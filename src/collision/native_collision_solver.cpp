@@ -14,6 +14,8 @@ namespace {
 using U = uint32_t;
 using B = unsigned char;
 constexpr U kChunks=32;
+// Minimum contacts per plan chunk (~10 us of Predict) so per-chunk dispatch cost stays small.
+constexpr U kPlanGrain=128;
 constexpr U kPacketFlagMask=3u,kNoPacket=0x3fffffffu;
 // Contact capacity is max(primary<=131072,ceil(pairs<=4194304 /16)), capped by pairs.
 // Every valid index fits below the 30-bit link sentinel; low two bits remain native flags.
@@ -130,6 +132,10 @@ struct Job {
     U auditCount,nativeQueries;
     volatile LONG auditVisits;
     ULONGLONG workerCpu,chunkCpu[kChunks];
+    // Contact-plan dispatch: accepted contacts of the stage (dense plan rows), contact-range
+    // chunk count, and per-chunk QPC busy ticks (exact plan_thread_us; GetThreadTimes is 15.6 ms quanta).
+    U acceptedTotal,planChunks;
+    ULONGLONG chunkBusy[kChunks];
     unsigned short cw, headingBias;
     bool rebuild,owned;
     B* manager;
@@ -507,11 +513,32 @@ void Body(Job& j,U chunk) {
         for (U n=start;n<end && !j.failure;++n) AuditCell(j,a.occupied[n]);
         return;
     }
+    if (j.phase==ContactPlanPhase) {
+        // Contact-balanced: plan rows are dense (acceptedFirst is the record-order prefix sum), and
+        // contacts cluster in melee slot ranges, so split the contact index range, not the records.
+        // Exactly the contacts ApplyRecord dispatches; read-only, from the state the callbacks see.
+        U at=static_cast<U>(static_cast<ULONGLONG>(chunk)*j.acceptedTotal/j.planChunks);
+        U end=static_cast<U>(static_cast<ULONGLONG>(chunk+1)*j.acceptedTotal/j.planChunks);
+        if (at>=end) return;
+        // Owner of contact `at`: the last record whose first contact is <= at (acceptedFirst[0]==0).
+        U i=static_cast<U>(std::upper_bound(a.acceptedFirst,a.acceptedFirst+j.primaryCount,at)-a.acceptedFirst)-1;
+        for (;at<end && !j.failure;++i) {
+            U last=(std::min)(a.acceptedFirst[i]+a.accepted[i],end);
+            if (at>=last) continue;
+            if (!a.nativeRecord[i] && a.active[i] && (a.flags[i]&3)) {
+                B* r=a.rec[i];
+                for (U n=at;n<last;++n)
+                    ntw2_contact::Predict(*j.contact,a.plans[n],r,a.rec[a.packets[a.outgoing[n]].other]);
+            }
+            at=last;
+        }
+        return;
+    }
     U start=chunk*j.chunkSize,end=(std::min)(start+j.chunkSize,j.count);
     for (U i=start;i<end && !j.failure;++i) {
         // Query metadata is primary-sized; secondary registry records are destinations only.
         if (i>=j.primaryCount && (j.phase==NativeClassifyPhase ||
-            j.phase==PacketPhase || j.phase==IncomingFillPhase || j.phase==ContactPlanPhase)) continue;
+            j.phase==PacketPhase || j.phase==IncomingFillPhase)) continue;
         if ((j.phase==GatherPhase || j.phase==CommitPhase || j.phase==LabelCommitPhase) && i+8<end && a.rec[i+8]) {
             _mm_prefetch(reinterpret_cast<const char*>(a.rec[i+8]+0x40),_MM_HINT_T0);
             _mm_prefetch(reinterpret_cast<const char*>(a.rec[i+8]+0x80),_MM_HINT_T0);
@@ -542,12 +569,6 @@ void Body(Job& j,U chunk) {
         else if (j.phase==NativeClassifyPhase) {
             for (U y=a.top[i];y<=a.bottom[i];++y) for (U x=a.left[i];x<=a.right[i];++x)
                 if (a.badCell[(y<<j.shift)+x]) a.nativeRecord[i]=1;
-        } else if (j.phase==ContactPlanPhase) {
-            // Exactly the contacts ApplyRecord dispatches; read-only, from the state the callbacks see.
-            if (a.nativeRecord[i] || !a.accepted[i] || !a.active[i] || !(a.flags[i]&3)) continue;
-            B* r=a.rec[i];
-            for (U n=0,at=a.acceptedFirst[i];n<a.accepted[i];++n,++at)
-                ntw2_contact::Predict(*j.contact,a.plans[at],r,a.rec[a.packets[a.outgoing[at]].other]);
         }
     }
 }
@@ -555,6 +576,8 @@ void __fastcall Chunk(void* context,U chunk) {
     Job& j=*static_cast<Job*>(context);
     bool worker=GetCurrentThreadId()!=j.owner;
     ULONGLONG cpu=worker?ThreadClock():0;
+    bool plan=j.phase==ContactPlanPhase;
+    ULONGLONG busy=plan?Clock():0;
     U previous=_mm_getcsr(); unsigned short cw;
     __asm { fnstcw cw }
     _mm_setcsr(j.mxcsr);
@@ -568,13 +591,14 @@ void __fastcall Chunk(void* context,U chunk) {
         _mm_setcsr(previous);
         __asm { fldcw cw }
     }
+    if (plan) j.chunkBusy[chunk]=Clock()-busy;
     ULONGLONG end=worker?ThreadClock():0;
     j.chunkCpu[chunk]=end>=cpu?end-cpu:0;
     _InterlockedIncrement(reinterpret_cast<volatile LONG*>(&words[worker?WorkerChunks:InlineChunks]));
 }
 void Dispatch(Job& j,U phase) {
     j.phase=phase;
-    U chunks=phase==HistogramPhase?j.sortChunks:j.chunks;
+    U chunks=phase==HistogramPhase?j.sortChunks:phase==ContactPlanPhase?j.planChunks:j.chunks;
     binding.dispatch(binding.pool,Address(reinterpret_cast<const void*>(&Chunk)),chunks,&j);
     for (U n=0;n<chunks;++n) j.workerCpu+=j.chunkCpu[n];
 }
@@ -844,6 +868,7 @@ bool Prepare(Job& j,void* manager) {
         if (arena->accepted[i]>kContacts-contacts) { Fail(j,CapacityFallbacks); return false; }
         contacts+=arena->accepted[i];
     }
+    j.acceptedTotal=contacts;
     Dispatch(j,IncomingFillPhase); if (j.failure) return false;
     U incoming=0;
     for (U i=0;i<j.count;++i) {
@@ -996,10 +1021,13 @@ void Apply(Job& j) {
     j.contact=nullptr;
     if (binding.contact_mode && a.plans && ntw2_contact::BeginStage(contactStage,ContactModel(j.manager))) {
         contactStageOpen=true;
-        Timing plan=Begin(j); j.contact=&contactStage;
+        ULONGLONG wall=Clock(); j.contact=&contactStage;
+        // >=kPlanGrain contacts per chunk, at most kChunks; the pool's dynamic claim balances them.
+        j.planChunks=(std::max)(1u,(std::min)(kChunks,(j.acceptedTotal+kPlanGrain-1)/kPlanGrain));
         Dispatch(j,ContactPlanPhase);
-        ULONGLONG cpu=ThreadClock();
-        ntw2_contact::AddPlanTime(Micros(plan.wall),cpu>=plan.cpu?static_cast<U>((cpu-plan.cpu+j.workerCpu-plan.workers)/10):0);
+        ULONGLONG busy=0;
+        for (U n=0;n<j.planChunks;++n) busy+=j.chunkBusy[n];
+        ntw2_contact::AddPlanTime(Micros(wall),static_cast<U>(busy*1000000/frequency.QuadPart));
         if (j.failure) j.contact=nullptr; // a solver-side chunk fault: no plan is trusted
     }
     // Approved split-pass visibility: supported callbacks see final sums, velocities,

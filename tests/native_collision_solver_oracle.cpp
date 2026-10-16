@@ -822,6 +822,19 @@ static void MultiRecordCases() {
     for (Input& in : s.input) in.radius = 1.0f;
     Run("contact cluster rebuild and subsequent reuse", s, false, true);
 }
+// Contact-mode plan chunks split the dense contact range, not records: 128 five-record clusters give
+// 1280 contacts (4/3/2/1/0 per cluster), so the 10 plan chunks' boundaries fall inside a record's
+// contact run. A plan row left unwritten would replay as an effect-free port plan and drop a callback.
+static void PlanChunkCases() {
+    Spec s; s.input.resize(640); s.expectedContacts = 1280;
+    for (U i = 0; i < s.input.size(); ++i) {
+        U group = i / 5;
+        s.input[i].x = -60.0f + float(group % 16) * 8.0f + float(i % 5) * 0.125f;
+        s.input[i].z = -56.0f + float(group / 16) * 8.0f;
+        s.input[i].radius = 0.5f;
+    }
+    Run("contact plan chunks split record contact runs", s);
+}
 static __declspec(align(64)) ntw_pool pool;
 static ntw2_collide::Binding Binding(U workers) { return {delta, &ntw_pool_dispatch, A(&pool), workers}; }
 static void StartPool(U workers) {
@@ -1625,7 +1638,7 @@ int main(int argc, char** argv) {
         currentCase = mode == ntw2_contact::ModeShadow ? "contact shadow wiring" : "contact workers wiring";
         StartPool(3); auto bind = Binding(3); bind.contact_mode = mode;
         Require(ntw2_collide::Start(bind), "contact-mode solver starts");
-        TwoRecordCases(); MultiRecordCases();
+        TwoRecordCases(); MultiRecordCases(); PlanChunkCases();
         U counters[ntw2_collide::WordCount], contact[ntw2_contact::WordCount];
         ntw2_collide::Sample(counters); ntw2_contact::Sample(contact);
         Require(contact[ntw2_contact::ModeWord] == mode && contact[ntw2_contact::Stages] == counters[ntw2_collide::SolverTicks],
