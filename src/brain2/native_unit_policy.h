@@ -115,8 +115,9 @@ bool UnitListStable(U unitIndex); // the unit's live member list still equals th
 namespace ntw2_unit_policy {
 // Header words 0..31 (kHeaderWords). Counters wrap modulo 2^32. modes: 2 bits per mechanic (Mode) at bit 2*mechanic.
 // admitted_* = units admitted by that mechanic's decide() at the last stage (Live or Shadow); unit_stages_* the cumulative
-// sum; refused_* cumulative unit-stages whose decide() refused. admitted_occurrences = occurrences with a nonzero live
-// mask, native_occurrences all others. seam_us_* = BeginStage + EndStage (one QPC pair each per stage, never per man).
+// sum; refused_* cumulative unit-stages whose decide() refused. admitted_occurrences / native_occurrences = selected members
+// that ran at least once this stage in a unit with / without a live mask (tallied from ran[] at EndStage, never per man;
+// duplicates and non-members are not counted). seam_us_* = BeginStage + EndStage (one QPC pair each per stage).
 enum Word : U {
     Version, Modes, Stages, UnitsSelected, UnitsRejected, MembersSelected, MembersRefused, AdmittedFatigue,
     AdmittedPosture, AdmittedEngage, UnitStagesFatigue, UnitStagesPosture, UnitStagesEngage, RefusedFatigue,

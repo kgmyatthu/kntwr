@@ -583,6 +583,44 @@ static void TestDeterminism() {
     Require(ha == hb, "two worlds at different addresses give the same decision chain");
     Require(a.get() != b.get(), "distinct worlds");
 }
+// Microbench (informational, never a pass/fail criterion): ns per occurrence of the policy runner's own work. The step is a
+// no-op stub (thiscall-compatible), so the numbers are the runner overhead admitted vs non-admitted.
+static void __fastcall StubStep(void*, void*) {}
+static void Bench() {
+    label = "bench";
+    auto w = std::make_unique<World>();
+    w->Init();
+    Require(StartModule(*w, up::Live), "start live module (bench)");
+    up::BeginStage(Addr(w->manager.data()));
+    Require(up::View(0) && up::View(0)->admitted, "bench unit admitted");
+    U entries[NTW2_CLONE_COUNT] = {};
+    const U stub = static_cast<U>(reinterpret_cast<uintptr_t>(&StubStep));
+    entries[NTW2_CLONE_BRAIN_U] = stub;
+    const U core = Addr(image) + (0x66CE00 - 0x400000);
+    constexpr U kIters = 2000000;
+    LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f);
+    auto ns = [&](LARGE_INTEGER a, LARGE_INTEGER b) { return (b.QuadPart - a.QuadPart) * 1e9 / f.QuadPart / kIters; };
+    const U man = A(w->men[0]), ref = A(w->ref);
+    QueryPerformanceCounter(&t0);
+    for (U i = 0; i < kIters; ++i) { up::BeginOccurrence(man); up::EndOccurrence(); }
+    QueryPerformanceCounter(&t1); const double seamAdm = ns(t0, t1);
+    QueryPerformanceCounter(&t0);
+    for (U i = 0; i < kIters; ++i) { up::BeginOccurrence(ref); up::EndOccurrence(); }
+    QueryPerformanceCounter(&t1); const double seamNat = ns(t0, t1);
+    QueryPerformanceCounter(&t0);
+    for (U i = 0; i < kIters; ++i) up::RunOccurrence(man, 0, core, entries);
+    QueryPerformanceCounter(&t1); const double runAdm = ns(t0, t1);
+    QueryPerformanceCounter(&t0);
+    for (U i = 0; i < kIters; ++i) up::RunOccurrence(ref, 1, stub, entries);
+    QueryPerformanceCounter(&t1); const double runNat = ns(t0, t1);
+    QueryPerformanceCounter(&t0);
+    for (U i = 0; i < kIters; ++i) StubStep(reinterpret_cast<void*>(ref), nullptr);
+    QueryPerformanceCounter(&t1); const double bare = ns(t0, t1);
+    up::EndStage();
+    std::printf("bench ns/occurrence: begin+end admitted %.2f non-member %.2f | run admitted %.2f non-core %.2f | bare call %.2f\n",
+                seamAdm, seamNat, runAdm, runNat, bare);
+    up::Stop(); uf::Stop();
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: native_unit_fatigue_oracle <Napoleon.exe>\n"); return 2; }
@@ -596,6 +634,7 @@ int main(int argc, char** argv) {
     TestGate();
     TestDeterminism();
     TestShadow();
+    Bench();
     std::printf("native_unit_fatigue_oracle OK: %u step cases vs 0x670F40 (level up %u, level down %u, clamp low %u, clamp high %u, "
                 "band applied %u, env added %u, node20==1 %u, activity>0x4E %u, no unit %u, wrapped %u), %u checks\n",
                 cases, cov[0], cov[1], cov[2], cov[3], cov[4], cov[5], cov[6], cov[7], cov[8], cov[9], checks);

@@ -46,7 +46,9 @@ Config g_cfg;
 ntw2_unit_select::Rules g_rules;
 U g_words[kHeaderWords];
 U g_unitCount, g_stage, g_generation, g_coreEntry, g_bruEntry;
+U g_observeLive, g_observeShadow; // mechanic bits whose provider has observe (Live / Shadow mode); 0 = no observe work
 bool g_started, g_selected, g_disabled;
+bool g_routing;                   // g_started && !g_disabled: the single per-occurrence gate
 LONGLONG g_frequency = 1, g_seamBegin, g_seamTicks;
 U g_membersSelected, g_membersRefused;
 
@@ -153,7 +155,7 @@ bool ImportGuarded() {
 }
 void Disable(U code) {
     RecordFault(code);
-    g_disabled = true;
+    g_disabled = true; g_routing = false;
     for (U ui = 0; ui < g_unitCount; ++ui) RetireUnit(ui);
 }
 } // namespace
@@ -186,19 +188,23 @@ bool Start(const Config& config) {
     g_bruEntry = config.cloneEntries ? config.cloneEntries[NTW2_CLONE_BRAIN_U] : 0;
     if (!config.s0 && !g_bruEntry) return false;
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_frequency = f.QuadPart ? f.QuadPart : 1;
-    g_words[Modes] = 0;
-    for (U m = 0; m < MechanicCount; ++m) if (P(m)) g_words[Modes] |= P(m)->mode << (2 * m);
-    g_started = true;
+    g_words[Modes] = 0; g_observeLive = g_observeShadow = 0;
+    for (U m = 0; m < MechanicCount; ++m) if (P(m)) {
+        g_words[Modes] |= P(m)->mode << (2 * m);
+        if (P(m)->observe) (P(m)->mode == Shadow ? g_observeShadow : g_observeLive) |= 1u << m;
+    }
+    g_started = true; g_routing = true;
     return true;
 }
 void Stop() {
     if (!g_started) return;
     for (U ui = 0; ui < g_unitCount; ++ui) RetireUnit(ui);
     g_occ = Occurrence{}; g_occ.unitIndex = kNone;
-    g_started = false;
+    g_started = false; g_routing = false;
 }
 void Reset() {
-    g_started = g_selected = g_disabled = false;
+    g_started = g_selected = g_disabled = g_routing = false;
+    g_observeLive = g_observeShadow = 0;
     if (g_store) for (U ui = 0; ui < g_unitCount; ++ui) ClearRows(g_units[ui], ui);
     memset(g_units, 0, sizeof(g_units));
     memset(g_words, 0, sizeof(g_words));
@@ -251,56 +257,51 @@ void BeginStage(U manager) {
 void EndStage() {
     if (!g_started || g_disabled) return;
     const LONGLONG t0 = Now();
-    U outOfWorklist = 0;
+    U outOfWorklist = 0, admittedOcc = 0, nativeOcc = 0;
     for (U ui = 0; ui < g_unitCount; ++ui) {
         Unit& u = g_units[ui];
         if (!u.active) continue;
-        if (u.view.admitted) {
-            const U* ran = u.view.ran;
-            for (U k = 0; k < u.view.memberCount; ++k) outOfWorklist += ran[k] != g_stage;
-        }
+        // Occurrence tallies moved off the per-occurrence path: one pass over the unit's ran[] per stage.
+        const U* ran = u.view.ran;
+        U ranHere = 0;
+        for (U k = 0; k < u.view.memberCount; ++k) ranHere += ran[k] == g_stage;
+        if (u.view.admitted) outOfWorklist += u.view.memberCount - ranHere;
+        (u.liveMask ? admittedOcc : nativeOcc) += ranHere;
         for (U m = 0; m < MechanicCount; ++m) if (P(m)) P(m)->end(ui, u.view, g_store->slots[ui][m]);
     }
     g_words[OutOfWorklistLast] = outOfWorklist;
+    g_words[AdmittedOccurrences] += admittedOcc; g_words[NativeOccurrences] += nativeOcc;
     const LONGLONG ticks = g_seamBegin + (Now() - t0);
     const U us = static_cast<U>(ticks * 1000000 / g_frequency);
     g_words[SeamUsLast] = us; g_words[SeamUsTotal] += us;
     if (us > g_words[SeamUsMax]) g_words[SeamUsMax] = us;
 }
 
+// Hot path. A non-member costs the gate flag, one serial load and one bit test and writes nothing (g_occ stays in its
+// cleared state from the last EndOccurrence). No SEH frame anywhere on this path: an exception unwinds past EndOccurrence,
+// which skips observe exactly like AbandonOccurrence did; the stale g_occ is never read because BRAIN_U is only entered after
+// a BeginOccurrence that rewrote it, and Stop/Reset clear it.
 U BeginOccurrence(U entity) {
-    Occurrence& o = g_occ;
-    o.entity = entity;
+    if (!g_routing) return 0;
     const U serial = D(entity + 0x2C);
-    if (!g_started || g_disabled || serial >= kSerialBits || !Bit(serial)) goto native;
-    {
-        const Row& r = g_store->rows[serial];
-        if (r.entity != entity) goto native;
-        const U ui = (r.packed >> 16) - 1;
-        Unit& u = g_units[ui];
-        g_store->ran[ui][r.packed & 0xFFFF] = g_stage;
-        o.unitIndex = ui; o.unit = &u.view; o.mask = u.liveMask;
-        o.slot[Fatigue] = g_store->slots[ui][Fatigue];
-        o.slot[Posture] = g_store->slots[ui][Posture];
-        o.slot[Engage] = g_store->slots[ui][Engage];
-        ++g_words[o.mask ? AdmittedOccurrences : NativeOccurrences];
-        return o.mask;
-    }
-native:
-    o.unitIndex = kNone; o.mask = 0; o.unit = nullptr;
-    o.slot[0] = o.slot[1] = o.slot[2] = nullptr;
-    ++g_words[NativeOccurrences];
-    return 0;
+    if (serial >= kSerialBits || !Bit(serial)) return 0;
+    const Row& r = g_store->rows[serial];
+    if (r.entity != entity) return 0;
+    const U ui = (r.packed >> 16) - 1;
+    Unit& u = g_units[ui];
+    g_store->ran[ui][r.packed & 0xFFFF] = g_stage;
+    Occurrence& o = g_occ;
+    U* const slots = g_store->slots[ui][0];
+    o.entity = entity; o.unitIndex = ui; o.unit = &u.view; o.mask = u.liveMask;
+    o.slot[Fatigue] = slots; o.slot[Posture] = slots + kSlotWords; o.slot[Engage] = slots + 2 * kSlotWords;
+    return o.mask;
 }
 void EndOccurrence() {
     Occurrence& o = g_occ;
-    if (o.unit) {
-        const UnitView& v = *o.unit;
-        for (U m = 0; m < MechanicCount; ++m) {
-            const Provider* p = P(m);
-            if (!p || !p->observe) continue;
-            if ((o.mask >> m & 1) || (p->mode == Shadow && (v.admitted >> m & 1))) p->observe(o.entity, v, o.slot[m]);
-        }
+    if (!o.unit) return; // non-member: nothing was written
+    const UnitView& v = *o.unit;
+    if (U obs = (o.mask & g_observeLive) | (v.admitted & g_observeShadow)) {
+        for (U m = 0; obs; ++m, obs >>= 1) if (obs & 1) P(m)->observe(o.entity, v, o.slot[m]);
     }
     o.entity = 0; o.unitIndex = kNone; o.mask = 0; o.unit = nullptr;
     o.slot[0] = o.slot[1] = o.slot[2] = nullptr;
@@ -311,17 +312,15 @@ void AbandonOccurrence() {
 }
 void RunOccurrence(U entity, U cls, U original, const U* cloneEntries) {
     using Step = void (__thiscall*)(void*);
-    U entry = original, mask = 0;
-    if (cls == 0 && original == g_coreEntry) mask = BeginOccurrence(entity);
-    if (mask) entry = cloneEntries[NTW2_CLONE_BRAIN_U];
-    bool completed = false;
-    __try {
-        reinterpret_cast<Step>(entry)(reinterpret_cast<void*>(entity));
-        completed = true;
-    } __finally {
-        if (completed) EndOccurrence();
-        else AbandonOccurrence();
+    // The caller (ntw2_brain2::RunOccurrence) already holds the occurrence's SEH frame; none here.
+    if (cls != 0 || original != g_coreEntry || !BeginOccurrence(entity)) {
+        reinterpret_cast<Step>(original)(reinterpret_cast<void*>(entity));
+        if (g_occ.entity == entity) EndOccurrence(); // member of a non-live unit (shadow observe / clear); a stale g_occ
+                                                     // left by an exception never matches another occurrence's entity
+        return;
     }
+    reinterpret_cast<Step>(cloneEntries[NTW2_CLONE_BRAIN_U])(reinterpret_cast<void*>(entity));
+    EndOccurrence();
 }
 void Drain(U unitIndex, U mechanic, U code) {
     (void)code;

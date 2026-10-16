@@ -656,17 +656,14 @@ void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries) {
     (void)cloneEntries; // the family was captured (and verified complete) at Start
     if (!g_unitMode) { RunStep(entity, brainClass, original); return; }
     // Unit policy: the occurrence's live mask routes the selector/driver/posture gates of the S0 clone (g_umask); the
-    // observe/end hooks of the providers run after the step.
+    // observe hooks of the providers run after the step. No SEH frame here (ntw2_brain2::RunOccurrence holds the
+    // occurrence's): after an exception g_umask/g_occ stay stale, but g_umask is rewritten before every RunStep (the only
+    // reader) and EndOccurrence runs only when g_occ belongs to this occurrence's entity.
     const bool member = brainClass == 0 && original == V(0x66CE00);
     g_umask = member ? ntw2_unit_policy::BeginOccurrence(entity) & 7 : 0;
-    bool completed = false;
-    __try {
-        RunStep(entity, brainClass, original);
-        completed = true;
-    } __finally {
-        g_umask = 0;
-        if (member) { if (completed) ntw2_unit_policy::EndOccurrence(); else ntw2_unit_policy::AbandonOccurrence(); }
-    }
+    RunStep(entity, brainClass, original);
+    g_umask = 0;
+    if (member && ntw2_unit_policy::g_occ.entity == entity) ntw2_unit_policy::EndOccurrence();
 }
 bool OverrideGateTarget(U binding, U target) {
     for (U k = 0; k < StaticGateCount; ++k)
