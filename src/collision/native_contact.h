@@ -83,7 +83,8 @@ void EndStage(Stage& stage, U contacts);
 // Pure; any thread with the owner's MXCSR/x87 control word installed. Never faults out.
 void Predict(const Stage& stage, Plan& plan, void* r, void* s);
 void CountPlan(const Plan& plan);   // owner-side census of one plan
-// wallUs: QPC around the plan dispatch; threadUs: per-chunk QPC busy time summed over owner+workers.
+// wallUs: QPC around the plan dispatch; threadUs: per-chunk QPC occupancy (elapsed inside each
+// chunk, including preemption; not CPU time) summed over owner+workers.
 void AddPlanTime(U wallUs, U threadUs);
 // Owner, in contact order. Both return false iff the original callback/replay faulted.
 bool Shadow(const Stage& stage, const Plan& plan, U index, void* r, void* s, Original original, void* context);

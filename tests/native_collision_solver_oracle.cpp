@@ -125,7 +125,7 @@ static void Map(const char* path) {
     Jump(0xff7f20, Fn(&Allocate)); Jump(0xff7ef0, Fn(&Release));
     Require(FlushInstructionCache(GetCurrentProcess(), image, nt->OptionalHeader.SizeOfImage) != 0, "flush private loader seams");
 }
-struct Record { B bytes[0x140]; };
+struct Record { B bytes[0x680]; }; // through the LAND fields Predict reads (+0x5B8, +0x67C)
 struct Node { U type, serial, payload, owner, previous, next, head; };
 static_assert(sizeof(Node) == 0x1c, "native node stride");
 struct Event {
@@ -825,14 +825,18 @@ static void MultiRecordCases() {
 // Contact-mode plan chunks split the dense contact range, not records: 128 five-record clusters give
 // 1280 contacts (4/3/2/1/0 per cluster), so the 10 plan chunks' boundaries fall inside a record's
 // contact run. A plan row left unwritten would replay as an effect-free port plan and drop a callback.
-static void PlanChunkCases() {
-    Spec s; s.input.resize(640); s.expectedContacts = 1280;
+static Spec ClusterWorld() {
+    Spec s; s.input.resize(640);
     for (U i = 0; i < s.input.size(); ++i) {
         U group = i / 5;
         s.input[i].x = -60.0f + float(group % 16) * 8.0f + float(i % 5) * 0.125f;
         s.input[i].z = -56.0f + float(group / 16) * 8.0f;
         s.input[i].radius = 0.5f;
     }
+    return s;
+}
+static void PlanChunkCases() {
+    Spec s = ClusterWorld(); s.expectedContacts = 1280;
     Run("contact plan chunks split record contact runs", s);
 }
 static __declspec(align(64)) ntw_pool pool;
@@ -843,6 +847,82 @@ static void StartPool(U workers) {
     cfg.api.set_event = Fn(&SetEvent); cfg.api.wait_single = Fn(&WaitForSingleObject);
     cfg.api.create_thread = Fn(&CreateThread); cfg.api.worker_entry = Fn(&ntw_pool_worker_start);
     Require(ntw_pool_init(&pool, &cfg) == NTW_POOL_OK, "real persistent pool starts");
+}
+// Real LAND-class contacts through the production solver: records carry the image's type-8 callback
+// pair (+0x40 = 0x64CAD0, +0x44 = 0x64CC70), so the native stage and the shadow pass run the original
+// callback. +0x117 alternates blocking roles inside each cluster, so a plan's WriteR/WriteS depends on
+// its orientation and its keys identify its pair; both-blocked pairs take the availability path
+// (manager bits recorded and revalidated). Checked per lane count 1/3/8 and mode: final state equals
+// the native stage, plan rows are predicted exactly once (counted at prediction), each row equals a
+// serial Predict of its own (R, S), the rows cover the geometric pair set once, shadow agrees with the
+// original on every row, and rows and final +0x13C state are identical across lane counts and modes.
+static U landVtable[18];
+static void MakeLand(Fixture& f) {
+    for (U i = 0; i < f.records.size(); ++i) {
+        B* r = f.records[i].bytes;
+        Put(r, 0, A(landVtable));
+        Put(r, 0x117, B(i % 5 == 0 || i % 5 == 2 ? 0 : 1)); Put(r, 0x118, B(1));
+        Put(r, 0x160, Get<float>(r, 0x48)); Put(r, 0x168, Get<float>(r, 0x50)); // slot = position
+    }
+    for (U i = 0; i < f.records.size(); i += 7) f.avoidBits[i >> 3] |= B(1u << (i & 7));
+}
+static void LandPlanCases() {
+    landVtable[0x40 / 4] = A(At(0x64cad0)); landVtable[0x44 / 4] = A(At(0x64cc70));
+    const Spec spec = ClusterWorld();
+    std::vector<Pair> pairs;
+    for (U i = 0; i < spec.input.size(); ++i)
+        for (U j = i + 1; j < spec.input.size() && j / 5 == i / 5; ++j) pairs.push_back({i, j});
+    Require(pairs.size() == 1280, "LAND cluster world has 1280 geometric pairs");
+    std::vector<ntw2_contact::Plan> firstRows;
+    std::vector<U> firstState;
+    for (U workers : {1u, 3u, 8u}) for (U mode : {U(ntw2_contact::ModeShadow), U(ntw2_contact::ModeWorkers)}) {
+        currentCase = mode == ntw2_contact::ModeShadow ? "LAND contact plans (shadow)" : "LAND contact plans (workers)";
+        StartPool(workers); auto bind = Binding(workers); bind.contact_mode = mode;
+        Require(ntw2_collide::Start(bind), "contact-mode solver starts");
+        Fixture expected(spec), actual(spec); MakeLand(expected); MakeLand(actual);
+        ActivateFixture(actual);
+        U before[ntw2_collide::WordCount], after[ntw2_collide::WordCount]; ntw2_collide::Sample(before);
+        Execute(expected, true); Execute(actual, false);
+        Compare(expected, actual, spec, false);
+        ntw2_collide::Sample(after);
+        Require(after[ntw2_collide::SolverTicks] == before[ntw2_collide::SolverTicks] + 1 &&
+            after[ntw2_collide::Callbacks] - before[ntw2_collide::Callbacks] == pairs.size(), "LAND world runs the solver");
+        U c[ntw2_contact::WordCount]; ntw2_contact::Sample(c);
+        Require(c[ntw2_contact::Contacts] == pairs.size() && c[ntw2_contact::PortContacts] == pairs.size(),
+            "every LAND contact is consumed once as a port plan");
+        Require(c[ntw2_contact::PredictedWriteR] > 0 && c[ntw2_contact::PredictedWriteS] > 0,
+            "fixture distinguishes receiver and argument writes");
+        if (mode == ntw2_contact::ModeShadow)
+            Require(c[ntw2_contact::Compared] == pairs.size() && c[ntw2_contact::Mismatches] == 0,
+                "every row agrees with the original callback on the pair it was replayed for");
+        else
+            Require(c[ntw2_contact::Replays] == pairs.size() && c[ntw2_contact::OwnerCallbacks] == 0,
+                "workers replay every LAND row without the original");
+        U rows = 0, predicted = 0;
+        const ntw2_contact::Plan* plans = ntw2_collide::ContactPlans(rows, predicted);
+        Require(plans && rows == pairs.size() && predicted == rows, "every row predicted exactly once at plan time");
+        std::vector<Pair> keyed;
+        for (U n = 0; n < rows; ++n) keyed.push_back({std::min<U>(plans[n].keyR, plans[n].keyS), std::max<U>(plans[n].keyR, plans[n].keyS)});
+        std::sort(keyed.begin(), keyed.end());
+        Require(keyed == pairs, "plan rows cover the geometric pair set exactly once");
+        // Plan inputs are untouched by the callback pass, so post-stage state re-derives every row.
+        ntw2_contact::Stage stage; ResetFp();
+        Require(ntw2_contact::BeginStage(stage, actual.model.data()), "serial reference stage admits");
+        for (U n = 0; n < rows; ++n) {
+            ntw2_contact::Plan p;
+            ntw2_contact::Predict(stage, p, actual.records[plans[n].keyR].bytes, actual.records[plans[n].keyS].bytes);
+            Require(!std::memcmp(&p, &plans[n], sizeof(p)), "row equals a serial prediction of its own (R, S)");
+        }
+        std::vector<U> state;
+        for (const Record& r : actual.records) state.push_back(Get<U>(r.bytes, 0x13c));
+        if (firstRows.empty()) { firstRows.assign(plans, plans + rows); firstState = state; }
+        else {
+            Require(!std::memcmp(firstRows.data(), plans, rows * sizeof(ntw2_contact::Plan)), "plan rows identical across lane counts and modes");
+            Require(state == firstState, "final +0x13C state identical across lane counts and modes");
+        }
+        ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after LAND plans");
+        ++cases;
+    }
 }
 static void FallbackCases(U workers) {
     Spec s = Two(); s.invalidGrid = true;
@@ -1651,6 +1731,7 @@ int main(int argc, char** argv) {
             contact[ntw2_contact::Contacts], "every foreign plan runs the original callback");
         ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after contact wiring");
     }
+    LandPlanCases();
     for (U workers : {1u, 4u, 8u}) {
         StartPool(workers);
         OwnedCases(workers);

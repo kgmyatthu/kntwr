@@ -133,8 +133,9 @@ struct Job {
     volatile LONG auditVisits;
     ULONGLONG workerCpu,chunkCpu[kChunks];
     // Contact-plan dispatch: accepted contacts of the stage (dense plan rows), contact-range
-    // chunk count, and per-chunk QPC busy ticks (exact plan_thread_us; GetThreadTimes is 15.6 ms quanta).
-    U acceptedTotal,planChunks;
+    // chunk count, per-chunk QPC occupancy ticks (plan_thread_us; GetThreadTimes is 15.6 ms
+    // quanta) and per-chunk Predict calls (oracle seam ContactPlans).
+    U acceptedTotal,planChunks,chunkPlanned[kChunks];
     ULONGLONG chunkBusy[kChunks];
     unsigned short cw, headingBias;
     bool rebuild,owned;
@@ -153,6 +154,8 @@ Arena* arena;
 U words[WordCount];
 U sourceWords[SourceWordCount];
 volatile LONG diagnosticClaim;
+// Most recent stage's plan rows and Predict calls (ContactPlans); reset at every stage entry.
+U planRows,planPredicted;
 bool faulted;
 LARGE_INTEGER frequency;
 
@@ -519,6 +522,7 @@ void Body(Job& j,U chunk) {
         // Exactly the contacts ApplyRecord dispatches; read-only, from the state the callbacks see.
         U at=static_cast<U>(static_cast<ULONGLONG>(chunk)*j.acceptedTotal/j.planChunks);
         U end=static_cast<U>(static_cast<ULONGLONG>(chunk+1)*j.acceptedTotal/j.planChunks);
+        j.chunkPlanned[chunk]=0;
         if (at>=end) return;
         // Owner of contact `at`: the last record whose first contact is <= at (acceptedFirst[0]==0).
         U i=static_cast<U>(std::upper_bound(a.acceptedFirst,a.acceptedFirst+j.primaryCount,at)-a.acceptedFirst)-1;
@@ -529,6 +533,7 @@ void Body(Job& j,U chunk) {
                 B* r=a.rec[i];
                 for (U n=at;n<last;++n)
                     ntw2_contact::Predict(*j.contact,a.plans[n],r,a.rec[a.packets[a.outgoing[n]].other]);
+                j.chunkPlanned[chunk]+=last-at;
             }
             at=last;
         }
@@ -1022,11 +1027,13 @@ void Apply(Job& j) {
     if (binding.contact_mode && a.plans && ntw2_contact::BeginStage(contactStage,ContactModel(j.manager))) {
         contactStageOpen=true;
         ULONGLONG wall=Clock(); j.contact=&contactStage;
-        // >=kPlanGrain contacts per chunk, at most kChunks; the pool's dynamic claim balances them.
-        j.planChunks=(std::max)(1u,(std::min)(kChunks,(j.acceptedTotal+kPlanGrain-1)/kPlanGrain));
+        // Each chunk >=kPlanGrain contacts (one owner-only chunk below 2*kPlanGrain, no wake),
+        // at most kChunks; the pool's dynamic claim balances them.
+        j.planChunks=(std::max)(1u,(std::min)(kChunks,j.acceptedTotal/kPlanGrain));
         Dispatch(j,ContactPlanPhase);
         ULONGLONG busy=0;
-        for (U n=0;n<j.planChunks;++n) busy+=j.chunkBusy[n];
+        for (U n=0;n<j.planChunks;++n) { busy+=j.chunkBusy[n]; planPredicted+=j.chunkPlanned[n]; }
+        planRows=j.acceptedTotal;
         ntw2_contact::AddPlanTime(Micros(wall),static_cast<U>(busy*1000000/frequency.QuadPart));
         if (j.failure) j.contact=nullptr; // a solver-side chunk fault: no plan is trusted
     }
@@ -1079,8 +1086,13 @@ void Stop() {
 }
 void Sample(U out[WordCount]) { memcpy(out,words,sizeof(words)); }
 void SampleSource(U out[SourceWordCount]) { memcpy(out,sourceWords,sizeof(sourceWords)); }
+const ntw2_contact::Plan* ContactPlans(U& rows,U& predicted) {
+    rows=planRows; predicted=planPredicted;
+    return arena?arena->plans:nullptr;
+}
 U __fastcall Stage(void* manager) {
     ++words[Calls]; ULONGLONG start=Clock(); Job job={};
+    planRows=planPredicted=0;
     if (!arena) job.failure=ArenaFallbacks;
     else if (manager!=activationManager) job.failure=LayoutFallbacks;
     else if (faulted) job.failure=StickyFallbacks;

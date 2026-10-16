@@ -2155,6 +2155,7 @@ static void print_collide(const Run *r)
                 say(L"  %hs=%lu%ls", contact_labels[i], (unsigned long)c[i], (i+1)%4 ? L" " : L"\n");
         }
         if (NTW2_COLLIDE_CONTACT_WORDS % 4) say(L"\n");
+        say(L"  plan_thread_us = per-chunk QPC occupancy summed over owner+workers (elapsed incl. preemption, not CPU time); plan_thread_us/plan_us = plan parallelism\n");
     }
     say(L"  per solver tick (denominator solver_ticks=%lu, NOT stage_calls=%lu which includes fallbacks):\n",
         (unsigned long)w[1], (unsigned long)w[0]);

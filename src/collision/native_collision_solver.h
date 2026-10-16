@@ -4,6 +4,7 @@
 
 // Owner-owned lifetime. No original executable instructions are patched.
 namespace ntw2_loco { struct GridView; }
+namespace ntw2_contact { struct Plan; }
 namespace ntw2_collide {
 enum Word : uint32_t {
     Calls, SolverTicks, FallbackTicks, CapacityFallbacks, LayoutFallbacks,
@@ -63,4 +64,8 @@ void Stop();
 uint32_t __fastcall Stage(void* manager);
 void Sample(uint32_t words[WordCount]);
 void SampleSource(uint32_t words[SourceWordCount]);
+// Oracle seam, owner only, between stages: the most recent stage's contact plan rows
+// (plans[0, rows) in contact order; null without a contact mode) and the number of Predict
+// calls its plan phase made (counted at prediction, per chunk). Zero rows when no plan phase ran.
+const ntw2_contact::Plan* ContactPlans(uint32_t& rows, uint32_t& predicted);
 }
