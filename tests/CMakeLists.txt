@@ -315,7 +315,7 @@ ntw2_harness(native_fire_oracle STD 20 FP strict
   SOURCES native_fire_oracle.cpp "${NTW2_SRC}/brain2/native_fire.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_loco_oracle STD 20 FP strict
-  SOURCES native_loco_oracle.cpp "${NTW2_SRC}/loco/native_loco.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+  SOURCES native_loco_oracle.cpp "${NTW2_SRC}/loco/native_loco.cpp" "${NTW2_SRC}/loco/native_move_delta.cpp" "${NTW2_SRC}/loco/native_relink.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
           "${NTW2_SRC}/loco/native_sweep.cpp" "${NTW2_SRC}/loco/native_resolve.cpp" "${NTW2_SRC}/loco/native_env.cpp"
           "${NTW2_SRC}/collision/native_collision_solver.cpp" "${NTW2_SRC}/collision/native_contact.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco" DEFINES NTW2_LOCO_ORACLE=1 LIBS bcrypt)
