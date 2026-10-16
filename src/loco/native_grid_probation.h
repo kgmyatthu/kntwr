@@ -15,15 +15,20 @@ struct ntw2_clone_set;
 // restores PAGE_READWRITE for that one page and resumes the same instruction. Data, order and timing-independent
 // outcomes are untouched: the only effect is the trap latency (a page stays open until the next re-arm).
 //
-// Page isolation: interior pages are always armed; the head/tail partial pages only when VirtualQuery shows a
-// dedicated allocation (AllocationBase == the first page with at most kHeadSlack bytes of allocator header before
-// the array; nothing committed past the last array page). Otherwise those edge pages stay unarmed and are
-// reported as uncovered_bytes (they hold only heads of row 0 / the last row, i.e. the clamped map border).
-// Relocating the array through the header +0 slot is NOT done: the engine releases header+0 through its own heap
-// (same-layout free/re-allocate sequences of the 620AD0 family at 61E4CB/61E7BB/61F13F and the release at 623C34
-// [INFERENCE: receiver class not pinned]; free path FF7EF0 -> owner lookup FF8950 -> heap vtable+8). A private copy
-// in the slot would reach the engine heap's free with no in-process seam to swap it back first (the monitor only
-// notices a destroyed battle afterwards), so isolation is measured instead (isolated / uncovered_bytes words).
+// Page isolation: only pages the array provably owns end to end are armed. VirtualQuery boundaries do not prove
+// exclusive ownership of an engine-heap block (allocator metadata or a neighbour block may share an edge page),
+// so partial head/tail pages always stay unarmed and their bytes are reported as uncovered_bytes (they hold only
+// heads of row 0 / the last row, i.e. the clamped map border). isolated=1 therefore means complete coverage with
+// every array page armed, not merely deduced dedication. Relocating the array through the header +0 slot is NOT
+// done: the engine releases header+0 through its own heap (free path FF7EF0 -> owner lookup FF8950 -> heap
+// vtable+8) from teardown code that has no in-process seam to swap it back first (the monitor only notices a
+// destroyed battle afterwards).
+//
+// Lifetime: the vectored handler is registered once and kept for the process lifetime (the runtime module is
+// pinned). Retiring a span restores its pages, parks its identity in a 4-slot graveyard ring and drains
+// in-flight handlers before clearing it, so a fault raised while the span was armed is still resolved and
+// resumed even when it is dispatched after retirement. A restored page re-faulting later was not armed by us
+// any more and is passed through (foreign_faults).
 namespace ntw2_grid_probation {
 using U = uint32_t;
 
@@ -58,10 +63,11 @@ struct Binding {
     U (*thread_class)();               // ThreadClass of the calling thread; must not fault or block
 };
 
-// Monitor thread, with no tick in flight. Start resets every word and installs the first-chance handler.
+// Monitor thread, with no tick in flight. Start resets every word and installs the first-chance handler on the
+// first call; later generations reuse it after Stop. The graveyard is deliberately retained across generations.
 bool Start(const Binding& binding);
-// Monitor thread, after the tick owner drained: restores every armed page that is still this allocation's and
-// removes the handler. Counters stay for the final snapshot.
+// Monitor thread, after the tick owner drained: retires the armed span (restore + graveyard + handler drain)
+// and marks the detector retired. The handler stays registered; counters stay for the final snapshot.
 void Stop();
 // Owner thread inside ntw2_loco::Stage. open=1 lifts protection for the owner's relink window; open=0 re-derives
 // the [manager]->+8->+A4 layout and re-arms. Never faults outward; refusals are counted and retried next close.

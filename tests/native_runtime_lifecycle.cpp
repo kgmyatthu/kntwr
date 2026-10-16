@@ -1625,6 +1625,18 @@ static __declspec(noinline) void ProbationWrite(volatile U* p,U value) { *p=valu
 // Distinct instruction (different displacement) so the foreign-thread trap forms its own {EIP, caller} row.
 static __declspec(noinline) U ProbationReadNext(const volatile U* p) { return p[1]; }
 static DWORD WINAPI ProbationReader(void* raw) { return ProbationReadNext(static_cast<const volatile U*>(raw)); }
+static volatile LONG probationSpinStop;
+static DWORD WINAPI ProbationSpinReader(void* raw) { // keeps faulting while the main thread toggles and retires
+    U sum=0;
+    while(!probationSpinStop) sum^=ProbationReadNext(static_cast<const volatile U*>(raw));
+    return sum&1;
+}
+static volatile LONG probationGate, probationReady;
+static DWORD WINAPI ProbationGatedReader(void* raw) { // spin-gate: both threads' faults land before any restore
+    InterlockedIncrement(&probationReady);
+    while(!probationGate) YieldProcessor();
+    return ProbationReadNext(static_cast<const volatile U*>(raw));
+}
 static U PageProtection(const void* p) { MEMORY_BASIC_INFORMATION m={}; return VirtualQuery(p,&m,sizeof(m)) ? m.Protect : 0; }
 static int GridProbationFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
     auto probe=reinterpret_cast<ntw2_grid_probation_probe_fn>(GetProcAddress(runtimeModule,"ntw2_grid_probation_probe"));
@@ -1680,14 +1692,86 @@ static int GridProbationFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile n
         const U* row=w+NTW2_GRID_PROBATION_HEADER_WORDS+8*i;
         if(!row[4]) continue;
         ++rows; writes+=row[5];
-        Check(row[0] && (row[2]&0xF)==3 && row[4]==1 && (row[2]>>16)==0,"test-module EIP rows carry no clone id");
+        Check(row[0] && (row[2]&0xF)==3 && row[4]>=1 && (row[2]>>16)==0,"test-module EIP rows carry no clone id");
         if((row[2]>>8)&(1u<<3)) ++mainMask;
         if((row[2]>>8)&(1u<<4)) ++otherMask;
         Check(!(row[6]&0x80000000u),"no routed tick was executing at the trap");
     }
     Check(rows==3 && mainMask==2 && otherMask==1 && writes==1,"rows attribute two main-thread and one foreign-thread instruction");
+    // Two threads fault the SAME armed page concurrently. A spin-gate releases both faulting instructions within
+    // nanoseconds, well before either vectored handler reaches VirtualProtect, so both threads genuinely trap;
+    // the second handler then sees the restore race (page already PAGE_READWRITE) and resumes. Re-arm per
+    // iteration (the page is open again after a restore) and require at least one double-trap iteration.
+    const U samePageTrapsBefore=3, kSamePageIterations=12;
+    U iter=0;
+    for(;iter<kSamePageIterations;++iter) {
+        Check(probe(pages,4*4096)==1,"synthetic range re-armed for the same-page race");
+        probationGate=0; probationReady=0;
+        HANDLE pair[2]={};
+        for(U t=0;t<2;++t) pair[t]=CreateThread(nullptr,0,ProbationGatedReader,pages+1024+9,0,nullptr);
+        DWORD pairValues[2]={};
+        // Both readers must be parked at the gate before release, otherwise one thread's whole trap/restore
+        // cycle can complete before the other's first instruction and the page is already open.
+        for(const ULONGLONG readyEnd=GetTickCount64()+2000;probationReady!=2 && GetTickCount64()<readyEnd;Sleep(0)) {}
+        Check(probationReady==2,"same-page readers reached the gate");
+        probationGate=1;
+        Check(pair[0] && pair[1] && WaitForMultipleObjects(2,pair,TRUE,5000)==WAIT_OBJECT_0 &&
+              GetExitCodeThread(pair[0],&pairValues[0]) && GetExitCodeThread(pair[1],&pairValues[1]) &&
+              pairValues[0]==0xC0DE040Au && pairValues[1]==0xC0DE040Au,"same-page faults on two threads both resume");
+        if(pair[0]) CloseHandle(pair[0]);
+        if(pair[1]) CloseHandle(pair[1]);
+        if(iter+1<kSamePageIterations) Check(probe(nullptr,0)==1,"same-page iteration disarmed");
+    }
+    published=false;
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
+        if(ReadState(state,snapshot) && snapshot.grid_probation_words[30]==1+iter &&
+           snapshot.grid_probation_words[31]==iter) { published=true; break; }
+    w=snapshot.grid_probation_words;
+    const U trapsAfterSamePage=w[6];
+    Check(published && trapsAfterSamePage>samePageTrapsBefore+iter && trapsAfterSamePage<=samePageTrapsBefore+2*iter,
+          "gated iterations each trapped once or twice, at least one double (both handlers raced the restore)");
+    Check(w[12]==3 && w[29]==trapsAfterSamePage-2 && w[10]==0 && w[11]==0,
+          "same-page traps merged into the existing row; no restore failure or foreign fault");
+    // Retirement with a fault stream in flight: the spin reader keeps trapping page 2 while the main thread
+    // re-arms it behind the handler and then retires the whole span; every raised trap must stay resumable.
+    probationSpinStop=0;
+    HANDLE spinner=CreateThread(nullptr,0,ProbationSpinReader,pages+2*1024+2,0,nullptr);
+    Check(spinner!=nullptr,"pending-fault reader started");
+    const ULONGLONG toggleEnd=GetTickCount64()+60;
+    while(GetTickCount64()<toggleEnd) {
+        DWORD old=0;
+        VirtualProtect(pages+2*1024,4096,PAGE_NOACCESS,&old);
+        VirtualProtect(pages+2*1024,4096,PAGE_READWRITE,&old);
+    }
+    Check(probe(nullptr,0)==1,"span retired while faults were in flight");
+    probationSpinStop=1;
+    Check(spinner && WaitForSingleObject(spinner,5000)==WAIT_OBJECT_0,"pending-fault reader survived retirement");
+    if(spinner) CloseHandle(spinner);
+    published=false;
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
+        if(ReadState(state,snapshot) && snapshot.grid_probation_words[31]==iter+1) { published=true; break; }
+    w=snapshot.grid_probation_words;
+    Check(published && w[6]>=trapsAfterSamePage && w[10]==0 && w[11]==0,
+          "retirement under a pending fault stream: no restore failure or foreign fault");
+    // Allocation reuse: the same address range recommitted for a new owner is never claimed by the detector.
+    const U trapsBeforeReuse=w[6];
+    Check(VirtualFree(pages,0,MEM_RELEASE)!=0,"synthetic pages released before reuse");
+    pages=static_cast<U*>(VirtualAlloc(pages,4*4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    Check(pages!=nullptr,"same-address range reallocated");
+    if(!pages) return 1;
+    for(U i=0;i<4*1024;++i) pages[i]=0xF00D0000u+i;
+    HANDLE reuser=CreateThread(nullptr,0,ProbationReader,pages+2*1024+2,0,nullptr);
+    DWORD reusedValue=0;
+    Check(reuser && WaitForSingleObject(reuser,5000)==WAIT_OBJECT_0 && GetExitCodeThread(reuser,&reusedValue) &&
+          reusedValue==0xF00D0803u,"reused allocation reads without interference");
+    if(reuser) CloseHandle(reuser);
+    Check(ProbationRead(pages+7)==0xF00D0007u,"reused allocation read on the main thread");
+    published=false;
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
+        if(ReadState(state,snapshot) && snapshot.grid_probation_words[6]==trapsBeforeReuse) { published=true; break; }
+    Check(published && snapshot.grid_probation_words[11]==0,"reused allocation produced no detector activity");
     Check(stop(nullptr)==0,"probation generation stops");
-    Check(ReadState(state,snapshot) && snapshot.grid_probation_words[6]==3 && snapshot.grid_probation_words[2]==4,
+    Check(ReadState(state,snapshot) && snapshot.grid_probation_words[6]==trapsBeforeReuse && snapshot.grid_probation_words[2]==4,
           "final detector totals are retained and the state is retired after stop");
     Check(probe(pages,4096)==0,"probe refused after stop");
     Check(VirtualFree(pages,0,MEM_RELEASE)!=0,"synthetic pages released");
