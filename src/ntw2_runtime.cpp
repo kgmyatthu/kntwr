@@ -286,6 +286,12 @@ TickCadence cadence;
 volatile U tickInProgress;
 volatile LONG gateDepth;
 constexpr U kRouted = kSimulation | NTW2_PROFILE; // the clone route is also taken for profiling (sub-phase timing)
+// Features whose sites live behind the MANAGER clone route (FORMATION takes its own hook; PATH and BALLISTICS are
+// bound in the TICK clone). Every other routed feature must take the clone, or its site gates are never reached.
+constexpr U kManagerRouted = NTW2_PROFILE | NTW2_BRAIN2 | NTW2_AI_ASYNC | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO |
+                             NTW2_PUPPET;
+static_assert(kManagerRouted == (kRouted & ~(NTW2_FORMATION | NTW2_PATH | NTW2_BALLISTICS)),
+              "every routed feature except formation/path/ballistics takes the MANAGER clone");
 volatile U phaseUs[3];       // manager, ballistics, path: accumulated inside the current tick (single executor, depth <= 1)
 // One tick executor at a time (gate depth <= 1); site calls nest because site 2
 // encloses the ARMY sites. Host storage never changes any game's object layout.
@@ -524,18 +530,19 @@ U __fastcall LocoMoveGate(void* manager) {
         return ntw2_loco::Stage(manager);
     return reinterpret_cast<Manager>(V(0x531af0))(manager);
 }
-static_assert(ntw2_puppet::kWords==NTW2_PUPPET_WORDS && ntw2_puppet::kMaxUnits==NTW2_PUPPET_MAX_UNITS, "puppet status word contract");
+static_assert(ntw2_puppet::kWords==NTW2_PUPPET_WORDS && ntw2_puppet::kMaxUnits==NTW2_PUPPET_MAX_UNITS &&
+              ntw2_puppet::kMotionWords==NTW2_PUPPET_MOTION_WORDS, "puppet status word contract");
 // NTW2_PUPPET (--puppet-probe N): sole owner of site 6 (the ACTIVE clone's call of the loop 0x585D10, ECX = manager)
 // and of the infantry class slot 0x1333714+08 (common step 0x670EB0, thiscall, no stack argument). Outside the tick
-// owner's epoch both run only the original. The slot gate is reached by every class-0x1333714 common step, so its
-// epoch test uses plain reads (epochMask is written only by the tick owner; tickOwner is an aligned word).
+// owner's epoch both run only the original. The slot gate is reached by every class-0x1333714 common step; the module
+// owns its epoch test (bound to tickOwner/epochMask at Start) so its sampled dispatch cost covers the whole gate.
 bool PuppetEpoch() { return (epochMask&NTW2_PUPPET) && static_cast<U>(tickOwner)==GetCurrentThreadId(); }
 void __fastcall PuppetStageGate(void* g) {
     if (!PuppetEpoch()) { reinterpret_cast<void (__fastcall*)(void*)>(V(0x585d10))(g); return; }
     ntw2_puppet::Stage(Address(g));
 }
 U __fastcall PuppetCommonGate(U entity, U) {
-    if (PuppetEpoch() && ntw2_puppet::CommonStep(entity)) return 0;
+    if (ntw2_puppet::CommonStep(entity,Address(_ReturnAddress()))) return 0;
     return reinterpret_cast<U (__thiscall*)(U)>(V(0x670eb0))(entity);
 }
 static_assert(ntw2_army_unit::kWords==NTW2_ARMY_UNIT_WORDS, "army unit status word contract");
@@ -2066,7 +2073,7 @@ U __fastcall FormationGate(void* manager) {
     // The MANAGER clone route carries the timed sites, including the planner gate (site 34): every feature that lives behind a
     // site must take it, not only profiling. (Shipping `ai` without `profile` was inert before this line included NTW2_AI_ASYNC.)
     const U target=Epoch(NTW2_FORMATION) ? formHook :
-        (Epoch(NTW2_PROFILE) || Epoch(NTW2_BRAIN2) || Epoch(NTW2_AI_ASYNC) || Epoch(NTW2_COLLIDE) || Epoch(NTW2_COLLIDE_LOD) || Epoch(NTW2_LOCO)) ? clones.entries[NTW2_CLONE_MANAGER] : V(0x580640);
+        Epoch(kManagerRouted) ? clones.entries[NTW2_CLONE_MANAGER] : V(0x580640);
     return reinterpret_cast<Manager>(target)(manager);
 }
 void __fastcall PathGate(void* pf) {
@@ -2397,7 +2404,7 @@ bool StartModules() {
             (mask&NTW2_AI_CENSUS) ? &ntw2_ai_census::OwnerCalls : nullptr,(mask&NTW2_AI_ASYNC2) ? 1u : 0u};
         if (!ntw2_army_unit::Start(binding)) { RecordError(ModuleError,NTW2_ARMY_UNIT_SHADOW); return false; }
     }
-    if ((mask & NTW2_PUPPET) && !ntw2_puppet::Start({imageBase,config.puppet_units})) {
+    if ((mask & NTW2_PUPPET) && !ntw2_puppet::Start({imageBase,config.puppet_units,&tickOwner,&epochMask,NTW2_PUPPET})) {
         RecordError(ModuleError,NTW2_PUPPET); return false;
     }
     if (mask & NTW2_COLLIDE) {
@@ -2775,6 +2782,7 @@ void SampleCounters() {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
+    ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -2899,6 +2907,7 @@ bool Activate(const World& candidate) {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
+    ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -3172,6 +3181,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_ARMY_UNIT_WORDS;++i) ntw2_state.army_unit_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_WORDS;++i) ntw2_state.puppet_words[i]=0;
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
+    for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;

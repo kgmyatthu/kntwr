@@ -1354,19 +1354,53 @@ static void print_army_b0(const uint32_t *u, const uint32_t *b)
         g_steps ? L"PASS" : L"FAIL", 100.0 * p_closed, g_rec ? L"PASS" : L"FAIL", pct(b[139], u[16]), g_save ? L"PASS" : L"FAIL",
         native_ms - t_exp, g_cover && g_steps && g_rec && g_save ? L"GO" : L"NO-GO");
 }
-/* Puppet probe stage 1 (NTW2_PUPPET, native_puppet.h): every labelled word plus the derived per-stage rates. */
-static void print_puppet(const uint32_t *p)
+/* Puppet probe stage 1 (NTW2_PUPPET, native_puppet.h): every labelled word plus derived per-stage rates. The probe's
+   per-tick cost is adapter (seam + gated replacement work) + dispatch (sampled routing overhead on every occurrence). */
+static void print_puppet(const uint32_t *p, const uint32_t *m)
 {
     static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
     const double stages = p[6] ? (double)p[6] : 1.0; /* word 6 = stages */
     unsigned i;
     say(L"  puppet: units %lu/%lu selected (%lu rejected of %lu examined), members selected=%lu admitted=%lu parked=%lu "
         L"pending=%lu; parked member-ticks=%lu skipped native steps=%lu gated common steps=%lu; reparks=%lu handbacks=%lu "
-        L"external nodes=%lu deaths=%lu faults=%lu; adapter us/stage=%.1f (max %lu)\n",
+        L"(diverted +628 %lu) external nodes=%lu deaths(departures)=%lu faults=%lu\n",
         (unsigned long)p[3], (unsigned long)p[2], (unsigned long)p[4], (unsigned long)p[5], (unsigned long)p[8],
         (unsigned long)p[10], (unsigned long)p[11], (unsigned long)p[12], (unsigned long)p[14], (unsigned long)p[15],
-        (unsigned long)p[16], (unsigned long)p[17], (unsigned long)p[18], (unsigned long)p[19], (unsigned long)p[23],
-        (unsigned long)p[28], p[32] / stages, (unsigned long)p[31]);
+        (unsigned long)p[16], (unsigned long)p[17], (unsigned long)p[18], (unsigned long)p[24], (unsigned long)p[19],
+        (unsigned long)p[23], (unsigned long)p[28]);
+    for (i = 0; i < p[3] && i < NTW2_PUPPET_MAX_UNITS; ++i) {
+        const uint32_t *u = p + 40u + 4u * i;
+        float x, z;
+        memcpy(&x, u + 2, 4); memcpy(&z, u + 3, 4);
+        if (NTW2_PUPPET_UNIT_ARMY(u[0]) == NTW2_PUPPET_NO_ARMY)
+            say(L"  probe unit %u: ordinal %lu, army unknown, men %lu (parked %lu, handed back %lu), start position (%.1f, %.1f)\n",
+                i, (unsigned long)NTW2_PUPPET_UNIT_ORDINAL(u[0]), (unsigned long)NTW2_PUPPET_UNIT_MEN(u[0]),
+                (unsigned long)(u[1] & 0xFFFFu), (unsigned long)(u[1] >> 16), x, z);
+        else
+            say(L"  probe unit %u: ordinal %lu, army %lu (registry order), men %lu (parked %lu, handed back %lu), start position (%.1f, %.1f)\n",
+                i, (unsigned long)NTW2_PUPPET_UNIT_ORDINAL(u[0]), (unsigned long)NTW2_PUPPET_UNIT_ARMY(u[0]),
+                (unsigned long)NTW2_PUPPET_UNIT_MEN(u[0]), (unsigned long)(u[1] & 0xFFFFu), (unsigned long)(u[1] >> 16), x, z);
+    }
+    say(L"  puppet cost us/stage: adapter=%.1f (max %lu) + dispatch=%.1f (sampled 1/64, %lu samples) = %.1f\n",
+        p[32] / stages, (unsigned long)p[31], p[60] / stages, (unsigned long)p[61], (p[32] + (double)p[60]) / stages);
+    say(L"  puppet common step: calls=%lu member_calls=%lu parked_forwarded=%lu parked_no_common_member_ticks=%lu "
+        L"member_caller=0x%08lX sampled_caller=0x%08lX\n",
+        (unsigned long)p[38], (unsigned long)p[62], (unsigned long)p[63], (unsigned long)p[56], (unsigned long)p[59],
+        (unsigned long)p[7]);
+    {
+        static const char *const buckets[] = {"1", "2-3", "4-7", "8-15", "16-31", "32-63", "64-127", "128-255", "256-511",
+                                              "512-1023", "1024-2047", ">=2048"};
+        say(L"  puppet +628 diverts: first stage %lu, last stage %lu, peak %lu at stage %lu; by stage:",
+            (unsigned long)m[1], (unsigned long)m[2], (unsigned long)m[3], (unsigned long)m[4]);
+        for (i = 0; i < 12u; ++i) if (m[5 + i]) say(L" [%hs]=%lu", buckets[i], (unsigned long)m[5 + i]);
+        say(L"\n");
+        say(L"  puppet parked motion (last stage): intent=%lu moved=%lu; member-ticks intent=%lu moved=%lu; first move stage %lu, "
+            L"peak moved %lu at stage %lu; from admission mean %.2f m max %.2f m; slot (%lu men) mean %.2f m max %.2f m, "
+            L"other node %lu\n",
+            (unsigned long)m[17], (unsigned long)m[18], (unsigned long)m[19], (unsigned long)m[20], (unsigned long)m[21],
+            (unsigned long)m[22], (unsigned long)m[23], m[24] / 100.0, m[25] / 100.0, (unsigned long)m[26], m[27] / 100.0,
+            m[28] / 100.0, (unsigned long)m[29]);
+    }
     say(L"   ");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) say(L" %hs=%lu", labels[i], (unsigned long)p[i]);
     say(L"\n");
@@ -1580,7 +1614,7 @@ static void print_module_words(const ntw2_status *s)
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
-    if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words);
+    if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words, s->puppet_motion_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -3025,6 +3059,7 @@ static void sb_army_unit(Sb *b, const Run *r)
 static void sb_puppet(Sb *b, const Run *r)
 {
     static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
+    static const char *const motion[] = { NTW2_PUPPET_MOTION_LABELS };
     const uint32_t *w = r->last.puppet_words;
     unsigned i;
     if (!(r->opt.mask & NTW2_PUPPET) || !r->have_status || !w[0]) {
@@ -3033,9 +3068,26 @@ static void sb_puppet(Sb *b, const Run *r)
     }
     sb_fmt(b, "  \"puppet\": {\"metrics\": {");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
-    sb_fmt(b, "}, \"words\": [");
+    sb_fmt(b, "}, \"units\": [");
+    for (i = 0; i < w[3] && i < NTW2_PUPPET_MAX_UNITS; ++i) {
+        const uint32_t *u = w + 40u + 4u * i;
+        float x, z;
+        memcpy(&x, u + 2, 4); memcpy(&z, u + 3, 4);
+        sb_fmt(b, "%s{\"ordinal\": %lu, \"army\": ", i ? ", " : "", (unsigned long)NTW2_PUPPET_UNIT_ORDINAL(u[0]));
+        if (NTW2_PUPPET_UNIT_ARMY(u[0]) == NTW2_PUPPET_NO_ARMY) sb_fmt(b, "null");
+        else sb_fmt(b, "%lu", (unsigned long)NTW2_PUPPET_UNIT_ARMY(u[0]));
+        sb_fmt(b, ", \"men\": %lu, \"parked\": %lu, \"handed_back\": %lu, \"start_x\": ",
+               (unsigned long)NTW2_PUPPET_UNIT_MEN(u[0]), (unsigned long)(u[1] & 0xFFFFu), (unsigned long)(u[1] >> 16));
+        if (x - x == 0.0f) sb_fmt(b, "%.3f", (double)x); else sb_fmt(b, "null"); /* JSON has no NaN/inf */
+        sb_fmt(b, ", \"start_z\": ");
+        if (z - z == 0.0f) sb_fmt(b, "%.3f}", (double)z); else sb_fmt(b, "null}");
+    }
+    sb_fmt(b, "], \"words\": [");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
-    sb_fmt(b, "]},\n");
+    sb_fmt(b, "], \"motion\": {");
+    for (i = 0; i < NTW2_PUPPET_MOTION_WORDS; ++i)
+        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", motion[i], (unsigned long)r->last.puppet_motion_words[i]);
+    sb_fmt(b, "}},\n");
 }
 static void sb_ai_census(Sb *b, const Run *r)
 {
@@ -3530,7 +3582,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                         16u * (256u + NTW2_TIMED_SITES * 128u) + NTW2_TIMED_SITES * 192u +
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
                         NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u +
-                        NTW2_ARMY_B0_WORDS * 64u + 4096u];
+                        NTW2_ARMY_B0_WORDS * 64u + NTW2_PUPPET_MOTION_WORDS * 64u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];

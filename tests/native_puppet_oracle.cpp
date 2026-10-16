@@ -26,6 +26,7 @@ using U = uint32_t;
 using B = unsigned char;
 namespace pp = ntw2_puppet;
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
+constexpr U NTW2_PUPPET_TEST_BIT = 0x80000u; // the runtime's NTW2_PUPPET epoch bit (the oracle does not link the runtime)
 static B* image;
 static U delta, checks, cases;
 static const char* label = "map";
@@ -69,7 +70,13 @@ static void Map(const char* path) {
 }
 
 // Shared fixture objects (identical pointer values on both sides of every comparison).
-static std::array<B, 0x40> context{}, transform{}, target{};
+static std::array<B, 0x40> context{}, target{};
+static std::array<B, 0x100> transform{}; // 0x81AC80 reads [A+10]+5C
+// Tick-owner epoch bound into the module: the oracle thread is the owner unless a case clears it.
+static volatile long ownerTid;
+static U epochMask = NTW2_PUPPET_TEST_BIT;
+static pp::Binding Bind() { return {Addr(image), 1, &ownerTid, &epochMask, NTW2_PUPPET_TEST_BIT}; }
+static U Caller() { return Addr(At(0x58395e)); } // a native slot-+08 return address (0x583940 loop)
 static void __fastcall Detach(U, U, U) {}
 static std::array<U, 4> requestTable{}, attachTable{};
 static std::array<B, 0x20> attached{};
@@ -161,6 +168,7 @@ static void InstallCase(const char* name, bool quiet, float speed, bool prior, b
 // ---- Stage scenario -------------------------------------------------------------------------------------------
 struct World {
     std::array<B, 0xe00> unit{}, rejectedUnit{};
+    std::array<B, 0x40> armyP{}, armyQ{};
     std::array<B, 0x300> manager{};
     Soldier s[6], officer, other, gunner, rejectedInfantry;
     std::array<U, 16> members{}, rejectedMembers{}, registry{}, worklist{};
@@ -171,7 +179,10 @@ struct World {
     }
     World() {
         Put(unit.data(), 0, U(0x0b1e55ed)); Put(rejectedUnit.data(), 0, U(0x0b1e55ed));
-        for (U i = 0; i < 6; ++i) { InitSoldier(s[i], 100 + i, Addr(unit.data())); Warm(s[i]); members[i] = A(s[i]); }
+        for (U i = 0; i < 6; ++i) {
+            InitSoldier(s[i], 100 + i, Addr(unit.data())); Put(s[i].data(), 0x1f8, Addr(armyQ.data()));
+            Put(s[i].data(), 0x48, 120.5f + i); Put(s[i].data(), 0x50, -42.25f); Warm(s[i]); members[i] = A(s[i]);
+        }
         otherTable.fill(0); memcpy(otherTable.data(), At(0x1333714), sizeof(otherTable));
         otherTable[0xc / 4] = Fn(&StubStep);
         InitSoldier(officer, 200, Addr(unit.data())); Put(officer.data(), 0, Addr(otherTable.data()));
@@ -180,7 +191,7 @@ struct World {
         InitSoldier(other, 300, 0); Put(other.data(), 0, Addr(otherTable.data()));
         // A unit examined first and refused: it contains an artillery-class member.
         memcpy(artilleryTable.data(), At(0x13394c0), sizeof(artilleryTable));
-        InitSoldier(rejectedInfantry, 400, Addr(rejectedUnit.data()));
+        InitSoldier(rejectedInfantry, 400, Addr(rejectedUnit.data())); Put(rejectedInfantry.data(), 0x1f8, Addr(armyP.data()));
         InitSoldier(gunner, 401, Addr(rejectedUnit.data())); Put(gunner.data(), 0, Addr(artilleryTable.data()));
         rejectedMembers[0] = A(rejectedInfantry); rejectedMembers[1] = A(gunner);
         Put(rejectedUnit.data(), 0x2cc, U(2)); Put(rejectedUnit.data(), 0x2d0, Addr(rejectedMembers.data()));
@@ -195,13 +206,16 @@ static std::array<U, pp::kWords> Words() { std::array<U, pp::kWords> w{}; pp::Sn
 static void StageCase() {
     label = "stage: selection, admission and skip"; ++cases;
     static World w;
-    Require(pp::Start({Addr(image), 1}), "start on the mapped image (class/node pins hold)");
+    Require(pp::Start(Bind()), "start on the mapped image (class/node pins hold)");
     stubSteps = 0; ResetFp();
     pp::Stage(Addr(w.manager.data()));
     auto v = Words();
-    Require(v[pp::UnitsExamined] == 2 && v[pp::UnitsRejected] == 1 && v[pp::UnitsSelected] == 1 && v[pp::SelectionStage] == 1,
+    Require(v[pp::UnitsExamined] == 2 && v[pp::UnitsRejected] == 1 && v[pp::UnitsSelected] == 1,
             "first unit refused (artillery member), second selected in registry order");
-    Require(v[pp::UnitRows] == 1 && v[pp::UnitRows + 1] == 6, "unit row: examined ordinal 1, six infantry members");
+    Require(NTW2_PUPPET_UNIT_ORDINAL(v[pp::UnitRows]) == 1 && NTW2_PUPPET_UNIT_MEN(v[pp::UnitRows]) == 6 &&
+            NTW2_PUPPET_UNIT_ARMY(v[pp::UnitRows]) == 1 && v[pp::UnitRows + 1] == 6 &&
+            Get<float>(&v[pp::UnitRows + 2], 0) == 120.5f && Get<float>(&v[pp::UnitRows + 3], 0) == -42.25f,
+            "unit identity: examined ordinal 1, army 1 (registry order), six men, six parked, first member's start XZ");
     Require(v[pp::MembersSelected] == 6 && v[pp::MembersRejected] == 1 && v[pp::MembersAdmitted] == 6 &&
             v[pp::MembersParked] == 6 && v[pp::InstallQuiet] == 6 && !v[pp::InstallStopped], "six quiet admissions, officer native");
     Require(v[pp::SkippedNativeSteps] == 6 && v[pp::ParkedMemberTicks] == 6 && stubSteps == 2 && v[pp::LoopOccurrences] == 8,
@@ -211,27 +225,55 @@ static void StageCase() {
 
     label = "gated common step equals the native step on a parked member"; ++cases;
     Soldier copy = w.s[5];
-    Require(pp::CommonStep(A(w.s[5])), "parked member takes the gated step");
+    Require(pp::CommonStep(A(w.s[5]), Caller()), "parked member takes the gated step");
     Native(0x670eb0, Addr(copy.data()));
     Require(!memcmp(copy.data(), w.s[5].data(), copy.size()), "terrain/extent and activity publication identical when nothing advances");
-    Require(!pp::CommonStep(A(w.officer)) && !pp::CommonStep(A(w.other)), "non-members forward to the original");
+    Require(!pp::CommonStep(A(w.officer), Caller()) && !pp::CommonStep(A(w.other), Caller()), "non-members forward to the original");
+    v = Words();
+    Require(v[pp::GatedCommonSteps] == 1 && v[pp::CommonMemberCalls] == 1 && v[pp::MemberCallerVa] == 0x58395e &&
+            !v[pp::CommonParkedForwarded] && v[pp::CommonCalls] == 3, "member call counted with its native call site");
+
+    label = "common step outside the tick-owner epoch is untouched"; ++cases;
+    ownerTid = 0;
+    Require(!pp::CommonStep(A(w.s[5]), Caller()) && Words()[pp::CommonCalls] == 3, "foreign thread: forwarded, not counted");
+    ownerTid = static_cast<long>(GetCurrentThreadId()); epochMask = 0;
+    Require(!pp::CommonStep(A(w.s[5]), Caller()) && Words()[pp::CommonCalls] == 3, "closed epoch: forwarded, not counted");
+    epochMask = NTW2_PUPPET_TEST_BIT;
+
+    label = "sampled dispatch cost covers every call"; ++cases;
+    const U samplesBefore = Words()[pp::DispatchSamples];
+    for (U i = 0; i < 128; ++i) pp::CommonStep(A(w.other), Caller());
+    v = Words();
+    Require(v[pp::DispatchSamples] - samplesBefore == 2 && v[pp::CommonCallerVa] == 0x58395e, "one sample per 64 calls");
 
     label = "stage: external nodes, deaths, departures"; ++cases;
     ForeignIdle(w.s[0]);                                        // e.g. a formation/order install: repark at the seam
-    Put(w.s[1].data(), 0x628, U(1)); w.s[1][0x30] = 0;          // dying: death system owns it
+    Put(w.s[1].data(), 0x628, U(1)); w.s[1][0x30] = 0;          // divert controller: handed back, not a death
     w.members[2] = w.members[6]; Put(w.unit.data(), 0x2cc, U(6)); w.s[2][0x30] = 0; // left the unit list
     ForeignIdle(w.s[3]); Put(w.s[3].data(), 0x1ec, Addr(target.data())); w.s[3][0x30] = 0; // engaged: hand back
     ForeignIdle(w.s[4]);
-    Require(!pp::CommonStep(A(w.s[4])), "a replaced node is not gated at the common step");
+    Put(w.s[5].data(), 0x48, Get<float>(w.s[5].data(), 0x48) + 3.0f); Put(w.s[5].data(), 0xd4, 0.25f); // moved while parked
+    Require(!pp::CommonStep(A(w.s[4]), Caller()), "a replaced node is not gated at the common step");
     v = Words();
-    Require(v[pp::ExternalSeenCommon] == 1 && v[pp::ExternalNodesSeen] == 1, "common-step detection counted once");
+    Require(v[pp::ExternalSeenCommon] == 1 && v[pp::ExternalNodesSeen] == 1 && v[pp::CommonParkedForwarded] == 1 &&
+            v[pp::CommonMemberCalls] == 2, "common-step detection counted once; parked call forwarded");
     stubSteps = 0;
     pp::Stage(Addr(w.manager.data()));
     v = Words();
     Require(v[pp::Reparks] == 2 && v[pp::ExternalSeenSeam] == 2 && v[pp::ExternalNodesSeen] == 3,
             "two reparks (seam + common-step detection), engaged member seen at the seam");
-    Require(v[pp::DyingHandbacks] == 1 && v[pp::DepartedMembers] == 1 && v[pp::DeathsImported] == 2 &&
+    Require(v[pp::DivertedHandbacks] == 1 && v[pp::DepartedMembers] == 1 && v[pp::DeathsImported] == 1 &&
             v[pp::IneligibleHandbacks] == 1 && v[pp::Handbacks] == 2, "membership import and handbacks");
+    Require(v[pp::ParkedNoCommonTicks] == 4, "four parked members had no common step in the closed window (s5, s4 had)");
+    {
+        U m[pp::kMotionWords]; pp::SnapshotMotion(m);
+        Require(m[pp::MotionVersion] == 1 && m[pp::MotionDivertFirst] == 2 && m[pp::MotionDivertLast] == 2 &&
+                m[pp::MotionDivertPeak] == 1 && m[pp::MotionDivertPeakStage] == 2 && m[pp::MotionDivertHist + 1] == 1,
+                "divert timing: one +628 handback at stage 2 (bucket 2-3)");
+        Require(m[pp::MotionIntentLast] == 1 && m[pp::MotionMovedLast] == 1 && m[pp::MotionFirstMoveStage] == 2 &&
+                m[pp::MotionDispMaxCm] == 300 && m[pp::MotionDispMeanCm] == 60 && !m[pp::MotionSlotMembers],
+                "parked motion: one man with intent moved 3 m of five measured; no slot node");
+    }
     Require(v[pp::MembersParked] == 3 && v[pp::SkippedNativeSteps] == 9 && v[pp::ParkedMemberTicks] == 9 && stubSteps == 2,
             "three parked members skipped; handed-back members are native");
     Require(pp::WaitNodeInstalled(A(w.s[0])) && pp::WaitNodeInstalled(A(w.s[4])) &&
@@ -244,12 +286,12 @@ static void StageCase() {
     v = Words();
     Require(v[pp::StopHandbacks] == 3 && v[pp::Handbacks] == 5 && v[pp::MembersParked] == 0 && !v[pp::Enabled], "stop handback");
     Require(!memcmp(snapshot.data(), w.s[5].data(), snapshot.size()), "no byte written at stop");
-    Require(!pp::CommonStep(A(w.s[5])), "stopped module gates nothing");
+    Require(!pp::CommonStep(A(w.s[5]), Caller()), "stopped module gates nothing");
 }
 
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_puppet_oracle <approved Napoleon.exe>\n"); return 2; }
-    ResetFp(); Map(argv[1]);
+    ResetFp(); Map(argv[1]); ownerTid = static_cast<long>(GetCurrentThreadId());
     // A native fault inside a case names the case and the faulting VA (preferred base) instead of a bare exit code.
     AddVectoredExceptionHandler(1, [](EXCEPTION_POINTERS* e) -> LONG {
         const U code = e->ExceptionRecord->ExceptionCode;
@@ -261,7 +303,9 @@ int main(int argc, char** argv) {
     });
     requestTable[1] = Fn(&MakeAttached); attachTable[1] = Fn(&Attach); attachTable[3] = Fn(&Detach);
     Put(attached.data(), 0, Addr(attachTable.data())); Put(transform.data(), 0x5c, U(0x2468));
-    label = "start"; Require(pp::Start({Addr(image), 1}), "class and node table pins hold on the mapped image");
+    label = "start"; Require(pp::Start(Bind()), "class and node table pins hold on the mapped image");
+    { pp::Binding b = Bind(); b.tick_owner = nullptr; Require(!pp::Start(b), "start refuses a binding without an epoch"); }
+    Require(pp::Start(Bind()), "restart");
     InstallCase("quiet owner, no prior node", true, 0.0f, false, false);
     InstallCase("quiet owner, enabled prior idle node destroyed", true, 0.0f, true, false);
     InstallCase("not quiet (+117=0): begin runs the stop transaction, then one step", false, 0.0f, true, false);

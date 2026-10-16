@@ -35,6 +35,7 @@ extern "C" {
 #define NTW2_PUPPET 0x80000u /* Opt-in --puppet-probe N: puppet survival probe stage 1 (analysis/native-unit-sim-rewrite.md section 3). N = ntw2_config::puppet_units (1..4) ordinary foot-infantry units (class 0x1333714, registry order) get the engine's real wait node (0x650600 -> 0x61D8F0, table 0x1334028) at an owner stage seam; site 6 skips their native step +0C and the class common-step slot +08 (0x670EB0) keeps only terrain/extent 0x81AC80 and order->activity 0x663730 for them. Externally installed nodes are reparked or handed back; stop hands members back without native writes. Sole owner of site 6: refuses BRAIN2, BRAIN and brain flags. Routed simulation feature outside NTW2_ALL. Words: puppet_words, src/puppet/native_puppet.h. */
 #define NTW2_PUPPET_WORDS 64u /* puppet_words; layout src/puppet/native_puppet.h (Word), labels NTW2_PUPPET_WORD_LABELS */
 #define NTW2_ARMY_B0_WORDS 160u /* army_b0_words (NTW2_ARMY_UNIT_SHADOW, Stage B0 qualification); layout src/army/native_army_unit.h (B0Word), labels NTW2_ARMY_B0_LABELS */
+#define NTW2_PUPPET_MOTION_WORDS 32u /* puppet_motion_words; layout src/puppet/native_puppet.h (MotionWord), labels NTW2_PUPPET_MOTION_LABELS */
 #define NTW2_PUPPET_MAX_UNITS 4u
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
@@ -773,6 +774,10 @@ typedef struct ntw2_status {
        bound, own-state bytes, exclusive refusal cost). Layout and labels in src/army/native_army_unit.h (B0Word,
        NTW2_ARMY_B0_LABELS). Tick-owner writer; reads only, no native write. Reset at activation, retained after stop. */
     uint32_t army_b0_words[NTW2_ARMY_B0_WORDS];
+    /* NTW2_PUPPET motion/divert diagnostics (appended after army_b0_words): +628 divert timing, parked members' movement
+       intent, actual motion, admission displacement and delivered-slot distance per seam. Layout and labels in
+       src/puppet/native_puppet.h (MotionWord, NTW2_PUPPET_MOTION_LABELS). Tick-owner writer, reads only. */
+    uint32_t puppet_motion_words[NTW2_PUPPET_MOTION_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1177,8 +1182,10 @@ static_assert(offsetof(ntw2_status,puppet_words) + NTW2_PUPPET_WORDS * sizeof(ui
               NTW2_PUPPET_WORDS == 64u && NTW2_PUPPET == 0x80000u && NTW2_PUPPET_MAX_UNITS == 4u &&
               (NTW2_VALID_MASK & NTW2_PUPPET) && !(NTW2_ALL & NTW2_PUPPET),
               "puppet row appends after army_unit_words; its bit is valid and outside NTW2_ALL");
-static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_motion_words) &&
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after puppet_words");
+static_assert(offsetof(ntw2_status,puppet_motion_words) + NTW2_PUPPET_MOTION_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_PUPPET_MOTION_WORDS == 32u, "puppet motion row appends after army_b0_words");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&
