@@ -215,11 +215,48 @@ static void ModuleCases() {
     Check(words[Occurrences] == 0 && words[Version] == 0, "reset zeroes the row");
 }
 
+// The native call frees/decommits probed memory: unit A's attached container, then unit B itself. The post
+// observation must re-prove readability (no fault), and B must land in the unreadable bucket, never eligible.
+static uint8_t *g_uA, *g_uB, *g_attA;
+static U __fastcall DecommitUnit(void* unit) {
+    if (unit == g_uA) VirtualFree(g_attA, 0x1000, MEM_DECOMMIT);
+    if (unit == g_uB) VirtualFree(g_uB, 0x1000, MEM_DECOMMIT);
+    return 7;
+}
+static U __fastcall DecommitStage(void*) {
+    Check(Unit(g_uA, 0, &DecommitUnit) == 7 && Unit(g_uB, 0, &DecommitUnit) == 7, "natives run while memory is decommitted");
+    return 0;
+}
+static void DecommitCases() {
+    uint8_t* c = Page(); uint8_t* m = Page(); uint8_t* member = Page();
+    g_uA = Page(); g_uB = Page(); g_attA = Page();
+    U list[2] = {A(g_uA), A(g_uB)};
+    Put(c, 0xF0, 2); Put(c, 0xF4, A(list));
+    Put(m, 0x50, 0x1111u); Put(m, 0x58, 7);
+    for (uint8_t* u : {g_uA, g_uB}) { Put(u, 0x1EC, A(c)); Put(u, 0x2CC, 4); }
+    Put(g_uA, 0x1F4, A(g_attA)); Put(g_attA, 0x10, 1); Put(g_attA, 0x14, A(g_attA) + 0x80); Put(g_attA, 0x80, A(member));
+    Put(g_uB, 0x1F4, A(g_attA)); // B's attached container is gone too by the time B runs
+    Binding binding = {0x400000u, 8, nullptr, 0};
+    Check(Start(binding), "module restarts");
+    Stage(c, A(m), &DecommitStage);
+    U words[kWords];
+    Snapshot(words);
+    const U* reason = words + ReasonCount; const U* bit = words + DetailCount;
+    Check(words[Occurrences] == 2 && words[Unreadable] == 1 && bit[EUnreadable] == 1, "decommitted unit is one unreadable occurrence");
+    Check(words[StrictEligible] == 0 && words[DynamicEligible] == 0, "unreadable occurrence is never eligible");
+    Check(reason[RAllocList] == 1 && reason[RNonClosed] == 1 && bit[EAttached] == 1,
+          "unit A: decommitted attached container re-proved unreadable, read as a list change (no fault)");
+    Check(words[CommandRows + 1] == 2 && words[CommandRows + 2] == 2, "the unreadable occurrence counts as owner-only in the census");
+    Check(words[PlannerMeasured] == 0 && words[RngDrawing] == 0, "no planner binding, no RNG draw");
+    Stop(); Reset();
+}
+
 int main() {
     ClassifierCases();
     RngCases();
     ProbeCases();
     ModuleCases();
+    DecommitCases();
     printf("native_army_unit_oracle: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
