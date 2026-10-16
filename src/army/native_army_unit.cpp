@@ -5,6 +5,7 @@
 #include <string.h>
 #include <algorithm>
 #include <new>
+#include "ntw2_guard.h"
 
 namespace ntw2_army_unit {
 namespace {
@@ -36,8 +37,8 @@ U g_delta, g_workers, g_ai2, g_inStage, g_inUnit, g_model, g_tick, g_haveTick, g
 U g_stageStamp, g_occurrenceStamp, g_stageOccurrences, g_distinct, g_seenUsed, g_queries;
 U (*g_planner)();
 LARGE_INTEGER g_frequency;
-unsigned long long g_unitQ, g_strictQ, g_dynamicQ, g_stageQ, g_observerQ, g_snapshotQ, g_rngQ, g_reasonQ[kReasons],
-                   g_commandQ[kCommands];
+unsigned long long g_unitQ, g_strictQ, g_dynamicQ, g_stageQ, g_observerQ, g_snapshotQ, g_rngQ, g_unreadableQ,
+                   g_reasonQ[kReasons], g_commandQ[kCommands];
 
 LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 U Us(unsigned long long q) { return g_frequency.QuadPart ? static_cast<U>(q * 1000000ull / g_frequency.QuadPart) : 0; }
@@ -155,7 +156,7 @@ void FinalizeTick() {
 void PublishTimes() {
     g_words[UnitUs] = Us(g_unitQ); g_words[StrictEligibleUs] = Us(g_strictQ); g_words[DynamicEligibleUs] = Us(g_dynamicQ);
     g_words[StageUs] = Us(g_stageQ); g_words[ObserverUs] = Us(g_observerQ); g_words[SnapshotUs] = Us(g_snapshotQ);
-    g_words[RngDrawingUs] = Us(g_rngQ);
+    g_words[RngDrawingUs] = Us(g_rngQ); g_words[UnreadableUs] = Us(g_unreadableQ);
     for (U r = 0; r < kReasons; ++r) g_words[ReasonUs + r] = Us(g_reasonQ[r]);
     for (U c = 0; c < kCommands; ++c) g_words[CommandRows + c * kCommandStride + 3] = Us(g_commandQ[c]);
 }
@@ -245,6 +246,36 @@ U Classify(const Probe& a, const Probe& b, U plannerDelta, U rngSteps, U& detail
     return r;
 }
 
+// Guarded observation. Proofs are re-established first: a native call (this unit's or an earlier occurrence's) may
+// have freed or decommitted probed memory. Every load runs under SEH bracketed by ntw2::probeDepth, so a stale or
+// racing range records an unreadable observation instead of faulting (and is not taken as a crash capture).
+struct Reading { Probe probe; U rng, rngValid; };
+static void Observe(U u, bool before, Reading& out) {
+    ntw2_region::Table& t = g_s->table;
+    t.Clear();
+    bool ok = false;
+    ++ntw2::probeDepth;
+    __try {
+        out.rngValid = g_model && t.Readable(g_model + 0x50, 4, g_queries) ? 1u : 0u;
+        out.rng = out.rngValid ? D(g_model + 0x50) : 0;
+        ok = ReadProbe(u, g_delta, t, g_queries, out.probe);
+        if (ok) { if (before) NeighbourWitness(u); else AggregationWitness(u); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    --ntw2::probeDepth;
+    if (!ok) { out.probe.readable = 0; out.rngValid = 0; }
+}
+static U SnapshotContainer(U c) {
+    ntw2_region::Table& t = g_s->table;
+    U units = 0;
+    ++ntw2::probeDepth;
+    __try {
+        if (c && t.Readable(c + 0xF0, 8, g_queries)) SnapshotList(D(c + 0xF0), D(c + 0xF4), units);
+        if (c && t.Readable(c + 0x1A4, 8, g_queries)) SnapshotList(D(c + 0x1A4), D(c + 0x1A8), units);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ++g_words[ForeignUnreadable]; }
+    --ntw2::probeDepth;
+    return units;
+}
+
 bool Start(const Binding& binding) {
     Stop();
     void* memory = VirtualAlloc(nullptr, sizeof(Storage), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -262,7 +293,7 @@ void Stop() {
 }
 void Reset() {
     memset(g_words, 0, sizeof(g_words));
-    g_unitQ = g_strictQ = g_dynamicQ = g_stageQ = g_observerQ = g_snapshotQ = g_rngQ = 0;
+    g_unitQ = g_strictQ = g_dynamicQ = g_stageQ = g_observerQ = g_snapshotQ = g_rngQ = g_unreadableQ = 0;
     memset(g_reasonQ, 0, sizeof(g_reasonQ)); memset(g_commandQ, 0, sizeof(g_commandQ));
     g_haveTick = g_tickN = g_stageStamp = g_occurrenceStamp = g_stageOccurrences = 0;
     if (g_s) { memset(g_s->foreign, 0, sizeof(g_s->foreign)); memset(g_s->seen, 0, sizeof(g_s->seen)); }
@@ -286,9 +317,7 @@ U Stage(void* container, U model, Native native) {
     ++g_stageStamp; g_stageOccurrences = 0; g_seenUsed = 0;
     const U c = static_cast<U>(reinterpret_cast<uintptr_t>(container));
     const LONGLONG k0 = Now();
-    U units = 0;
-    if (c && t.Readable(c + 0xF0, 8, g_queries)) SnapshotList(D(c + 0xF0), D(c + 0xF4), units);
-    if (c && t.Readable(c + 0x1A4, 8, g_queries)) SnapshotList(D(c + 0x1A4), D(c + 0x1A8), units);
+    const U units = SnapshotContainer(c);
     const LONGLONG k1 = Now();
     g_words[SnapshotUnits] += units;
     g_snapshotQ += static_cast<unsigned long long>(k1 - k0);
@@ -310,47 +339,48 @@ U Unit(void* unit, U list, Native native) {
     g_inUnit = 1;
     const LONGLONG t0 = Now();
     const U u = static_cast<U>(reinterpret_cast<uintptr_t>(unit));
-    ntw2_region::Table& t = g_s->table;
     ++g_occurrenceStamp; g_distinct = 0;
-    Probe pre, post;
-    ReadProbe(u, g_delta, t, g_queries, pre);
-    if (pre.readable) NeighbourWitness(u);
+    Reading pre = {}, post = {};
+    Observe(u, true, pre);
     const U planner0 = g_planner ? g_planner() : 0;
-    const U rng0 = g_model ? D(g_model + 0x50) : 0;
     const LONGLONG a = Now();
     const U result = native(unit);
     const LONGLONG b = Now();
-    const U rng1 = g_model ? D(g_model + 0x50) : 0;
     const U plannerDelta = g_planner ? g_planner() - planner0 : 0;
-    ReadProbe(u, g_delta, t, g_queries, post);
-    if (post.readable) AggregationWitness(u);
+    Observe(u, false, post);
 
     const LONGLONG q = b - a;
-    const U steps = g_model ? RngSteps(rng0, rng1, kRngBound) : 0;
+    const unsigned long long uq = static_cast<unsigned long long>(q);
+    // Only a complete pre+post observation is classified; an unreadable one is its own bucket, never eligible.
+    const bool observed = pre.probe.readable && post.probe.readable;
+    const U steps = observed && pre.rngValid && post.rngValid ? RngSteps(pre.rng, post.rng, kRngBound) : 0;
     U detail = 0;
-    const U reasons = Classify(pre, post, plannerDelta, steps, detail);
+    const U reasons = Classify(pre.probe, post.probe, plannerDelta, steps, detail);
     ++g_words[Occurrences]; ++g_words[list ? AlternateOccurrences : MainOccurrences]; ++g_stageOccurrences;
-    g_unitQ += static_cast<unsigned long long>(q);
-    for (U r = 0; r < kReasons; ++r) if (reasons >> r & 1) {
-        ++g_words[ReasonCount + r]; g_reasonQ[r] += static_cast<unsigned long long>(q);
-        if (reasons == 1u << r) ++g_words[SoleReason + r];
+    g_unitQ += uq;
+    bool dynamicOwner = true;
+    if (!observed) { ++g_words[Unreadable]; g_unreadableQ += uq; }
+    else {
+        for (U r = 0; r < kReasons; ++r) if (reasons >> r & 1) {
+            ++g_words[ReasonCount + r]; g_reasonQ[r] += uq;
+            if (reasons == 1u << r) ++g_words[SoleReason + r];
+        }
+        if (!reasons) { ++g_words[StrictEligible]; g_strictQ += uq; }
+        dynamicOwner = (reasons & ~(1u << RNonClosed)) != 0;
+        if (!dynamicOwner) { ++g_words[DynamicEligible]; g_dynamicQ += uq; }
+        if (steps) {
+            ++g_words[RngDrawing]; g_rngQ += uq;
+            if (steps == ~0u) ++g_words[RngUnresolved]; else g_words[RngDraws] += steps;
+        }
     }
-    if (!reasons) { ++g_words[StrictEligible]; g_strictQ += static_cast<unsigned long long>(q); }
-    const bool dynamicOwner = (reasons & ~(1u << RNonClosed)) != 0;
-    if (!dynamicOwner) { ++g_words[DynamicEligible]; g_dynamicQ += static_cast<unsigned long long>(q); }
     for (U i = 0; i < kDetails; ++i) if (detail >> i & 1) ++g_words[DetailCount + i];
-    if (steps) {
-        ++g_words[RngDrawing]; g_rngQ += static_cast<unsigned long long>(q);
-        if (steps == ~0u) ++g_words[RngUnresolved]; else g_words[RngDraws] += steps;
-    }
-    if (!pre.readable || !post.readable) ++g_words[Unreadable];
-    const U us = Us(static_cast<unsigned long long>(q));
+    const U us = Us(uq);
     U bucket = 0;
     while (bucket + 1 < kHistogram && us >= (1u << bucket)) ++bucket;
     ++g_words[CostHistogram + bucket];
-    if (g_tickN < kTickCapacity) g_s->tickCosts[g_tickN++] = Dus(static_cast<unsigned long long>(q));
+    if (g_tickN < kTickCapacity) g_s->tickCosts[g_tickN++] = Dus(uq);
     else ++g_words[TickBufferOverflow];
-    Census(pre.readable ? pre.command : ~0u, dynamicOwner, steps != 0, q);
+    Census(pre.probe.readable ? pre.probe.command : ~0u, dynamicOwner, steps != 0, q);
     g_words[ForeignDistinctSum] += g_distinct;
     if (g_distinct > g_words[ForeignDistinctMax]) g_words[ForeignDistinctMax] = g_distinct;
     bool fresh = true;

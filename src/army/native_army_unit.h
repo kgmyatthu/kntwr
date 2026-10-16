@@ -23,14 +23,20 @@
 //    F+508!=1||F+498, F+460==0; 586440 not replicated: upper bound).
 //  * effects (pre/post deltas): A40 notification 585890 (U+AA0 0->1), 608/AB8 5858E0/585904 (U+AA0 ->2), BD0 57F0F8
 //    (6011F0 returns old<new of byte U+D48), 601500 trigger 601622/60170D (R=[U+DC8], R+68 0->nonzero: 5CCA60 effect,
-//    6A5CE0 counters, 69E4D0 publication and callback 69E66E), model+50 RNG (MSVC LCG 343FD/269EC3 steps counted),
+//    6A5CE0 counters, 69E4D0 publication and callback 69E66E), model+50 RNG (MSVC LCG 343FD/269EC3: bounded endpoint
+//    inference, the number of LCG steps <= kRngBound from the pre to the post state; a reseed or more draws than the
+//    bound count as rng_unresolved, and draws that return to the same state are invisible),
 //    planner mutators (ntw2_ai_census owner-thread calls; only with --features ai_census), member/attached/driver
 //    counts, command U+930/934, FSM state [U+D6C].
 //  * reasons (owner-only under the approved compromises): notification (A40|608|BD0|trigger), planner, allocation/list
 //    (member/attached/driver/command changes, attached removal, formation command), return-dependent (FSM transition,
 //    or selected-command predicate followed by a command change), non-closed callee (any kind). Strict eligible: no
 //    reason. Dynamic eligible: no reason other than non-closed, i.e. eligible once the reached classes are closed.
-//    RNG draws are eligible under compromise 5 and only counted.
+//    RNG draws are eligible under compromise 5 and only counted. An occurrence whose pre or post observation is not
+//    complete (unit unreadable, or a fault caught while reading) is counted in unreadable/unreadable_us only: it is
+//    neither eligible nor attributed to a reason, and its cost stays owner-only in the projection.
+//  * observation safety: readability proofs are re-established before each pre and post observation (the native call
+//    may free or decommit probed memory) and every load runs under SEH bracketed by ntw2::probeDepth.
 //  * foreign witness: distinct foreign units in the lists the closure enumerates: 5821B0 candidates [[U+1EC]+D8]+44/48
 //    (pre) and 53A9E0's [U+1EC]+F0/F4 (post state; its pure-read gates are replicated, 55AC40/55C480 and the U+1B0/1AF
 //    command queries are not: upper bound). Pinned cells: 4 per aggregation unit (D9E, C00, +2704, C2C), 18 per
@@ -79,7 +85,7 @@ enum Word : U {
     ForeignDistinctSum = DetailCount + kDetails, ForeignDistinctMax, ForeignAggregationSum, ForeignNeighbourSum,
     AggregationSkipped, ForeignUnreadable, ForeignSetOverflow, PinnedCellsSum,
     CostHistogram = 88, // bucket b: cost in [2^(b-1), 2^b) us, bucket 0 below 1 us, bucket 15 at least 16384 us
-    CommandDistinct = CostHistogram + kHistogram, CommandOverflow, RngDrawingUs, Reserved107,
+    CommandDistinct = CostHistogram + kHistogram, CommandOverflow, RngDrawingUs, UnreadableUs,
     CommandRows = 108, // kCommands x (preferred vtable VA, 0 no command, ~0 unreadable; occurrences; dynamic owner-only;
                        //               cost us; RNG-drawing occurrences), first-seen order
     Reserved188 = CommandRows + kCommands * kCommandStride, Reserved189, Reserved190, Reserved191,

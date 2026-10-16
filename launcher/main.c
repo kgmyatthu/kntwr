@@ -1235,9 +1235,10 @@ static void print_army_unit(const uint32_t *u)
         u[26] / 10.0, u[27] / 10.0, u[28] / 10.0, p50, p90);
     say(L"    site 18 per tick: native %.3f ms = units %.3f + other %.3f; instrumentation %.3f ms; frozen-copy %.3f ms (%.1f units)\n",
         native_ms, unit_ms, other_ms, u[20] / ticks / 1000.0, snap_ms, u[22] / ticks);
-    say(L"    eligible: strict %.2f%% of units (%.2f%% of unit cost); dynamic %.2f%% (%.2f%% of cost); RNG-drawing %.2f%% "
-        L"(%.2f draws/unit, unresolved %lu, %.2f%% of cost, eligible under compromise 5)\n", pct(u[9], u[3]), pct(u[17], u[16]),
-        pct(u[10], u[3]), pct(u[18], u[16]), pct(u[11], u[3]), u[12] / occ, (unsigned long)u[13], pct(u[106], u[16]));
+    say(L"    eligible: strict %.2f%% of units (%.2f%% of unit cost); dynamic %.2f%% (%.2f%% of cost); unreadable %.2f%% "
+        L"(%.2f%% of cost, never eligible); RNG-drawing %.2f%% (%.2f draws/unit by bounded LCG-step inference, unresolved %lu, "
+        L"%.2f%% of cost, eligible under compromise 5)\n", pct(u[9], u[3]), pct(u[17], u[16]), pct(u[10], u[3]), pct(u[18], u[16]),
+        pct(u[15], u[3]), pct(u[107], u[16]), pct(u[11], u[3]), u[12] / occ, (unsigned long)u[13], pct(u[106], u[16]));
     say(L"    owner-only reasons (units%% / cost%% / sole-reason units%%):");
     for (i = 0; i < 5u; ++i) say(L" %hs=%.2f/%.2f/%.2f", reasons[i], pct(u[32u + i], u[3]), pct(u[37u + i], u[16]), pct(u[42u + i], u[3]));
     say(L"%ls\n", u[14] ? L"" : L" (planner_write NOT measured: needs --features ai,ai_census)");
@@ -2897,8 +2898,8 @@ static void sb_army_unit(Sb *b, const Run *r)
     for (i = 0; i < 8u; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", foreign[i], (unsigned long)w[80u + i]);
     sb_fmt(b, "}, \"cost_histogram_log2_us\": [");
     for (i = 0; i < 16u; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[88u + i]);
-    sb_fmt(b, "], \"command_distinct\": %lu, \"command_overflow\": %lu, \"rng_drawing_us\": %lu, \"commands\": [",
-           (unsigned long)w[104], (unsigned long)w[105], (unsigned long)w[106]);
+    sb_fmt(b, "], \"command_distinct\": %lu, \"command_overflow\": %lu, \"rng_drawing_us\": %lu, \"unreadable_us\": %lu, \"commands\": [",
+           (unsigned long)w[104], (unsigned long)w[105], (unsigned long)w[106], (unsigned long)w[107]);
     for (i = 0; i < 16u && i < w[104]; ++i) {
         sb_fmt(b, "%s{", i ? ", " : "");
         for (c = 0; c < 5u; ++c) sb_fmt(b, "%s\"%s\": %lu", c ? ", " : "", command[c], (unsigned long)w[108u + 5u * i + c]);

@@ -146,7 +146,7 @@ static void Map(const char* path) {
         reinterpret_cast<IMAGE_NT_HEADERS32*>(image + dos->e_lfanew), delta), "relocate private image");
     Put(At(0x1841bb8), 0, U(_tls_index)); tlsPad[0] = 0;
     Put(At(0x150fb24), 0, uint16_t(0x7654));
-    Put(At(0x131a7b8), 0, 1.25f); Put(At(0x1325d24), 0, 2.0f);
+    Put(At(0x131a7b8), 0, 1.25f);
     std::fill(std::begin(bindings), std::end(bindings), Fn(&Unexpected));
     Require(brain::Bind(Addr(image), bindings), "bind production generic gates");
     Require(projection::Initialize(Addr(image), bindings), "initialize private projection banks");
@@ -155,6 +155,8 @@ static void Map(const char* path) {
     Require(ntw2_build_clones(Addr(image), bindings, &production, &detail) == 0, "build production source-pinned clones");
     bindings[NTW2_BIND_B2_SERVICE_GATE] = Fn(&BoundaryGate);
     Require(ntw2_build_clones(Addr(image), bindings, &boundary, &detail) == 0, "build source-pinned event-seam clones");
+    // 0x1325d24 (lead threshold, stock 5.0f) is a generator data pin since PIN_CONTACT_LEAD; the fixture keeps the
+    // stock value and drives the threshold cases through group+0xda8 instead.
 }
 struct Fixture {
     std::array<B, 0x700> owner{};
@@ -188,7 +190,7 @@ struct Fixture {
         Put(group.data(), 0x14, Addr(root.data())); Put(root.data(), 8, Addr(model.data()));
         Put(model.data(), 0xb0, Addr(mode.data())); Put(model.data(), 0xb4, Addr(query.data()));
         Put(query.data(), 0, Addr(root.data()));
-        Put(group.data(), 0xda8, 3.0f); Put(group.data(), 0xd9e, B(1));
+        Put(group.data(), 0xda8, 6.0f); Put(group.data(), 0xd9e, B(1));
         databaseLink = Addr(database.data()); Put(owner.data(), 0x218, Addr(&databaseLink));
         Put(database.data(), 0x2c, Addr(rows.data())); Put(rows.data(), 0x59c, U(1));
         Put(surface.data(), 0x40, Addr(cell.data())); Put(cell.data(), 0xc, Addr(cellVtable.data()));
@@ -297,10 +299,10 @@ static void StepCases() {
         Put(f.group.data(), 0xda4, disabled); Put(f.group.data(), 0xd9e, active);
         U count = disabled != 1 && active != 0 ? 1 : 0; Invoke(f, hot::Step, count, count == 0);
     }
-    for (U mode : {0u, 1u, 2u}) for (U speed : {0x3f800000u, 0x40000000u, 0x40400000u, 0x7fc00001u}) {
+    for (U mode : {0u, 1u, 2u}) for (U speed : {0x40800000u, 0x40a00000u, 0x40c00000u, 0x7fc00001u}) {
         label = "55B0A0 manager modes, threshold equality and unordered"; Fixture f; f.Group();
         Put(f.mode.data(), 0x14, mode); Put(f.group.data(), 0xda8, speed);
-        U count = mode < 2 || speed != 0x3f800000u ? 1 : 0;
+        U count = mode < 2 || speed != 0x40800000u ? 1 : 0;
         Invoke(f, hot::Step, count, count == 0);
     }
     { label = "63B3E0 short circuit avoids unsupported later virtual"; Fixture f; f.Group();
