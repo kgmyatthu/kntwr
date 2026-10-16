@@ -53,7 +53,7 @@ static_assert(NTW2_COLLIDE_LOD==0x400u && !(NTW2_ALL&NTW2_COLLIDE_LOD) &&
               (NTW2_VALID_MASK&NTW2_COLLIDE_LOD)==NTW2_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
 static_assert(NTW2_ALL==(NTW2_AI_ASYNC|NTW2_BATCH64|NTW2_VISUAL), "NTW2_ALL is exactly the shipping set batch64,ai,visual");
 static_assert(NTW2_BRAIN_SLOTS==23u && NTW2_BRAIN_FAMILIES==5u && NTW2_BRAIN_SITE_FIRST==46u && NTW2_BRAIN_SITES==49u && NTW2_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase and army unit words without changing existing words");
+static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit and puppet words without changing existing words");
 static_assert(NTW2_AI_SLICE_BUDGET_WORDS==8u && offsetof(ntw2_status,ai_slice_budget_words)==offsetof(ntw2_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(ntw2_status,ai_park_words)==offsetof(ntw2_status,ai_slice_budget_words)+NTW2_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(ntw2_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -114,12 +114,16 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,collide_contact_words)+NTW2_COLLIDE_CONTACT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,grid_probation_words) && NTW2_COLLIDE_CONTACT_WORDS==48u &&
               offsetof(ntw2_status,grid_probation_words)+NTW2_GRID_PROBATION_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_async2_route_words) && NTW2_GRID_PROBATION_WORDS==32u+256u*8u &&
               offsetof(ntw2_status,ai_async2_route_words)+NTW2_AI_ASYNC2_ROUTE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_unit_words) && NTW2_AI_ASYNC2_ROUTE_WORDS==65u &&
-              offsetof(ntw2_status,army_unit_words)+NTW2_ARMY_UNIT_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ARMY_UNIT_WORDS==192u &&
+              offsetof(ntw2_status,army_unit_words)+NTW2_ARMY_UNIT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_words) && NTW2_ARMY_UNIT_WORDS==192u &&
+              offsetof(ntw2_status,puppet_words)+NTW2_PUPPET_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_PUPPET_WORDS==64u &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
 static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
               (NTW2_VALID_MASK&NTW2_ARMY_UNIT_SHADOW)==NTW2_ARMY_UNIT_SHADOW && !(NTW2_ARMY_UNIT_SHADOW&NTW2_PROFILE),
               "army unit shadow is its own opt-in observation bit outside the shipping set");
+static_assert(NTW2_PUPPET==0x80000u && !(NTW2_ALL&NTW2_PUPPET) && (NTW2_VALID_MASK&NTW2_PUPPET)==NTW2_PUPPET &&
+              !(NTW2_PUPPET&(NTW2_PROFILE|NTW2_BRAIN|NTW2_BRAIN2)) && NTW2_PUPPET_MAX_UNITS==4u,
+              "puppet probe is its own opt-in simulation bit outside the shipping set");
 static_assert(NTW2_AI_CENSUS==0x10000u && !(NTW2_ALL&NTW2_AI_CENSUS) && (NTW2_VALID_MASK&NTW2_AI_CENSUS)==NTW2_AI_CENSUS &&
               !(NTW2_AI_CENSUS&(NTW2_PROFILE|NTW2_GRID_CENSUS)) && NTW2_AI_CENSUS_WORDS==768u,
               "ai census is its own opt-in bit outside the shipping set");
@@ -166,7 +170,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==52 && offsetof(ntw2_config,puppet_units)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -1846,6 +1850,17 @@ int main(int argc,char** argv) {
     config.enabled_mask=NTW2_ARMY_UNIT_SHADOW; Check(start(&config)==1,"army unit shadow alone refused (no routed tick reaches site 18)");
     config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL|NTW2_ARMY_UNIT_SHADOW;
     Check(start(&config)==1,"army unit shadow refused without profile or a simulation feature");
+    // Puppet probe: unit count 1..4 exactly with its bit; sole owner of site 6 and the infantry class step slot.
+    config.enabled_mask=NTW2_PUPPET; config.puppet_units=0; Check(start(&config)==1,"puppet probe without a unit count refused");
+    config.puppet_units=5; Check(start(&config)==1,"puppet probe beyond four units refused");
+    config.enabled_mask=NTW2_BATCH64; config.puppet_units=1; Check(start(&config)==1,"puppet unit count without the puppet bit refused");
+    config.enabled_mask=NTW2_PUPPET|NTW2_BRAIN2; Check(start(&config)==1,"puppet probe and brain2 cannot both own site 6");
+    config.enabled_mask=NTW2_PUPPET|NTW2_PROFILE|NTW2_BRAIN; config.main_thread_id=1;
+    Check(start(&config)==1,"puppet probe and brain profiling slots refused"); config.main_thread_id=0;
+    config.enabled_mask=NTW2_PUPPET; config.brain_flags=NTW2_BRAIN_UNIT_SHADOW; Check(start(&config)==1,"puppet probe with brain flags refused");
+    config.brain_flags=0; config.puppet_units=4;
+    Check(start(&config)==2,"valid four-unit puppet configuration passes validation and refuses a foreign main image");
+    config.puppet_units=0;
     config.enabled_mask=NTW2_BRAIN; config.main_thread_id=1; Check(start(&config)==1,"brain profiling without profile refused"); config.main_thread_id=0;
     config.enabled_mask=NTW2_AI_CTRL; Check(start(&config)==1,"controller offload without ai refused");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_BUDGET_EMA; Check(start(&config)==1,"retired EMA budget refused with ai");

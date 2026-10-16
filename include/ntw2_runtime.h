@@ -32,6 +32,9 @@ extern "C" {
 #define NTW2_AI_ASYNC2_ROUTE_WORDS 65u /* ai_async2_route_words; layout src/ntw2_ai_async2.h (RouteWord), labels NTW2_AI_ASYNC2_ROUTE_LABELS */
 #define NTW2_ARMY_UNIT_SHADOW 0x40000u /* Opt-in --army-unit-shadow: item 4 Stage A, instrumentation only. Site 18 (ARMY_UPDATE clone) and its 0x581F30 calls (sites 101/103) are bound to owner-thread gates that time each unit update, classify it under the approved compromises (owner-only reasons, RNG draws, foreign-unit witness, command-class census) and measure a frozen-view copy; the native calls run unchanged. Requires a routed tick (PROFILE or a simulation feature); planner writes are measured only with AI_CENSUS. Outside NTW2_ALL. Words: army_unit_words, src/army/native_army_unit.h. */
 #define NTW2_ARMY_UNIT_WORDS 192u /* army_unit_words; layout src/army/native_army_unit.h (Word), labels NTW2_ARMY_UNIT_*_LABELS */
+#define NTW2_PUPPET 0x80000u /* Opt-in --puppet-probe N: puppet survival probe stage 1 (analysis/native-unit-sim-rewrite.md section 3). N = ntw2_config::puppet_units (1..4) ordinary foot-infantry units (class 0x1333714, registry order) get the engine's real wait node (0x650600 -> 0x61D8F0, table 0x1334028) at an owner stage seam; site 6 skips their native step +0C and the class common-step slot +08 (0x670EB0) keeps only terrain/extent 0x81AC80 and order->activity 0x663730 for them. Externally installed nodes are reparked or handed back; stop hands members back without native writes. Sole owner of site 6: refuses BRAIN2, BRAIN and brain flags. Routed simulation feature outside NTW2_ALL. Words: puppet_words, src/puppet/native_puppet.h. */
+#define NTW2_PUPPET_WORDS 64u /* puppet_words; layout src/puppet/native_puppet.h (Word), labels NTW2_PUPPET_WORD_LABELS */
+#define NTW2_PUPPET_MAX_UNITS 4u
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
 #define NTW2_LOCO_SHADOW 0x4u /* Owner-thread sweep/resolve oracle; requires LOCO_CLONE. */
@@ -170,7 +173,7 @@ enum ntw2_memory_word {
    PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE, COLLIDE_LOD, AI_CTRL, PROFILE and BRAIN are opt-in. */
 #define NTW2_ALL (NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_VISUAL)
 /* Every feature bit the runtime accepts in ntw2_config::enabled_mask. */
-#define NTW2_VALID_MASK (NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_BRAIN2 | NTW2_VISUAL | NTW2_PROFILE | NTW2_BRAIN | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_AI_CTRL | NTW2_LOCO | NTW2_GRID_CENSUS | NTW2_AI_CENSUS | NTW2_AI_ASYNC2 | NTW2_ARMY_UNIT_SHADOW)
+#define NTW2_VALID_MASK (NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_BRAIN2 | NTW2_VISUAL | NTW2_PROFILE | NTW2_BRAIN | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_AI_CTRL | NTW2_LOCO | NTW2_GRID_CENSUS | NTW2_AI_CENSUS | NTW2_AI_ASYNC2 | NTW2_ARMY_UNIT_SHADOW | NTW2_PUPPET)
 /* ai_async2_words labels, word order (histogram buckets: <=125us, <=250us, ... <=128ms, >128ms; gate kinds: site 34
    admission (capacity drain, lease wait, fallback join), site 33 controller, TICK 57DFDF quadtree update, tick end
    (start seam, abort drain), delegate replacement 6EA520/6B3010, delegate destructor 69D710/69D750, command callback
@@ -231,6 +234,7 @@ typedef struct ntw2_config {
     uint32_t loco_flags;     /* Appended (config grew 36 -> 40 bytes); own field, no other field is reinterpreted. NTW2_LOCO_* flags; nonzero requires NTW2_LOCO. */
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
+    uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS; nonzero exactly when NTW2_PUPPET is set. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -759,6 +763,10 @@ typedef struct ntw2_status {
        src/army/native_army_unit.h (Word, NTW2_ARMY_UNIT_*_LABELS). Tick-owner writer; a poll is a non-atomic snapshot.
        Nothing here changes a native write. All zero without the feature; reset at activation, retained after stop. */
     uint32_t army_unit_words[NTW2_ARMY_UNIT_WORDS];
+    /* NTW2_PUPPET (appended after army_unit_words): puppet probe stage 1 membership/admission counters; layout and labels
+       in src/puppet/native_puppet.h (Word, NTW2_PUPPET_WORD_LABELS). Tick-owner writer; a poll is a non-atomic snapshot.
+       All zero without the feature; reset at activation, retained after stop. */
+    uint32_t puppet_words[NTW2_PUPPET_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1075,8 +1083,9 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(ntw2_config) == 48 && offsetof(ntw2_config, loco_flags) == 36 &&
-              offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44, "configuration ABI is append-only");
+static_assert(sizeof(ntw2_config) == 52 && offsetof(ntw2_config, loco_flags) == 36 &&
+              offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
+              offsetof(ntw2_config, puppet_units) == 48, "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
 static_assert(offsetof(ntw2_status,ai_slice_budget_words) == offsetof(ntw2_status,ai_ctrl_words) + 16 * sizeof(uint32_t) &&
               NTW2_AI_SLICE_BUDGET_WORDS == 8u, "slice budget telemetry preserves its shipped offset");
@@ -1154,10 +1163,14 @@ static_assert(offsetof(ntw2_status,grid_probation_words) + NTW2_GRID_PROBATION_W
               NTW2_GRID_PROBATION_WORDS == 32u + 256u * 8u, "grid probation row appends after collide_contact_words");
 static_assert(offsetof(ntw2_status,ai_async2_route_words) + NTW2_AI_ASYNC2_ROUTE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_unit_words) &&
               NTW2_AI_ASYNC2_ROUTE_WORDS == 65u, "ai_async2 route row appends after grid_probation_words");
-static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_words) &&
               NTW2_ARMY_UNIT_WORDS == 192u && NTW2_ARMY_UNIT_SHADOW == 0x40000u &&
               (NTW2_VALID_MASK & NTW2_ARMY_UNIT_SHADOW) && !(NTW2_ALL & NTW2_ARMY_UNIT_SHADOW),
               "army unit row appends after ai_async2_route_words; its bit is valid and outside NTW2_ALL");
+static_assert(offsetof(ntw2_status,puppet_words) + NTW2_PUPPET_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_PUPPET_WORDS == 64u && NTW2_PUPPET == 0x80000u && NTW2_PUPPET_MAX_UNITS == 4u &&
+              (NTW2_VALID_MASK & NTW2_PUPPET) && !(NTW2_ALL & NTW2_PUPPET),
+              "puppet row appends after army_unit_words; its bit is valid and outside NTW2_ALL");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

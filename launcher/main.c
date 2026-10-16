@@ -40,6 +40,7 @@
 #include "brain2/native_brain_workers.h"
 #include "brain2/native_unit_brain.h"
 #include "army/native_army_unit.h"
+#include "puppet/native_puppet.h"
 #include "collision/native_contact.h"
 
 #include "ntw2_runtime.h"
@@ -185,6 +186,7 @@ typedef struct Options {
     BOOL loco_grid;          /* --loco-grid: owned soldier grid v2, published at site-13 exit; default off */
     BOOL loco_grid_verify;   /* --loco-grid-verify: implies grid; owner-side verification */
     BOOL grid_probation;     /* --grid-probation: native cell-head trap detector; requires --loco-grid (or verify), not ballistic */
+    uint32_t puppet_units;   /* --puppet-probe N: NTW2_PUPPET stage 1, N = 1..4 ordinary foot-infantry units (ntw2_config::puppet_units) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -336,6 +338,7 @@ static const struct { uint32_t bit; const wchar_t *name; const char *jname; } k_
     { NTW2_AI_CENSUS, L"ai_census", "ai_census" },
     { NTW2_AI_ASYNC2, L"ai_async2", "ai_async2" },
     { NTW2_ARMY_UNIT_SHADOW, L"army_unit_shadow", "army_unit_shadow" },
+    { NTW2_PUPPET, L"puppet_probe", "puppet_probe" },
 };
 #define NFEATURES (sizeof k_features / sizeof k_features[0])
 
@@ -1268,15 +1271,32 @@ static void print_army_unit(const uint32_t *u)
             pct(v[2], v[1]), v[1] ? (double)v[3] / v[1] : 0.0, v[3] / ticks / 1000.0, pct(v[3], u[16]), pct(v[4], v[1]));
     }
 }
+/* Puppet probe stage 1 (NTW2_PUPPET, native_puppet.h): every labelled word plus the derived per-stage rates. */
+static void print_puppet(const uint32_t *p)
+{
+    static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
+    const double stages = p[6] ? (double)p[6] : 1.0; /* word 6 = stages */
+    unsigned i;
+    say(L"  puppet: units %lu/%lu selected (%lu rejected of %lu examined), members selected=%lu admitted=%lu parked=%lu "
+        L"pending=%lu; parked member-ticks=%lu skipped native steps=%lu gated common steps=%lu; reparks=%lu handbacks=%lu "
+        L"external nodes=%lu deaths=%lu faults=%lu; adapter us/stage=%.1f (max %lu)\n",
+        (unsigned long)p[3], (unsigned long)p[2], (unsigned long)p[4], (unsigned long)p[5], (unsigned long)p[8],
+        (unsigned long)p[10], (unsigned long)p[11], (unsigned long)p[12], (unsigned long)p[14], (unsigned long)p[15],
+        (unsigned long)p[16], (unsigned long)p[17], (unsigned long)p[18], (unsigned long)p[19], (unsigned long)p[23],
+        (unsigned long)p[28], p[32] / stages, (unsigned long)p[31]);
+    say(L"   ");
+    for (i = 0; i < NTW2_PUPPET_WORDS; ++i) say(L" %hs=%lu", labels[i], (unsigned long)p[i]);
+    say(L"\n");
+}
 static void print_module_words(const ntw2_status *s)
 {
-    static const wchar_t *const names[45] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header"};
-    const uint32_t *arrays[45] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
+    static const wchar_t *const names[46] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"puppet"};
+    const uint32_t *arrays[46] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                   s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
-                                  s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->brain2_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->brain_unit_words, s->collide_contact_words, s->grid_probation_words};
-    const unsigned counts[45] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_HEADER_WORDS, NTW2_BRAIN2_WORDS, 8, 8, 32, 2, NTW2_BRAIN_STATE_COUNTS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_BRAIN_UNIT_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_HEADER_WORDS};
+                                  s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->brain2_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->brain_unit_words, s->collide_contact_words, s->grid_probation_words, s->puppet_words};
+    const unsigned counts[46] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_HEADER_WORDS, NTW2_BRAIN2_WORDS, 8, 8, 32, 2, NTW2_BRAIN_STATE_COUNTS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_BRAIN_UNIT_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_HEADER_WORDS, NTW2_PUPPET_WORDS};
     unsigned i, j;
-    for (i = 0; i < 45; ++i) {
+    for (i = 0; i < 46; ++i) {
         say(L"  %ls words:", names[i]);
         for (j = 0; j < counts[i]; ++j) say(L" %lu", (unsigned long)arrays[i][j]);
         say(L"\n");
@@ -1477,6 +1497,7 @@ static void print_module_words(const ntw2_status *s)
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) print_army_unit(s->army_unit_words);
+    if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -2910,6 +2931,22 @@ static void sb_army_unit(Sb *b, const Run *r)
     for (i = 0; i < NTW2_ARMY_UNIT_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+/* puppet (NTW2_PUPPET, --puppet-probe N): every labelled word of native_puppet.h plus the raw row. */
+static void sb_puppet(Sb *b, const Run *r)
+{
+    static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
+    const uint32_t *w = r->last.puppet_words;
+    unsigned i;
+    if (!(r->opt.mask & NTW2_PUPPET) || !r->have_status || !w[0]) {
+        sb_fmt(b, "  \"puppet\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"puppet\": {\"metrics\": {");
+    for (i = 0; i < NTW2_PUPPET_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"words\": [");
+    for (i = 0; i < NTW2_PUPPET_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -3402,7 +3439,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                         NTW2_GRID_READERS * (2048u + NTW2_GRID_SITES * 80u) + NTW2_GRID_EDGES * 384u +
                         16u * (256u + NTW2_TIMED_SITES * 128u) + NTW2_TIMED_SITES * 192u +
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
-                        NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + 4096u];
+                        NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -3480,6 +3517,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
     sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & NTW2_ARMY_UNIT_SHADOW) ? "true" : "false");
+    sb_fmt(&b, "  \"puppet_probe\": %lu,\n", (unsigned long)((r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u));
     sb_fmt(&b, "  \"armed\": %s,\n  \"reached_full_activation\": %s,\n  \"remote_thread_outstanding\": %s,\n",
            r->ever_armed ? "true" : "false", r->ever_full ? "true" : "false", r->remote_leaked ? "true" : "false");
     sb_fmt(&b, "  \"game_exited\": %s,\n  \"game_exit_code\": %lu,\n", r->game_exited ? "true" : "false",
@@ -3516,6 +3554,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_grid_census(&b, r);
     sb_ai_census(&b, r);
     sb_army_unit(&b, r);
+    sb_puppet(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -3579,18 +3618,18 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, "],\n");
         }
         {
-            static const char *const names[45] = {"formation_words", "query_words", "path_words", "ballistic_words",
+            static const char *const names[46] = {"formation_words", "query_words", "path_words", "ballistic_words",
                                                   "formation_diag", "tick_words", "sim_words", "planner_words", "planner_walk_words",
-                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words"};
-            const uint32_t *arrays[45] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
+                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words", "puppet_words"};
+            const uint32_t *arrays[46] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                           s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
-                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words};
-            const unsigned counts[45] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS};
+                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->puppet_words};
+            const unsigned counts[46] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_PUPPET_WORDS};
             unsigned i, j;
-            for (i = 0; i < 45; ++i) {
+            for (i = 0; i < 46; ++i) {
                 sb_fmt(&b, "    \"%s\": [", names[i]);
                 for (j = 0; j < counts[i]; ++j) sb_fmt(&b, "%s%lu", j ? "," : "", (unsigned long)arrays[i][j]);
-                sb_fmt(&b, "]%s\n", i + 1 < 45 ? "," : "");
+                sb_fmt(&b, "]%s\n", i + 1 < 46 ? "," : "");
             }
             sb_put(&b, "  }\n", 4);
         }
@@ -4150,6 +4189,7 @@ static int install_runtime(Run *r)
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
     {
@@ -4645,6 +4685,10 @@ static void usage(void)
         L"                        update (sites 18/101/103): per-unit 0x581F30 cost, owner-only reasons, RNG draws, foreign-unit\n"
         L"                        witness, command classes and projected site-18 time (army_unit_words, receipt army_unit);\n"
         L"                        add ai,ai_census to measure planner writes\n"
+        L"  --puppet-probe N      puppet survival probe stage 1: N = 1..4 ordinary foot-infantry units (class 0x1333714, registry\n"
+        L"                        order) get the engine's real wait node; their native site-6 step and common-step node/slot\n"
+        L"                        advancement are gated (stationary; puppet_words, receipt puppet). Owns site 6: excludes\n"
+        L"                        brain2, brain and every --brain-* option\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -4702,7 +4746,7 @@ static BOOL parse_features(const wchar_t *s, uint32_t *mask)
         for (i = 0; i < NFEATURES; ++i)
             if (_wcsicmp(tok, k_features[i].name) == 0) { bit = k_features[i].bit; break; }
         if (!bit) {
-            errsay(L"unknown --features item \"%ls\"; use all,path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2,army_unit_shadow.\n", tok);
+            errsay(L"unknown --features item \"%ls\"; use all,path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2,army_unit_shadow,puppet_probe (with --puppet-probe N).\n", tok);
             return FALSE;
         }
         if (m & bit) {
@@ -4779,6 +4823,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--workers")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
+        } else if (!wcscmp(name, L"--puppet-probe")) {
+            NEEDVAL();
+            if (!parse_uint(val, 1, NTW2_PUPPET_MAX_UNITS, &o->puppet_units)) { errsay(L"--puppet-probe must be 1..%u.\n", NTW2_PUPPET_MAX_UNITS); return -1; }
+            feature_options |= NTW2_PUPPET;
         } else if (!wcscmp(name, L"--poll-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 10, 1000, &o->poll_ms)) { errsay(L"--poll-ms must be 10..1000.\n"); return -1; }
@@ -4861,6 +4909,16 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if (o->brain_unit_shadow && (o->brain_parallel || o->brain_quiet)) {
         errsay(L"--brain-unit-shadow observes the serial site-6 loop and excludes --brain-parallel and --brain-quiet.\n");
+        return -1;
+    }
+    if ((o->mask & NTW2_PUPPET) && !o->puppet_units) {
+        errsay(L"puppet_probe needs its unit count: use --puppet-probe N (1..%u).\n", NTW2_PUPPET_MAX_UNITS);
+        return -1;
+    }
+    if ((o->mask & NTW2_PUPPET) && ((o->mask & (NTW2_BRAIN2 | NTW2_BRAIN)) || o->brain_census || o->brain_timing ||
+        o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet ||
+        o->brain_unit_shadow)) {
+        errsay(L"--puppet-probe is the sole owner of site 6 and the infantry step slot: it excludes brain2, brain and every --brain-* option.\n");
         return -1;
     }
     if ((o->mask & NTW2_LOCO) && (o->mask & (NTW2_BRAIN | NTW2_COLLIDE_LOD))) {
@@ -4979,6 +5037,7 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u;
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];
