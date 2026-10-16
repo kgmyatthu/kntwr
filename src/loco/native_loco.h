@@ -127,14 +127,21 @@
 // occurrence the workers refused as needs_class_wrapper (receiver 0x132BA04, wrapper 0x5B2CA0). Pre-step = D(+0x688) != 0
 // (0x5F3040 runs), children = D(+0x66C) entries of the array at D(+0x670), state = D(+0x224) (9 = aim arm, 8 = skipped
 // child). empty_closure = no pre-step and no children; with_children_no_pre_step = candidates for a replayed child family.
-// vt<N>/count<N> are the first eight distinct child vtable addresses (child object word 0) and their child counts;
+// vt<N>/count<N> are the first four distinct child vtable addresses (child object word 0, live) and their child counts;
 // vtable_overflow counts children of further vtables. Counters cumulative per run.
+// Phase 2 (version 2, words 24-31; --loco-cw-shadow / --loco-cw-workers): cw_mode 0 off / 1 shadow / 2 live; cw_admitted =
+// worker-computed wrappers with children that passed the commit re-check (live: committed; shadow: compared); cw_events =
+// child relocations replayed through native 0x80BAC0 (live) or compared (shadow); cw_refused_class = census occurrences
+// refused only because a child vtable is not the World agent table 0x1333714; cw_refused_gate = other phase-2 gate refusals
+// (pre-step, state 9, >8 children, null/self child, unproven child slots); cw_recheck_fallbacks = computed wrappers whose
+// child list/vtables/state/0x14A51A0 word changed before commit (run natively); cw_shadow_compares/mismatches.
 #define NTW2_LOCO_CW_LABELS \
     "version", "occurrences", "pre_step_nonzero", "children_0", "children_1", "children_2plus", \
     "children_max", "state_9", "state_8", "state_other", "empty_closure", "with_children_no_pre_step", \
     "children_total", "null_children", "vtable_overflow", "unreadable", \
     "vt0", "count0", "vt1", "count1", "vt2", "count2", "vt3", "count3", \
-    "vt4", "count4", "vt5", "count5", "vt6", "count6", "vt7", "count7"
+    "cw_mode", "cw_admitted", "cw_events", "cw_refused_class", "cw_refused_gate", "cw_recheck_fallbacks", \
+    "cw_shadow_compares", "cw_shadow_mismatches"
 
 #ifdef __cplusplus
 #include "native_owned_grid.h"
@@ -270,7 +277,9 @@ enum RelinkWord : uint32_t {
 enum CwWord : uint32_t {
     CwVersion, CwOccurrences, CwPreStep, CwKids0, CwKids1, CwKids2Plus,
     CwKidsMax, CwState9, CwState8, CwStateOther, CwEmpty, CwWithKidsNoPre,
-    CwChildrenTotal, CwNullChildren, CwVtOverflow, CwUnreadable, CwVtBase, CwWordCount = CwVtBase + 16
+    CwChildrenTotal, CwNullChildren, CwVtOverflow, CwUnreadable, CwVtBase, CwVtEntries = 4,
+    CwMode = CwVtBase + 2 * CwVtEntries, CwAdmitted, CwEvents, CwRefusedClass, CwRefusedGate, CwRecheckFallbacks,
+    CwShadowCompares, CwShadowMismatches, CwWordCount
 };
 struct Binding {
     uint32_t image_delta;
@@ -304,6 +313,11 @@ struct Binding {
     // services still run and a private mirror verifies the parallel apply; workers: the pool applies the logged batches.
     bool use_relink_shadow;
     bool use_relink_workers;
+    // Class-wrapper phase 2 (requires use_owned_services; exclusive): 0x132BA04 wrappers whose children are all World agents
+    // (vtable 0x1333714) run on workers with proxy children; the owner replays each child relocation through native 0x80BAC0.
+    // Shadow: the worker result is computed, the owner still runs the wrapper natively and compares (loco_cw_words).
+    bool use_cw_shadow;
+    bool use_cw_workers;
 };
 // Bind before clone emission. Scratch headers have stable addresses across starts.
 void Bind(uint32_t image_delta, uint32_t* bindings);

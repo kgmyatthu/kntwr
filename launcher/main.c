@@ -202,6 +202,8 @@ typedef struct Options {
     uint32_t inject_timeout_s;
     BOOL activate;
     BOOL validate_only;
+    BOOL loco_cw_shadow;     /* --loco-cw-shadow: class-wrapper phase 2 computed on workers, native wrapper still runs and is compared; requires --loco-owned-services */
+    BOOL loco_cw_workers;    /* --loco-cw-workers: class-wrapper phase 2 live (owner replays child relocations natively); exclusive with shadow */
     BOOL focus;
     BOOL exit_game_after_observe;
 } Options;
@@ -212,7 +214,8 @@ static uint32_t loco_flags_from(const Options *o)
            (o->loco_owned ? NTW2_LOCO_OWNED_SERVICES : 0u) | (o->loco_quiet ? NTW2_LOCO_QUIET : 0u) |
            ((o->loco_grid || o->loco_grid_verify) ? NTW2_LOCO_GRID : 0u) | (o->loco_grid_verify ? NTW2_LOCO_GRID_VERIFY : 0u) |
            (o->grid_probation ? NTW2_LOCO_GRID_PROBATION : 0u) | (o->loco_grid_incremental ? NTW2_LOCO_GRID_INCREMENTAL : 0u) |
-           (o->loco_relink_shadow ? NTW2_LOCO_RELINK_SHADOW : 0u) | (o->loco_relink_workers ? NTW2_LOCO_RELINK_WORKERS : 0u);
+           (o->loco_relink_shadow ? NTW2_LOCO_RELINK_SHADOW : 0u) | (o->loco_relink_workers ? NTW2_LOCO_RELINK_WORKERS : 0u) |
+           (o->loco_cw_shadow ? NTW2_LOCO_CW_SHADOW : 0u) | (o->loco_cw_workers ? NTW2_LOCO_CW_WORKERS : 0u);
 }
 
 /* Quiet overrides owner shadow comparisons even when --loco-shadow is also supplied. */
@@ -5315,6 +5318,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             if (!parse_uint(val, 5, 3600, &o->inject_timeout_s)) { errsay(L"--inject-timeout must be 5..3600.\n"); return -1; }
         } else {
             errsay(L"unknown option \"%ls\".\n", name);
+        L"  --loco-cw-shadow      requires loco + --loco-owned-services: class wrappers 0x132BA04 whose children are all World agents run on\n"
+        L"                        workers with proxy children; the owner still runs them natively and compares (zero gameplay effect;\n"
+        L"                        loco_cw_words cw_*); exclusive with --loco-cw-workers\n"
+        L"  --loco-cw-workers     same requirements: live; the worker result is committed and each child relocation is replayed\n"
+        L"                        through native 0x80BAC0 on the owner in worklist order\n"
             return -1;
         }
 #undef NEEDVAL
@@ -5489,6 +5497,8 @@ static BOOL choose_game_dir(Run *r)
             errsay(L"game directory \"%ls\" does not exist.\n", r->opt.game);
             return FALSE;
         }
+        else if (!wcscmp(name, L"--loco-cw-shadow")) o->loco_cw_shadow = TRUE;
+        else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
         return TRUE;
     }
     if (!g_in_con) {
@@ -5597,3 +5607,11 @@ int wmain(int argc, wchar_t **argv)
     default: return finish(r, code, L"runtime status unavailable");
     }
 }
+    if (o->loco_cw_shadow && o->loco_cw_workers) {
+        errsay(L"--loco-cw-shadow and --loco-cw-workers are exclusive.\n");
+        return -1;
+    }
+    if ((o->loco_cw_shadow || o->loco_cw_workers) && (!(o->mask & NTW2_LOCO) || !o->loco_owned)) {
+        errsay(L"--loco-cw-shadow and --loco-cw-workers require --features loco and --loco-owned-services.\n");
+        return -1;
+    }

@@ -642,12 +642,13 @@ extern "C" uint32_t ntw2_build_clones(uint32_t image_base, const uint32_t bindin
     return NTW2_CLONE_OK;
 }
 
-extern "C" uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move,
+extern "C" uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move, uint32_t class_wrap, uint32_t select,
     const uint32_t bindings[NTW2_BIND_COUNT], ntw2_clone_set* out) {
-    if (!wrap || !move || !bindings || !out) return NTW2_CLONE_ERR_BAD_ARGUMENT;
+    if (!wrap || !move || !bindings || !out || (class_wrap && !select)) return NTW2_CLONE_ERR_BAD_ARGUMENT;
     memset(out, 0, sizeof *out);
-    const uint32_t ids[2] = {NTW2_CLONE_LOCO_WRAP, NTW2_CLONE_LOCO_MOVE};
-    const uint32_t source[2] = {wrap, move};
+    const uint32_t ids[3] = {NTW2_CLONE_LOCO_WRAP, NTW2_CLONE_LOCO_MOVE, NTW2_CLONE_LOCO_CLASS_WRAP};
+    const uint32_t source[3] = {wrap, move, class_wrap};
+    const uint32_t clones = class_wrap ? 3u : 2u;
     GridArena header = {};
     MEMORY_BASIC_INFORMATION memory = {};
     if (VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(wrap)), &memory, sizeof(memory)))
@@ -655,22 +656,23 @@ extern "C" uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move,
     const bool census = header.magic == kGridMagic && header.callback;
     const uint32_t prefix = census ? kGridHeaderBytes : 0;
     const uint32_t moveOffset = prefix + ((ntw2_specs[ids[0]].size + 15u) & ~15u);
-    const uint32_t gatesOffset = moveOffset + ntw2_specs[ids[1]].size;
+    const uint32_t classOffset = moveOffset + ((ntw2_specs[ids[1]].size + 15u) & ~15u);
+    const uint32_t gatesOffset = class_wrap ? classOffset + ntw2_specs[ids[2]].size : moveOffset + ntw2_specs[ids[1]].size;
     uint32_t gateCount = 0;
     if (census) for (uint32_t i = 0; i < ntw2_grid_edge_count; ++i)
-        if (ntw2_grid_edges[i].clone == ids[0] || ntw2_grid_edges[i].clone == ids[1]) ++gateCount;
+        for (uint32_t n = 0; n < clones; ++n) if (ntw2_grid_edges[i].clone == ids[n]) ++gateCount;
     const uint32_t size = gatesOffset + gateCount * kGridGateBytes;
     uint8_t* region = static_cast<uint8_t*>(VirtualAlloc(nullptr, size,
         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!region) return NTW2_CLONE_ERR_ALLOC_FAILED;
-    const uint32_t destination[2] = {
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(region)) + prefix,
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(region)) + moveOffset};
+    const uint32_t regionBase = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(region));
+    const uint32_t offsets[3] = {prefix, moveOffset, classOffset};
+    const uint32_t destination[3] = {regionBase + prefix, regionBase + moveOffset, class_wrap ? regionBase + classOffset : 0u};
     uint32_t error = NTW2_CLONE_OK;
     uint32_t gateIndex = 0;
-    for (uint32_t n = 0; n < 2 && !error; ++n) {
+    for (uint32_t n = 0; n < clones && !error; ++n) {
         const ntw2_clone_spec& spec = ntw2_specs[ids[n]];
-        uint8_t* dst = region + (n ? moveOffset : prefix);
+        uint8_t* dst = region + offsets[n];
         const uint8_t* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(source[n]));
         if (!CopyGuarded(dst, src, spec.size)) { error = NTW2_CLONE_ERR_COPY_UNREADABLE; break; }
         for (uint32_t i = 0; i < spec.operation_count; ++i) {
@@ -683,10 +685,10 @@ extern "C" uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move,
                 }
                 target = bindings[op.offset] + op.addend;
             } else if (op.source == NTW2_TARGET_CLONE) {
-                if (op.offset != ids[0] && op.offset != ids[1]) {
-                    error = NTW2_CLONE_ERR_FIXUP_TARGET; break;
-                }
-                target = destination[op.offset == ids[1]] + op.addend;
+                // The participant class wrapper calls the host selector (private mover + A3 refusal), never the staging selector clone.
+                if (n == 2 && op.offset == NTW2_CLONE_LOCO_SELECT) target = select + op.addend;
+                else if (op.offset == ids[0] || op.offset == ids[1]) target = destination[op.offset == ids[1]] + op.addend;
+                else { error = NTW2_CLONE_ERR_FIXUP_TARGET; break; }
             } else if (op.kind == NTW2_ABSOLUTE) {
                 continue; // image address is already relocated in the validated source clone
             } else if (census && op.source == NTW2_TARGET_IMAGE) {
@@ -711,14 +713,14 @@ extern "C" uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move,
         GridArena* emitted = reinterpret_cast<GridArena*>(region);
         memset(emitted, 0, sizeof(*emitted));
         emitted->magic = kGridMagic; emitted->image_base = header.image_base; emitted->callback = header.callback;
-        emitted->entries[ids[0]] = destination[0]; emitted->entries[ids[1]] = destination[1];
+        for (uint32_t n = 0; n < clones; ++n) emitted->entries[ids[n]] = destination[n];
     }
     DWORD old;
     if (!error && !VirtualProtect(region, size, PAGE_EXECUTE_READ, &old)) error = NTW2_CLONE_ERR_PROTECT_FAILED;
     if (!error && !FlushInstructionCache(GetCurrentProcess(), region, size)) error = NTW2_CLONE_ERR_FLUSH_FAILED;
     if (error) { VirtualFree(region, 0, MEM_RELEASE); return error; }
     out->allocation = region; out->allocation_bytes = size;
-    out->entries[ids[0]] = destination[0]; out->entries[ids[1]] = destination[1];
+    for (uint32_t n = 0; n < clones; ++n) out->entries[ids[n]] = destination[n];
     return NTW2_CLONE_OK;
 }
 

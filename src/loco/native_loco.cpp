@@ -146,7 +146,8 @@ WorkerArena* g_workers;
 __declspec(thread) WorkerOccurrence* g_workerOccurrence;
 U g_parallelInFlight;
 
-constexpr U kOwnedBytes = 0x680, kOwnedPrefix = 0x200, kNoOccurrence = ~0u;
+// 0x6C0: the phase-2 LOCO_CLASS_WRAP clone reads the private receiver's +688 (pre-step word, always zero) past the 0x680 mover footprint.
+constexpr U kOwnedBytes = 0x6C0, kOwnedPrefix = 0x200, kNoOccurrence = ~0u;
 constexpr U kOwnedChunkMin = 32, kOwnedChunkMax = 256, kOwnedHistogram = 8;
 constexpr U kOwnedClasses = 13, kOwnedVirtualWords = 0xF4 / 4;
 constexpr DWORD kOwnedUnsupported = 0xE042B201;
@@ -316,6 +317,17 @@ struct OwnedContexts {
     ntw2_resolve::WorkerContext resolve;
     ntw2_env::WorkerContext env;
 };
+// Class-wrapper phase 2: one entry per real child of a worker-computed 0x132BA04 wrapper (pooled per stage, ordinal order
+// via OwnedArena::cwInfo). Prefilled at gather (child, vtable, list, state); the proxy child's slot 0x36 records the
+// 0x14A51A0 word it served, slot 1 records the 0x80BAC0 arguments (pose, heading dword) and sets `submitted`.
+constexpr U kCwMaxChildren = 8, kCwChildTable = 0x1333714, kCwChildSlots = 0xD8 / 4 + 1;
+struct CwEvent {
+    U child, vtable, list, state;
+    float pose[3];
+    U heading;
+    unsigned short word;
+    unsigned char submitted, served;
+};
 struct OwnedParticipant {
     ntw2_clone_set clones{};
     U first[5]{}, second[4]{}, third[4]{};
@@ -327,7 +339,14 @@ struct OwnedParticipant {
     // the join (no locked operation per chunk). Timing/CPU/histogram are measured only outside --loco-quiet.
     U computed = 0, refused = 0, chunks = 0, inlineChunks = 0, chunkTimeUs = 0, histogram[8] = {};
     bool isOwner = false;
-    // Private receiver. Bytes outside the copied prefix/latches/+67C are never read by the closed closure and stay zero.
+    // Class-wrapper phase 2: first pooled event of the current occurrence, selector inputs for OwnedSelect, proxy children
+    // ({private child vtable, child index}) and the private child array installed at work+0x670.
+    U cwBase = 0;
+    bool cwWrapper = false, cwInitialA3 = false;
+    U cwProxy[kCwMaxChildren][2]{};
+    U cwList[kCwMaxChildren]{};
+    // Private receiver. Bytes outside the copied prefix/latches/+67C are never read by the closed closure and stay zero
+    // (a phase-2 class wrapper sets +224/+66C/+670 for its own call and clears them afterwards).
     alignas(64) unsigned char work[kOwnedBytes]{};
 };
 struct OwnedArena {
@@ -336,12 +355,15 @@ struct OwnedArena {
     OwnedParticipant* participants[kParallelChunks]{}; // only participantsCount entries are ever allocated
     U virtualTables[kOwnedClasses][kOwnedVirtualWords];
     bool classRoute[kOwnedClasses]{}, predicate67C[kOwnedClasses]{}, predicateLinkByte[kOwnedClasses]{};
-    unsigned char* movement = nullptr; // one block: slots | worklist | states, all sized by capacity.primary
+    unsigned char* movement = nullptr; // one block: slots | worklist | states [| cwInfo | cwEvents], all sized by capacity.primary
     U movementBytes = 0;
     OwnedSlot* slots = nullptr;
     unsigned char* states = nullptr;
     U slotCapacity = 0;
     U* worklist = nullptr;
+    U* cwInfo = nullptr;       // per ordinal: children << 24 | first pooled event (phase-2 class wrappers only, else 0)
+    CwEvent* cwEvents = nullptr; // capacity.primary entries; exhaustion refuses the occurrence (needs_capacity)
+    volatile LONG cwNext = 0;
     U activationModel = 0;
     bool activated = false;
     U list = 0, count = 0, participantsCount = 0, owner = 0, mxcsr = 0, chunkSize = 0, chunks = 0;
@@ -358,6 +380,11 @@ U g_ownedLoad[OwnedLoadWordCount];
 LONGLONG g_replayCommitTicks, g_replayFallbackTicks;
 U g_ownedReplaySeq, g_ownedFallbackSeq;
 bool g_quiet;
+// Class-wrapper phase 2: 0 off, 1 shadow, 2 live. g_cwChildSlots: the World agent table really has 80BAC0/5E4C60 at +4/+D8.
+U g_cwMode;
+bool g_cwChildSlots;
+U g_cwChildTable[kCwChildSlots];
+U g_cwShadowIndex = ~0u; // shadow: ordinal whose native wrapper run must be compared after the stage loop's fallback
 U g_stageEntity, g_stageOrdinal;
 __declspec(thread) OwnedCurrent* g_ownedOccurrence;
 __declspec(thread) OwnedParticipant* g_ownedParticipant;
@@ -1422,6 +1449,32 @@ void RefuseOwned(U reason, U detail = 0) {
 void __fastcall OwnedClamp(void*, void*) {
     RefuseOwned(OwnedNeedsStaging, OwnedDetailClampCallback);
 }
+// Class-wrapper phase 2. The participant's LOCO_CLASS_WRAP clone calls this instead of the selector 0x62A290: the private
+// MOVE/WRAP clone, then the selector's post-move A3 test (zero would stage: refused before the child loop).
+void __fastcall OwnedSelect(void* receiver, void*) {
+    OwnedParticipant& participant = *g_ownedParticipant;
+    Call(participant.clones.entries[participant.cwWrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], Address(receiver));
+    if (!static_cast<const unsigned char*>(receiver)[0xA3])
+        RefuseOwned(OwnedNeedsStaging, participant.cwInitialA3 ? OwnedDetailResultA3 : OwnedDetailInitialA3);
+}
+// Proxy child slot 0x36 (thiscall, 1 arg, RET 4): exactly 0x5E4C60 (word [arg0] = word [0x14A51A0], returns arg0); the
+// served word is recorded and re-checked at commit.
+U __fastcall OwnedChildHeading(const U* proxy, void*, unsigned short* out) {
+    CwEvent& event = g_owned->cwEvents[g_ownedParticipant->cwBase + proxy[1]];
+    const unsigned short word = *reinterpret_cast<const unsigned short*>(static_cast<uintptr_t>(V(0x14A51A0)));
+    event.word = word; event.served = 1;
+    *out = word;
+    return Address(out);
+}
+// Proxy child slot 1 (thiscall, 2 args, RET 8): records the 0x80BAC0 arguments; the owner replays the native call.
+void __fastcall OwnedChildSubmit(const U* proxy, void*, const float* pose, U heading) {
+    CwEvent& event = g_owned->cwEvents[g_ownedParticipant->cwBase + proxy[1]];
+    if (event.submitted) RefuseOwned(OwnedNeedsClassWrapper);
+    memcpy(event.pose, pose, sizeof(event.pose));
+    event.heading = heading; event.submitted = 1;
+}
+// Every other proxy slot: never reached by 0x5B2CA0's general/skip arms; refuse rather than guess.
+void __fastcall OwnedChildTrap(void*, void*) { RefuseOwned(OwnedNeedsClassWrapper); }
 // Participant clone calls obey the original thiscall ABI. No blanket register/FP save is needed:
 // these are real replacement callees, not instrumentation inserted into an instruction stream.
 __forceinline void OwnedService(Service service, void* receiver) {
@@ -2096,6 +2149,11 @@ bool CreateOwned() {
         memcpy(g_owned->virtualTables[i], P(V(kTables[i])), sizeof(g_owned->virtualTables[i]));
         g_owned->virtualTables[i][0x70 / 4] = Address(reinterpret_cast<void*>(&OwnedClamp));
     }
+    // Phase 2 proxy children share one private table: slot 1 = submit, slot 0x36 = heading, everything else traps.
+    g_cwChildSlots = D(V(kCwChildTable) + 4) == V(0x80BAC0) && D(V(kCwChildTable) + 0xD8) == V(0x5E4C60);
+    for (U& slot : g_cwChildTable) slot = Address(reinterpret_cast<void*>(&OwnedChildTrap));
+    g_cwChildTable[1] = Address(reinterpret_cast<void*>(&OwnedChildSubmit));
+    g_cwChildTable[0xD8 / 4] = Address(reinterpret_cast<void*>(&OwnedChildHeading));
     g_owned->participantsCount = (std::min)(kParallelChunks, (std::max)(1u, g_binding.workers + 1));
     for (U i = 0; i < g_owned->participantsCount; ++i) {
         void* const memory = _aligned_malloc(sizeof(OwnedParticipant), 64);
@@ -2116,18 +2174,39 @@ bool CreateOwned() {
         bindings[NTW2_BIND_LOCO_SERVICE_80F290] = Address(reinterpret_cast<void*>(&OwnedResolve));
         bindings[NTW2_BIND_LOCO_SERVICE_81AE40] = Address(reinterpret_cast<void*>(&OwnedEnvironment));
         bindings[NTW2_BIND_LOCO_SERVICE_814AA0] = Address(reinterpret_cast<void*>(&OwnedQuery));
-        if (ntw2_build_loco_participant(g_binding.wrap_clone, g_binding.move_clone, bindings, &participant.clones)) {
+        for (U k = 0; k < kCwMaxChildren; ++k) {
+            participant.cwProxy[k][0] = Address(g_cwChildTable); participant.cwProxy[k][1] = k;
+            participant.cwList[k] = Address(participant.cwProxy[k]);
+        }
+        if (ntw2_build_loco_participant(g_binding.wrap_clone, g_binding.move_clone, g_cwMode ? g_binding.class_wrap_clone : 0,
+                g_cwMode ? Address(reinterpret_cast<void*>(&OwnedSelect)) : 0, bindings, &participant.clones)) {
             DestroyOwned(); return false;
         }
     }
     return true;
 }
+// Phase-2 gate for a 0x132BA04 receiver with a pre-step or children: 0 admissible, CwRefusedClass (a child is not a World
+// agent 0x1333714) or CwRefusedGate (mode off, pre-step, aim state 9, >8 children, null/self child, unproven slots).
+// Reads only the receiver's own +224/+66C/+670/+688, its child array and each child's word 0.
+U CwGate(U a) {
+    const U count = D(a + 0x66C), list = D(a + 0x670);
+    if (!g_cwMode || !g_cwChildSlots || D(a + 0x688) || D(a + 0x224) == 9 || count > kCwMaxChildren || !list) return CwRefusedGate;
+    U refusal = 0;
+    for (U k = 0; k < count; ++k) {
+        const U child = D(list + 4 * k);
+        if (!child || child == a) return CwRefusedGate;
+        if (D(child) != V(kCwChildTable)) refusal = CwRefusedClass;
+    }
+    return refusal;
+}
+inline bool CwAdmissible(U a) { return !CwGate(a); }
 // Worker-side classification: reads only this entity's own cache lines plus static class/context state.
 U OwnedReason(U a, U& classIndex) {
     if (!Candidate(D(a), &classIndex) || !g_owned->classRoute[classIndex]) return OwnedNeedsUnit;
     // 0x5B2CA0 with no pre-step (+688 == 0, 0x5F3040 not entered) and an empty child array (+66C == 0) is exactly its 0x62A290 selector
-    // call (prologue/epilogue have no other effect): admitted. Pre-step and children (foreign-writing child virtuals, aim arm) stay refused.
-    if (D(a) == V(0x132BA04) && (D(a + 0x688) || D(a + 0x66C))) return OwnedNeedsClassWrapper;
+    // call (prologue/epilogue have no other effect): admitted. Children are admitted only by phase 2 (CwAdmissible: World agent
+    // children replayed through native 0x80BAC0 on the owner); pre-step and the aim arm stay refused.
+    if (D(a) == V(0x132BA04) && (D(a + 0x688) || D(a + 0x66C)) && !CwAdmissible(a)) return OwnedNeedsClassWrapper;
     if (B(a + 0xEC) != 1 && D(a + 0x628) && D(a + 0x62C) == 4) return OwnedNeedsAlternateWrapper;
     if (D(a + 0x18)) return OwnedNeedsPending;
     if (D(a + 0x170)) return OwnedNeedsForeignTransform;
@@ -2186,14 +2265,39 @@ bool OwnedRunEntity(OwnedArena& arena, OwnedParticipant& participant, U index) {
     memcpy(work + 0x67C, &slot.inputPredicate, sizeof(slot.inputPredicate));
     // Headers are participant-private; a refused call can have left a count behind.
     participant.first[3] = participant.second[2] = participant.third[2] = 0;
+    // Phase 2: children (admitted by CwGate) run through the participant LOCO_CLASS_WRAP clone with proxy children; their
+    // events are pooled per stage and the owner replays native 0x80BAC0 per submitted child at this ordinal.
+    const U children = slot.classWrapper ? D(a + 0x66C) : 0;
+    if (slot.classWrapper && arena.cwInfo) arena.cwInfo[index] = 0;
+    if (children) {
+        const U base = static_cast<U>(_InterlockedExchangeAdd(&arena.cwNext, static_cast<LONG>(children)));
+        if (base + children > arena.slotCapacity) {
+            slot.reason = OwnedNeedsCapacity; slot.detail = 0;
+            arena.states[index] = OwnedRefused; return true;
+        }
+        const U list = D(a + 0x670), state = D(a + 0x224);
+        for (U k = 0; k < children; ++k) {
+            CwEvent& event = arena.cwEvents[base + k];
+            event.child = D(list + 4 * k); event.vtable = D(event.child); event.list = list; event.state = state;
+            event.heading = 0; event.word = 0; event.submitted = event.served = 0;
+        }
+        participant.cwBase = base; participant.cwWrapper = slot.wrapper != 0; participant.cwInitialA3 = initialA3;
+        memcpy(work + 0x224, &state, sizeof(state));
+        memcpy(work + 0x66C, &children, sizeof(children));
+        const U privateList = Address(participant.cwList);
+        memcpy(work + 0x670, &privateList, sizeof(privateList));
+        arena.cwInfo[index] = children << 24 | base;
+    }
     bool ok = false;
     __try {
-        Call(participant.clones.entries[slot.wrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], Address(work));
+        Call(children ? participant.clones.entries[NTW2_CLONE_LOCO_CLASS_WRAP] :
+            participant.clones.entries[slot.wrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], Address(work));
         // 62A290 tests the POST-MOVE A3 byte: zero really does stage. Never inverted.
         if (!work[0xA3])
             RefuseOwned(OwnedNeedsStaging, initialA3 ? OwnedDetailResultA3 : OwnedDetailInitialA3);
         ok = true;
     } __except(OwnedFilter(current, GetExceptionInformation())) {}
+    if (children) memset(work + 0x224, 0, 4), memset(work + 0x66C, 0, 8);
     if (!ok) {
         // A refusal/fault unwound out of the middle of the private mover: its x87 stack is unknown.
         const unsigned short controlWord = arena.cw;
@@ -2369,9 +2473,13 @@ void Prefault(void* base, size_t bytes) {
     for (size_t offset = 0; offset < bytes; offset += 4096) page[offset] = 0;
 }
 // One block: slots[capacity] | worklist[capacity] | states[capacity]. capacity is the PRIMARY occurrence capacity.
+// Phase 2 adds cwInfo[capacity] | cwEvents[capacity] (+CwBytesPerOrdinal per ordinal) behind the states.
+constexpr U kCwBytesPerOrdinal = sizeof(U) + sizeof(CwEvent);
 bool AllocateOwnedSlots(OwnedArena& arena, U capacity) {
     const unsigned long long slotBytes = static_cast<unsigned long long>(capacity) * sizeof(OwnedSlot),
-        listBytes = static_cast<unsigned long long>(capacity) * sizeof(U), total = slotBytes + listBytes + capacity;
+        listBytes = static_cast<unsigned long long>(capacity) * sizeof(U), stateBytes = g_cwMode ? (capacity + 3ull) & ~3ull : capacity,
+        cwBytes = g_cwMode ? static_cast<unsigned long long>(capacity) * kCwBytesPerOrdinal : 0,
+        total = slotBytes + listBytes + stateBytes + cwBytes;
     if (total > 0x7FFFFFFFull) return false;
     unsigned char* const block = static_cast<unsigned char*>(
         VirtualAlloc(nullptr, static_cast<SIZE_T>(total), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
@@ -2380,6 +2488,9 @@ bool AllocateOwnedSlots(OwnedArena& arena, U capacity) {
     arena.slots = reinterpret_cast<OwnedSlot*>(block);
     arena.worklist = reinterpret_cast<U*>(block + slotBytes);
     arena.states = block + slotBytes + listBytes; // zero == OwnedUnprocessed
+    unsigned char* const cw = block + slotBytes + listBytes + stateBytes;
+    arena.cwInfo = g_cwMode ? reinterpret_cast<U*>(cw) : nullptr;
+    arena.cwEvents = g_cwMode ? reinterpret_cast<CwEvent*>(cw + static_cast<size_t>(capacity) * sizeof(U)) : nullptr;
     Prefault(block, static_cast<size_t>(total));
     arena.slotCapacity = capacity;
     return true;
@@ -2427,7 +2538,7 @@ void PrepareOwned(U manager) {
     U size = arena.count / (participants * 32);
     size = (std::max)(kOwnedChunkMin, (std::min)(kOwnedChunkMax, (size + 7) & ~7u));
     arena.chunkSize = size; arena.chunks = (arena.count + size - 1) / size;
-    arena.epoch = ++g_ownedEpochCounter; arena.nextParticipant = 0; arena.overflow = 0;
+    arena.epoch = ++g_ownedEpochCounter; arena.nextParticipant = 0; arena.overflow = 0; arena.cwNext = 0;
     const LONGLONG identityStart = Now();
     // Already activated: PrepareScene performs only fixed-size identity/header checks.
     const bool ready = ntw2_sweep::PrepareScene(arena.scene, model, g_delta, g_generation);
@@ -2508,6 +2619,7 @@ U g_cwWords[CwWordCount];
 void CensusClassWrapper(U a) {
     __try {
         ++g_cwWords[CwOccurrences];
+        if (g_cwMode) { const U gate = CwGate(a); ++g_cwWords[gate ? gate : CwRefusedGate]; }
         const U pre = D(a + 0x688), count = D(a + 0x66C), list = D(a + 0x670), state = D(a + 0x224);
         if (pre) ++g_cwWords[CwPreStep];
         ++g_cwWords[state == 9 ? CwState9 : state == 8 ? CwState8 : CwStateOther];
@@ -2522,11 +2634,74 @@ void CensusClassWrapper(U a) {
             if (!child) { ++g_cwWords[CwNullChildren]; continue; }
             const U vt = D(child);
             U k = 0;
-            while (k < 8 && g_cwWords[CwVtBase + 2 * k] && g_cwWords[CwVtBase + 2 * k] != vt) ++k;
-            if (k == 8) { ++g_cwWords[CwVtOverflow]; continue; }
+            while (k < CwVtEntries && g_cwWords[CwVtBase + 2 * k] && g_cwWords[CwVtBase + 2 * k] != vt) ++k;
+            if (k == CwVtEntries) { ++g_cwWords[CwVtOverflow]; continue; }
             g_cwWords[CwVtBase + 2 * k] = vt; ++g_cwWords[CwVtBase + 2 * k + 1];
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { ++g_cwWords[CwUnreadable]; }
+}
+// Phase 2 commit re-check: the live wrapper still has no pre-step, the same child count, list, aim state and child
+// objects/vtables, and the 0x14A51A0 word every proxy heading served is unchanged. Any difference = native run.
+bool CwStillMatches(const OwnedArena& arena, U a, U info) {
+    const U children = info >> 24;
+    if (D(a + 0x688) || D(a + 0x66C) != children) return false;
+    if (!children) return true;
+    const CwEvent* const events = arena.cwEvents + (info & 0xFFFFFF);
+    if (D(a + 0x670) != events[0].list || D(a + 0x224) != events[0].state) return false;
+    const unsigned short word = *reinterpret_cast<const unsigned short*>(static_cast<uintptr_t>(V(0x14A51A0)));
+    for (U k = 0; k < children; ++k) {
+        const CwEvent& event = events[k];
+        if (D(event.list + 4 * k) != event.child || D(event.child) != event.vtable) return false;
+        if (event.served && event.word != word) return false;
+    }
+    return true;
+}
+// Live: the recorded child relocations, in child order, through the real 0x80BAC0 (reads the child's +28 context and the
+// live model, calls the native link services directly; a relink window flushes first).
+void CwReplay(const OwnedArena& arena, U info) {
+    const U children = info >> 24;
+    const CwEvent* const events = arena.cwEvents + (info & 0xFFFFFF);
+    using Relocate = void (__thiscall*)(void*, const float*, U);
+    for (U k = 0; k < children; ++k) {
+        const CwEvent& event = events[k];
+        if (!event.submitted) continue;
+        reinterpret_cast<Relocate>(V(0x80BAC0))(P(event.child), event.pose, event.heading);
+        ++g_cwWords[CwEvents];
+    }
+}
+// Shadow: after the owner ran the wrapper natively, the worker's receiver footprint and each submitted child's
+// 0x80BAC0 inputs (pose +48..+50, heading word +64) must equal what the native wrapper produced.
+bool OwnedOutputMatches(const OwnedSlot& slot, const unsigned char* native) {
+    U diff = 0;
+    EachSpanOf<kOutputSpanCount>([&](auto i) {
+        constexpr Span s = kOutputSpans[decltype(i)::value];
+        diff |= SpanDiff<s.bytes>(native + s.offset, slot.output + kOutputStart[decltype(i)::value]);
+    });
+    if (slot.wrapper) EachSpanOf<kWrapperSpanCount>([&](auto i) {
+        constexpr Span s = kWrapperSpans[decltype(i)::value];
+        diff |= SpanDiff<s.bytes>(native + s.offset, slot.output + kOutputBytes + kWrapperStart[decltype(i)::value]);
+    });
+    diff |= static_cast<U>(native[0x5EC] ^ slot.resultLatches[0]) | static_cast<U>(native[0x5ED] ^ slot.resultLatches[1]);
+    return diff == 0;
+}
+void CwShadowCompare() {
+    const U index = g_cwShadowIndex;
+    g_cwShadowIndex = ~0u;
+    if (!g_owned || index >= g_owned->count) return;
+    const OwnedArena& arena = *g_owned;
+    const OwnedSlot& slot = arena.slots[index];
+    const U info = arena.cwInfo[index], children = info >> 24;
+    const CwEvent* const events = arena.cwEvents + (info & 0xFFFFFF);
+    bool same = OwnedOutputMatches(slot, static_cast<const unsigned char*>(P(slot.entity)));
+    for (U k = 0; k < children; ++k) {
+        const CwEvent& event = events[k];
+        if (!event.submitted) continue;
+        same = same && !memcmp(P(event.child + 0x48), event.pose, sizeof(event.pose)) &&
+            *static_cast<const unsigned short*>(P(event.child + 0x64)) == static_cast<unsigned short>(event.heading);
+        ++g_cwWords[CwEvents];
+    }
+    ++g_cwWords[CwShadowCompares];
+    if (!same) ++g_cwWords[CwShadowMismatches];
 }
 bool CommitOwned(U manager, U cursor) {
     if (!g_owned || g_parallelWords[ParallelSticky]) return false;
@@ -2567,11 +2742,20 @@ bool CommitOwned(U manager, U cursor) {
     const unsigned char* const live = static_cast<const unsigned char*>(P(slot.entity));
     // An earlier fallback/replay may have changed this very receiver (duplicate occurrence, class-wrapper children
     // callbacks...): the speculative result is stale, so this one entity runs natively at its ordinal.
-    // +66C/+688 lie beyond the copied prefix: a class wrapper admitted as empty must still be empty when its result is replayed.
-    if (!OwnedGuardMatches(slot, live) || (slot.classWrapper && (Raw<U>(live + 0x66C) | Raw<U>(live + 0x688)))) {
+    // +66C/+688 lie beyond the copied prefix: a class wrapper admitted as empty must still be empty when its result is replayed,
+    // a phase-2 wrapper must still have the very children/list/state/heading word its proxies saw.
+    const U cwInfo = slot.classWrapper && arena.cwInfo ? arena.cwInfo[index] : 0;
+    const bool guardOk = OwnedGuardMatches(slot, live);
+    if (!guardOk || (slot.classWrapper && !CwStillMatches(arena, slot.entity, cwInfo))) {
         ++g_ownedWords[OwnedNeedsUnit]; ++g_ownedWords[OwnedDuplicateRefusals];
         ++g_ownedPhase[OwnedPhaseValidationRefusals]; ++g_parallelWords[ParallelInvalidated];
+        if (guardOk && cwInfo) ++g_cwWords[CwRecheckFallbacks];
         return false;
+    }
+    if (cwInfo) {
+        ++g_cwWords[CwAdmitted];
+        // Shadow: the owner runs this wrapper natively (stage loop fallback), then CwShadowCompare checks the worker result.
+        if (g_cwMode == 1) { --g_ownedReplaySeq; g_cwShadowIndex = index; return false; } // not a replay: keep the 1/16 sample cadence
     }
     if (g_quiet) CountCommitted(slot); else CountEntity(slot.entity);
     if (!g_quiet) ResetServiceTrace();
@@ -2597,6 +2781,11 @@ bool CommitOwned(U manager, U cursor) {
         ++g_parallelWords[ParallelReplayedServices];
     }
     if (!committed) CommitOwnedFields(slot);
+    if (cwInfo) {
+        // The child relocations run native link services untapped: a relink window flushes the parent's logged ops first.
+        if (g_relinkWindow) RelinkBarrier(RelinkCauseClassWrapper);
+        CwReplay(arena, cwInfo);
+    }
     arena.states[index] = OwnedCommitted;
     g_gridCommittedReady = true;
     // Predicted transition events are env_untested and refuse before commit. No staging transaction is admitted.
@@ -2655,6 +2844,8 @@ bool Start(const Binding& binding) {
     if (binding.use_owned_services && !binding.use_parallel) return false;
     if (binding.use_quiet && !binding.use_owned_services) return false;
     if (binding.use_relink_shadow && binding.use_relink_workers) return false;
+    if ((binding.use_cw_shadow && binding.use_cw_workers) ||
+        ((binding.use_cw_shadow || binding.use_cw_workers) && !binding.use_owned_services)) return false;
     if ((binding.use_relink_shadow || binding.use_relink_workers) &&
         (!binding.use_owned_services || !(binding.use_grid || binding.verify_grid))) return false;
     g_grid = nullptr; g_gridModel = 0; g_storageBytes = 0;
@@ -2697,7 +2888,9 @@ bool Start(const Binding& binding) {
     g_binding.use_grid = binding.use_grid || binding.verify_grid;
     g_binding.grid_incremental = binding.grid_incremental && g_binding.use_grid;
     memset(g_relinkWords, 0, sizeof(g_relinkWords));
-    memset(g_cwWords, 0, sizeof(g_cwWords)); g_cwWords[CwVersion] = 1;
+    memset(g_cwWords, 0, sizeof(g_cwWords)); g_cwWords[CwVersion] = 2;
+    g_cwMode = binding.use_cw_workers ? 2u : binding.use_cw_shadow ? 1u : 0u;
+    g_cwWords[CwMode] = g_cwMode; g_cwShadowIndex = ~0u;
     g_relinkMode = binding.use_relink_workers ? 2u : binding.use_relink_shadow ? 1u : 0u;
     g_relinkWords[RelinkVersion] = 1; g_relinkWords[RelinkMode] = g_relinkMode;
     g_relinkDispatcher = {binding.dispatch, binding.pool, binding.workers};
@@ -2892,6 +3085,7 @@ U __fastcall Stage(void* manager) {
         if (g_binding.grid_window) g_binding.grid_window(manager, 1); // probation: owner's relink window opens
         const LONGLONG replayStart = g_binding.use_owned_services ? Now() : 0;
         if (g_relinkMode) RelinkBeginStage();
+        g_cwShadowIndex = ~0u;
         while (cursor != end) {
             const U parallel = g_binding.use_owned_services ? (CommitOwned(m, cursor) ? 1u : 0u) : ParallelRun(m, cursor, end);
             if (parallel) {
@@ -2956,6 +3150,7 @@ U __fastcall Stage(void* manager) {
                 // Selector tests A3 AFTER integrating; the pre-call value can
                 // differ at map bounds. No staging callback is replayed here.
                 if (selector && B(a + 0xA3) == 0) ++g_words[Staging];
+                if (g_cwShadowIndex != ~0u) CwShadowCompare(); // --loco-cw-shadow: native wrapper just ran at this ordinal
             } else ++g_words[Filtered];
             // Exact 531AF0 semantics: keep the absolute cursor; reload BOTH
             // list base and count after each occurrence (including filtered).
@@ -3022,6 +3217,8 @@ U EstimateActivationBytes(const ntw2_workload::Capacity& capacity) {
     if (g_relinkMode && !g_moveLog.block) total += RelinkPlanBytes(capacity, g_relinkMode);
     if (g_owned && !g_owned->activated) {
         total += static_cast<unsigned long long>(capacity.primary) * (sizeof(OwnedSlot) + sizeof(U) + 1);
+        if (g_cwMode) total += ((capacity.primary + 3ull) & ~3ull) - capacity.primary +
+            static_cast<unsigned long long>(capacity.primary) * kCwBytesPerOrdinal;
         for (U i = 0; i < g_owned->participantsCount; ++i)
             if (g_owned->participants[i] && !g_owned->participants[i]->ctx) total += sizeof(OwnedContexts);
     }

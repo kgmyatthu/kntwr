@@ -330,11 +330,12 @@ uint32_t ntw2_clone_origin(const ntw2_clone_set* set, uint32_t address, uint32_t
    must retain allocation until process exit, even after restoring all slots. */
 uint32_t ntw2_build_clones(uint32_t image_base, const uint32_t bindings[NTW2_BIND_COUNT],
                           ntw2_clone_set *out, uint32_t *detail);
-/* Duplicate the already validated private MOVE/WRAP pair for one pool participant.
+/* Duplicate the already validated private MOVE/WRAP pair for one pool participant, plus (class_wrap != 0) the validated
+   LOCO_CLASS_WRAP clone whose LOCO_SELECT call is retargeted to the host `select` (thiscall, receiver only).
    Rewrites metadata-described fixups only, including private scratch bindings;
    never reads or modifies executable image text. The unpublished pair may be
    released once dispatch has joined (no external code pointer is published). */
-uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move,
+uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move, uint32_t class_wrap, uint32_t select,
     const uint32_t bindings[NTW2_BIND_COUNT], ntw2_clone_set* out);
 /* Duplicate the validated primary BRAIN_W closure (BRAIN_W..BRAIN_W_UNLINK, BRAIN_W_COMMON_STEP..BRAIN_ACTION_EMPTY,
    BRAIN_W_NODE_BEGIN_7FF9E0..BRAIN_W_NODE_DISPATCH_809D80)

@@ -217,6 +217,8 @@ struct Spec {
     float fx = NAN, fz = NAN; // expected F0 clamp results
     bool clampHolder = false; // real 63D5B0 reaches holder virtual +44, whose nonzero result safely terminates the callback
     bool classMutate = false; // genuine 5B2CA0 child traversal mutates the later entity named by arg
+    std::vector<U> kids;      // phase 2: +66C/+670 child array naming these fixture agents (real 0x1333714 children)
+    U b224 = 0;               // wrapper aim state (8 skips the children, 9 = aim arm)
     bool admitted = true;     // Classify must return Eligible (supported vtable, no pending/parked)
 };
 struct Scenario {
@@ -386,6 +388,14 @@ World::World(const Scenario& s) : sc(s) {
         agents.push_back(std::make_unique<Agent>());
         InitAgent(*this, *agents[i], sc.agents[i], i);
     }
+    // Phase-2 class wrappers: real World agent children (other fixture agents) in a private array at +6B0.
+    for (U i = 0; i < sc.agents.size(); ++i) {
+        const Spec& spec = sc.agents[i];
+        if (spec.kids.empty()) continue;
+        B* p = agents[i]->b.p();
+        Put(p, 0x66c, U(spec.kids.size())); Put(p, 0x670, A(p + 0x6b0)); Put(p, 0x224, spec.b224);
+        for (U k = 0; k < spec.kids.size(); ++k) Put(p, 0x6b0 + 4 * k, A(agents[spec.kids[k]]->b.p()));
+    }
     // Unit context / foreign transform objects: zeroed, registered, referenced by A+1F0 / A+170 (never the +44 team).
     for (const Spec& s : sc.agents) {
         while (units.size() < s.unit) {
@@ -472,7 +482,8 @@ static std::vector<U> Canon(const World& w) {
         for (U i = 0; i + 4 <= n; i += 4) out.push_back(w.Token(Get<U>(p, i)));
     };
     for (const auto& a : w.agents) {
-        words(a->b.p(), a->b.size(), {0, 4, 8, 0x10, 0x18, 0x28, 0x44, 0x98, 0xa8, 0x170, 0x1ec, 0x1f0, 0x2d4, 0x444, 0x670, 0x6a0, 0x6b0});
+        words(a->b.p(), a->b.size(), {0, 4, 8, 0x10, 0x18, 0x28, 0x44, 0x98, 0xa8, 0x170, 0x1ec, 0x1f0, 0x2d4, 0x444, 0x670, 0x6a0, 0x6b0,
+                                      0x6b4, 0x6b8, 0x6bc, 0x6c0, 0x6c4, 0x6c8, 0x6cc, 0x6d0});
         for (U i = 0; i < 256; ++i) words(a->nodes.p() + i * 0x1c, 0x1c, {8, 0xc, 0x10, 0x14, 0x18});
     }
     pointerWords(w.softCells.p(), w.softCells.size()); pointerWords(w.obsCells.p(), w.obsCells.size());
@@ -2453,6 +2464,8 @@ struct OwnedPlan {
     bool quiet = false, grid = false;
     U relink = 0, relinkMin = 1; // 0 off / 1 shadow / 2 live; parallel-apply threshold in cell operations
     U stagingRefusals = 0, classRefusals = 0, alternateRefusals = 0, unitRefusals = 0;
+    U cw = 0;                              // class-wrapper phase 2: 0 off / 1 shadow / 2 live
+    U cwAdmitted = 0, cwEvents = 0, cwRefusedClass = 0, cwRefusedGate = 0;
     std::array<bool, kOwnedSlots> attempted{}; // this occurrence entered private ports before refusing
     std::array<U, loco::OwnedDetailWordCount> details{};
 };
@@ -2477,6 +2490,9 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
         }
         clampCalls += s.clampHolder;
     }
+    // A real 0x80BAC0 child relocation clears the child's +A1: a later child is no longer an active candidate at its ordinal.
+    for (U i = 0; i < n; ++i)
+        if (sc.agents[i].b224 != 8) for (U k : sc.agents[i].kids) activeCandidates -= k > i && sc.agents[k].a1 != 0;
     World original(sc), serial(sc), owned(sc);
     GridRegistry originalRegistry(original), serialRegistry(serial), ownedRegistry(owned);
     std::vector<U> ids; for (U i = 0; i < n; ++i) ids.push_back(i);
@@ -2528,6 +2544,7 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
     binding.use_quiet = plan.quiet; binding.use_shadow = plan.quiet; // quiet must override even an explicit shadow request
     binding.dispatch = &OracleDispatch; binding.pool = 0xc0111deu; binding.workers = plan.lanes - 1;
     binding.use_relink_shadow = plan.relink == 1; binding.use_relink_workers = plan.relink == 2;
+    binding.use_cw_shadow = plan.cw == 1; binding.use_cw_workers = plan.cw == 2;
     reverseChunks = plan.reversed; dispatchLanes = plan.lanes; dispatchCalls = dispatchedChunks = dispatchMaxChunks = 0;
     concurrentChunks = plan.concurrent;
     Require(loco::Start(binding), "owned-services oracle starts through public binding");
@@ -2613,7 +2630,7 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
     EqU("owned has no sticky failure", ps[loco::ParallelSticky], 0);
     EqU("owned has no exception", ps[loco::ParallelLastException], 0);
     EqU("owned has no invalidated output", ps[loco::ParallelInvalidated], 0);
-    CheckOwnedPhase(n, plan.lanes, ownerCount);
+    CheckOwnedPhase(n, plan.lanes, ownerCount - (plan.cw == 1 ? plan.cwAdmitted : 0u)); // shadowed wrappers were computed, then run natively
     CheckOwnedLoad(activated);
     // B2 is genuinely exercised: active A1 occurrences execute on workers, nothing is refused for env/sweep/resolve.
     EqU("worker entities are the supported active cohort", ps[loco::ParallelWorkerEntities], n - ownerCount);
@@ -2633,13 +2650,21 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
     EqU("only genuine class-wrapper occurrences get the class reason", os[loco::OwnedNeedsClassWrapper], plan.classRefusals);
     {   // class-wrapper census: one observation per refused 0x132BA04 occurrence; the fixture's wrappers have an empty or one-entry child list
         std::array<U, loco::CwWordCount> cw{}; loco::SampleClassWrapper(cw.data());
-        EqU("census version", cw[loco::CwVersion], 1);
+        EqU("census version", cw[loco::CwVersion], 2);
+        EqU("phase-2 mode", cw[loco::CwMode], plan.cw);
+        EqU("phase-2 admitted wrappers", cw[loco::CwAdmitted], plan.cwAdmitted);
+        EqU("phase-2 child relocations", cw[loco::CwEvents], plan.cwEvents);
+        EqU("phase-2 class refusals", cw[loco::CwRefusedClass], plan.cwRefusedClass);
+        EqU("phase-2 gate refusals", cw[loco::CwRefusedGate], plan.cwRefusedGate);
+        EqU("phase-2 recheck fallbacks", cw[loco::CwRecheckFallbacks], 0);
+        EqU("phase-2 shadow compares", cw[loco::CwShadowCompares], plan.cw == 1 ? plan.cwAdmitted : 0u);
+        EqU("phase-2 shadow mismatches", cw[loco::CwShadowMismatches], 0);
         EqU("census observes exactly the class-wrapper refusals", cw[loco::CwOccurrences], plan.classRefusals);
         EqU("census children histogram partitions the occurrences", cw[loco::CwKids0] + cw[loco::CwKids1] + cw[loco::CwKids2Plus] + cw[loco::CwUnreadable], plan.classRefusals);
         EqU("census aim-state histogram partitions the occurrences", cw[loco::CwState9] + cw[loco::CwState8] + cw[loco::CwStateOther], plan.classRefusals);
-        EqU("census children total", cw[loco::CwChildrenTotal], cw[loco::CwKids1] + 2 * cw[loco::CwKids2Plus]);
-        Require(cw[loco::CwKids2Plus] == 0 && cw[loco::CwVtOverflow] == 0, "fixture wrappers carry at most one child");
-        U byVtable = 0; for (U k = 0; k < 8; ++k) byVtable += cw[loco::CwVtBase + 2 * k + 1];
+        Require(cw[loco::CwChildrenTotal] >= cw[loco::CwKids1] + 2 * cw[loco::CwKids2Plus], "census children total covers the histogram");
+        Require(cw[loco::CwVtOverflow] == 0, "fixture child vtables fit the census table");
+        U byVtable = 0; for (U k = 0; k < loco::CwVtEntries; ++k) byVtable += cw[loco::CwVtBase + 2 * k + 1];
         EqU("census child vtable table accounts for every non-null child", byVtable + cw[loco::CwNullChildren], cw[loco::CwChildrenTotal]);
     }
     EqU("alternate wrapper is not battle or class wrapper", os[loco::OwnedNeedsAlternateWrapper], plan.alternateRefusals);

@@ -2587,6 +2587,8 @@ bool FindVisualSlot(U& address) {
             const U candidate=imageBase+section.VirtualAddress+offset;
             if (!Word(candidate,value)) { RecordError(SlotProtection,candidate); return false; }
             if (value==V(0x779e60)) { address=candidate; ++hits; }
+        binding.use_cw_shadow=(config.loco_flags&NTW2_LOCO_CW_SHADOW)!=0;
+        binding.use_cw_workers=(config.loco_flags&NTW2_LOCO_CW_WORKERS)!=0;
         }
     }
     if (hits!=1) { RecordError(VisualSlotCount,hits); return false; }
@@ -3307,6 +3309,9 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_S0_WORDS;++i) ntw2_state.brain_s0_words[i]=0;
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS;++i) ntw2_state.ai_ctrl_reuse_words[i]=0;
+        // Class-wrapper phase 2 replays through the owned-service commit; shadow and live are exclusive.
+        ((next.loco_flags&NTW2_LOCO_CW_SHADOW) && (next.loco_flags&NTW2_LOCO_CW_WORKERS)) ||
+        ((next.loco_flags&(NTW2_LOCO_CW_SHADOW|NTW2_LOCO_CW_WORKERS)) && !(next.loco_flags&NTW2_LOCO_OWNED_SERVICES)) ||
     for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_DIVERT_WORDS;++i) ntw2_state.puppet_divert_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOVER_WORDS;++i) ntw2_state.puppet_mover_words[i]=0;
