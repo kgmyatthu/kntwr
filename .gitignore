@@ -1,0 +1,8 @@
+build/
+__pycache__/
+*.pyc
+*.obj
+*.pdb
+*.ilk
+*.dmp
+*.log

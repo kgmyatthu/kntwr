@@ -1,0 +1,2970 @@
+#!/usr/bin/env python3
+"""Generate src/ntw2_clone_specs.inc: source-pinned private-code construction metadata.
+
+Build-time only.  Nothing in the generated metadata contains original game code: it holds source spans (VA, size,
+FNV-1a64 hash of the bytes with HIGHLOW relocations normalised to the preferred base 0x400000, sorted relocation
+offsets) and a list of operations (COPY from the validated live image / LITERAL our own tiny code / ABSOLUTE /
+RELATIVE fixups) per clone.  No Python, disassembler or PE parser runs inside the game.
+
+Every clone is decoded instruction by instruction from the pinned image.  The generator fails on:
+  * an image other than the pinned SHA-256 / preferred base 0x400000, or a non-HIGHLOW relocation,
+  * a span that does not tile into whole instructions, a relocation that is not a 32-bit displacement/immediate field of
+    exactly one decoded instruction, an unrelocated operand that looks like an image address (hidden absolute),
+  * an unexpected external call/jump target, an unexpected indirect jump, unexpected return/stack cleanup, forbidden
+    opcode (int/syscall/io/far transfers/privileged), a branch into the middle of an instruction, a rel8 branch
+    that would change reach without a literal rewrite possibility,
+  * a replaced call whose site/target/count differs from the pinned expectation, an insertion not on an instruction
+    boundary, a missing or extra pinned relocation census entry, an instruction patch whose source bytes differ, whose
+    replacement does not decode to the same extent of plain mov/nop instructions, or an indirect call that is not pinned,
+  * a call rewrite whose pinned old bytes differ, that does not tile whole instructions (mov... + one indirect call) into
+    exactly the 5 bytes of `call rel32`, or that a branch enters in the middle of.
+After construction every clone is materialised the way the runtime emitter materialises it (any image delta, arbitrary
+clone/binding addresses), decoded again, and compared instruction by instruction with the original decode.
+
+Usage:
+  python generate_clone_specs.py [--image PATH] [--output PATH] [--header PATH] [--manifest PATH] [--grid-census PATH]
+                                 [--grid-report PATH] [--check]
+Default output: <this tool>/../src/ntw2_clone_specs.inc.  --check compares instead of writing (non-zero on drift).
+The generated tail embeds the reader ranges of analysis/native-grid-reader-census.json (--grid-census) plus every
+surviving direct `call` edge to a reader VA inside the emitted clones; --grid-report lists surviving edges, source
+calls removed by clone rewrites, and ungated internal-call/direct-jump references.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import bisect
+import json
+import re
+import struct
+import sys
+from pathlib import Path
+from native_pe_tools import highlow_relocations
+
+HERE = Path(__file__).resolve().parent
+
+
+def _import_decoders():
+    try:
+        import capstone  # noqa: F401
+        import pefile  # noqa: F401
+    except ImportError:
+        for parent in HERE.parents:
+            for candidate in (parent / 'work' / 'pylib', parent / 'pylib'):
+                if candidate.is_dir():
+                    sys.path.insert(0, str(candidate))
+        import capstone  # noqa: F401
+        import pefile  # noqa: F401
+    return sys.modules['capstone'], sys.modules['pefile']
+
+
+capstone, pefile = _import_decoders()
+from capstone import x86  # noqa: E402
+
+APPROVED_SHA256 = '13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4'
+DEFAULT_IMAGE = 'E:/steam/steamapps/common/Napoleon Total War/Napoleon.exe'
+PREFERRED_BASE = 0x400000
+HEADER_NAME = 'ntw2_clones.h'
+OUTPUT_NAME = 'ntw2_clone_specs.inc'
+
+
+class GenerationError(RuntimeError):
+    pass
+
+
+def fail(message):
+    raise GenerationError(message)
+
+
+def u32(value):
+    return struct.pack('<I', value & 0xFFFFFFFF)
+
+
+def fnv1a64(data):
+    h = 0xCBF29CE484222325
+    for byte in data:
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+# ============================================================================================ pinned image
+
+class Image:
+    def __init__(self, path):
+        self.data = Path(path).read_bytes()
+        digest = hashlib.sha256(self.data).hexdigest()
+        if digest != APPROVED_SHA256:
+            fail(f'image SHA-256 {digest} is not the pinned image {APPROVED_SHA256}')
+        self.sha256 = digest
+        self.pe = pefile.PE(data=self.data, fast_load=True)
+        if self.pe.FILE_HEADER.Machine != 0x14C or self.pe.OPTIONAL_HEADER.ImageBase != PREFERRED_BASE:
+            fail('not a PE32 x86 image with preferred base 0x400000')
+        self.size_of_image = self.pe.OPTIONAL_HEADER.SizeOfImage
+        self.sorted_relocs = highlow_relocations(self.pe, PREFERRED_BASE)
+
+    def section(self, va):
+        rva = va - PREFERRED_BASE
+        for s in self.pe.sections:
+            if s.VirtualAddress <= rva < s.VirtualAddress + s.SizeOfRawData:
+                return s
+        fail(f'{va:#x} is not backed by file data in any section')
+
+    def read(self, va, size):
+        first, last = self.section(va), self.section(va + size - 1)
+        if first is not last:
+            fail(f'span {va:#x}+{size:#x} crosses a section boundary')
+        offset = first.PointerToRawData + (va - PREFERRED_BASE - first.VirtualAddress)
+        out = self.data[offset:offset + size]
+        if len(out) != size:
+            fail(f'short read at {va:#x}')
+        return out
+
+    def live(self, va, size, delta):
+        """The span as the process holds it after the loader applied HIGHLOW relocations for `delta`."""
+        out = bytearray(self.read(va, size))
+        for r in self.span_relocs(va, size):
+            o = r - va
+            out[o:o + 4] = u32(struct.unpack_from('<I', out, o)[0] + delta)
+        return bytes(out)
+
+    def span_relocs(self, va, size):
+        lo = bisect.bisect_left(self.sorted_relocs, va - 3)
+        hi = bisect.bisect_left(self.sorted_relocs, va + size)
+        out = []
+        for r in self.sorted_relocs[lo:hi]:
+            if r < va:
+                fail(f'relocation {r:#x} straddles the start of span {va:#x}+{size:#x}')
+            if r + 4 > va + size:
+                fail(f'relocation {r:#x} straddles the end of span {va:#x}+{size:#x}')
+            out.append(r)
+        return out
+
+
+def decoder():
+    engine = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    engine.detail = True
+    return engine
+
+
+ENGINE = decoder()
+
+FORBIDDEN_MNEMONICS = {
+    'int', 'int1', 'into', 'sysenter', 'sysexit', 'syscall', 'sysret', 'hlt', 'cli', 'sti', 'in', 'ins', 'insb', 'insw',
+    'insd', 'out', 'outs', 'outsb', 'outsw', 'outsd', 'ud2', 'iret', 'iretd', 'lcall', 'ljmp', 'retf', 'lret',
+    'rdmsr', 'wrmsr', 'lgdt', 'lidt', 'ltr', 'wbinvd', 'invd', 'cpuid', 'xgetbv', 'rdtsc', 'rdtscp'}
+
+
+def decode_span(image, va, size, *, allow_int3_padding_tail=False):
+    code = image.read(va, size)
+    insns = list(ENGINE.disasm(code, va))
+    if not insns or sum(i.size for i in insns) != size or insns[-1].address + insns[-1].size != va + size:
+        covered = sum(i.size for i in insns)
+        fail(f'span {va:#x}+{size:#x} does not tile into whole instructions (decoded {covered:#x} bytes)')
+    return code, insns
+
+
+def is_rel_branch(ins):
+    """Return (kind, width) for a relative call/jump/jcc/loop/jcxz, else None."""
+    b = ins.bytes
+    op = b[0]
+    if op == 0xE8:
+        return ('call', 4)
+    if op == 0xE9:
+        return ('jmp', 4)
+    if op == 0xEB:
+        return ('jmp', 1)
+    if op == 0x0F and 0x80 <= b[1] <= 0x8F:
+        return ('jcc', 4)
+    if 0x70 <= op <= 0x7F:
+        return ('jcc', 1)
+    if op in (0xE0, 0xE1, 0xE2, 0xE3):
+        return ('loop', 1)
+    if ins.group(capstone.CS_GRP_CALL) or ins.group(capstone.CS_GRP_JUMP):
+        return None
+    return None
+
+
+def branch_target(ins):
+    if not ins.operands or ins.operands[0].type != x86.X86_OP_IMM:
+        fail(f'relative branch at {ins.address:#x} has no immediate target')
+    return ins.operands[0].imm & 0xFFFFFFFF
+
+
+def operand_fields(ins):
+    """32-bit displacement/immediate fields: [(offset, kind)]."""
+    fields = []
+    if ins.disp_size == 4:
+        fields.append((ins.disp_offset, 'disp'))
+    if ins.imm_size == 4:
+        fields.append((ins.imm_offset, 'imm'))
+    return fields
+
+
+# ============================================================================================ header contract
+
+def parse_header(path):
+    text = Path(path).read_text(encoding='utf-8')
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+
+    def enum_names(tag):
+        m = re.search(r'enum\s+' + tag + r'\s*\{(.*?)\}\s*;', text, flags=re.S)
+        if not m:
+            fail(f'header {path} does not define enum {tag}')
+        return [n.strip().split('=')[0].strip() for n in m.group(1).split(',') if n.strip()]
+
+    bindings = enum_names('ntw2_binding')
+    clones = enum_names('ntw2_clone_id')
+    targets = enum_names('ntw2_target_kind')
+    ops = enum_names('ntw2_op_kind')
+    expect_t = ['NTW2_TARGET_IMAGE', 'NTW2_TARGET_CLONE', 'NTW2_TARGET_BINDING']
+    expect_o = ['NTW2_COPY', 'NTW2_LITERAL', 'NTW2_ABSOLUTE', 'NTW2_RELATIVE']
+    if targets != expect_t or ops != expect_o:
+        fail('header target/op enums differ from the layout this generator emits')
+    if bindings[-1] != 'NTW2_BIND_COUNT' or clones[-1] != 'NTW2_CLONE_COUNT':
+        fail('header enums must end with NTW2_BIND_COUNT / NTW2_CLONE_COUNT')
+    return [b[len('NTW2_BIND_'):] for b in bindings[:-1]], [c[len('NTW2_CLONE_'):] for c in clones[:-1]]
+
+
+# ============================================================================================ targets and pieces
+
+class Target:
+    """IMAGE: ident = preferred VA; CLONE: ident = clone name; BINDING: ident = binding name."""
+    __slots__ = ('kind', 'ident', 'addend')
+
+    def __init__(self, kind, ident, addend=0):
+        self.kind, self.ident, self.addend = kind, ident, addend
+
+    def __repr__(self):
+        base = f'{self.ident:#x}' if self.kind == 'IMAGE' else self.ident
+        return f'{self.kind}:{base}{self.addend:+d}' if self.addend else f'{self.kind}:{base}'
+
+
+def Img(va, addend=0):
+    return Target('IMAGE', va, addend)
+
+
+def Clone(name, addend=0):
+    return Target('CLONE', name, addend)
+
+
+def Bind(name, addend=0):
+    return Target('BINDING', name, addend)
+
+
+class SrcRef:
+    """A fixup target naming an instruction of the clone's OWN source span (preferred VA).  plan_clone resolves it to
+    Clone(<this clone>, mapping[va]) after layout, so authored entry/exit splices can jump to a mapped source instruction."""
+    __slots__ = ('va',)
+
+    def __init__(self, va):
+        self.va = va
+
+
+class Fix:
+    """A 4-byte fixup field inside literal data: kind 'abs' | 'rel'."""
+    __slots__ = ('kind', 'target')
+
+    def __init__(self, kind, target):
+        self.kind, self.target = kind, target
+
+
+def pieces_length(pieces):
+    return sum(4 if isinstance(p, Fix) else len(p) for p in pieces)
+
+
+# ============================================================================================ sources
+
+class SourceRegistry:
+    def __init__(self, image):
+        self.image = image
+        self.items = []
+        self.by_name = {}
+
+    def add(self, name, va, end, role, *, code=True, hidden_abs_ok=()):
+        if name in self.by_name:
+            fail(f'duplicate source {name}')
+        size = end - va
+        if size <= 0:
+            fail(f'source {name} has no extent')
+        data = self.image.read(va, size)
+        relocs = [r - va for r in self.image.span_relocs(va, size)]
+        item = dict(name=name, va=va, end=end, size=size, role=role, code=code, hash=fnv1a64(data), relocs=relocs,
+                    index=len(self.items))
+        if code:
+            _, insns = decode_span(self.image, va, size)
+            census_relocs(self.image, name, va, insns, hidden_abs_ok)
+            item['instructions'] = len(insns)
+        self.items.append(item)
+        self.by_name[name] = item
+        return item
+
+
+def census_relocs(image, name, va, insns, hidden_abs_ok):
+    """Every HIGHLOW reloc is a 32-bit disp/imm field of one instruction; every image-looking unrelocated field is
+    justified by hidden_abs_ok (set of field VAs)."""
+    span_end = va + sum(i.size for i in insns)
+    fields = {}
+    for ins in insns:
+        for off, kind in operand_fields(ins):
+            fields[ins.address + off] = (ins, kind)
+    relocs = set(image.span_relocs(va, span_end - va))
+    for r in relocs:
+        if r not in fields:
+            fail(f'{name}: relocation {r:#x} is not a 32-bit displacement/immediate of a decoded instruction')
+    for field_va, (ins, kind) in fields.items():
+        value = struct.unpack_from('<I', ins.bytes, field_va - ins.address)[0]
+        looks_image = PREFERRED_BASE <= value < PREFERRED_BASE + image.size_of_image
+        rel = is_rel_branch(ins)
+        if rel and kind == 'imm':
+            continue
+        if looks_image and field_va not in relocs and field_va not in hidden_abs_ok:
+            fail(f'{name}: unrelocated image-looking operand {value:#x} at {field_va:#x} ({ins.mnemonic} {ins.op_str})')
+        if field_va in relocs and not looks_image:
+            fail(f'{name}: relocated operand {value:#x} at {field_va:#x} is outside the image')
+
+
+# ============================================================================================ clone planning
+
+class Plan:
+    """Result of planning a clone: ops + metadata for manifest and verification."""
+
+    def __init__(self, name, source):
+        self.name = name
+        self.source = source
+        self.copies = []       # (dest, source_offset, size)
+        self.literals = []     # (dest, bytes)
+        self.fixups = []       # (kind 'abs'|'rel', dest_field, Target)
+        self.size = 0
+        self.instructions = []  # (ins, dest, expectation dict)
+        self.inserts = []      # (dest, pieces, name)
+        self.tails = []        # (label, dest, pieces)
+        self.external_calls = {}
+        self.external_jumps = {}
+        self.rets = {}
+        self.notes = []
+        self.indirect_calls = []
+        self.insn_patches = []  # (source VA, dest, old bytes, new bytes)
+        self.rewrites = []      # (dest, pieces, source VA text, old bytes): whole-instruction-run replacement by a call
+
+
+def piece_bytes_and_fixups(pieces, dest, plan):
+    out = bytearray()
+    for p in pieces:
+        if isinstance(p, Fix):
+            plan.fixups.append((p.kind, dest + len(out), p.target))
+            out += b'\0\0\0\0'
+        else:
+            out += p
+    return bytes(out)
+
+
+def plan_clone(image, sources, cfg, header_clones, header_bindings):
+    """cfg keys (all optional except clone/source):
+         calls        {target VA: (Target, count, sites|None)}   replaced call sites
+         inserts      {VA: [pieces]}                              inserted before the instruction (branches to it run it)
+                                                                  (a Fix target SrcRef(va) in inserts / tails resolves to the
+                                                                  mapped clone offset of that source instruction: entry/exit splices)
+         ret_patches  {site: (old bytes, new bytes)}
+         site_calls   {call site VA: Target}                       one call site replaced regardless of target (same target at
+                                                                   several sites bound differently)
+         site_jumps   {jump site VA: (original target VA, Target)} replaced rel32 jmp/jcc, preserving opcode
+         thunk_targets (VA...)                                     rel8 external jumps to these go via appended thunks
+         redirects    {site: label}                               branch retargeted to a tail label
+         tail         [(label, [pieces])]                         literal code appended after the body
+         abs_retarget callable(value, site) -> Target | None      relocated operands pointing elsewhere
+         abs_expected expected number of retargeted operands
+         indirect_ok  {site}                                      allowed indirect jmp sites
+         insn_patches {site: (old bytes, new bytes)}               whole-instruction rewrite (same extent; mov/nop only)
+         call_rewrites {site: (old bytes, Target[, keep])}         a run of whole instructions (plain mov... then one indirect
+                                                                   call) replaced by one `call rel32 Target` of the SAME
+                                                                   length; no branch may enter the run's interior. Without
+                                                                   keep the run is exactly 5 bytes. With keep (the run minus
+                                                                   its final indirect call) the leading mov instructions stay
+                                                                   verbatim and the call (>= 5 bytes) becomes call rel32 + NOPs
+         run_rewrites {site: (old bytes, pieces)}                  a pinned run of whole instructions replaced by authored pieces
+                                                                   (bytes and rel/abs fixups to host bindings) of exactly the same
+                                                                   length; no relocation inside the run, no branch into its interior
+         region_rewrites {site: (end VA, pieces)}                 replace a whole source-pinned region, shrinking its layout;
+                                                                   relocations and internal branches disappear with that region.
+                                                                   No surviving branch may enter its interior; source call sites
+                                                                   must be pinned separately. Existing run_rewrites stay same-size.
+         indirect_calls {site}                                     exact set of remaining indirect call sites (None: unchecked)
+         expect_calls set of external call targets that stay original (RELATIVE IMAGE)
+         expect_jumps set of external jump targets (rel32 direct)
+         expect_rets  {site: bytes}
+         forbid       extra forbidden mnemonics / prefixes
+    """
+    name = cfg['clone']
+    src = sources.by_name[cfg['source']]
+    va, size = src['va'], src['size']
+    end = va + size
+    code, insns = decode_span(image, va, size)
+    plan = Plan(name, src)
+    by_addr = {i.address: i for i in insns}
+    boundaries = set(by_addr)
+    calls = cfg.get('calls', {})
+    inserts = cfg.get('inserts', {})
+    ret_patches = cfg.get('ret_patches', {})
+    thunk_targets = tuple(cfg.get('thunk_targets', ()))
+    insn_patches = cfg.get('insn_patches', {})
+    redirects = cfg.get('redirects', {})
+    tail_cfg = cfg.get('tail', [])
+    abs_retarget = cfg.get('abs_retarget')
+    indirect_ok = set(cfg.get('indirect_ok', ()))
+    forbid = set(cfg.get('forbid', ())) | FORBIDDEN_MNEMONICS
+
+    if set(inserts) - boundaries:
+        fail(f'{name}: insertion not on an instruction boundary: {sorted(hex(a) for a in set(inserts) - boundaries)}')
+    run_rewrites = dict(cfg.get('run_rewrites', {}))
+    region_rewrites = cfg.get('region_rewrites', {})
+    region_interior = set()
+    for site, (region_end, pieces) in region_rewrites.items():
+        if site not in boundaries or region_end not in boundaries | {end} or region_end <= site:
+            fail(f'{name}: region rewrite {site:#x}..{region_end:#x} is not on instruction boundaries')
+        if site in run_rewrites or not 0 < pieces_length(pieces) < region_end - site:
+            fail(f'{name}: region rewrite {site:#x} overlaps a run or does not shrink it')
+        run_rewrites[site] = (image.read(site, region_end - site), pieces)
+    if set(ret_patches) - boundaries or set(redirects) - boundaries or set(insn_patches) - boundaries or \
+            set(cfg.get('call_rewrites', {})) - boundaries or set(run_rewrites) - boundaries:
+        fail(f'{name}: patch site is not an instruction boundary')
+
+    # ---- call rewrites: pinned run of whole instructions -> `call rel32`, byte-for-byte same length
+    call_rewrites = cfg.get('call_rewrites', {})
+    rewrite_interior = set()
+    rewrite_range = set()
+    index_of = {i.address: k for k, i in enumerate(insns)}
+    for site, spec in call_rewrites.items():
+        old, rtarget = spec[0], spec[1]
+        keep = spec[2] if len(spec) > 2 else 0
+        run, got, k = [], 0, index_of[site]
+        while got < len(old) and k < len(insns):
+            run.append(insns[k])
+            got += insns[k].size
+            k += 1
+        if got != len(old) or len(run) < 2 or (len(old) != 5 if not keep else len(old) - keep < 5):
+            fail(f'{name}: rewrite at {site:#x} does not tile {len(old)} bytes into whole instructions (a call rel32 is 5 bytes)')
+        if keep and keep != len(old) - run[-1].size:
+            fail(f'{name}: rewrite at {site:#x} keeps {keep} bytes, expected every instruction before the final call')
+        if bytes(code[site - va:site - va + len(old)]) != old:
+            fail(f'{name}: rewrite at {site:#x} does not match source bytes')
+        if image.span_relocs(site, len(old)):
+            fail(f'{name}: rewritten run at {site:#x} carries a relocation')
+        last = run[-1]
+        if not last.group(capstone.CS_GRP_CALL) or is_rel_branch(last) is not None:
+            fail(f'{name}: rewrite at {site:#x} does not end with an indirect call')
+        for r in run[:-1]:
+            if r.mnemonic != 'mov' or r.group(capstone.CS_GRP_CALL) or r.group(capstone.CS_GRP_JUMP):
+                fail(f'{name}: rewrite at {site:#x} contains a non-mov instruction before the call')
+        span = {r.address for r in run}
+        if span & (set(inserts) | set(ret_patches) | set(redirects) | set(insn_patches) | set(cfg.get('site_calls', {})) |
+                   set(cfg.get('site_jumps', {}))) or rewrite_range & span:
+            fail(f'{name}: rewrite at {site:#x} overlaps another patch')
+        rewrite_range |= span
+        rewrite_interior |= span - {site}
+        validate_target(rtarget, header_clones, header_bindings, f'{name} rewrite {site:#x}')
+
+    # ---- run rewrites: a pinned run of whole instructions replaced by authored pieces of EXACTLY the same length (the pieces
+    # may carry rel32 fixups to host bindings).  Used where the original indirect call is shorter than `call rel32`: the
+    # run also covers the preceding `push` and the vtable load, and the host trampoline performs that load itself.
+    for site, (old, rpieces) in run_rewrites.items():
+        run, got, k = [], 0, index_of[site]
+        while got < len(old) and k < len(insns):
+            run.append(insns[k])
+            got += insns[k].size
+            k += 1
+        if got != len(old) or (len(run) < 2 and not cfg.get('forward_gates')):
+            fail(f'{name}: run rewrite at {site:#x} does not tile {len(old)} bytes into whole instructions')
+        if site not in region_rewrites and pieces_length(rpieces) != len(old):
+            fail(f'{name}: run rewrite at {site:#x} changes the instruction stream length')
+        if bytes(code[site - va:site - va + len(old)]) != old:
+            fail(f'{name}: run rewrite at {site:#x} does not match source bytes')
+        relocs = image.span_relocs(site, len(old))
+        if relocs and site not in region_rewrites and not cfg.get('forward_gates'):
+            fail(f'{name}: run rewrite at {site:#x} carries a relocation')
+        if site in region_rewrites:
+            for ins in run:
+                rel = is_rel_branch(ins)
+                if ins.group(capstone.CS_GRP_RET) or (ins.group(capstone.CS_GRP_JUMP) and rel is None):
+                    fail(f'{name}: region rewrite {site:#x} contains a return or indirect jump')
+                if rel and rel[0] != 'call':
+                    target = branch_target(ins)
+                    if target not in boundaries | {end} or not site <= target <= site + len(old):
+                        fail(f'{name}: region rewrite {site:#x} has an escaping or unaligned branch at {ins.address:#x}')
+        span = {r.address for r in run}
+        if site in region_rewrites:
+            region_interior |= span - {site}
+        if span & (set(inserts) | set(ret_patches) | set(redirects) | set(insn_patches) | set(cfg.get('site_calls', {})) |
+                   set(cfg.get('site_jumps', {})) | set(call_rewrites)) or rewrite_range & span:
+            fail(f'{name}: run rewrite at {site:#x} overlaps another patch')
+        rewrite_range |= span
+        rewrite_interior |= span - {site}
+        for piece in rpieces:
+            if isinstance(piece, Fix):
+                validate_target(piece.target, header_clones, header_bindings, f'{name} run rewrite {site:#x}')
+
+    # ---- layout: mapping is BEFORE any insertion, so branches to an insertion point execute it
+    mapping, dest_of, cursor = {}, {}, 0
+    for ins in insns:
+        mapping[ins.address] = cursor
+        if ins.address in inserts:
+            cursor += pieces_length(inserts[ins.address])
+        dest_of[ins.address] = cursor
+        if ins.address in region_rewrites:
+            cursor += pieces_length(region_rewrites[ins.address][1])
+        elif ins.address not in region_interior:
+            cursor += ins.size
+    body_end = cursor
+
+    def resolve_src(pieces):
+        out = []
+        for piece in pieces:
+            if isinstance(piece, Fix) and isinstance(piece.target, SrcRef):
+                if piece.target.va not in mapping:
+                    fail(f'{name}: SrcRef {piece.target.va:#x} is not an instruction of the source span')
+                if piece.target.va in region_interior:
+                    fail(f'{name}: SrcRef {piece.target.va:#x} lies inside a rewritten region')
+                piece = Fix(piece.kind, Clone(name, mapping[piece.target.va]))
+            out.append(piece)
+        return out
+
+    inserts = {site: resolve_src(pieces) for site, pieces in inserts.items()}
+    tail_cfg = [(label, resolve_src(pieces)) for label, pieces in tail_cfg]
+    labels = {}
+    thunk_label = {}
+    tail_layout = []
+    for label, pieces in tail_cfg:
+        labels[label] = cursor
+        tail_layout.append((label, cursor, pieces))
+        cursor += pieces_length(pieces)
+    for target in thunk_targets:
+        label = f'thunk_{target:x}'
+        thunk_label[target] = label
+        labels[label] = cursor
+        tail_layout.append((label, cursor, [b'\xe9', Fix('rel', Img(target))]))
+        cursor += 5
+    plan.size = cursor
+
+    # ---- instruction walk
+    site_calls = cfg.get('site_calls', {})
+    site_jumps = cfg.get('site_jumps', {})
+    seen_jumps = []
+    seen_sites = []
+    seen_replaced = {t: [] for t in calls}
+    patches = []           # (dest, bytes) literal rewrites inside instruction bytes
+    retargeted = 0
+    for ins in insns:
+        d = dest_of[ins.address]
+        exp = {'dest': d, 'kind': 'plain'}
+        if ins.mnemonic in forbid:
+            fail(f'{name}: forbidden instruction {ins.mnemonic} at {ins.address:#x}')
+        if cfg.get('leaf_only') and (ins.mnemonic in ('call', 'ret', 'retn') or ins.mnemonic.startswith('f')
+                                     or ins.group(capstone.CS_GRP_CALL) or ins.group(capstone.CS_GRP_RET)):
+            fail(f'{name}: unexpected {ins.mnemonic} in a leaf-only clone at {ins.address:#x}')
+        if ins.mnemonic == 'int3' and not (cfg.get('allow_trailing_int3') and ins.address + ins.size == end):
+            fail(f'{name}: unexpected int3 at {ins.address:#x}')
+        for op in ins.operands:
+            if op.type == x86.X86_OP_MEM and op.mem.segment not in (0, x86.X86_REG_DS, x86.X86_REG_ES, x86.X86_REG_SS,
+                                                                    x86.X86_REG_CS, x86.X86_REG_FS):
+                fail(f'{name}: unexpected segment override at {ins.address:#x}')
+            if cfg.get('forbid_fs') and op.type == x86.X86_OP_MEM and op.mem.segment == x86.X86_REG_FS:
+                fail(f'{name}: TLS access at {ins.address:#x}')
+        if ins.address in rewrite_range:
+            exp.update(kind='rewrite' if (ins.address in call_rewrites or ins.address in run_rewrites) else 'rewrite_covered')
+            plan.instructions.append((ins, d, exp))
+            continue
+        if ins.address in insn_patches:
+            old, new = insn_patches[ins.address]
+            if ins.bytes != old or len(new) != len(old):
+                fail(f'{name}: instruction patch at {ins.address:#x} does not match source bytes {ins.bytes.hex()}')
+            if image.span_relocs(ins.address, ins.size):
+                fail(f'{name}: patched instruction at {ins.address:#x} carries a relocation')
+            decoded = list(ENGINE.disasm(new, ins.address))
+            if sum(x.size for x in decoded) != len(new) or any(x.mnemonic not in ('mov', 'nop') for x in decoded):
+                fail(f'{name}: replacement for {ins.address:#x} is not whole mov/nop instructions')
+            if any(op.type == x86.X86_OP_MEM and (op.mem.segment not in (0, x86.X86_REG_DS) or op.mem.base == 0)
+                   for x in decoded for op in x.operands):
+                fail(f'{name}: replacement for {ins.address:#x} has an unsafe memory operand')
+            patches.append((d, new))
+            plan.insn_patches.append((ins.address, d, old, new))
+            exp.update(kind='insn_patch', bytes=new)
+            plan.instructions.append((ins, d, exp))
+            continue
+        rel = is_rel_branch(ins)
+        is_call = bool(ins.group(capstone.CS_GRP_CALL))
+        is_jump = bool(ins.group(capstone.CS_GRP_JUMP))
+        if ins.group(capstone.CS_GRP_RET):
+            expected = cfg.get('expect_rets', {})
+            patched = ret_patches.get(ins.address)
+            if ins.address not in expected or expected[ins.address] != ins.bytes:
+                fail(f'{name}: unexpected return/stack cleanup {ins.bytes.hex()} at {ins.address:#x}')
+            plan.rets[ins.address] = patched[1] if patched else ins.bytes
+        if ins.address in ret_patches:
+            old, new = ret_patches[ins.address]
+            if ins.bytes != old or len(new) != len(old):
+                fail(f'{name}: ret patch at {ins.address:#x} does not match source bytes')
+            diff = [k for k in range(len(old)) if old[k] != new[k]]
+            patches.append((d + diff[0], new[diff[0]:diff[-1] + 1]))
+            exp.update(kind='ret_patch', bytes=new)
+        if (is_call or is_jump) and rel is None:
+            # indirect or far transfer
+            if is_jump:
+                if ins.address not in indirect_ok:
+                    fail(f'{name}: indirect jump at {ins.address:#x} ({ins.op_str}) is not whitelisted')
+            elif ins.operands and ins.operands[0].type == x86.X86_OP_IMM:
+                fail(f'{name}: far/absolute call at {ins.address:#x}')
+            else:
+                plan.indirect_calls.append(ins.address)
+        elif rel is not None:
+            kind, width = rel
+            if ins.imm_size != width or ins.imm_offset + ins.imm_size != ins.size:
+                fail(f'{name}: unsupported branch encoding at {ins.address:#x}')
+            target = branch_target(ins)
+            field = d + ins.imm_offset
+            exp.update(kind='branch', target=target, width=width)
+            if ins.address in redirects:
+                label = redirects[ins.address]
+                if label not in labels:
+                    fail(f'{name}: redirect label {label} is not defined')
+                new_disp = labels[label] - (d + ins.size)
+                exp.update(mode='label', want=('label', labels[label]))
+                patches.append((field, struct.pack('<b' if width == 1 else '<i', new_disp) if
+                                (width == 4 or -128 <= new_disp <= 127) else fail(f'{name}: rel8 redirect out of reach')))
+            elif ins.address in site_jumps:
+                original, replacement = site_jumps[ins.address]
+                if not is_jump or width != 4 or kind not in ('jmp', 'jcc') or target != original:
+                    fail(f'{name}: replaced jump at {ins.address:#x} is not the pinned rel32 jump to {original:#x}')
+                seen_jumps.append(ins.address)
+                plan.fixups.append(('rel', field, replacement))
+                exp.update(mode='fix', want=('target', replacement))
+            elif ins.address in site_calls and is_call:
+                if width != 4:
+                    fail(f'{name}: replaced call at {ins.address:#x} is not rel32')
+                if target in calls:
+                    fail(f'{name}: site {ins.address:#x} target {target:#x} is also a whole-target replacement')
+                seen_sites.append(ins.address)
+                plan.fixups.append(('rel', field, site_calls[ins.address]))
+                exp.update(mode='fix', want=('target', site_calls[ins.address]))
+            elif target in calls and is_call:
+                replacement, count, sites = calls[target]
+                seen_replaced[target].append(ins.address)
+                if width != 4:
+                    fail(f'{name}: replaced call at {ins.address:#x} is not rel32')
+                plan.fixups.append(('rel', field, replacement))
+                exp.update(mode='fix', want=('target', replacement))
+            elif target in calls:
+                fail(f'{name}: seam target {target:#x} reached by a non-call at {ins.address:#x}')
+            elif va <= target < end:
+                if target not in boundaries:
+                    fail(f'{name}: branch at {ins.address:#x} enters mid-instruction {target:#x}')
+                if target in rewrite_interior:
+                    fail(f'{name}: branch at {ins.address:#x} enters the interior of a rewritten run at {target:#x}')
+                new_disp = mapping[target] - (d + ins.size)
+                old_disp = struct.unpack_from('<b' if width == 1 else '<i', ins.bytes, ins.imm_offset)[0]
+                exp.update(mode='internal', want=('clone', mapping[target]))
+                if new_disp != old_disp:
+                    if width == 1 and not -128 <= new_disp <= 127:
+                        fail(f'{name}: short branch at {ins.address:#x} out of range after layout change')
+                    patches.append((field, struct.pack('<b' if width == 1 else '<i', new_disp)))
+            else:
+                # external target
+                if is_call and width == 4:
+                    plan.external_calls[target] = plan.external_calls.get(target, 0) + 1
+                    plan.fixups.append(('rel', field, Img(target)))
+                    exp.update(mode='fix', want=('target', Img(target)))
+                elif is_jump and width == 4 and kind in ('jmp', 'jcc'):
+                    plan.external_jumps[target] = plan.external_jumps.get(target, 0) + 1
+                    plan.fixups.append(('rel', field, Img(target)))
+                    exp.update(mode='fix', want=('target', Img(target)))
+                elif is_jump and width == 1 and kind in ('jmp', 'jcc') and target in thunk_label:
+                    plan.external_jumps[target] = plan.external_jumps.get(target, 0) + 1
+                    new_disp = labels[thunk_label[target]] - (d + ins.size)
+                    if not -128 <= new_disp <= 127:
+                        fail(f'{name}: thunk for {target:#x} is out of rel8 reach from {ins.address:#x}')
+                    patches.append((field, struct.pack('<b', new_disp)))
+                    exp.update(mode='label', want=('label', labels[thunk_label[target]]))
+                else:
+                    fail(f'{name}: external {kind} at {ins.address:#x} to {target:#x} is not an allowed form')
+        # ---- relocated operands
+        for r in image.span_relocs(ins.address, ins.size):
+            fo = r - ins.address
+            if (fo, 'disp') not in [(o, k) for o, k in operand_fields(ins)] and \
+                    (fo, 'imm') not in [(o, k) for o, k in operand_fields(ins)]:
+                fail(f'{name}: relocation {r:#x} is not an operand field')
+            value = struct.unpack_from('<I', ins.bytes, fo)[0]
+            retarget = abs_retarget(value, r) if abs_retarget else None
+            if retarget is not None:
+                plan.fixups.append(('abs', d + fo, retarget))
+                retargeted += 1
+                exp.setdefault('abs', []).append((fo, retarget))
+            else:
+                exp.setdefault('abs_live', []).append((fo, value))
+        plan.instructions.append((ins, d, exp))
+    for target, (replacement, count, sites) in calls.items():
+        got = seen_replaced[target]
+        if len(got) != count or (sites is not None and set(got) != set(sites)):
+            fail(f'{name}: replaced call to {target:#x} found at {[hex(a) for a in got]}, expected count {count} sites '
+                 f'{None if sites is None else [hex(a) for a in sites]}')
+    if sorted(seen_sites) != sorted(site_calls):
+        fail(f'{name}: per-site replaced calls at {[hex(a) for a in sorted(seen_sites)]}, expected '
+             f'{[hex(a) for a in sorted(site_calls)]}')
+    if sorted(seen_jumps) != sorted(site_jumps):
+        fail(f'{name}: not every per-site replaced jump was applied')
+    if cfg.get('abs_expected') is not None and retargeted != cfg['abs_expected']:
+        fail(f'{name}: retargeted {retargeted} absolute operands, expected {cfg["abs_expected"]}')
+    if cfg.get('indirect_calls') is not None and set(plan.indirect_calls) != set(cfg['indirect_calls']):
+        fail(f'{name}: indirect call sites {sorted(hex(x) for x in plan.indirect_calls)} != '
+             f'{sorted(hex(x) for x in cfg["indirect_calls"])}')
+    if {p[0] for p in plan.insn_patches} != set(insn_patches):
+        fail(f'{name}: not every instruction patch was applied')
+    if 'expect_calls' in cfg and set(plan.external_calls) != set(cfg['expect_calls']):
+        extra = sorted(hex(x) for x in set(plan.external_calls) - set(cfg['expect_calls']))
+        missing = sorted(hex(x) for x in set(cfg['expect_calls']) - set(plan.external_calls))
+        fail(f'{name}: external call set changed: +{extra} -{missing}')
+    if 'expect_jumps' in cfg and set(plan.external_jumps) != set(cfg['expect_jumps']):
+        fail(f'{name}: external jump set {sorted(hex(x) for x in plan.external_jumps)} != '
+             f'{sorted(hex(x) for x in cfg["expect_jumps"])}')
+    if set(plan.rets) != set(cfg.get('expect_rets', {})):
+        fail(f'{name}: return set {sorted(hex(x) for x in plan.rets)} != {sorted(hex(x) for x in cfg.get("expect_rets", {}))}')
+    if cfg.get('must_end_with') and insns[-1].mnemonic not in cfg['must_end_with']:
+        fail(f'{name}: clone body ends with {insns[-1].mnemonic}, expected one of {cfg["must_end_with"]}')
+
+    # ---- build copy/literal segments in destination order
+    segments = []   # (dest, kind, a, b)
+    patch_map = sorted(patches)
+    for a, b in zip(patch_map, patch_map[1:]):
+        if a[0] + len(a[1]) > b[0]:
+            fail(f'{name}: overlapping literal patches')
+    # literal patches expressed per instruction, so copy runs break around them
+    for ins in insns:
+        d = dest_of[ins.address]
+        if ins.address in rewrite_interior:
+            continue
+        if ins.address in call_rewrites:
+            old, rtarget = call_rewrites[ins.address][:2]
+            keep = call_rewrites[ins.address][2] if len(call_rewrites[ins.address]) > 2 else 0
+            rpieces = ([old[:keep]] if keep else []) + [b'\xe8', Fix('rel', rtarget)]
+            if len(old) - keep > 5:
+                rpieces.append(b'\x90' * (len(old) - keep - 5))
+            data = piece_bytes_and_fixups(rpieces, d, plan)
+            if len(data) != len(old):
+                fail(f'{name}: rewrite at {ins.address:#x} changes the instruction stream length')
+            segments.append((d, 'lit', data, None))
+            plan.rewrites.append((d, rpieces, f'{ins.address:#x}', old))
+            continue
+        if ins.address in run_rewrites:
+            old, rpieces = run_rewrites[ins.address]
+            data = piece_bytes_and_fixups(rpieces, d, plan)
+            if ins.address not in region_rewrites and len(data) != len(old):
+                fail(f'{name}: run rewrite at {ins.address:#x} changes the instruction stream length')
+            segments.append((d, 'lit', data, None))
+            plan.rewrites.append((d, rpieces, f'{ins.address:#x}', old))
+            continue
+        if ins.address in inserts:
+            ins_start = mapping[ins.address]
+            dest0 = ins_start
+            data = piece_bytes_and_fixups(inserts[ins.address], dest0, plan)
+            segments.append((dest0, 'lit', data, None))
+            plan.inserts.append((dest0, inserts[ins.address], f'{ins.address:#x}'))
+        segments.append((d, 'copy', ins.address - va, ins.size))
+    for label, d, pieces in tail_layout:
+        data = piece_bytes_and_fixups(pieces, d, plan)
+        segments.append((d, 'lit', data, None))
+        plan.tails.append((label, d, pieces))
+    # apply literal patches by splitting copy segments
+    split = []
+    for seg in sorted(segments, key=lambda s: s[0]):
+        dest, kind, a, b = seg
+        if kind != 'copy':
+            split.append(seg)
+            continue
+        end_seg = dest + b
+        cuts = [(p, data) for p, data in patch_map if dest <= p < end_seg]
+        cur = dest
+        for p, data in cuts:
+            if p + len(data) > end_seg:
+                fail(f'{name}: literal patch crosses instruction boundary at {p:#x}')
+            if p > cur:
+                split.append((cur, 'copy', a + (cur - dest), p - cur))
+            split.append((p, 'lit', data, None))
+            cur = p + len(data)
+        if cur < end_seg:
+            split.append((cur, 'copy', a + (cur - dest), end_seg - cur))
+    # merge adjacent copies contiguous in both spaces
+    merged = []
+    for seg in split:
+        if merged and seg[1] == 'copy' and merged[-1][1] == 'copy' and \
+                merged[-1][0] + merged[-1][3] == seg[0] and merged[-1][2] + merged[-1][3] == seg[2]:
+            last = merged[-1]
+            merged[-1] = (last[0], 'copy', last[2], last[3] + seg[3])
+        else:
+            merged.append(seg)
+    cover = 0
+    for dest, kind, a, b in merged:
+        if dest != cover:
+            fail(f'{name}: gap/overlap in clone layout at {dest:#x} (expected {cover:#x})')
+        length = b if kind == 'copy' else len(a)
+        cover += length
+        if kind == 'copy':
+            plan.copies.append((dest, a, b))
+        else:
+            plan.literals.append((dest, a))
+    if cover != plan.size:
+        fail(f'{name}: layout covers {cover:#x} of {plan.size:#x} bytes')
+    plan.segments = merged
+    plan.fixups.sort(key=lambda f: f[1])
+    for k in range(len(plan.fixups) - 1):
+        if plan.fixups[k][1] + 4 > plan.fixups[k + 1][1]:
+            fail(f'{name}: overlapping fixup fields at {plan.fixups[k][1]:#x}')
+    plan.body_end = body_end
+    plan.mapping = mapping
+    plan.labels = labels
+    return plan
+
+
+def validate_target(target, header_clones, header_bindings, where):
+    if target.kind == 'CLONE' and target.ident not in header_clones:
+        fail(f'{where}: unknown clone {target.ident}')
+    if target.kind == 'BINDING' and target.ident not in header_bindings:
+        fail(f'{where}: unknown binding {target.ident}')
+
+
+# ============================================================================================ data clone (jump table)
+
+def plan_table(image, sources, cfg, query_src):
+    """Private copy of a fully relocated jump table: entries point into the selected code clone."""
+    name = cfg['clone']
+    src = sources.by_name[cfg['source']]
+    plan = Plan(name, src)
+    va, size = src['va'], src['size']
+    data = image.read(va, size)
+    entries = struct.unpack(f'<{size // 4}I', data)
+    relocs = set(image.span_relocs(va, size))
+    if size % 4 or relocs != {va + 4 * k for k in range(size // 4)}:
+        fail(f'{name}: table is not fully relocated 32-bit entries')
+    qva, qend = query_src['va'], query_src['end']
+    _, qinsns = decode_span(image, qva, query_src['size'])
+    qbound = {i.address for i in qinsns}
+    expected = cfg['expected_entries']
+    if len(entries) != len(expected):
+        fail(f'{name}: table entry count {len(entries)} != {len(expected)}')
+    for k, target in enumerate(entries):
+        if target != expected[k] or target not in qbound:
+            fail(f'{name}: entry {k} = {target:#x}, expected instruction boundary {expected[k]:#x}')
+        plan.fixups.append(('abs', 4 * k, Clone(cfg['target_clone'], target - qva)))
+    plan.size = size
+    plan.copies.append((0, 0, size))
+    plan.segments = [(0, 'copy', 0, size)]
+    plan.literals = []
+    plan.instructions = []
+    plan.entries = entries
+    return plan
+
+
+def append_table(image, sources, plan, cfg):
+    """Append a pinned table using existing COPY/ABSOLUTE runtime ops, not embedded game bytes."""
+    table = plan_table(image, sources, cfg, plan.source)
+    offset = plan.size
+    if offset != cfg['offset']:
+        fail(f'{plan.name}: embedded table offset {offset:#x} != {cfg["offset"]:#x}')
+    plan.segments.append((offset, 'copy_from', table.source, table.size))
+    plan.copies.append((offset, 0, table.size))
+    for k, entry in enumerate(table.entries):
+        plan.fixups.append(('abs', offset + 4 * k, Clone(plan.name, plan.mapping[entry])))
+    plan.size += table.size
+    plan.embedded_table = (offset, table.entries)
+    plan.embedded_jump = cfg['jump']
+    return plan
+
+
+# ============================================================================================ verification
+
+class Materializer:
+    """Applies a plan exactly like the runtime emitter, for arbitrary bases (self-check only)."""
+
+    def __init__(self, image, sources_by_index, plans, delta, clone_bases, binding_values):
+        self.image, self.sources, self.plans = image, sources_by_index, plans
+        self.delta, self.bases, self.bindings = delta, clone_bases, binding_values
+
+    def resolve(self, target):
+        if target.kind == 'IMAGE':
+            return (target.ident + self.delta + target.addend) & 0xFFFFFFFF
+        if target.kind == 'CLONE':
+            return (self.bases[target.ident] + target.addend) & 0xFFFFFFFF
+        return (self.bindings[target.ident] + target.addend) & 0xFFFFFFFF
+
+    def build(self, plan):
+        out = bytearray(plan.size)
+        written = [False] * plan.size
+        for dest, kind, a, b in plan.segments:
+            if kind == 'copy':
+                live = self.image.live(plan.source['va'] + a, b, self.delta)
+            elif kind == 'copy_from':
+                live = self.image.live(a['va'], b, self.delta)
+            else:
+                live = a
+            out[dest:dest + len(live)] = live
+            for k in range(dest, dest + len(live)):
+                if written[k]:
+                    fail(f'{plan.name}: byte {k:#x} produced twice')
+                written[k] = True
+        if not all(written):
+            fail(f'{plan.name}: unwritten bytes')
+        base = self.bases[plan.name]
+        for kind, field, target in plan.fixups:
+            value = self.resolve(target)
+            if kind == 'rel':
+                value = (value - (base + field + 4)) & 0xFFFFFFFF
+            out[field:field + 4] = u32(value)
+        return bytes(out)
+
+
+def verify_plan(image, plan, mat, bases, delta, resolver, expect_rets_final):
+    """Decode the materialised clone and compare against the original decode."""
+    name = plan.name
+    base = bases[name]
+    for ins, d, exp in plan.instructions:
+        if exp['kind'] == 'insn_patch':
+            if bytes(mat[d:d + ins.size]) != exp['bytes']:
+                fail(f'{name}: patched instruction at {ins.address:#x} is not the pinned replacement')
+            continue
+        if exp['kind'] in ('rewrite', 'rewrite_covered'):
+            continue  # the whole run is verified below as the call rel32 region
+        got = list(ENGINE.disasm(mat[d:d + ins.size], base + d))
+        if len(got) != 1 or got[0].size != ins.size or got[0].mnemonic != ins.mnemonic:
+            fail(f'{name}: instruction {ins.address:#x} no longer decodes identically ({ins.mnemonic} {ins.op_str})')
+        new = got[0]
+        if exp['kind'] == 'branch':
+            target = struct.unpack_from('<b' if exp['width'] == 1 else '<i', new.bytes, new.imm_offset)[0]
+            actual = (base + d + ins.size + target) & 0xFFFFFFFF
+            mode, want = exp['mode'], exp['want']
+            if mode == 'fix':
+                expected = resolver.resolve(want[1])
+            elif mode == 'label' or mode == 'internal':
+                expected = (base + want[1]) & 0xFFFFFFFF
+            else:
+                fail(f'{name}: unknown branch mode')
+            if actual != expected:
+                fail(f'{name}: branch at {ins.address:#x} reaches {actual:#x}, expected {expected:#x}')
+            # all other bytes identical
+            lo, hi = ins.imm_offset, ins.imm_offset + ins.imm_size
+            live = image.live(ins.address, ins.size, delta)
+            if new.bytes[:lo] != live[:lo] or new.bytes[hi:] != live[hi:]:
+                fail(f'{name}: branch opcode bytes changed at {ins.address:#x}')
+            continue
+        want = bytearray(image.live(ins.address, ins.size, delta))
+        if exp['kind'] == 'ret_patch':
+            want = bytearray(exp['bytes'])
+        for fo, retarget in exp.get('abs', []):
+            want[fo:fo + 4] = u32(resolver.resolve(retarget))
+        if bytes(new.bytes) != bytes(want):
+            fail(f'{name}: instruction bytes at {ins.address:#x} differ from expected: {new.bytes.hex()} vs {bytes(want).hex()}')
+    # inserted code and tails: decode and verify every call/jump resolves
+    regions = [(dest, pieces, f'insert@{where}') for dest, pieces, where in plan.inserts]
+    regions += [(dest, pieces, f'tail:{label}') for label, dest, pieces in plan.tails]
+    regions += [(dest, pieces, f'rewrite@{where}') for dest, pieces, where, _old in plan.rewrites]
+    for dest, pieces, where in regions:
+        length = pieces_length(pieces)
+        code = mat[dest:dest + length]
+        decoded = list(ENGINE.disasm(code, base + dest))
+        if sum(i.size for i in decoded) != length:
+            fail(f'{name}: {where} does not decode to its extent')
+        pos = dest
+        fixes = {}
+        for p in pieces:
+            if isinstance(p, Fix):
+                fixes[pos] = p
+                pos += 4
+            else:
+                pos += len(p)
+        for fpos, f in fixes.items():
+            value = struct.unpack_from('<I', mat, fpos)[0]
+            if f.kind == 'abs':
+                want = resolver.resolve(f.target)
+            else:
+                want = (resolver.resolve(f.target) - (base + fpos + 4)) & 0xFFFFFFFF
+            if value != want:
+                fail(f'{name}: {where} fixup at {fpos:#x} wrong')
+            if f.kind == 'rel':
+                # must be the immediate of a call/jmp whose end is the field end
+                hit = [i for i in decoded if i.address - base + i.size == fpos + 4 and i.imm_size == 4
+                       and i.address - base + i.imm_offset == fpos]
+                if not hit or is_rel_branch(hit[0]) is None:
+                    fail(f'{name}: {where} relative fixup at {fpos:#x} is not a rel32 branch field')
+                target = (base + fpos + 4 + struct.unpack_from('<i', mat, fpos)[0]) & 0xFFFFFFFF
+                if target != resolver.resolve(f.target):
+                    fail(f'{name}: {where} branch resolves to {target:#x}')
+        # stack-balance sanity of literal insert is asserted by the config via expected decoded mnemonics
+
+
+def plan_literal(name, pieces):
+    """A clone made only of our own authored code (no source span)."""
+    plan = Plan(name, None)
+    data = piece_bytes_and_fixups(pieces, 0, plan)
+    plan.size = len(data)
+    plan.segments = [(0, 'lit', data, None)]
+    plan.literals = [(0, data)]
+    plan.tails = [('body', 0, pieces)]
+    plan.fixups.sort(key=lambda f: f[1])
+    return plan
+
+
+# ============================================================================================ pinned configuration
+
+TABLE_VA, TABLE_END = 0x639BFC, 0x639C0C
+QUERY_TABLE_JMP = 0x639661
+BATCH_CONTEXT_BYTES = 776
+APPENDER_VA = 0x747FB0
+MANAGER_TABLE_VA, MANAGER_TABLE_END = 0x58094C, 0x58096C
+MANAGER_TABLE_JMP = 0x580691
+BRAIN_TABLE_VA, BRAIN_TABLE_END = 0x66D6BC, 0x66D6C4
+BRAIN_TABLE_JMP = 0x66D41C
+# AI controller job body 0x7C8BD0 (site 33): nine-entry dword switch table directly behind its ret, `jmp [eax*4+0x7C8C8C]` at 0x7C8BFF.
+AI_CONTROLLER_VA, AI_CONTROLLER_END = 0x7C8BD0, 0x7C8C8C
+AI_CONTROLLER_TABLE_VA, AI_CONTROLLER_TABLE_END = 0x7C8C8C, 0x7C8CB0
+AI_CONTROLLER_TABLE_JMP = 0x7C8BFF
+# Brain profiling sites (NTW2_BRAIN, trace ABI 6): (site index, original callee, call sites).  Entry sites 46..50 are bound to the
+# 23 registry vtable slots +0x0C by the runtime; the rest are the callee sites of the wrapper clones and of the brain clone.
+WRAP_6F4660_CALLS = ((51, 0x6FA2D0, (0x6F4663,)), (52, 0x6FEE40, (0x6F4673,)), (53, 0x6FEA90, (0x6F467C,)),
+                     (54, 0x6FB740, (0x6F4683,)), (55, 0x6F50F0, (0x6F468A,)))
+WRAP_602EB0_CALLS = ((56, 0x6F50F0, (0x602EB6,)), (57, 0x5CB830, (0x602F2E,)), (58, 0x5B7B20, (0x602F35,)))
+WRAP_5FCEB0_CALLS = ((59, 0x6F50F0, (0x5FCF67,)), (60, 0x610470, (0x5FCF6E,)), (61, 0x60CAC0, (0x5FCF75,)),
+                     (62, 0x5E52F0, (0x5FCF7C,)), (63, 0x607540, (0x5FCF83,)))
+WRAP_5FCEB0_TAIL = (0x5FCFA3, 64, 0x5B9720)   # `jmp 0x5B9720` becomes a timed `call; ret` (the ECX-only callee has a plain ret)
+BRAIN_CALLS = (
+    (65, 0x7EE750, (0x66CE0F,)), (66, 0x679300, (0x66CE5D,)), (67, 0x63C440, (0x66CE7B,)),
+    (68, 0x5B77A0, (0x66CEB3, 0x66D286)), (69, 0x444B60, (0x66CECE, 0x66D23C, 0x66D270, 0x66D2BE, 0x66D2D5)),
+    (70, 0x679C50, (0x66CF2D,)), (71, 0x7FD9E0, (0x66CF51, 0x66CF7E)), (72, 0x66EEB0, (0x66CF96,)),
+    (73, 0xE5F760, (0x66CFF7, 0x66D37E)), (74, 0x10F1160, (0x66D060,)), (75, 0x659480, (0x66D14A,)),
+    (76, 0x7FD070, (0x66D160,)), (77, 0x80E9D0, (0x66D16E,)), (78, 0x66B080, (0x66D235, 0x66D2B7)),
+    (79, 0x66C160, (0x66D262, 0x66D2CE)), (80, 0x663730, (0x66D269,)), (81, 0x62DFF0, (0x66D2EE,)),
+    (82, 0x6666E0, (0x66D3A3,)), (83, 0x6718F0, (0x66D3B1,)), (84, 0x805880, (0x66D3D7, 0x66D541)),
+    (85, 0x658C50, (0x66D3F9,)), (86, 0x64DE80, (0x66D402,)), (87, 0x602E00, (0x66D4FD,)),
+    (88, 0x53EEE0, (0x66D550,)), (89, 0x6E9DA0, (0x66D5F3,)), (90, 0x639200, (0x66D60D,)),
+    (91, 0x55AC60, (0x66D62B,)), (92, 0x55C2E0, (0x66D699,)))
+# `mov ecx,edi; call [eax+disp32]` (8 bytes): the mov stays, the call becomes `call rel32` + 1 NOP to a host trampoline that
+# loads [ecx] and jumps through the same vtable slot.
+BRAIN_VIRTUAL_REWRITES = {
+    0x66D431: (bytes.fromhex('8bcfff90a8010000'), Bind('SITE_CALL_93'), 2),   # [vt+0x1A8], arg = &local (callee pops 4)
+    0x66D43B: (bytes.fromhex('8bcfff9008010000'), Bind('SITE_CALL_94'), 2),   # [vt+0x108] post-brain hook
+}
+
+# BRAIN2 v2 uses exact owner-serial BRAIN_W clones. Every call (including
+# unresolved virtuals) forwards synchronously through one transparent gate.
+# No event, trap, elided body, speculative write or replay region remains.
+# Indirect call sites of the brain that stay original indirect calls in every clone of it (virtual predicates / getters above).
+BRAIN_INDIRECT_CALLS = {0x66CE35, 0x66CE45, 0x66CE55, 0x66CEF5, 0x66D1E8, 0x66D1F8, 0x66D208, 0x66D309, 0x66D535,
+                        0x66D58D, 0x66D59D, 0x66D5AD, 0x66D638, 0x66D646, 0x66D650, 0x66D65F, 0x66D669, 0x66D678,
+                        0x66D682}
+# Site and original callee, in trace ABI order (including conditional/looped sites).
+ACTIVE_CALLS = (
+    (0x58348B, 0x554AA0), (0x58349D, 0x603A40), (0x5834A4, 0x582FB0), (0x5834AD, 0x585960),
+    (0x5834B4, 0x57DA70), (0x5834BB, 0x57DC30), (0x5834C2, 0x585D10), (0x5834C9, 0x585760),
+    (0x5834D0, 0x583A20), (0x5834DB, 0x6F8B60), (0x5834F5, 0x7F08D0), (0x583512, 0x531920),
+    (0x583519, 0x531AB0), (0x583520, 0x531AF0), (0x58352B, 0x582F70), (0x583545, 0x6F3E00))
+ARMY_CALLS = (
+    (0x580324, 0x550360), (0x58032B, 0x585F70),
+    (0x580342, 0x580390), (0x580372, 0x55AD60))
+# Every direct call of 0x580390, including repeated targets, has a distinct inclusive timing site (95..105).
+ARMY_UPDATE_CALLS = (
+    (0x5803B4, 0x55CB50), (0x5803CE, 0x575AE0), (0x580409, 0x6D0750), (0x580423, 0x575720),
+    (0x580458, 0x57FFE0), (0x580488, 0x57FD20), (0x5804C2, 0x581F30), (0x5804F4, 0x55AB80),
+    (0x5804FF, 0x581F30), (0x58054E, 0x579AD0), (0x580598, 0x579AD0))
+AICTRL_CALLS = (
+    (0x7B25B7, 0x756C80), (0x7B264D, 0x7D6510), (0x7B2654, 0x7DBA90), (0x7B265B, 0x755E50),
+    (0x7B2686, 0x6387F0), (0x7B26AB, 0x7D7020), (0x7B26B3, 0x7B5F20), (0x7B26BA, 0x7C8BD0),
+    (0x7B26CA, 0x7D99F0), (0x7B26D1, 0x7A4C80), (0x7B2700, 0x76A580), (0x7B271F, 0x75C880),
+    (0x7B272A, 0x7DB360), (0x7B273B, 0x7D90A0))
+
+# (name, va, end, role, extras).  Extents were verified by decoding: corrections against the assignment text are noted.
+SOURCES = [
+    ('TICK', 0x57DF40, 0x57E105, 'clone'),
+    ('TASK', 0x5CC390, 0x5CC3D6, 'clone'),
+    ('MANAGER', 0x580640, MANAGER_TABLE_VA, 'clone'),         # ret at 0x58094A, one trailing NOP alignment byte
+    ('MANAGER_TABLE', MANAGER_TABLE_VA, MANAGER_TABLE_END, 'clone-data'),
+    ('ACTIVE', 0x583480, 0x583566, 'clone'),
+    ('ARMIES', 0x582FB0, 0x5830FB, 'clone'),
+    ('AIPASS', 0x5832C0, 0x583371, 'clone'),
+    ('ARMY', 0x580320, 0x580387, 'clone'),
+    ('ARMY_UPDATE', 0x580390, 0x5805D5, 'clone'),
+    ('AIWRAP', 0x583380, 0x58338C, 'clone'),
+    ('AICTRL', 0x7B25A0, 0x7B274E, 'clone'),
+    ('AI_STATE_UPDATE', 0x702BB0, 0x702BC5, 'clone'),
+    ('AI_POSITION_UPDATE', 0x7A6960, 0x7A6D28, 'clone'),
+    ('AI_SHAPE_SEARCH', 0x7C7DC0, 0x7C831E, 'clone'),
+    ('AI_WALK', 0x7F1D40, 0x7F1ECA, 'clone'),
+    ('AI_GATHER', 0x804DD0, 0x804F56, 'clone'),
+    ('PLANNER', 0x7D99F0, 0x7D9B13, 'clone'),                 # AI planner (site 34): cheap passes + two round-robin thinks
+    ('BRAIN', 0x66CE00, 0x66D6BC, 'clone'),                   # agent brain (slot +0x0C); the two-entry switch table follows at 0x66D6BC
+    ('BRAIN_TABLE', BRAIN_TABLE_VA, BRAIN_TABLE_END, 'clone-data'),
+    ('WRAP_6F4660', 0x6F4660, 0x6F4697, 'clone'),             # class wrapper; plain ret
+    ('WRAP_602EB0', 0x602EB0, 0x602F49, 'clone'),
+    ('WRAP_5FCEB0', 0x5FCEB0, 0x5FCFAB, 'clone'),             # ends in `pop esi; add esp,4; jmp 0x5B9720`
+    ('TRIGGER', 0x63C440, 0x63C4E2, 'clone'),                 # charge trigger called by the brain; its callback is the only cross-object call
+    ('MOVEORDER', 0x658C50, 0x659125, 'clone'),
+    ('DRIVER_64DE80', 0x64DE80, 0x64DFD5, 'clone'),           # order/fire driver skeleton (plain ret); BRAIN2 kernel clone
+    # Observational bodies are not global replacements: older profiling clones
+    # may intentionally keep native calls to them. BRAIN_W gates every edge.
+    ('BRAIN_W_FINALIZE', 0x6543D0, 0x654750, 'forward'),
+    ('BRAIN_W_FINALIZE_TABLE', 0x654750, 0x6547AC, 'clone-data'),
+    ('BRAIN_W_POSTURE0', 0x6547F0, 0x654800, 'clone-data'),
+    ('BRAIN_W_POSTURE1', 0x654800, 0x654810, 'clone-data'),
+    ('BRAIN_W_POSTURE2', 0x654810, 0x654820, 'clone-data'),
+    ('BRAIN_W_FIRE', 0x659600, 0x659B5A, 'forward'),
+    ('BRAIN_W_REFERENCE', 0x6758D0, 0x675B5D, 'forward'),
+    ('BRAIN_W_BEGIN', 0x6666B0, 0x6666B8, 'forward'),         # push 1; call 6758D0; ret(6666B7): the ret is inside the span
+    ('BRAIN_W_STEP', 0x66E670, 0x66E678, 'forward'),          # push 0; call 6758D0; ret(66E677)
+    ('BRAIN_W_REQUEST', 0x659520, 0x659595, 'forward'),
+    ('BRAIN_W_CANDIDATES', 0x63C4F0, 0x63C4F8, 'forward'),
+    ('BRAIN_W_CANDIDATE_BODY', 0x62E910, 0x62F19B, 'forward'),
+    ('BRAIN_W_GATHER', 0x80BF70, 0x80DBC8, 'forward'),
+    ('BRAIN_W_TARGET', 0x6718F0, 0x671B36, 'forward'),
+    ('BRAIN_W_WRAPPER_SERVICE', 0x5B7B20, 0x5B7EF7, 'forward'),
+    ('BRAIN_W_FINISH', 0x63CDD0, 0x63CDF2, 'forward'),
+    ('BRAIN_W_RECYCLE', 0x5AA400, 0x5AA42A, 'forward'),
+    ('BRAIN_W_BACKLINK', 0x658BA0, 0x658BDC, 'forward'),
+    ('BRAIN_W_BACKUNLINK', 0x66BF80, 0x66BFA6, 'forward'),
+    ('BRAIN_W_TIMER', 0x602E00, 0x602EA7, 'forward'),
+    ('BRAIN_W_ANIMATION', 0x670F40, 0x6711AC, 'forward'),
+    ('BRAIN_W_ANIMATION_TABLE', 0x6711AC, 0x6711D8, 'clone-data'),
+    ('BRAIN_W_SLOT', 0x6666E0, 0x66672F, 'forward'),
+    ('BRAIN_W_RESET_REQUEST', 0x6595A0, 0x6595F3, 'forward'),
+    ('BRAIN_W_PARKED', 0x67A050, 0x67A73C, 'forward'),
+    ('BRAIN_W_ORDER', 0x6631A0, 0x663438, 'forward'),
+    ('BRAIN_W_ORDER_TABLE', 0x663438, 0x663464, 'clone-data'),
+    ('BRAIN_W_NODE_ORDER', 0x662E70, 0x662E78, 'forward'),
+    ('BRAIN_W_ARRIVAL', 0x655B20, 0x655B80, 'forward'),
+    ('BRAIN_W_UNLINK', 0x643C90, 0x643CE6, 'forward'),
+    ('BRAIN_W_COMMON_STEP', 0x670EB0, 0x670F37, 'forward'),  # tail jump at 670F32 to 66EE30
+    ('BRAIN_W_HOLDER_STEP', 0x66C160, 0x66C196, 'forward'),  # plain ret at 66C195
+    ('BRAIN_W_HOT_BEGIN', 0x816900, 0x816A4B, 'forward'),  # RET at 816A4A, no INT3 padding
+    ('BRAIN_W_HOT_STEP', 0x819310, 0x819389, 'forward'),   # RETs at 819377 and 819388
+    ('BRAIN_W_HOT_CTOR', 0x7E2C80, 0x7E2CF1, 'forward'),
+    ('BRAIN_W_HOT_DTOR', 0x7EDD00, 0x7EDD24, 'forward'),
+    ('BRAIN_W_HOT_INSTALL', 0x650DC0, 0x650E03, 'forward'),
+    ('BRAIN_W_IDLE_CTOR', 0x61D910, 0x61D947, 'forward'),
+    ('BRAIN_W_IDLE_BEGIN', 0x665E60, 0x665E6B, 'forward'),
+    ('BRAIN_W_IDLE_STEP', 0x66DD10, 0x66E048, 'forward'),
+    ('BRAIN_W_IDLE_DTOR', 0x624EF0, 0x624F14, 'forward'),
+    ('BRAIN_W_IDLE_INSTALL', 0x650650, 0x6506B2, 'forward'),
+    ('BRAIN_W_WAIT_CTOR', 0x61D8F0, 0x61D90A, 'forward'),
+    ('BRAIN_W_WAIT_BEGIN', 0x665E30, 0x665E54, 'forward'),
+    ('BRAIN_W_WAIT_STEP', 0x66DCF0, 0x66DD08, 'forward'),
+    ('BRAIN_W_WAIT_DTOR', 0x5AC9D0, 0x5AC9F4, 'forward'),
+    ('BRAIN_W_WAIT_INSTALL', 0x650600, 0x650643, 'forward'),
+    ('BRAIN_W_STOP', 0x6669B0, 0x6669D0, 'forward'),
+    # Watcher-node begins (vt+4 of node tables 13493B8 / 1349054, reached at the WATCHER virtual begin 66E7BF): 7FF9E0 copies
+    # node+20..+49 into a stack descriptor and calls 80A190; 7FF5C0 passes a stack byte to 809D80. Both dispatchers load
+    # X = [[node+8]] (holder -> soldier) and tail-jump X.vt+188 (650DC0 HOT_INSTALL) / X.vt+134 (650600 WAIT_INSTALL).
+    ('BRAIN_W_NODE_BEGIN_7FF9E0', 0x7FF9E0, 0x7FFA5B, 'forward'),     # plain ret at 7FFA5A
+    ('BRAIN_W_NODE_DISPATCH_80A190', 0x80A190, 0x80A19D, 'forward'),  # jmp [eax+188] at 80A197
+    ('BRAIN_W_NODE_BEGIN_7FF5C0', 0x7FF5C0, 0x7FF5CD, 'forward'),     # plain ret at 7FF5CC
+    ('BRAIN_W_NODE_DISPATCH_809D80', 0x809D80, 0x809D8D, 'forward'),  # jmp [eax+134] at 809D87
+    ('BRAIN_ACTION_BEGIN', 0x816080, 0x8162CF, 'forward'),
+    ('BRAIN_ACTION_STEP', 0x818500, 0x81880E, 'forward'),
+    ('BRAIN_ACTION_RELATED_STEP', 0x818330, 0x8183CE, 'forward'),
+    ('BRAIN_ACTION_RELATED_BEGIN', 0x815FF0, 0x816026, 'forward'),
+    ('BRAIN_ACTION_EMPTY', 0x444B60, 0x444B61, 'forward'),
+    ('PIN_IDLE_TABLE', 0x133405C, 0x1334090, 'pin-data'),
+    ('PIN_WAIT_TABLE', 0x1334028, 0x133405C, 'pin-data'),
+    ('PIN_ACTION_TABLE', 0x1347270, 0x13472A4, 'pin-data'),
+    ('PIN_RELATED_ORDER_TABLE', 0x1348D2C, 0x1348D60, 'pin-data'),
+    ('PIN_RELATED_BEGIN_TABLE', 0x1348CC4, 0x1348CF8, 'pin-data'),
+    ('PIN_IDLE_READY', 0x646C20, 0x646C5A, 'pin'),
+    ('PIN_IDLE_DISTRIBUTION', 0x664B40, 0x664BAF, 'pin'),
+    ('PIN_IDLE_DISTRIBUTION_TABLES', 0x664BB0, 0x664BD3, 'pin-data'),
+    ('PIN_IDLE_RANDOM', 0x5FC070, 0x5FC09A, 'pin'),
+    ('PIN_IDLE_WEIGHTED_RANDOM', 0x80E020, 0x80E096, 'pin'),
+    ('PIN_IDLE_RESET', 0x62DF10, 0x62DF1B, 'pin'),
+    ('PIN_IDLE_RANDOM_SCALE', 0x131A7AC, 0x131A7B0, 'pin-data'),
+    ('PIN_IDLE_THRESHOLDS', 0x1318030, 0x131803C, 'pin-data'),
+    ('PIN_IDLE_TIME_SCALE', 0x1325CAC, 0x1325CB0, 'pin-data'),
+    ('PIN_IDLE_DELAY', 0x1325CE0, 0x1325CE4, 'pin-data'),
+    ('PIN_ACTION_MODE', 0x45C180, 0x45C184, 'pin'),
+    ('PIN_ACTION_CLOCK', 0x6ABC80, 0x6ABC87, 'pin'),
+    ('PIN_ACTION_POSE', 0x61E9A0, 0x61E9DA, 'pin'),
+    ('PIN_ACTION_POSE_BUILD', 0x7F6720, 0x7F6764, 'pin'),
+    ('PIN_ACTION_POSE_POSITION', 0x7F6820, 0x7F68E2, 'pin'),
+    ('PIN_ACTION_POSE_HEADING', 0x7F6770, 0x7F6786, 'pin'),
+    ('PIN_ACTION_MATERIALIZE', 0x80E9D0, 0x80EA09, 'pin'),
+    ('PIN_ACTION_IDENTITY', 0x4470B0, 0x4470B3, 'pin'),
+    ('PIN_ACTION_ENABLED', 0x4B4A50, 0x4B4A54, 'pin'),
+    ('PIN_ACTION_RELATED', 0x55C360, 0x55C364, 'pin'),
+    # Hot shadow's pure helper decisions are certified by these live source
+    # hashes too, not merely by the callers' source bytes or a file-time SHA.
+    ('PIN_HOT_FIRST', 0x64F8F0, 0x64F901, 'pin'),
+    ('PIN_HOT_GROUP_PREDICATE', 0x55B0A0, 0x55B0E3, 'pin'),
+    ('PIN_HOT_MANAGER_PREDICATE', 0x55AD60, 0x55AD72, 'pin'),
+    ('PIN_HOT_SECOND', 0x63B3E0, 0x63B422, 'pin'),
+    ('PIN_HOT_OWNER_PREDICATE', 0x5DB820, 0x5DB82B, 'pin'),
+    ('PIN_PROJECTION_CELL_PREDICATE', 0x7FF170, 0x7FF196, 'pin'),
+    ('PIN_PROJECTION_DESCRIPTOR', 0x7EAD80, 0x7EADE3, 'pin'),
+    ('PIN_HOT_ADJUST_ORDER', 0x66AE10, 0x66AE52, 'pin'),
+    ('PIN_HOT_RANK', 0x586400, 0x586429, 'pin'),
+    ('PIN_HOT_SETTER', 0x662E50, 0x662E60, 'pin'),
+    ('PIN_HOT_ADJUST_DESCRIPTOR', 0x66AD00, 0x66AE0F, 'pin'),
+    ('PIN_HOT_SCALE', 0x57E1F0, 0x57E22F, 'pin'),
+    ('PIN_HOT_SCALE_QUERY', 0x55C9A0, 0x55C9BC, 'pin'),
+    ('PIN_HOT_SCALE_ROWS', 0x57ACA0, 0x57ACD6, 'pin'),
+    ('PIN_HOT_SCALE_TAG', 0x57AC90, 0x57AC96, 'pin'),
+    ('PIN_HOT_SCALE_ACTIVE', 0x557450, 0x557454, 'pin'),
+    ('PIN_HOT_SCALE_CACHE', 0xE1BBD0, 0xE1BC8C, 'pin'),
+    ('PIN_HOT_SCALE_RECORD', 0xF88300, 0xF8830B, 'pin'),
+    ('PIN_HOT_BASE_CTOR', 0x61D3B0, 0x61D3F0, 'pin'),
+    ('PIN_HOT_DTOR', 0x7EC990, 0x7EC99B, 'pin'),
+    ('PIN_HOT_BASE_DTOR', 0x623A70, 0x623AB8, 'pin'),
+    ('PIN_HOT_CLEAR_FLAGS', 0x7FD9E0, 0x7FD9EF, 'pin'),
+    ('PIN_HOT_ZERO_U32', 0x461180, 0x461183, 'pin'),
+    ('PIN_HOT_FALSE_BYTE', 0x462CB0, 0x462CB3, 'pin'),
+    ('PIN_HOT_TRUE_BYTE', 0x447880, 0x447883, 'pin'),
+    ('PIN_HOT_EMPTY_DELETE', 0x444B60, 0x444B61, 'pin'),
+    ('PIN_HOT_VTABLE', 0x1348B44, 0x1348B78, 'pin-data'),
+    ('PIN_HOT_MATERIALIZE_TRANSFORM', 0x7F4950, 0x7F4A0E, 'pin'),
+    ('PIN_WALK_KERNEL', 0x80DCF0, 0x80DD77, 'pin'),
+    ('PIN_WALK_OBB', 0x10EC150, 0x10EC3E2, 'pin'),
+    ('PIN_WALK_POINT', 0x10E7030, 0x10E70C4, 'pin'),
+    ('PIN_WALK_EDGES', 0x10E78F0, 0x10E796D, 'pin'),
+    ('PIN_WALK_SEGMENT', 0x559C10, 0x559D25, 'pin'),
+    ('PIN_WALK_SEGMENT_CTOR', 0x10D0900, 0x10D0922, 'pin'),
+    ('PIN_WALK_OBB_EDGE_A', 0x10E9450, 0x10E94FA, 'pin'),
+    ('PIN_WALK_OBB_EDGE_B', 0x65D890, 0x65D93A, 'pin'),
+    ('FORM_COMMAND', 0x581200, 0x58123C, 'clone'),
+    ('FORM_HELPER', 0x57AFC0, 0x57AFFD, 'clone'),
+    ('FORM_ASSIGN', 0x555CA0, 0x555DEB, 'clone'),             # assignment end 0x555DEC includes one int3 pad byte
+    ('BAL_PREFIX', 0x6F54E0, 0x6F5936, 'clone'),
+    ('BAL_MANAGER', 0x6F6BC0, 0x6F6CE1, 'clone'),
+    ('BAL_ITEM', 0x6F54E0, 0x6F6617, 'clone'),                # assignment end 0x6F6613 cuts `jmp 6F5A59` (6F6612..6F6616)
+    ('QUERY', 0x6392C0, 0x639BFC, 'clone'),
+    ('QUERY_TABLE', TABLE_VA, TABLE_END, 'clone-data'),
+    ('QUERY_WRAPPER', 0x53C060, 0x53C177, 'clone'),
+    ('BATCH_CALLEE', 0x789BD0, 0x78A5C6, 'clone'),
+    ('BATCH_WORKER', 0x78BAC0, 0x78BC24, 'clone'),
+    ('PATH_SCHEDULER', 0x81A2C0, 0x81A5DE, 'clone'),          # fastcall ecx = pf, plain ret; no relocations
+    ('PATH_STEPPER', 0x80F5E0, 0x8102EA, 'clone'),            # ret 4; includes out-of-line static-init tail 0x8102B4..0x8102E5
+    ('UNIT_HIT', 0x809620, 0x809A53, 'clone'),                # thiscall ecx = unit, ret 0x14; four rets, no int3 padding
+    ('PIN_UNIT_LEAF_7FA000', 0x7FA000, 0x7FA535, 'pin'),      # pure leaf called by UNIT_HIT at 0x809714 / 0x809897
+    ('PIN_UNIT_LEAF_10DB090', 0x10DB090, 0x10DB1FE, 'pin'),   # pure leaf called by UNIT_HIT at 0x809856 / 0x809874
+    ('PIN_FORM_CONTINUATION', 0x581200, 0x581295, 'pin'),     # assignment end 0x581290 cuts the instruction at 0x58128F
+    ('PIN_FORM_WRAPPER_18F0A00', 0x18F0A00, 0x18F0A2B, 'pin'),  # first 40 bytes cut `movups [esp+0x20],xmm2`; boundary 43
+    ('PIN_FORM_MANAGER_580640', 0x580640, 0x580668, 'pin'),
+    ('PIN_BATCH_APPENDER', APPENDER_VA, 0x747FE4, 'pin'),
+    ('WATCHER', 0x66E780, 0x66E816, 'clone'),
+    ('VISUAL_ENTRY', 0x779E60, 0x77A162, 'clone'),             # ret 4 at 0x77A15F; includes ALL three loops and 0x708870
+    ('VISUAL_ITEM', 0x779EA4, 0x77A025, 'clone'),             # first-loop body only; excludes increment/count reload/backedge
+    ('SOFT_ACTIVE', 0x57DC30, 0x57DECC, 'clone'),
+    ('COLLIDE_Q', 0x81A790, 0x81AC79, 'clone'),
+    # COLLIDE calls the original allocation-free oriented-radius leaf.
+    # Pin its complete body and file-backed .rdata constants. The heading word at
+    # 0x150FBC4 is runtime .data/.bss, not file-backed SOURCE material.
+    ('PIN_COLLIDE_RADIUS', 0x81A670, 0x81A784, 'pin'),
+    ('PIN_COLLIDE_BUMP', 0x1318038, 0x131803C, 'pin-data'),
+    ('PIN_COLLIDE_ONE', 0x1318048, 0x131804C, 'pin-data'),
+    ('PIN_COLLIDE_WEIGHT_R', 0x1325CB8, 0x1325CBC, 'pin-data'),
+    ('PIN_COLLIDE_WEIGHT_N', 0x1325D1C, 0x1325D20, 'pin-data'),
+    ('PIN_COLLIDE_DISTANCE', 0x1331B04, 0x1331B08, 'pin-data'),
+    ('PIN_COLLIDE_FAR_SCALE', 0x1335A50, 0x1335A54, 'pin-data'),
+    ('PIN_COLLIDE_ANGLE_SCALE', 0x1325DAC, 0x1325DB0, 'pin-data'),
+    # Existing owner clone family; worker helpers below are pinned, never cloned.
+    ('LOCO_WRAP', 0x7F0260, 0x7F05F0, 'clone'),
+    ('LOCO_MOVE', 0x7F08F0, 0x7F14BE, 'clone'),
+    ('LOCO_SELECT', 0x62A290, 0x62A34D, 'clone'),
+    ('LOCO_CLASS_WRAP', 0x5B2CA0, 0x5B2E48, 'clone'),
+    ('PIN_LOCO_DTOR_A', 0x12EA1B0, 0x12EA1CB, 'pin'),
+    ('PIN_LOCO_DTOR_B', 0x12E9A30, 0x12E9A6E, 'pin'),
+    ('PIN_LOCO_DTOR_C', 0x12E9970, 0x12E99AE, 'pin'),
+    # 444B40 is shared allocator infrastructure, not copied or reimplemented by
+    # LOCO. Do not add a runtime source pin for it: existing allocator fixtures
+    # interpose that seam before building otherwise unrelated clone families.
+    ('PIN_LOCO_ELEMENT_DTOR', 0x444B60, 0x444B61, 'pin'),
+    ('PIN_LOCO_STAGE_RESET', 0x7F7140, 0x7F7175, 'pin'),
+    # Closed Stage B helpers. Exact bytes: analysis/region-misc-630000-6b0000.asm
+    # 29901..29923: ret at 64C7AC, NOP through 64C7AF, three target dwords
+    # at 64C7B0, nine switch-index bytes at 64C7BC; padding starts 64C7C5.
+    # Keep code/data separate so code relocation census never decodes table bytes.
+    ('PIN_LOCO_ACTIVITY_LEAF', 0x64C780, 0x64C7B0, 'pin'),
+    ('PIN_LOCO_ACTIVITY_TABLE', 0x64C7B0, 0x64C7C5, 'pin-data'),
+    # region-path-7e0000-820000.asm:56696..56710; final ret at 814AC2.
+    ('PIN_LOCO_WRAPPER_QUERY', 0x814AA0, 0x814AC3, 'pin'),
+    # sim-wait-locks.asm:5..7: mov al,[ecx+5C]; ret, four bytes.
+    ('PIN_LOCO_CONFIG_BYTE', 0x45C190, 0x45C194, 'pin'),
+    # agents-move-exact.asm:376..393. Only the null-owner arm is worker-safe,
+    # but the source hash deliberately covers the complete native routine.
+    ('PIN_LOCO_PROJECT', 0x80E9D0, 0x80EA09, 'pin'),
+    # AI census (NTW2_AI_CENSUS): the controller job body is cloned only so its two 7492F0 calls can be counted. Code and table are split
+    # so the relocation census never decodes table bytes; the dword table is rebased into the clone, no other byte changes.
+    ('AI_CONTROLLER', AI_CONTROLLER_VA, AI_CONTROLLER_END, 'clone'),
+    ('AI_CONTROLLER_TABLE', AI_CONTROLLER_TABLE_VA, AI_CONTROLLER_TABLE_END, 'clone-data'),
+    # Participant-private reference-node projection family 7FD070 -> 81C080 -> 81C050 -> 67A790. Sources are shared by all
+    # participant clones. 7FD070 ends at 7FD5A5 (INT3 pad to 7FD5AF; 7FD5B0 is a separate function); the destructor stubs are
+    # pinned only as the evidence for host-side teardown: free(data) with 0xFF7EF0 after per-element RET 444B60.
+    ('NODE_PROJ_7FD070', 0x7FD070, 0x7FD5A5, 'clone'),
+    ('NODE_PROJ_81C080', 0x81C080, 0x81C0C6, 'clone'),
+    ('NODE_PROJ_81C050', 0x81C050, 0x81C07A, 'clone'),
+    ('NODE_PROJ_67A790', 0x67A790, 0x67A9F1, 'clone'),
+    ('PIN_NODE_RING_DTOR', 0x12EA6E0, 0x12EA71F, 'pin'),
+    ('PIN_NODE_IDS_DTOR', 0x12E9E00, 0x12E9E3E, 'pin'),
+    ('PIN_NODE_LOOKUP_DTOR', 0x12E5EC0, 0x12E5EFE, 'pin'),
+    # NTW2_AI_ASYNC2 worker-private walk family. Role 'private': these originals stay live for every other caller, so
+    # other clones may keep calling them; only the AI worker's family retargets into the private copies. Extents decoded:
+    # 7FCA40 ret C at 7FCA86; 7FCA90 cold tail ends with jmp 7FCAB7 at 7FCE74; 808040 cold tail jmp at 80853F;
+    # 7F6F20 ret 8 at 7F6F84; 7F1CC0 ret 8 at 7F1CD8 and 7F1CE4.
+    ('AI2_7FCA40', 0x7FCA40, 0x7FCA89, 'private'),
+    ('AI2_7FCA90', 0x7FCA90, 0x7FCE79, 'private'),
+    ('AI2_808040', 0x808040, 0x808544, 'private'),
+    ('AI2_7F6F20', 0x7F6F20, 0x7F6F87, 'private'),
+    ('AI2_7F1CC0', 0x7F1CC0, 0x7F1CE7, 'private'),
+    # Observer line-of-sight route (analysis/native-crash-ai2-triage.md section 6): vtable 0x13376FC slot 16 = 6A95A0 (ret C at
+    # 6A99CE) -> 6C71D0 (ret 14 at 6C7AAB; static-init cold tail 6C7AB7..6C7AF7 constructs search object 150B5F8 with 7E6C30)
+    # -> {7FCA40 | 6CC730 (ret 4 at 6CC85B/6CC865) -> 808550 (ret 4 at 80856C) -> 808040 | 7F6ED0 (ret 10 at 7F6F0F) -> 7F1CC0}.
+    # 7F1CF0 (ret 4 at 7F1D1B/7F1D35) closes AI2_7F6F20's slow path into 7F1CC0. 809110 (recursive node traversal, ret C at
+    # 8091A0/8091EA) carries no absolute operand; it is copied so the AI walk never executes the original walk-family code.
+    ('AI2_6A95A0', 0x6A95A0, 0x6A99D1, 'private'),
+    ('AI2_6C71D0', 0x6C71D0, 0x6C7AF7, 'private'),
+    ('AI2_6CC730', 0x6CC730, 0x6CC868, 'private'),
+    ('AI2_808550', 0x808550, 0x80856F, 'private'),
+    ('AI2_7F6ED0', 0x7F6ED0, 0x7F6F12, 'private'),
+    ('AI2_7F1CF0', 0x7F1CF0, 0x7F1D38, 'private'),
+    ('AI2_809110', 0x809110, 0x8091ED, 'private'),
+    # Contact responses (src/collision/native_contact.cpp, analysis/native-contact-response.md): the type-8 callback chain the
+    # port transcribes or the owner replays. Pins only: nothing is cloned or patched. Already pinned above and reused:
+    # PIN_LOCO_PROJECT 80E9D0, PIN_COLLIDE_RADIUS 81A670, PIN_COLLIDE_BUMP 1318038 (0.5), PIN_COLLIDE_ONE 1318048 (1.0),
+    # PIN_COLLIDE_ANGLE_SCALE 1325DAC. Extents end after the last RET (no INT3 padding).
+    ('PIN_CONTACT_CALLBACK', 0x64CAD0, 0x64CC70, 'pin'),        # this=R, S; ret 4 at 64CC6D
+    ('PIN_CONTACT_THUNK', 0x64CC70, 0x64CC7F, 'pin'),           # S vt+0x44 -> R vt+0x40
+    ('PIN_CONTACT_TRACKER', 0x52EDB0, 0x52EF6E, 'pin'),         # tracker bit/append + different-team pair event
+    ('PIN_CONTACT_APPEND16', 0x56EE80, 0x56EF3D, 'pin'),        # u16 vector append (owner replay calls it)
+    ('PIN_CONTACT_LINKED', 0x667260, 0x667282, 'pin'),
+    ('PIN_CONTACT_BLOCKS', 0x817160, 0x817253, 'pin'),
+    ('PIN_CONTACT_GATE', 0x64CAA0, 0x64CAC1, 'pin'),
+    ('PIN_CONTACT_AVOID', 0x664010, 0x6640C8, 'pin'),
+    ('PIN_CONTACT_AVAILABLE', 0x6795D0, 0x67965D, 'pin'),
+    ('PIN_CONTACT_CLASSIFY', 0x62F1A0, 0x62F502, 'pin'),
+    ('PIN_CONTACT_FACINGS', 0x7E4BB0, 0x7E4E87, 'pin'),
+    ('PIN_CONTACT_HEADING', 0x80B5B0, 0x80B66E, 'pin'),
+    ('PIN_CONTACT_FAR', 0x81BD10, 0x81BDC7, 'pin'),
+    ('PIN_CONTACT_FACING', 0x7FA690, 0x7FA6E4, 'pin'),
+    ('PIN_CONTACT_OVERLAP', 0x7FA590, 0x7FA68D, 'pin'),
+    ('PIN_CONTACT_TRANSFORM', 0x7F4950, 0x7F4A0E, 'pin'),
+    ('PIN_CONTACT_STUB_FALSE', 0x462CB0, 0x462CB3, 'pin'),     # xor al,al; ret
+    ('PIN_CONTACT_STUB_TRUE', 0x447880, 0x447883, 'pin'),      # mov al,1; ret
+    ('PIN_CONTACT_STUB_OWNER', 0x5DB820, 0x5DB82B, 'pin'),     # [this+0x67C] != 0
+    ('PIN_CONTACT_QUEUE_JMP', 0x629140, 0x629145, 'pin'),      # avoidance vt+0x14: jmp 629240
+    ('PIN_CONTACT_QUEUE', 0x629240, 0x62930E, 'pin'),          # pair-queue append (owner replay calls it through the vtable)
+    ('PIN_CONTACT_QUEUE_RECORD', 0x61F050, 0x61F087, 'pin'),   # {R, S, |dxz|^2}
+    ('PIN_CONTACT_AVOID_SLOT', 0x1334248, 0x133424C, 'pin-data'),  # avoidance vtable 1334234 slot +0x14 = 629140
+    ('PIN_CONTACT_TWO', 0x1325D14, 0x1325D18, 'pin-data'),
+    ('PIN_CONTACT_MIN_DISTANCE', 0x131A7A4, 0x131A7A8, 'pin-data'),
+    ('PIN_CONTACT_HEADING_FACTOR', 0x134955C, 0x1349560, 'pin-data'),
+    ('PIN_CONTACT_SIGN_MASK', 0x1318150, 0x1318160, 'pin-data'),
+    ('PIN_CONTACT_DOMINANCE', 0x1325CF8, 0x1325CFC, 'pin-data'),
+    ('PIN_CONTACT_LEAD', 0x1325D24, 0x1325D28, 'pin-data'),
+]
+
+# Allowed unrelocated image-looking operand fields, pinned by source, field VA and value.
+HIDDEN_ABS_OK = {
+    # mov dword ptr [esp+40h],01010100h: packed byte flags, not an image pointer.
+    'BRAIN_W_REFERENCE': {0x675B06: 0x01010100},
+}
+
+RET = lambda n: bytes([0xC2]) + struct.pack('<H', n)  # noqa: E731
+
+
+def query_abs_retarget(value, site):
+    if value == TABLE_VA:
+        if site != QUERY_TABLE_JMP + 3:
+            fail(f'QUERY: reference to the jump table at {site:#x} outside the pinned jump')
+        return Clone('QUERY_TABLE')
+    return None
+
+
+def manager_abs_retarget(value, site):
+    if value == MANAGER_TABLE_VA:
+        if site != MANAGER_TABLE_JMP + 3:
+            fail(f'MANAGER: unexpected jump-table reference at {site:#x}')
+        return Clone('MANAGER', MANAGER_TABLE_VA - 0x580640)
+    return None
+
+
+def brain_abs_retarget(value, site):
+    if value == BRAIN_TABLE_VA:
+        if site != BRAIN_TABLE_JMP + 3:
+            fail(f'BRAIN: unexpected jump-table reference at {site:#x}')
+        return Clone('BRAIN', BRAIN_TABLE_VA - 0x66CE00)
+    return None
+
+
+def ai_controller_abs_retarget(value, site):
+    if value == AI_CONTROLLER_TABLE_VA:
+        if site != AI_CONTROLLER_TABLE_JMP + 3:
+            fail(f'AI_CONTROLLER: unexpected jump-table reference at {site:#x}')
+        return Clone('AI_CONTROLLER', AI_CONTROLLER_TABLE_VA - AI_CONTROLLER_VA)
+    return None
+
+
+
+
+# The first header has a file-time vptr initializer; the other two are BSS zero construction.
+# No mover cold tail calls a constructor: it only registers original-global destructors.
+# Host Start owns construction and all backing (native allocator/free), before any clone entry.
+LOCO_SCRATCH = (
+    (0x14543B4, 0x14, 'LOCO_SCRATCH_14543B4'),
+    (0x15A1888, 0x10, 'LOCO_SCRATCH_15A1888'),
+    (0x15A189C, 0x10, 'LOCO_SCRATCH_15A189C'),
+    (0x15A1884, 4, 'LOCO_GUARD_15A1884'),
+    (0x15A1898, 4, 'LOCO_GUARD_15A1898'),
+    (0x15A18AC, 4, 'LOCO_GUARD_15A18AC'),
+)
+LOCO_SERVICE_SITES = {
+    0x811ED0: (0x7F0DFF,), 0x811D50: (0x7F0E06,),
+    0x801140: (0x7F0FCE,), 0x80F290: (0x7F0FE5,), 0x81AE40: (0x7F110C,),
+    0x7EFDD0: (0x7F1162, 0x7F11A8, 0x7F1209, 0x7F1246, 0x7F128D),
+    0x7EFA80: (0x7F1169, 0x7F11AF, 0x7F1210, 0x7F124D, 0x7F1294),
+}
+LOCO_MOVE_ORIGINAL_CALLS = {0x7F114C: 0x64C5F0, 0x7F1236: 0x679C50,
+                            0x7F126A: 0x6C7190, 0x7F1393: 0x80DBF0}
+LOCO_COLD_CALLS = {
+    0x7F1421: 0x126DF40, 0x7F143B: 0x126E299, 0x7F1445: 0x126DEF6,
+    0x7F1457: 0x126DF40, 0x7F1471: 0x126E299, 0x7F147B: 0x126DEF6,
+    0x7F148D: 0x126DF40, 0x7F14A7: 0x126E299, 0x7F14B1: 0x126DEF6,
+}
+# Leave boundary branches as separately pinned instructions: region_rewrites deliberately forbids
+# escaping source branches. NOP the three guard branches; all cold tails then become unreachable,
+# and remove every initializer/atexit call there as well. No original TLS/global guard is accessed.
+LOCO_WARM_REGIONS = {start: (end, [b'\x90']) for start, end in (
+    (0x7F09F0, 0x7F0A0A), (0x7F0A10, 0x7F0A24), (0x7F0A2A, 0x7F0A3E),
+    (0x7F141C, 0x7F1430), (0x7F1436, 0x7F144D),
+    (0x7F1452, 0x7F1466), (0x7F146C, 0x7F1483),
+    (0x7F1488, 0x7F149C), (0x7F14A2, 0x7F14B9),
+)}
+LOCO_WARM_BRANCHES = {
+    0x7F0A0A: (bytes.fromhex('0f8f0c0a0000'), b'\x90' * 6),
+    0x7F0A24: (bytes.fromhex('0f8f280a0000'), b'\x90' * 6),
+    0x7F0A3E: (bytes.fromhex('0f8f440a0000'), b'\x90' * 6),
+}
+LOCO_MOVE_ABSOLUTES = (
+    0x150FCA0, 0x150FCA4, 0x1318060, 0x1841BB8, 0x15A1884, 0x15A1898, 0x15A18AC,
+    0x131A7B0, 0x1325D1C, 0x1318048, 0x150FCA0, 0x150FCA4, 0x150FCA0, 0x150FCA4,
+    0x1325CDC, 0x1325CDC, 0x133BBF8, 0x131A7B0, 0x150FB24, 0x1325C60,
+    0x14543B4, 0x15A1888, 0x15A189C, 0x1325D20, 0x1318048,
+    0x150FCA0, 0x150FCA0, 0x150FCA4, 0x1318150, 0x150FCA4, 0x1318150,
+    0x1318068, 0x1318038, 0x1318038, 0x1318060, 0x150FCA8, 0x150FCB0,
+    0x150FB24, 0x150FCA0, 0x150FCA4, 0x15A18A4, 0x15A1890, 0x14543C0,
+    0x15A1884, 0x15A1884, 0x12EA1B0, 0x15A1884,
+    0x15A1898, 0x15A1898, 0x12E9A30, 0x15A1898,
+    0x15A18AC, 0x15A18AC, 0x12E9970, 0x15A18AC,
+)
+
+
+def loco_abs_retarget(value, site):
+    for base, size, binding in LOCO_SCRATCH:
+        if base <= value < base + size:
+            return Bind(binding, value - base)
+    return None
+
+
+# ---- participant-private reference-node projection (analysis/native-loco-path-projection.md section 5).
+# Static storage in the original image (all BSS; every static is zero-constructed, only atexit destructors are registered):
+#   15ADB74 ring {capacity,data,count,read,write}; 15ADB88 ring guard; 15ADB90 visited bitset (0x2000); 15AFB90 visited-id
+#   vector {tag,capacity,count,data}; 15AFBA0 its guard; 14D0A6C lookup candidate vector {tag,capacity,count,data}; 14D0A7C guard.
+# One binding per participant keeps each interior offset: VISIT_p = image of 15ADB74.., LOOKUP_p = image of 14D0A6C..
+NODE_PROJ_PARTICIPANTS = 9
+NODE_VISIT_BASE, NODE_VISIT_END = 0x15ADB74, 0x15AFBA4
+NODE_LOOKUP_BASE, NODE_LOOKUP_END = 0x14D0A6C, 0x14D0A80
+NODE_VISIT_OPERANDS = (0x15ADB74, 0x15ADB78, 0x15ADB7C, 0x15ADB80, 0x15ADB84, 0x15ADB88, 0x15ADB90, 0x15AFB90, 0x15AFBA0)
+NODE_LOOKUP_OPERANDS = (0x14D0A6C, 0x14D0A74, 0x14D0A78, 0x14D0A7C)
+NODE_ORIGINAL_ENTRIES = (0x7FD070, 0x81C080, 0x81C050, 0x67A790)
+# Warm entry: every TLS/static-init guard check and cold registration tail is removed. The three conditional branches of
+# the guard checks are NOPped (their targets, the cold tails, become unreachable and are removed too); the back-branches of
+# the cold tails remain as ordinary instructions targeting the surviving instruction boundaries 7FD09D/7FD0B7 and 67A7B7.
+# 7FD073..7FD097 replaces `mov eax,fs:[2C]` ... `cmp eax,[edx+8]` by the original pushes ebx/ebp/esi/edi, `mov edi,ecx` and
+# `mov [esp+1C],edi` only (the intervening TLS/guard loads write only eax/edx/esi, all dead before 7FD0C7).
+NODE_7FD070_WARM_REGIONS = {
+    0x7FD073: (0x7FD097, [bytes.fromhex('53555657' '8bf9' '897c241c')]),
+    0x7FD09D: (0x7FD0B1, [b'\x90']),
+    **{start: (end, [b'\x90']) for start, end in (
+        (0x7FD539, 0x7FD54D), (0x7FD553, 0x7FD56A), (0x7FD56F, 0x7FD583), (0x7FD589, 0x7FD5A0))},
+}
+NODE_7FD070_WARM_BRANCHES = {
+    0x7FD097: (bytes.fromhex('0f8f9c040000'), b'\x90' * 6),
+    0x7FD0B1: (bytes.fromhex('0f8fb8040000'), b'\x90' * 6),
+}
+# 67A790..67A7B1 keeps only `sub esp,14; push esi; push edi; mov edi,ecx` (TLS/guard loads write eax/edx only, both dead).
+NODE_67A790_WARM_REGIONS = {
+    0x67A790: (0x67A7B1, [bytes.fromhex('83ec14' '56' '57' '8bf9')]),
+    **{start: (end, [b'\x90']) for start, end in ((0x67A9BB, 0x67A9CF), (0x67A9D5, 0x67A9EC))},
+}
+NODE_67A790_WARM_BRANCHES = {0x67A7B1: (bytes.fromhex('0f8f04020000'), b'\x90' * 6)}
+NODE_COLD_CALLS = {
+    '7FD070': {0x7FD53E: 0x126DF40, 0x7FD558: 0x126E299, 0x7FD562: 0x126DEF6,
+               0x7FD574: 0x126DF40, 0x7FD58E: 0x126E299, 0x7FD598: 0x126DEF6},
+    '67A790': {0x67A9C0: 0x126DF40, 0x67A9DA: 0x126E299, 0x67A9E4: 0x126DEF6},
+}
+NODE_SOURCE_CALLS = {
+    '7FD070': {0x7FD0C2: 0x81C080, 0x7FD100: 0x812030, 0x7FD15C: 0x56EE80, 0x7FD168: 0x80E9D0, 0x7FD190: 0x10D0900,
+               0x7FD211: 0x10E73F0, 0x7FD231: 0x57E870, 0x7FD23E: 0x7EAD80, 0x7FD248: 0x7F7070, 0x7FD287: 0x10E73F0,
+               0x7FD29E: 0x10E78F0, 0x7FD2CC: 0x10D0900, 0x7FD300: 0x559C10, 0x7FD370: 0x812030, 0x7FD3CF: 0x56EE80,
+               0x7FD42C: 0x7F7070, 0x7FD4A6: 0x7F7070, 0x7FD50A: 0x7F7070, **NODE_COLD_CALLS['7FD070']},
+    '81C080': {0x81C093: 0x80E9D0, 0x81C0B9: 0x81C050},
+    '81C050': {0x81C072: 0x67A790},
+    '67A790': {0x67A878: 0x6498B0, 0x67A8B7: 0x679860, 0x67A8D9: 0x10E73F0, 0x67A920: 0x679860, 0x67A938: 0x10E73F0,
+               0x67A976: 0x679860, 0x67A98E: 0x10E73F0, **NODE_COLD_CALLS['67A790']},
+}
+# Complete source absolute-operand census, in address order (relocation values of the pinned source spans).
+NODE_7FD070_ABSOLUTES = (
+    0x1841BB8, 0x15ADB88, 0x15AFBA0, 0x15ADB74, 0x15ADB7C, 0x15ADB74, 0x15ADB84, 0x15ADB78, 0x15ADB84, 0x15ADB7C,
+    0x15ADB74, 0x15ADB84, 0x15ADB90, 0x15ADB90, 0x15AFB90, 0x15ADB7C, 0x15ADB80, 0x15ADB78, 0x15ADB74, 0x15ADB7C,
+    0x15ADB80, 0x15ADB90, 0x15ADB7C, 0x15ADB74, 0x15ADB80, 0x15ADB80, 0x15ADB7C, 0x15ADB90, 0x15ADB74, 0x15ADB7C,
+    0x15ADB74, 0x15ADB84, 0x15ADB78, 0x15ADB84, 0x15ADB7C, 0x15ADB74, 0x15ADB84, 0x15ADB90, 0x15ADB90, 0x15AFB90,
+    0x15ADB7C, 0x15ADB90, 0x15ADB7C, 0x15ADB74, 0x15ADB80, 0x15ADB80, 0x15ADB7C, 0x15ADB90, 0x15ADB7C, 0x15ADB74,
+    0x15ADB80, 0x15ADB90, 0x15ADB7C, 0x15ADB74, 0x15ADB80, 0x15ADB88, 0x15ADB88, 0x12EA6E0, 0x15ADB88, 0x15AFBA0,
+    0x15AFBA0, 0x12E9E00, 0x15AFBA0,
+)
+NODE_67A790_ABSOLUTES = (
+    0x1841BB8, 0x14D0A7C, 0x14D0A6C, 0x14D0A74, 0x14D0A78, 0x14D0A74, 0x14D0A78, 0x14D0A74, 0x14D0A74, 0x14D0A7C,
+    0x14D0A7C, 0x12E5EC0, 0x14D0A7C,
+)
+
+
+def node_abs_retarget(participant):
+    def retarget(value, site):
+        if value in NODE_VISIT_OPERANDS:
+            return Bind(f'NODE_PROJ_VISIT_{participant}', value - NODE_VISIT_BASE)
+        if value in NODE_LOOKUP_OPERANDS:
+            return Bind(f'NODE_PROJ_LOOKUP_{participant}', value - NODE_LOOKUP_BASE)
+        return None
+    return retarget
+
+
+# Replace only the three virtual call windows; retain receiver setup and exact
+# stream lengths. Runtime gates certify reached callbacks for owner shadows.
+NODE_CALLBACK_RUNS = {
+    0x7FD0D1: (bytes.fromhex('8b560c8d4e0c8b12ffd2'), [bytes.fromhex('8d4e0c'), b'\xe8', Fix('rel', Bind('NODE_PROJ_CELL')), b'\x90\x90']),
+    0x7FD1FB: (bytes.fromhex('8b018b00ffd0'), [b'\xe8', Fix('rel', Bind('NODE_PROJ_CELL')), b'\x90']),
+    0x7FD2B2: (bytes.fromhex('8bce8b4014ffd0'), [bytes.fromhex('8bce'), b'\xe8', Fix('rel', Bind('NODE_PROJ_EDGE'))]),
+}
+
+def node_projection_configs():
+    out = []
+    for p in range(NODE_PROJ_PARTICIPANTS):
+        out += [
+            dict(clone=f'NODE_PROJ_7FD070_{p}', source='NODE_PROJ_7FD070',
+                 calls={0x81C080: (Clone(f'NODE_PROJ_81C080_{p}'), 1, [0x7FD0C2]),
+                        0x7EAD80: (Bind('NODE_PROJ_DESCRIPTOR'), 1, [0x7FD23E])},
+                 abs_retarget=node_abs_retarget(p), abs_expected=52,
+                 region_rewrites=NODE_7FD070_WARM_REGIONS, run_rewrites=NODE_CALLBACK_RUNS,
+                 insn_patches=NODE_7FD070_WARM_BRANCHES, indirect_calls=set(),
+                 expect_rets={0x7FD284: RET(0x14), 0x7FD467: RET(0x14)}),
+            dict(clone=f'NODE_PROJ_81C080_{p}', source='NODE_PROJ_81C080',
+                 calls={0x81C050: (Clone(f'NODE_PROJ_81C050_{p}'), 1, [0x81C0B9])},
+                 indirect_calls=set(), expect_rets={0x81C0C3: RET(8)}),
+            dict(clone=f'NODE_PROJ_81C050_{p}', source='NODE_PROJ_81C050',
+                 calls={0x67A790: (Clone(f'NODE_PROJ_67A790_{p}'), 1, [0x81C072])},
+                 indirect_calls=set(), expect_rets={0x81C077: RET(0xC)}),
+            dict(clone=f'NODE_PROJ_67A790_{p}', source='NODE_PROJ_67A790',
+                 abs_retarget=node_abs_retarget(p), abs_expected=7,
+                 region_rewrites=NODE_67A790_WARM_REGIONS, insn_patches=NODE_67A790_WARM_BRANCHES,
+                 indirect_calls=set(), expect_rets={0x67A8F3: RET(8), 0x67A9B8: RET(8)}),
+        ]
+    return out
+
+
+NODE_EXPECT_CALLS = {'7FD070': {0x812030, 0x56EE80, 0x80E9D0, 0x10D0900, 0x10E73F0, 0x57E870, 0x7F7070,
+                                0x10E78F0, 0x559C10},
+                     '81C080': {0x80E9D0}, '81C050': set(), '67A790': {0x6498B0, 0x679860, 0x10E73F0}}
+# (decoded instructions, source relocations, surviving external call sites, external jump sites)
+NODE_EXPECT_CENSUS = {'7FD070': (374, 63, 16, 0), '81C080': (23, 0, 1, 0), '81C050': (13, 0, 0, 0),
+                      '67A790': (171, 13, 7, 0)}
+
+
+# ---- NTW2_AI_ASYNC2 worker-private walk family (analysis/native-ai-async-consistency.md §3.2, §5.1 "private structures").
+# Only the dedicated AI worker enters it (slot 0x133E2DC of 702BB0, routed by thread). Every static query object the family
+# touches is rebased into one of three private images; each image keeps the original layout and is congruent mod 16.
+#   AI2_WALK_IMAGE   15AFBA8..15AFDBB: search object 15AFBA8 (0xFC, ctor 7E6C30) + guard 15AFCA4, search object 15AFCA8
+#                    (0xFC, ctor 7E6C30) + guard 15AFDA4, walk output vector 15AFDA8 {tag,capacity,count,data} + guard 15AFDB8
+#   AI2_GATHER_IMAGE 15BBF4C..15BBF5F: interest-gather OUTPUT vector (not a tree root) + guard 15BBF5C
+#   AI2_LOOKUP_IMAGE 14D0A6C..14D0A7F: projection lookup vector + guard (precedent NODE_LOOKUP)
+# Warm entry: the `jg cold` static-init branch is NOPped (the host constructs the images before first use), so the cold
+# tails with their atexit registrations 12E9C00/12E9BB0/12EA370/12E9D10 become unreachable and are never inherited.
+# CRT TLS metadata 1841BB8 / fs:[2C] is NOT rebased (its loads remain and are dead). Tree roots are parameterized:
+# the only root load inside the family, 7F1D73 `mov esi,[eax+0BC]` (static interest tree, model+0xBC), calls the
+# AI2_ROOT_INTEREST binding. The dynamic tree root model+0xC0 is read only outside the family (6F0D16 in 6F0730).
+#   AI2_SPOT_IMAGE   150B5F8..150B6F7: observer-route search object 150B5F8 (0xFC, ctor 7E6C30, context store 6C7213, clear
+#                    6C7A9D) + guard 150B6F4, owned only by 6C71D0 (relocation census, triage section 5)
+# Route counters: every private function's entry is prefixed by `inc dword ptr [AI2_ROUTE_COUNTS + 4*k]` (FF 05 abs32; EFLAGS
+# are dead at a call boundary). Only the AI worker executes the family, so the plain increment has a single writer. k is
+# AI2_ROUTE_ORDER's index; the runtime exports the counters in ai_async2_route_words (ntw2_ai_async2.h RouteWord).
+# AI2_UNROUTED_83FD00: AI2_POSITION_UPDATE's kept call 7A6D1D -> 83FD00 reaches the ORIGINAL walk owners through a 23-function
+# closure that includes owner transactions (812700 registration vector 15AFDF8, 814AD0); it is not privatizable by rebasing,
+# so the call goes through a runtime gate that marshals it to the tick owner (thiscall, ret 18).
+AI2_IMAGES = ((0x15AFBA8, 0x15AFDBC, 'AI2_WALK_IMAGE'), (0x15BBF4C, 0x15BBF60, 'AI2_GATHER_IMAGE'),
+              (0x14D0A6C, 0x14D0A80, 'AI2_LOOKUP_IMAGE'), (0x150B5F8, 0x150B6F8, 'AI2_SPOT_IMAGE'))
+AI2_ROUTE_ORDER = ('AI2_STATE_UPDATE', 'AI2_POSITION_UPDATE', 'AI2_SHAPE_SEARCH', 'AI2_WALK', 'AI2_GATHER', 'AI2_7FCA40',
+                   'AI2_7FCA90', 'AI2_808040', 'AI2_7F6F20', 'AI2_7F1CC0', 'AI2_81C080', 'AI2_81C050', 'AI2_67A790',
+                   'AI2_6A95A0', 'AI2_6C71D0', 'AI2_6CC730', 'AI2_808550', 'AI2_7F6ED0', 'AI2_7F1CF0', 'AI2_809110',
+                   'AI2_80DCF0')
+
+
+def ai2_abs_retarget(value, site):
+    for base, end, binding in AI2_IMAGES:
+        if base <= value < end:
+            return Bind(binding, value - base)
+    return None
+
+
+def ai2_count(name, entry):
+    return {entry: [b'\xff\x05', Fix('abs', Bind('AI2_ROUTE_COUNTS', 4 * AI2_ROUTE_ORDER.index(name)))]}
+
+
+def ai2_configs():
+    nop6 = b'\x90' * 6
+    configs = [
+        dict(clone='AI2_STATE_UPDATE', source='AI_STATE_UPDATE',
+             calls={0x7A6960: (Clone('AI2_POSITION_UPDATE'), 1, [0x702BBD])},
+             indirect_calls=set(), expect_rets={0x702BC2: RET(4)}),
+        dict(clone='AI2_POSITION_UPDATE', source='AI_POSITION_UPDATE',
+             calls={0x7C7DC0: (Clone('AI2_SHAPE_SEARCH'), 1, [0x7A6ADE]),
+                    0x7FCA40: (Clone('AI2_7FCA40'), 1, [0x7A6BFD]),
+                    0x83FD00: (Bind('AI2_UNROUTED_83FD00'), 1, [0x7A6D1D])},
+             indirect_calls=set(), expect_rets={0x7A6D27: b'\xc3'}),
+        dict(clone='AI2_SHAPE_SEARCH', source='AI_SHAPE_SEARCH',
+             calls={0x7F1D40: (Clone('AI2_WALK'), 2, [0x7C7FD3, 0x7C8113])},
+             indirect_calls={0x7C8238, 0x7C8264}, expect_rets={0x7C82E9: RET(4), 0x7C831B: RET(4)}),
+        dict(clone='AI2_WALK', source='AI_WALK',
+             calls={0x804DD0: (Clone('AI2_GATHER'), 1, [0x7F1D8D]), 0x80DCF0: (Clone('AI2_80DCF0'), 1, [0x7F1E5A])},
+             insn_patches={0x7F1D62: (bytes.fromhex('0f8f2c010000'), nop6)},
+             run_rewrites={0x7F1D73: (bytes.fromhex('8bb0bc000000' '8d44240c'),
+                                       [b'\xe8', Fix('rel', Bind('AI2_ROOT_INTEREST')), b'\x90', bytes.fromhex('8d44240c')])},
+             abs_retarget=ai2_abs_retarget, abs_expected=15,
+             indirect_calls=set(), expect_rets={0x7F1E1A: RET(4), 0x7F1E91: RET(4)}),
+        dict(clone='AI2_GATHER', source='AI_GATHER',
+             calls={0x809110: (Clone('AI2_809110'), 1, [0x804E0B])},
+             insn_patches={0x804DF3: (bytes.fromhex('0f8f27010000'), nop6)},
+             abs_retarget=ai2_abs_retarget, abs_expected=10,
+             indirect_calls=set(), expect_rets={0x804F1D: RET(0xC)}),
+        dict(clone='AI2_7FCA40', source='AI2_7FCA40',
+             calls={0x7FCA90: (Clone('AI2_7FCA90'), 1, [0x7FCA7A])},
+             indirect_calls=set(), expect_rets={0x7FCA86: RET(0xC)}),
+        dict(clone='AI2_7FCA90', source='AI2_7FCA90',
+             calls={0x808040: (Clone('AI2_808040'), 2, [0x7FCC59, 0x7FCD47])},
+             insn_patches={0x7FCAB1: (bytes.fromhex('0f8f82030000'), nop6)},
+             abs_retarget=ai2_abs_retarget, abs_expected=8,
+             indirect_calls=set(), expect_rets={0x7FCDB9: RET(0xC), 0x7FCE36: RET(0xC)}),
+        dict(clone='AI2_808040', source='AI2_808040',
+             calls={0x7F1D40: (Clone('AI2_WALK'), 1, [0x808492]), 0x81C050: (Clone('AI2_81C050'), 1, [0x808433]),
+                    0x7F6F20: (Clone('AI2_7F6F20'), 1, [0x8084C6])},
+             insn_patches={0x80807B: (bytes.fromhex('0f8f83040000'), nop6)},
+             abs_retarget=ai2_abs_retarget, abs_expected=9,
+             indirect_calls={0x808447}, expect_rets={0x8082F5: RET(0x14), 0x808501: RET(0x14)}),
+        dict(clone='AI2_7F6F20', source='AI2_7F6F20',
+             calls={0x7F1CC0: (Clone('AI2_7F1CC0'), 1, [0x7F6F59]), 0x7F1CF0: (Clone('AI2_7F1CF0'), 1, [0x7F6F6A])},
+             indirect_calls=set(), expect_rets={0x7F6F84: RET(8)}),
+        dict(clone='AI2_7F1CC0', source='AI2_7F1CC0',
+             calls={0x81C080: (Clone('AI2_81C080'), 1, [0x7F1CCB])},
+             indirect_calls=set(), expect_rets={0x7F1CD8: RET(8), 0x7F1CE4: RET(8)}),
+        dict(clone='AI2_81C080', source='NODE_PROJ_81C080',
+             calls={0x81C050: (Clone('AI2_81C050'), 1, [0x81C0B9])},
+             indirect_calls=set(), expect_rets={0x81C0C3: RET(8)}),
+        dict(clone='AI2_81C050', source='NODE_PROJ_81C050',
+             calls={0x67A790: (Clone('AI2_67A790'), 1, [0x81C072])},
+             indirect_calls=set(), expect_rets={0x81C077: RET(0xC)}),
+        dict(clone='AI2_67A790', source='NODE_PROJ_67A790',
+             abs_retarget=ai2_abs_retarget, abs_expected=7,
+             region_rewrites=NODE_67A790_WARM_REGIONS, insn_patches=NODE_67A790_WARM_BRANCHES,
+             indirect_calls=set(), expect_rets={0x67A8F3: RET(8), 0x67A9B8: RET(8)}),
+        # Indirect calls 6A96DD/6A990A/6A9916 dispatch on caller-supplied objects; their targets are not resolved here.
+        dict(clone='AI2_6A95A0', source='AI2_6A95A0',
+             calls={0x6C71D0: (Clone('AI2_6C71D0'), 1, [0x6A994F]), 0x7FCA40: (Clone('AI2_7FCA40'), 1, [0x6A9699])},
+             indirect_calls={0x6A96DD, 0x6A990A, 0x6A9916}, expect_rets={0x6A99CE: RET(0xC)}),
+        dict(clone='AI2_6C71D0', source='AI2_6C71D0',
+             calls={0x6CC730: (Clone('AI2_6CC730'), 3, [0x6C7316, 0x6C7410, 0x6C77E2]),
+                    0x7F6ED0: (Clone('AI2_7F6ED0'), 3, [0x6C73A8, 0x6C749F, 0x6C7883]),
+                    0x7FCA40: (Clone('AI2_7FCA40'), 1, [0x6C79A8])},
+             insn_patches={0x6C71FA: (bytes.fromhex('0f8fb7080000'), nop6)},
+             abs_retarget=ai2_abs_retarget, abs_expected=10,
+             indirect_calls=set(), expect_rets={0x6C7AAB: RET(0x14)}),
+        dict(clone='AI2_6CC730', source='AI2_6CC730',
+             calls={0x808550: (Clone('AI2_808550'), 1, [0x6CC851])},
+             indirect_calls=set(), expect_rets={0x6CC85B: RET(4), 0x6CC865: RET(4)}),
+        dict(clone='AI2_808550', source='AI2_808550',
+             calls={0x808040: (Clone('AI2_808040'), 1, [0x808566])},
+             indirect_calls=set(), expect_rets={0x80856C: RET(4)}),
+        dict(clone='AI2_7F6ED0', source='AI2_7F6ED0',
+             calls={0x7F1CC0: (Clone('AI2_7F1CC0'), 2, [0x7F6EE4, 0x7F6EFB])},
+             indirect_calls=set(), expect_rets={0x7F6F0F: RET(0x10)}),
+        dict(clone='AI2_7F1CF0', source='AI2_7F1CF0',
+             calls={0x7F1CC0: (Clone('AI2_7F1CC0'), 1, [0x7F1D2E])},
+             indirect_calls=set(), expect_rets={0x7F1D1B: RET(4), 0x7F1D35: RET(4)}),
+        dict(clone='AI2_809110', source='AI2_809110',
+             calls={0x809110: (Clone('AI2_809110'), 1, [0x8091D4])},
+             indirect_calls=set(), expect_rets={0x8091A0: RET(0xC), 0x8091EA: RET(0xC)}),
+        dict(clone='AI2_80DCF0', source='PIN_WALK_KERNEL',
+             indirect_calls=set(), expect_rets={0x80DD0E: RET(4), 0x80DD5A: RET(4), 0x80DD74: RET(4)}),
+    ]
+    entry_va = {name: va for name, va, _end, _role in SOURCES}
+    for cfg in configs:
+        count = ai2_count(cfg['clone'], entry_va[cfg['source']])
+        regions = cfg.get('region_rewrites', {})
+        if set(count) & set(regions):
+            # The entry is a shrinking warm region (67A790): the counter leads its replacement pieces instead.
+            (entry, pieces), = count.items()
+            end, body = regions[entry]
+            cfg['region_rewrites'] = {**regions, entry: (end, pieces + body)}
+        else:
+            cfg['inserts'] = count
+    return configs
+
+
+AI2_EXPECT_CALLS = {
+    'AI2_STATE_UPDATE': set(),
+    'AI2_POSITION_UPDATE': {0x4A4190, 0x5443D0, 0x5D7930, 0x722100, 0x76D870, 0x78B070, 0x7978E0,
+                            0x7CB940, 0x80E9D0},
+    'AI2_SHAPE_SEARCH': {0x4A4190, 0x4C9D40, 0x5CDA50, 0x5D7090, 0x78B1C0, 0x7E1BD0, 0x7FCFF0, 0x811910},
+    'AI2_WALK': {0x7EE620, 0x808F90, 0x126DEF6, 0x126DF40, 0x126E299},
+    'AI2_GATHER': {0x6DC9A0, 0x444B40, 0xFF7EF0, 0x126DEF6, 0x126DF40, 0x126E299},
+    'AI2_7FCA40': {0x7EAD50},
+    'AI2_7FCA90': {0x126DEF6, 0x126DF40, 0x126E299, 0x7E6C30, 0x7FCFF0, 0x80B940},
+    'AI2_808040': {0x126DEF6, 0x126DF40, 0x126E299, 0x4C9D40, 0x531E30, 0x5DAC30, 0x5DAC60, 0x6F2040, 0x73F4B0,
+                   0x7E1BD0, 0x7E6C30, 0x7FCE80, 0x7FCFF0},
+    'AI2_7F6F20': {0x531E40, 0x532320, 0x7F6E80},
+    'AI2_7F1CC0': set(),
+    'AI2_81C080': NODE_EXPECT_CALLS['81C080'],
+    'AI2_81C050': NODE_EXPECT_CALLS['81C050'],
+    'AI2_67A790': NODE_EXPECT_CALLS['67A790'],
+    'AI2_6A95A0': {0x80E9D0, 0x5187A0, 0x68E7E0, 0x68E5C0, 0x5EFCC0, 0x6A33F0, 0xFF7EF0},
+    'AI2_6C71D0': {0x531E30, 0x7FCFF0, 0x6E6CC0, 0x6DA460, 0x6B3C00, 0x80E9D0, 0x126DF40, 0x7E6C30, 0x126E299, 0x126DEF6},
+    'AI2_6CC730': {0x55A1B0, 0x6B3C00},
+    'AI2_808550': set(),
+    'AI2_7F6ED0': {0x7F6E80},
+    'AI2_7F1CF0': {0x539CE0, 0x53FBE0},
+    'AI2_809110': {0x7FA540, 0x448B90},
+    'AI2_80DCF0': {0x10D0B50, 0x10D0C70, 0x10EC3F0, 0x10EC150},
+}
+AI2_EXPECT_CENSUS = {
+    'AI2_STATE_UPDATE': (7, 0, 0, 0), 'AI2_POSITION_UPDATE': (233, 11, 17, 1),
+    'AI2_SHAPE_SEARCH': (256, 17, 21, 0), 'AI2_WALK': (112, 17, 5, 0), 'AI2_GATHER': (117, 12, 7, 0),
+    'AI2_7FCA40': (22, 0, 1, 0), 'AI2_7FCA90': (260, 12, 8, 0), 'AI2_808040': (347, 11, 20, 0),
+    'AI2_7F6F20': (37, 0, 3, 0), 'AI2_7F1CC0': (15, 0, 0, 0),
+    'AI2_81C080': NODE_EXPECT_CENSUS['81C080'], 'AI2_81C050': NODE_EXPECT_CENSUS['81C050'],
+    'AI2_67A790': NODE_EXPECT_CENSUS['67A790'],
+    'AI2_6A95A0': (251, 11, 9, 0), 'AI2_6C71D0': (471, 53, 13, 0), 'AI2_6CC730': (78, 2, 2, 0),
+    'AI2_808550': (13, 0, 0, 0), 'AI2_7F6ED0': (22, 0, 1, 0), 'AI2_7F1CF0': (24, 0, 2, 0),
+    'AI2_809110': (78, 0, 2, 0), 'AI2_80DCF0': (42, 0, 5, 0),
+}
+
+
+def clone_configs():
+    manager_insert = [b'\x52\x8b\xcf\xba', Fix('abs', Bind('BAL_JOB')), b'\xe8', Fix('rel', Bind('BAL_STAGE')), b'\x5a']
+    worker_init = b'\x55\x81\xec' + u32(BATCH_CONTEXT_BYTES) + bytes.fromhex('8bec894d00c7450400000000')
+    worker_finish = [b'\x8b\xcd\xe8', Fix('rel', Bind('BATCH_FLUSH')), b'\x81\xc4' + u32(BATCH_CONTEXT_BYTES) + b'\x5d']
+    skip_stub = b'\x31\xc0\x5f\x5e\x5b\x8b\xe5\x5d\xc3'
+    ready_stub = b'\xb8\x01\x00\x00\x00\xeb\x02'
+    # The original zero-count branch bypasses this region, including its byte write. Nonzero calls return the last
+    # item's original [esp+13] byte: 0x708870 receives its ADDRESS, so reconstruct it before the untouched tail.
+    visual_loop = [bytes.fromhex('8bcb'), b'\xe8', Fix('rel', Bind('VISUAL_LOOP')),
+                   bytes.fromhex('884424138b83f8000000')]
+    # Match the original body's stack geometry: 0x14 local bytes above four saved nonvolatiles; locals +11/+12/+13
+    # are scratch, not saved-register bytes. ECX=this, EDX=index; plain ret, unsigned status byte returned in EAX.
+    visual_item_enter = bytes.fromhex('83ec14535556578bd98bfa')
+    visual_item_leave = bytes.fromhex('0fb64424135f5e5d5b83c414c3')
+    return [
+        dict(clone='TICK', source='TICK',
+             calls={0x580640: (Bind('FORM_MANAGER'), 1, None), 0x6F6BC0: (Bind('BAL_MANAGER'), 1, [0x57DFF5]),
+                    0x81A2C0: (Bind('PATH_HOOK'), 1, [0x57DFEA]),
+                    # NTW2_AI_ASYNC2: the outer dynamic-quadtree update is a structural writer of the tree the
+                    # async think walks; its transparent gate joins the think before 817D20 runs.
+                    0x817D20: (Bind('AI2_SPATIAL_JOIN'), 1, [0x57DFDF])},
+             expect_rets={0x57E102: RET(8)}),
+        dict(clone='TASK', source='TASK', calls={0x57DF40: (Bind('TICK_ENTRY'), 1, None)}, expect_rets={0x5CC3D5: b'\xc3'}),
+        dict(clone='MANAGER', source='MANAGER', allow_trailing_int3=True,
+             calls={0x583480: (Clone('ACTIVE'), 2, [0x580725, 0x580731])},
+             indirect_ok={MANAGER_TABLE_JMP}, abs_retarget=manager_abs_retarget, abs_expected=1,
+             indirect_calls={0x5806BA, 0x5806E8, 0x5807A6, 0x580820, 0x5808FE},
+             expect_rets={0x58094A: b'\xc3'}),
+        dict(clone='ACTIVE', source='ACTIVE',
+             calls={target: (Bind(f'SITE_CALL_{i}'), 1, [site]) for i, (site, target) in enumerate(ACTIVE_CALLS)},
+             indirect_calls=set(), expect_rets={0x583565: b'\xc3'}),
+        dict(clone='SOFT_ACTIVE', source='SOFT_ACTIVE',
+             calls={0x81A790: (Bind('COLLIDE_QUERY'), 3, [0x57DCB7, 0x57DD61, 0x57DDC4])},
+             inserts={0x57DC95: [b'\xe8', Fix('rel', Bind('COLLISION_REUSE'))],
+                      0x57DD0E: [b'\xe8', Fix('rel', Bind('COLLISION_REBUILD'))]},
+             indirect_calls=set(), expect_rets={0x57DECB: b'\xc3'}),
+        dict(clone='COLLIDE_Q', source='COLLIDE_Q',
+             calls={0x56EE80: (Bind('SITE_CALL_107'), 1, [0x81A857]),
+                    0x81A670: (Bind('SITE_CALL_108'), 1, [0x81A9D4])},
+             # Keep the original push edi; replace mov eax,[ecx]; call [eax+44] with a same-size timed call.
+             call_rewrites={0x81AC37: (bytes.fromhex('8b01ff5044'), Bind('SITE_CALL_109'))},
+             # Five-byte calls deliberately keep the tight 0x81ABB2 rel8 within reach (122 + 5 = 127).
+             inserts={0x81A8F1: [b'\xe8', Fix('rel', Bind('COLLISION_NUMERIC_BEGIN'))],
+                      0x81A9F5: [b'\xe8', Fix('rel', Bind('COLLISION_ACCEPT'))],
+                      0x81AC18: [b'\xe8', Fix('rel', Bind('COLLISION_LABEL'))],
+                      0x81AC2E: [b'\xe8', Fix('rel', Bind('COLLISION_NUMERIC_END'))],
+                      0x81AC3C: [b'\xe8', Fix('rel', Bind('COLLISION_NUMERIC_END'))]},
+             indirect_calls=set(), expect_rets={0x81AC76: RET(4)}),
+        dict(clone='ARMIES', source='ARMIES',
+             calls={0x580320: (Clone('ARMY'), 1, [0x582FD4]), 0x5832C0: (Clone('AIPASS'), 2, [0x58306E, 0x5830EF]),
+                    0x550240: (Bind('SITE_CALL_25'), 1, [0x58300D])},
+             indirect_calls=set(), expect_rets={0x583079: b'\xc3', 0x5830FA: b'\xc3'}),
+        dict(clone='AIPASS', source='AIPASS',
+             calls={0x539E80: (Bind('SITE_CALL_22'), 1, [0x5832E2]), 0x583380: (Bind('SITE_CALL_24'), 1, [0x583351])},
+             site_calls={0x5832C4: Bind('SITE_CALL_21'), 0x583316: Bind('SITE_CALL_23')},
+             indirect_calls=set(), expect_rets={0x583370: b'\xc3'}),
+        dict(clone='ARMY', source='ARMY',
+             calls={target: (Bind(f'SITE_CALL_{16+i}'), 1, [site]) for i, (site, target) in enumerate(ARMY_CALLS)},
+             # Replace the tail jmp with an appended call/ret wrapper bound to the
+             # timed original 0x539E80. Equivalence requires the ECX-only callee
+             # not to inspect its return address or depend on the caller's stack identity.
+             redirects={0x58037F: 'army_ai'},
+             tail=[('army_ai', [b'\xe8', Fix('rel', Bind('SITE_CALL_20')), b'\xc3'])],
+             indirect_calls=set(), expect_rets={0x580386: b'\xc3'}),
+        dict(clone='ARMY_UPDATE', source='ARMY_UPDATE',
+             site_calls={site: Bind(f'SITE_CALL_{95+i}') for i, (site, _) in enumerate(ARMY_UPDATE_CALLS)},
+             indirect_calls={0x580556, 0x5805A0}, expect_rets={0x5805D4: b'\xc3'}),
+        dict(clone='AIWRAP', source='AIWRAP',
+             site_jumps={0x583385: (0x7B25A0, Clone('AICTRL'))},
+             indirect_calls=set(), expect_rets={0x58338B: b'\xc3'}),
+        dict(clone='AICTRL', source='AICTRL',
+             calls={target: (Bind(f'SITE_CALL_{26+i}'), 1, [site]) for i, (site, target) in enumerate(AICTRL_CALLS)},
+             indirect_calls=set(), expect_rets={0x7B274D: b'\xc3'}),
+        dict(clone='AI_STATE_UPDATE', source='AI_STATE_UPDATE',
+             calls={0x7A6960: (Clone('AI_POSITION_UPDATE'), 1, [0x702BBD])},
+             indirect_calls=set(), expect_rets={0x702BC2: RET(4)}),
+        dict(clone='AI_POSITION_UPDATE', source='AI_POSITION_UPDATE',
+             calls={0x7C7DC0: (Clone('AI_SHAPE_SEARCH'), 1, [0x7A6ADE])},
+             indirect_calls=set(), expect_rets={0x7A6D27: b'\xc3'}),
+        dict(clone='AI_SHAPE_SEARCH', source='AI_SHAPE_SEARCH',
+             calls={0x7F1D40: (Bind('SITE_CALL_40'), 2, [0x7C7FD3, 0x7C8113])},
+             indirect_calls={0x7C8238, 0x7C8264}, expect_rets={0x7C82E9: RET(4), 0x7C831B: RET(4)}),
+        dict(clone='AI_WALK', source='AI_WALK',
+             site_calls={0x7F1D8D: Bind('SITE_CALL_41'), 0x7F1E5A: Bind('SITE_CALL_44'),
+                         0x7F1DE5: Bind('SITE_CALL_45')},
+             indirect_calls=set(), expect_rets={0x7F1E1A: RET(4), 0x7F1E91: RET(4)}),
+        dict(clone='AI_GATHER', source='AI_GATHER',
+             site_calls={0x804E0B: Bind('SITE_CALL_42'), 0x804E4B: Bind('SITE_CALL_43')},
+             indirect_calls=set(), expect_rets={0x804F1D: RET(0xC)}),
+        # PROFILE-only planner clone: all guards/thinks remain original. AI jobs execute original 0x7D99F0 as a whole.
+        dict(clone='PLANNER', source='PLANNER',
+             indirect_calls={0x7D9A6E, 0x7D9A7F, 0x7D9AB9, 0x7D9ACA, 0x7D9AFA, 0x7D9B0B},
+             expect_rets={0x7D9A8D: RET(4), 0x7D9B10: RET(4)}),
+        # Brain profiling: the agent brain and the three class wrappers whose every call is a timed site (NTW2_BRAIN).
+        dict(clone='BRAIN', source='BRAIN',
+             calls={t: (Bind(f'SITE_CALL_{i}'), len(sites), list(sites)) for i, t, sites in BRAIN_CALLS},
+             call_rewrites=BRAIN_VIRTUAL_REWRITES,
+             indirect_ok={BRAIN_TABLE_JMP}, abs_retarget=brain_abs_retarget, abs_expected=1,
+             indirect_calls=BRAIN_INDIRECT_CALLS,
+             expect_rets={0x66CE66: b'\xc3', 0x66D6AE: b'\xc3', 0x66D6BB: b'\xc3'}),
+        dict(clone='WRAP_6F4660', source='WRAP_6F4660',
+             calls={t: (Bind(f'SITE_CALL_{i}'), len(sites), list(sites)) for i, t, sites in WRAP_6F4660_CALLS},
+             indirect_calls=set(), expect_rets={0x6F4696: b'\xc3'}),
+        dict(clone='WRAP_602EB0', source='WRAP_602EB0',
+             calls={t: (Bind(f'SITE_CALL_{i}'), len(sites), list(sites)) for i, t, sites in WRAP_602EB0_CALLS},
+             indirect_calls=set(), expect_rets={0x602F48: b'\xc3'}),
+        dict(clone='WRAP_5FCEB0', source='WRAP_5FCEB0',
+             calls={t: (Bind(f'SITE_CALL_{i}'), len(sites), list(sites)) for i, t, sites in WRAP_5FCEB0_CALLS},
+             redirects={WRAP_5FCEB0_TAIL[0]: 'post_tail'},
+             tail=[('post_tail', [b'\xe8', Fix('rel', Bind(f'SITE_CALL_{WRAP_5FCEB0_TAIL[1]}')), b'\xc3'])],
+             indirect_calls={0x5FCF02, 0x5FCF21}, expect_rets={0x5FCFAA: b'\xc3'}),
+        dict(clone='FORM_COMMAND', source='FORM_COMMAND', calls={0x57AFC0: (Clone('FORM_HELPER'), 1, None)},
+             thunk_targets=(0x58123C, 0x581286), expect_rets={}),
+        dict(clone='FORM_HELPER', source='FORM_HELPER', calls={0x555CA0: (Clone('FORM_ASSIGN'), 1, None)},
+             expect_rets={0x57AFFA: RET(0x10)}),
+        dict(clone='FORM_ASSIGN', source='FORM_ASSIGN', calls={0x18F0A00: (Bind('FORM_ASSIGN'), 1, [0x555CEB])},
+             expect_rets={0x555DE8: RET(0x14)}),
+        dict(clone='BAL_PREFIX', source='BAL_PREFIX', leaf_only=True, forbid_fs=True, must_end_with=('mov',),
+             redirects={0x6F5527: 'skip'}, tail=[('ready', [ready_stub]), ('skip', [skip_stub])], expect_rets={}),
+        dict(clone='BAL_MANAGER', source='BAL_MANAGER', inserts={0x6F6BFF: manager_insert},
+             calls={0x6F54E0: (Clone('BAL_STEP'), 1, [0x6F6C12])}, expect_rets={0x6F6CE0: b'\xc3'}),
+        dict(clone='BAL_ITEM', source='BAL_ITEM', calls={0x53C060: (Clone('QUERY_WRAPPER'), 1, None)},
+             expect_rets={0x6F6526: b'\xc3', 0x6F65AA: b'\xc3'}),
+        dict(clone='QUERY', source='QUERY', indirect_ok={QUERY_TABLE_JMP}, abs_retarget=query_abs_retarget, abs_expected=1,
+             calls={0x10EED80: (Bind('QUERY_GATHER'), 1, [0x639581]), 0x809620: (Bind('QUERY_UNIT'), 1, [0x639699])},
+             expect_rets={0x639AA6: RET(0x24)}),
+        dict(clone='QUERY_WRAPPER', source='QUERY_WRAPPER', calls={0x6392C0: (Bind('QUERY'), 1, [0x53C0E3])},
+             expect_rets={0x53C174: RET(0x18)}),
+        dict(clone='BATCH_CALLEE', source='BATCH_CALLEE',
+             calls={APPENDER_VA: (Bind('BATCH_APPEND'), 2, [0x789D09, 0x789D6C])},
+             ret_patches={0x78A484: (RET(0x18), RET(0x1C)), 0x78A54D: (RET(0x18), RET(0x1C)),
+                          0x78A5C3: (RET(0x18), RET(0x1C))},
+             expect_rets={0x78A484: RET(0x18), 0x78A54D: RET(0x18), 0x78A5C3: RET(0x18)}),
+        dict(clone='BATCH_WORKER', source='BATCH_WORKER',
+             calls={0x789BD0: (Clone('BATCH_CALLEE'), 1, [0x78BC13])},
+             inserts={0x78BB9D: [worker_init], 0x78BBF5: [b'\x55'], 0x78BC1E: worker_finish},
+             expect_rets={0x78BB85: b'\xc3', 0x78BB98: b'\xc3', 0x78BC23: b'\xc3'}),
+        dict(clone='PATH_SCHEDULER', source='PATH_SCHEDULER', calls={0x80F5E0: (Clone('PATH_STEPPER'), 1, [0x81A361])},
+             indirect_calls=set(), forbid_fs=True, expect_rets={0x81A5CA: b'\xc3', 0x81A5DD: b'\xc3'}),
+        dict(clone='PATH_STEPPER', source='PATH_STEPPER', calls={0x8026F0: (Bind('PATH_SOLVE'), 1, [0x8101F5])},
+             indirect_calls={0x80FFCE, 0x80FFFE},
+             expect_rets={a: RET(4) for a in (0x80F9C7, 0x80FF00, 0x80FF18, 0x81004B, 0x81026A, 0x8102B1)}),
+        # The private unit built by native_ballistics_collision.cpp has vtable0, values+0x30, cookie+0x3C, byte+0x40, so the
+        # original virtual getter call and the 0x5B77A0 getter chain are replaced by reads of the private snapshot
+        # (patches proven in analysis/native_ballistics_collision_kit.py).
+        dict(clone='UNIT_HIT', source='UNIT_HIT', forbid_fs=True, indirect_calls=set(),
+             insn_patches={0x809640: (bytes.fromhex('ff5018'), bytes.fromhex('8b4660')),
+                           0x809666: (bytes.fromhex('e835e1daff'), bytes.fromhex('8a01909090'))},
+             expect_rets={a: RET(0x14) for a in (0x809807, 0x809A2D, 0x809A45, 0x809A50)}),
+        dict(clone='VISUAL_ENTRY', source='VISUAL_ENTRY',
+             region_rewrites={0x779EA4: (0x77A034, visual_loop)},
+             indirect_calls={0x77A0FE}, expect_rets={0x779E80: RET(4), 0x77A15F: RET(4)}),
+        dict(clone='VISUAL_ITEM', source='VISUAL_ITEM',
+             inserts={0x779EA4: [visual_item_enter]}, tail=[('return_status', [visual_item_leave])],
+             indirect_calls={0x779F9A, 0x779FAE, 0x779FFC, 0x77A00A}, expect_rets={}, must_end_with={'mov'}),
+        dict(clone='LOCO_WRAP', source='LOCO_WRAP',
+             calls={0x7F08F0: (Clone('LOCO_MOVE'), 1, [0x7F029D]),
+                    0x814AA0: (Bind('LOCO_SERVICE_814AA0'), 1, [0x7F0350])},
+             abs_retarget=loco_abs_retarget, abs_expected=0,
+             indirect_calls={0x7F04E8}, expect_rets={0x7F05EF: b'\xc3'}),
+        dict(clone='LOCO_MOVE', source='LOCO_MOVE',
+             calls={target: (Bind(f'LOCO_SERVICE_{target:X}'), len(sites), sites)
+                    for target, sites in LOCO_SERVICE_SITES.items()},
+             abs_retarget=loco_abs_retarget, abs_expected=6,
+             region_rewrites=LOCO_WARM_REGIONS, insn_patches=LOCO_WARM_BRANCHES,
+             indirect_calls={0x7F0903, 0x7F0BD9, 0x7F0DC1, 0x7F10F7, 0x7F11FA,
+                             0x7F1261, 0x7F1281, 0x7F1370, 0x7F1385},
+             expect_rets={0x7F141B: b'\xc3'}),
+        dict(clone='LOCO_SELECT', source='LOCO_SELECT',
+             calls={0x7F08F0: (Clone('LOCO_MOVE'), 1, [0x62A2C1]),
+                    0x7F0260: (Clone('LOCO_WRAP'), 1, [0x62A2C8]),
+                    0x7FC120: (Bind('LOCO_STAGE_GATHER'), 1, [0x62A2F8])},
+             site_jumps={0x62A30D: (0x7F7140, Bind('LOCO_STAGE_RESET'))},
+             abs_retarget=loco_abs_retarget, abs_expected=0,
+             indirect_calls=set(), expect_rets={0x62A313: b'\xc3'}),
+        dict(clone='LOCO_CLASS_WRAP', source='LOCO_CLASS_WRAP',
+             calls={0x62A290: (Clone('LOCO_SELECT'), 1, [0x5B2CB9])},
+             abs_retarget=loco_abs_retarget, abs_expected=0,
+             indirect_calls={0x5B2D07, 0x5B2D3D, 0x5B2D5A, 0x5B2D75, 0x5B2E24},
+             expect_rets={0x5B2E47: b'\xc3'}),
+        dict(clone='AI_CONTROLLER', source='AI_CONTROLLER',
+             calls={0x7492F0: (Bind('AI_CENSUS_REBUILD'), 2, [0x7C8C5A, 0x7C8C83])},
+             indirect_ok={AI_CONTROLLER_TABLE_JMP}, abs_retarget=ai_controller_abs_retarget, abs_expected=1,
+             indirect_calls=set(), expect_rets={0x7C8C8B: b'\xc3'}),
+        *node_projection_configs(),
+        *ai2_configs(),
+    ]
+# External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
+EXPECT_CALLS = {
+    'TICK': {0x444B60, 0x55ABE0, 0x55AD90, 0x55C490, 0x55C4A0, 0x600910, 0x6063C0, 0x6F3D00, 0x6F73C0,
+        0x10E21F0},
+    'TASK': {0x10F4670},
+    'MANAGER': {0x6FF090, 0x583C60, 0x583AB0, 0x583A90, 0x531D50, 0x5796F0, 0x583820, 0x551BA0,
+        0x54AD10, 0x5695A0, 0x569570, 0x563D20, 0x53E230, 0x576BA0, 0x583440, 0x586BD0, 0x5CBBA0,
+        0x5768E0, 0x6062A0, 0x55AC60, 0x7FE010, 0x7FDA40, 0x7FDB80},
+    'ACTIVE': set(),
+    'ARMIES': set(),
+    'AIPASS': set(),
+    'ARMY': set(),
+    'ARMY_UPDATE': set(),
+    'AIWRAP': set(),
+    'AICTRL': set(),
+    'AI_STATE_UPDATE': set(),
+    'AI_POSITION_UPDATE': {0x4A4190, 0x5443D0, 0x5D7930, 0x722100, 0x76D870, 0x78B070, 0x7978E0,
+                           0x7CB940, 0x7FCA40, 0x80E9D0, 0x83FD00},
+    'AI_SHAPE_SEARCH': {0x4A4190, 0x4C9D40, 0x5CDA50, 0x5D7090, 0x78B1C0, 0x7E1BD0, 0x7FCFF0, 0x811910},
+    'AI_WALK': {0x7EE620, 0x126DEF6, 0x126DF40, 0x126E299},
+    'AI_GATHER': {0x444B40, 0xFF7EF0, 0x126DEF6, 0x126DF40, 0x126E299},
+    'PLANNER': {0x7CD010, 0x7CCF80},
+    'BRAIN': set(), 'WRAP_6F4660': set(), 'WRAP_602EB0': set(), 'WRAP_5FCEB0': set(),
+    'FORM_COMMAND': {0x4B4A50},
+    'FORM_HELPER': {0x4B4A50},
+    'FORM_ASSIGN': {0x444B40, 0x557C80, 0xFF7EF0},
+    'BAL_PREFIX': set(),
+    'BAL_MANAGER': {0x444B40, 0xFF7EF0},
+    'BAL_ITEM': {0x64C5F0, 0x679C50, 0x690EC0, 0x6A6CB0, 0x6C4810, 0x6CCC20, 0x6CCC90, 0x6E95E0, 0x6EE930,
+        0x6F9870, 0x126DEF6, 0x126DF40, 0x126E299},
+    'QUERY': {0x4549F0, 0x542AA0, 0x56EE80, 0x5DB450, 0x5EF540, 0x5F3550, 0x61A760, 0x6DC9A0, 0x6F06A0,
+        0x809C00, 0x10D0900, 0x10E7030, 0x10E83E0, 0x10E8500, 0x126DEF6, 0x126DF40, 0x126E299},
+    'QUERY_WRAPPER': {0x4FF3B0, 0x7F4A10, 0x7F4B50, 0x10DAD10},
+    'BATCH_CALLEE': {0x4C3900, 0x4C3A00, 0x5FBAB0, 0x611A60, 0x7078D0, 0x741B80, 0x741C00, 0x747EA0, 0x74CA60,
+        0x7725D0, 0x794B10, 0x7C4B20, 0x7C4F30, 0x7C4F60, 0x7DC690, 0x10D24A0, 0x10DF020},
+    'BATCH_WORKER': {0x5FBAB0, 0x7078D0, 0x12A7A03, 0x12A7A09},
+    'PATH_SCHEDULER': {0x7EB1A0, 0x7FDFD0, 0x7FE100, 0x7FE150, 0x7FE1C0, 0x80DC70, 0x80ED40, 0x80EF70, 0x80EFA0,
+        0x811D20, 0x81A5E0, 0x81B7B0},
+    'PATH_STEPPER': {0x532320, 0x5698A0, 0x5A3820, 0x61E190, 0x622980, 0x6A3110, 0x7E0880, 0x7E1690, 0x7EAF70,
+        0x7EAFB0, 0x7EB210, 0x7EBAE0, 0x7EBB40, 0x7F0790, 0x7F1630, 0x7F1CC0, 0x7F2EE0, 0x7F61D0, 0x7F6D20,
+        0x7F71C0, 0x7FD770, 0x802F50, 0x80AEA0, 0x80E9D0, 0x8102F0, 0x811850, 0x812700, 0x814990, 0x814AD0,
+        0x815F80, 0x816CA0, 0x816E10, 0x816E40, 0x816E50, 0x816E60, 0xFF7F20, 0x126DEF6, 0x126DF40, 0x126E299},
+    'UNIT_HIT': {0x7FA000, 0x10DB090},
+    'VISUAL_ENTRY': {0x7C5990, 0x708870, 0x799CA0, 0x779A90, 0x77F780},
+    'VISUAL_ITEM': {0x7911E0, 0x799CA0, 0x7D5570},
+    'SOFT_ACTIVE': {0x126E030, 0x12A3320, 0xFF7EF0},
+    'COLLIDE_Q': set(),
+    'LOCO_WRAP': {0x80E9D0},
+    'LOCO_MOVE': set(LOCO_MOVE_ORIGINAL_CALLS.values()),
+    'LOCO_SELECT': {0x8057F0, 0x126DF40, 0x7E3980, 0x126E299, 0x126DEF6},
+    'LOCO_CLASS_WRAP': {0x5F3040, 0x5BE800, 0x5BE5A0, 0x80E9D0},
+    'AI_CONTROLLER': {0x7C8CB0, 0x7C8D80, 0x7C8E20, 0x7C8E40, 0x7CA2B0, 0x7A70C0},
+}
+EXPECT_CALLS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CALLS[entry]
+                     for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CALLS})
+EXPECT_CALLS.update(AI2_EXPECT_CALLS)
+EXPECT_JUMPS = {'FORM_COMMAND': {0x58123C, 0x581286}, 'AI_POSITION_UPDATE': {0x6D3E30}, 'AI_CONTROLLER': {0x7C8F70},
+                'AI2_POSITION_UPDATE': {0x6D3E30}}
+# (decoded instructions, HIGHLOW relocations, external call sites kept original, external jump sites). QUERY matches the
+# earlier source-pinned census: 641 instructions, 30 image absolutes + 1 jump-table reference, 34 external calls.
+EXPECT_CENSUS = {
+    'TICK': (112, 4, 15, 0), 'TASK': (26, 0, 1, 0), 'FORM_COMMAND': (20, 0, 1, 3), 'FORM_HELPER': (20, 0, 2, 0),
+    'FORM_ASSIGN': (110, 0, 5, 0), 'BAL_PREFIX': (250, 21, 0, 0), 'BAL_MANAGER': (106, 0, 3, 0),
+    'BAL_STEP': (0, 0, 0, 0), 'BAL_ITEM': (995, 59, 19, 0), 'QUERY': (641, 31, 34, 0), 'QUERY_TABLE': (0, 4, 0, 0),
+    'QUERY_WRAPPER': (94, 0, 4, 0), 'BATCH_CALLEE': (668, 15, 57, 0), 'BATCH_WORKER': (128, 2, 4, 0),
+    'PATH_SCHEDULER': (205, 0, 12, 0), 'PATH_STEPPER': (728, 24, 50, 0), 'UNIT_HIT': (265, 3, 4, 0),
+    'MANAGER': (208, 3, 26, 0), 'ACTIVE': (66, 0, 0, 0),
+    'ARMIES': (104, 1, 0, 0), 'AIPASS': (60, 0, 0, 0), 'ARMY': (38, 0, 0, 0),
+    'ARMY_UPDATE': (176, 0, 0, 0),
+    'AIWRAP': (4, 0, 0, 0), 'AICTRL': (99, 0, 0, 0),
+    'AI_STATE_UPDATE': (7, 0, 0, 0), 'AI_POSITION_UPDATE': (233, 11, 19, 1),
+    'AI_SHAPE_SEARCH': (256, 17, 21, 0), 'AI_WALK': (112, 17, 4, 0), 'AI_GATHER': (117, 12, 6, 0),
+    'PLANNER': (94, 0, 2, 0),
+    'BRAIN': (578, 16, 0, 0), 'WRAP_6F4660': (17, 0, 0, 0), 'WRAP_602EB0': (34, 1, 0, 0), 'WRAP_5FCEB0': (64, 0, 0, 0),
+    'VISUAL_ENTRY': (207, 10, 5, 0), 'VISUAL_ITEM': (103, 5, 3, 0),
+    'SOFT_ACTIVE': (185, 0, 4, 0), 'COLLIDE_Q': (315, 9, 0, 0),
+    'LOCO_WRAP': (193, 9, 1, 0), 'LOCO_MOVE': (656, 55, 4, 0),
+    'LOCO_SELECT': (45, 10, 5, 0), 'LOCO_CLASS_WRAP': (116, 4, 4, 0), 'AI_CONTROLLER': (63, 1, 7, 1),
+}
+EXPECT_CENSUS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CENSUS[entry]
+                      for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CENSUS})
+EXPECT_CENSUS.update(AI2_EXPECT_CENSUS)
+
+
+# ============================================================================================ generation
+
+QUERY_TABLE_CFG = dict(clone='QUERY_TABLE', source='QUERY_TABLE', target_clone='QUERY',
+                       expected_entries=(0x639668, 0x639670, 0x639670, 0x639668))
+MANAGER_TABLE_CFG = dict(clone='MANAGER_TABLE', source='MANAGER_TABLE', target_clone='MANAGER', offset=0x30C,
+                         jump=MANAGER_TABLE_JMP,
+                         expected_entries=(0x580698, 0x580705, 0x580723, 0x58072F,
+                                           0x5807C9, 0x580723, 0x5807B7, 0x5807C0))
+# The brain's two-entry switch (`movzx eax,[eax+0x66D6C4]; jmp [eax*4+0x66D6BC]`): the dword table is rebased into the clone,
+# the 65-byte index table behind it is read-only data and stays the original.
+BRAIN_TABLE_CFG = dict(clone='BRAIN_TABLE', source='BRAIN_TABLE', target_clone='BRAIN', offset=BRAIN_TABLE_VA - 0x66CE00,
+                       jump=BRAIN_TABLE_JMP, expected_entries=(0x66D423, 0x66D439))
+# Controller switch (`mov eax,[esi+0x61C]; dec eax; cmp eax,8; ja default; jmp [eax*4+0x7C8C8C]`): nine dword entries rebased into the clone.
+AI_CONTROLLER_TABLE_CFG = dict(clone='AI_CONTROLLER_TABLE', source='AI_CONTROLLER_TABLE', target_clone='AI_CONTROLLER',
+                               offset=AI_CONTROLLER_TABLE_VA - AI_CONTROLLER_VA, jump=AI_CONTROLLER_TABLE_JMP,
+                               expected_entries=(0x7C8C06, 0x7C8C06, 0x7C8C0F, 0x7C8C28, 0x7C8C28, 0x7C8C28, 0x7C8C28, 0x7C8C18, 0x7C8C21))
+BAL_STEP_PIECES = [b'\xba', Fix('abs', Bind('BAL_JOB')), b'\xe9', Fix('rel', Bind('BAL_STEP'))]
+
+
+def query_extra_checks(image, plan):
+    """Selector table jump: `lea eax,[edx-1]; cmp eax,3; ja default; jmp [eax*4+TABLE]`."""
+    by_addr = {i.address: (i, d) for i, d, _ in plan.instructions}
+    jmp, _ = by_addr.get(QUERY_TABLE_JMP, (None, None))
+    if jmp is None or jmp.bytes != bytes([0xFF, 0x24, 0x85]) + u32(TABLE_VA):
+        fail('QUERY: computed jump is not the pinned table jump')
+    prev = [i for i, _, _ in plan.instructions if i.address < QUERY_TABLE_JMP][-3:]
+    if [p.mnemonic for p in prev] != ['lea', 'cmp', 'ja'] or prev[1].op_str != 'eax, 3':
+        fail('QUERY: selector range guard of the computed jump changed')
+
+
+def visual_extra_checks(plans):
+    """Pin source calls/relocations even in the removed loop, plus the entry/item stack and tail ABI."""
+    entry, item = plans['VISUAL_ENTRY'], plans['VISUAL_ITEM']
+    original = {ins.address: ins for ins, _dest, _exp in entry.instructions}
+    direct = {site: branch_target(ins) for site, ins in original.items()
+              if is_rel_branch(ins) == ('call', 4)}
+    expected = {0x779E8F: 0x7C5990, 0x779EB2: 0x7911E0, 0x779F18: 0x799CA0, 0x779F68: 0x7D5570,
+                0x77A05B: 0x708870, 0x77A0BC: 0x799CA0, 0x77A10B: 0x779A90, 0x77A13D: 0x77F780}
+    indirect = {site for site, ins in original.items() if ins.group(capstone.CS_GRP_CALL) and is_rel_branch(ins) is None}
+    if direct != expected or indirect != {0x779F9A, 0x779FAE, 0x779FFC, 0x77A00A, 0x77A0FE}:
+        fail('VISUAL_ENTRY: original direct/indirect call sites changed')
+    relocations = {0x779EF1, 0x779EFD, 0x779F3D, 0x779F55, 0x779F5D,
+                   0x77A090, 0x77A09C, 0x77A0E1, 0x77A0ED, 0x77A0F5}
+    for plan in (entry, item):
+        src = plan.source
+        expected_relocs = {r for r in relocations if src['va'] <= r < src['end']}
+        if {src['va'] + r for r in src['relocs']} != expected_relocs:
+            fail(f'{plan.name}: original relocation fields changed')
+    pinned = {
+        0x779E60: '83ec14', 0x779E63: '53', 0x779E64: '8bd9', 0x779E66: '55',
+        0x779E67: '56', 0x779E68: '57', 0x779E69: '80bb3001000000', 0x779E70: '7411',
+        0x779E72: 'c6833001000000', 0x779E80: 'c20400', 0x779E9E: '0f8490010000',
+        0x779F8A: '88442413', 0x77A022: '880c07', 0x77A025: '47',
+        0x77A026: '8b83f8000000', 0x77A02C: '3bf8', 0x77A02E: '0f8270feffff',
+        0x77A034: '89442418', 0x77A038: '8d442413', 0x77A03C: '50',
+        0x77A158: '5f', 0x77A159: '5e', 0x77A15A: '5d', 0x77A15B: '5b',
+        0x77A15C: '83c414', 0x77A15F: 'c20400',
+    }
+    if any(original[site].bytes != bytes.fromhex(want) for site, want in pinned.items()):
+        fail('VISUAL_ENTRY: entry, one-shot, loop status, loop control or tail ABI changed')
+    if entry.mapping[0x77A034] != 0x55 or entry.size != 0x183 or item.size != 0x199:
+        fail('VISUAL: entry seam/tail or callable item frame extent changed')
+    if any(exp['kind'] == 'rewrite_covered' or exp['kind'] == 'rewrite'
+           for ins, _dest, exp in entry.instructions if ins.address >= 0x77A034):
+        fail('VISUAL_ENTRY: serial tail must remain original')
+
+
+def loco_extra_checks(image, plans, header_path):
+    """Pin the owner-only routing, removed cold calls, and complete scratch operand census."""
+    expected_calls = {
+        'LOCO_WRAP': {0x7F029D: 0x7F08F0, 0x7F0350: 0x814AA0, 0x7F037E: 0x80E9D0},
+        'LOCO_MOVE': {**LOCO_MOVE_ORIGINAL_CALLS, **LOCO_COLD_CALLS,
+                      **{site: target for target, sites in LOCO_SERVICE_SITES.items() for site in sites}},
+        'LOCO_SELECT': {0x62A2C1: 0x7F08F0, 0x62A2C8: 0x7F0260,
+                        0x62A2F8: 0x7FC120, 0x62A302: 0x8057F0, 0x62A319: 0x126DF40,
+                        0x62A32F: 0x7E3980, 0x62A339: 0x126E299, 0x62A343: 0x126DEF6},
+        'LOCO_CLASS_WRAP': {0x5B2CB2: 0x5F3040, 0x5B2CB9: 0x62A290,
+                            0x5B2CF9: 0x5BE800, 0x5B2D16: 0x5BE5A0, 0x5B2D2F: 0x80E9D0},
+    }
+    for name, expected in expected_calls.items():
+        got = {ins.address: branch_target(ins) for ins, _d, _e in plans[name].instructions
+               if is_rel_branch(ins) == ('call', 4)}
+        if got != expected:
+            fail(f'{name}: source direct call sites changed')
+    move = plans['LOCO_MOVE']
+    absolutes = tuple(struct.unpack('<I', image.read(move.source['va'] + r, 4))[0]
+                      for r in move.source['relocs'])
+    if absolutes != LOCO_MOVE_ABSOLUTES:
+        fail('LOCO_MOVE: complete source absolute operand census changed')
+    for ins, _d, exp in move.instructions:
+        if ins.address in LOCO_COLD_CALLS and exp['kind'] != 'rewrite_covered':
+            fail('LOCO_MOVE: original cold initializer/atexit call survived')
+        for _field, value in exp.get('abs_live', ()):
+            if loco_abs_retarget(value, ins.address) is not None or value in (
+                    0x1841BB8, 0x12EA1B0, 0x12E9A30, 0x12E9970):
+                fail('LOCO_MOVE: original scratch/guard/TLS/destructor absolute survived')
+    # File-time constructor evidence only: NEVER make this mutable header a live source hash.
+    if image.read(0x14543B4, 20) != u32(0x1312358) + bytes(16):
+        fail('LOCO: static pointer-vector constructor layout changed')
+    for base in (0x15A1888, 0x15A189C):
+        rva = base - PREFERRED_BASE
+        if not any(s.VirtualAddress + s.SizeOfRawData <= rva and
+                   rva + 16 <= s.VirtualAddress + s.Misc_VirtualSize for s in image.pe.sections):
+            fail('LOCO: zero-constructed vector no longer lies entirely in BSS')
+    if image.read(0x444B60, 1) != b'\xc3':
+        fail('LOCO: borrowed-pointer element destructor is no longer empty')
+    # Pin source latches and the exact original mixed-width staging-reset tail, not an approximation.
+    select = {ins.address: ins.bytes for ins, _d, _e in plans['LOCO_SELECT'].instructions}
+    for site, expected in {
+            0x62A29A: '8a86ec050000', 0x62A2A0: '8886ed050000', 0x62A2A6: 'c686ec05000000',
+            0x62A293: '80beec00000001', 0x62A2AF: '83be2806000000',
+            0x62A2B8: '83be2c06000004', 0x62A2CD: '80bea300000000',
+            0x62A30D: 'e92ece1c00'}.items():
+        if select.get(site) != bytes.fromhex(expected):
+            fail(f'LOCO_SELECT: selector/latch/staging instruction changed at {site:#x}')
+    declared = re.search(r'#define\s+NTW2_LOCO_CLONE_BYTES\s+(0x[0-9A-Fa-f]+)u?',
+                         Path(header_path).read_text(encoding='utf-8'))
+    size = sum(plans[name].size for name in expected_calls)
+    if not declared or int(declared.group(1), 16) != size:
+        fail(f'LOCO: header clone byte count differs from emitted {size:#x}')
+
+
+def node_projection_extra_checks(image, plans, header_clones, header_path):
+    """Pin routing, warm-entry removals, per-participant privacy, constructor/destructor evidence and byte census."""
+    callback_regions = {site: (site + len(old), pieces) for site, (old, pieces) in NODE_CALLBACK_RUNS.items()}
+    regions = {'7FD070': {**NODE_7FD070_WARM_REGIONS, **callback_regions}, '67A790': NODE_67A790_WARM_REGIONS}
+    sizes = []
+    for p in range(NODE_PROJ_PARTICIPANTS):
+        for k, entry in enumerate(('7FD070', '81C080', '81C050', '67A790')):
+            name = f'NODE_PROJ_{entry}_{p}'
+            plan = plans[name]
+            if header_clones.index(name) != header_clones.index('NODE_PROJ_7FD070_0') + 4 * p + k:
+                fail(f'{name}: header clone order is not 4 contiguous clones per participant')
+            got = {ins.address: branch_target(ins) for ins, _d, _e in plan.instructions
+                   if is_rel_branch(ins) == ('call', 4)}
+            if got != NODE_SOURCE_CALLS[entry]:
+                fail(f'{name}: source direct call sites changed')
+            removed = {ins.address for ins, _d, exp in plan.instructions if exp['kind'] in ('rewrite', 'rewrite_covered')}
+            span = [(start, end) for start, (end, _) in regions.get(entry, {}).items()]
+            wanted = {ins.address for ins, _d, _e in plan.instructions if any(lo <= ins.address < hi for lo, hi in span)}
+            if removed != wanted:
+                fail(f'{name}: removed warm regions differ from the pinned guard/TLS/cold-tail regions')
+            for site in NODE_COLD_CALLS.get(entry, {}):
+                if site not in removed:
+                    fail(f'{name}: original cold initializer/atexit call at {site:#x} survived')
+            for ins, _d, exp in plan.instructions:
+                if exp['kind'] in ('rewrite', 'rewrite_covered'):
+                    continue
+                if exp.get('abs_live'):
+                    fail(f'{name}: original static/guard/TLS/destructor absolute survived at {ins.address:#x}')
+                if any(op.type == x86.X86_OP_MEM and op.mem.segment == x86.X86_REG_FS for op in ins.operands):
+                    fail(f'{name}: TLS access survived at {ins.address:#x}')
+            for kind, _field, target in plan.fixups:
+                if target.kind == 'IMAGE' and target.ident in NODE_ORIGINAL_ENTRIES:
+                    fail(f'{name}: call re-enters an original member of the projection family')
+                if target.kind == 'CLONE':
+                    nxt = {'7FD070': '81C080', '81C080': '81C050', '81C050': '67A790'}.get(entry)
+                    if target.ident != f'NODE_PROJ_{nxt}_{p}':
+                        fail(f'{name}: internal call does not stay inside participant {p}')
+                if target.kind == 'BINDING':
+                    private = {'7FD070': f'NODE_PROJ_VISIT_{p}', '67A790': f'NODE_PROJ_LOOKUP_{p}'}.get(entry)
+                    if target.ident != private and target.ident not in {'NODE_PROJ_CELL', 'NODE_PROJ_EDGE', 'NODE_PROJ_DESCRIPTOR'}:
+                        fail(f'{name}: binding {target.ident} is not this participant\'s private scratch')
+            sizes.append((p, k, plan.size))
+    for entry, absolutes in (('7FD070', NODE_7FD070_ABSOLUTES), ('67A790', NODE_67A790_ABSOLUTES)):
+        source = plans[f'NODE_PROJ_{entry}_0'].source
+        got = tuple(struct.unpack('<I', image.read(source['va'] + r, 4))[0] for r in source['relocs'])
+        if got != absolutes:
+            fail(f'NODE_PROJ_{entry}: complete source absolute operand census changed')
+    # Constructor evidence: every static of the family lies wholly in BSS, i.e. the native "constructor" is zero fill, and
+    # the only registered destructors are the three pinned atexit stubs: element dtor (444B60, pinned RET) + free(data).
+    for lo, hi in ((NODE_VISIT_BASE, NODE_VISIT_END), (NODE_LOOKUP_BASE, NODE_LOOKUP_END)):
+        rva_lo, rva_hi = lo - PREFERRED_BASE, hi - PREFERRED_BASE
+        if not any(s.VirtualAddress + s.SizeOfRawData <= rva_lo and rva_hi <= s.VirtualAddress + s.Misc_VirtualSize
+                   for s in image.pe.sections):
+            fail(f'NODE_PROJ: {lo:#x}..{hi:#x} is no longer entirely BSS (zero-constructed)')
+    if image.read(0x444B60, 1) != b'\xc3':
+        fail('NODE_PROJ: borrowed element destructor is no longer empty')
+    stubs = {0x12EA6E0: (0x12EA71F, {0x15ADB74, 0x15ADB78, 0x15ADB7C, 0x15ADB80}, {0xFF7EF0}),
+             0x12E9E00: (0x12E9E3E, {0x15AFB98, 0x15AFB9C}, {0x444B60, 0xFF7EF0}),
+             0x12E5EC0: (0x12E5EFE, {0x14D0A74, 0x14D0A78}, {0x444B60, 0xFF7EF0})}
+    for va, (end, absolutes, targets) in stubs.items():
+        _, insns = decode_span(image, va, end - va)
+        values = {struct.unpack('<I', image.read(r, 4))[0] for r in image.span_relocs(va, end - va)}
+        calls = {branch_target(i) for i in insns if is_rel_branch(i) == ('call', 4)}
+        if values != absolutes or calls != targets or insns[-1].bytes != b'\xc3':
+            fail(f'NODE_PROJ: destructor stub {va:#x} no longer frees exactly its vector data')
+    declared = re.search(r'#define\s+NTW2_NODE_PROJ_CLONE_BYTES\s+(0x[0-9A-Fa-f]+)u?',
+                         Path(header_path).read_text(encoding='utf-8'))
+    parts = re.search(r'#define\s+NTW2_NODE_PROJ_PARTICIPANTS\s+(\d+)u?', Path(header_path).read_text(encoding='utf-8'))
+    one = sum(size for p, _k, size in sizes if p == 0)
+    if any(sum(size for q, _k, size in sizes if q == p) != one for p in range(NODE_PROJ_PARTICIPANTS)):
+        fail('NODE_PROJ: participant clone sizes differ')
+    if not declared or int(declared.group(1), 16) != one:
+        fail(f'NODE_PROJ: header clone byte count differs from emitted {one:#x}')
+    if not parts or int(parts.group(1)) != NODE_PROJ_PARTICIPANTS:
+        fail('NODE_PROJ: header participant count differs from the generator')
+
+# One source layout serves both driver users: LOCO keeps its original binds,
+# BRAIN_W uses private forwarding thunks. No mutation of a LOCO binding/source.
+BRAIN_W_SOURCES = {
+    'BRAIN_W': 'BRAIN', 'BRAIN_W_602EB0': 'WRAP_602EB0',
+    'BRAIN_W_5FCEB0': 'WRAP_5FCEB0', 'BRAIN_W_TRIGGER': 'TRIGGER',
+    'BRAIN_W_MOVEORDER': 'MOVEORDER', 'BRAIN_W_DRIVER': 'DRIVER_64DE80',
+    'BRAIN_W_WATCHER': 'WATCHER', 'BRAIN_W_FINALIZE': 'BRAIN_W_FINALIZE',
+    'BRAIN_W_FIRE': 'BRAIN_W_FIRE', 'BRAIN_W_REFERENCE': 'BRAIN_W_REFERENCE',
+    'BRAIN_W_BEGIN': 'BRAIN_W_BEGIN', 'BRAIN_W_STEP': 'BRAIN_W_STEP',
+    'BRAIN_W_REQUEST': 'BRAIN_W_REQUEST',
+    'BRAIN_W_CANDIDATES': 'BRAIN_W_CANDIDATES',
+    'BRAIN_W_CANDIDATE_BODY': 'BRAIN_W_CANDIDATE_BODY',
+    'BRAIN_W_GATHER': 'BRAIN_W_GATHER', 'BRAIN_W_TARGET': 'BRAIN_W_TARGET',
+    'BRAIN_W_WRAPPER_SERVICE': 'BRAIN_W_WRAPPER_SERVICE',
+    'BRAIN_W_FINISH': 'BRAIN_W_FINISH', 'BRAIN_W_RECYCLE': 'BRAIN_W_RECYCLE',
+    'BRAIN_W_BACKLINK': 'BRAIN_W_BACKLINK', 'BRAIN_W_BACKUNLINK': 'BRAIN_W_BACKUNLINK',
+    'BRAIN_W_TIMER': 'BRAIN_W_TIMER', 'BRAIN_W_ANIMATION': 'BRAIN_W_ANIMATION',
+    'BRAIN_W_SLOT': 'BRAIN_W_SLOT', 'BRAIN_W_RESET_REQUEST': 'BRAIN_W_RESET_REQUEST',
+    'BRAIN_W_PARKED': 'BRAIN_W_PARKED', 'BRAIN_W_ORDER': 'BRAIN_W_ORDER',
+    'BRAIN_W_NODE_ORDER': 'BRAIN_W_NODE_ORDER',
+    'BRAIN_W_ARRIVAL': 'BRAIN_W_ARRIVAL', 'BRAIN_W_UNLINK': 'BRAIN_W_UNLINK',
+    'BRAIN_W_COMMON_STEP': 'BRAIN_W_COMMON_STEP',
+    'BRAIN_W_HOLDER_STEP': 'BRAIN_W_HOLDER_STEP',
+    'BRAIN_W_HOT_BEGIN': 'BRAIN_W_HOT_BEGIN',
+    'BRAIN_W_HOT_STEP': 'BRAIN_W_HOT_STEP',
+    'BRAIN_W_HOT_CTOR': 'BRAIN_W_HOT_CTOR',
+    'BRAIN_W_HOT_DTOR': 'BRAIN_W_HOT_DTOR',
+    'BRAIN_W_HOT_INSTALL': 'BRAIN_W_HOT_INSTALL',
+    **{name: name for name in (
+        'BRAIN_W_IDLE_CTOR', 'BRAIN_W_IDLE_BEGIN', 'BRAIN_W_IDLE_STEP', 'BRAIN_W_IDLE_DTOR', 'BRAIN_W_IDLE_INSTALL',
+        'BRAIN_W_WAIT_CTOR', 'BRAIN_W_WAIT_BEGIN', 'BRAIN_W_WAIT_STEP', 'BRAIN_W_WAIT_DTOR', 'BRAIN_W_WAIT_INSTALL',
+        'BRAIN_W_STOP', 'BRAIN_ACTION_BEGIN', 'BRAIN_ACTION_STEP', 'BRAIN_ACTION_RELATED_STEP',
+        'BRAIN_ACTION_RELATED_BEGIN', 'BRAIN_ACTION_EMPTY',
+        'BRAIN_W_NODE_BEGIN_7FF9E0', 'BRAIN_W_NODE_DISPATCH_80A190',
+        'BRAIN_W_NODE_BEGIN_7FF5C0', 'BRAIN_W_NODE_DISPATCH_809D80')},
+}
+# Observation points are native instruction boundaries. The original bytes
+# execute unchanged after the observer, with all input machine state restored.
+BRAIN_W_POINTS = {
+    'BRAIN_W': {0x66D00E, 0x66D2F3, 0x66D443, 0x66D4BB, 0x66D4D9, 0x66D5D4},
+    'BRAIN_W_MOVEORDER': {0x658F44, 0x658E93, 0x658FAE, 0x65909F},
+    'BRAIN_W_DRIVER': {0x64DEC2},
+    'BRAIN_W_REFERENCE': {0x6758D6},
+    'BRAIN_W_CANDIDATE_BODY': {0x62EC97, 0x62EFB3, 0x62EFBD, 0x62F0C0,
+                              0x62F0CC, 0x62F0DF, 0x62F0E9, 0x62F106},
+    'BRAIN_W_GATHER': {0x80C328, 0x80C340, 0x80C35B, 0x80C37C,
+                       0x80C3C9, 0x80CD61, 0x80D3F5, 0x80DA8A},
+}
+# Reference-node lifecycle seams inside the move-order body (agents-move-full.asm:172-181,273): the node's virtual begin
+# (vt+4) and step (vt+8) calls are `mov ecx,edi; call [eax+slot]` = exactly five bytes and become explicit `call rel32` call
+# rewrites to private gate thunks; the constructor 0x61DA90 is a direct call and stays one exact site call. Every one
+# reaches the single transparent B2_SERVICE_GATE with its original call-instruction address as site metadata.
+BRAIN_W_NODE_VIRTUALS = {
+    'BRAIN_W_MOVEORDER': {0x658F6E: (bytes.fromhex('8bcfff5004'), 4), 0x658F7F: (bytes.fromhex('8bcfff5008'), 8)},
+}
+BRAIN_W_NODE_CONSTRUCT = {'BRAIN_W_MOVEORDER': (0x6590F6, 0x61DA90)}
+BRAIN_W_TABLES = {
+    'BRAIN_W_ORDER': [('BRAIN_W_ORDER_TABLE', 0x66323E)],
+    'BRAIN_W_ANIMATION': [('BRAIN_W_ANIMATION_TABLE', 0x670F85)],
+    'BRAIN_W': [('BRAIN_TABLE', BRAIN_TABLE_JMP)],
+    'BRAIN_W_FINALIZE': [('BRAIN_W_FINALIZE_TABLE', 0x6545AF),
+                         ('BRAIN_W_POSTURE0', 0x6545C1),
+                         ('BRAIN_W_POSTURE1', 0x6545ED),
+                         ('BRAIN_W_POSTURE2', 0x654644)],
+}
+# Exact gated-edge census of the two node-lifecycle forwarders. COMMON_STEP 670EB0..670F37: calls 81AC80@670EB3, 66E780@670EE8,
+# node virtual begin [vt+4]@670F10 (`mov ecx,edi` at 670F0E) and step [vt+8]@670F21 (`mov ecx,edi` at 670F1F), 663730@670F2A, tail
+# `jmp 66EE30`@670F32. HOLDER_STEP 66C160..66C196: virtual begin@66C17D (`mov ecx,esi` at 66C17B) and step@66C18E (`mov ecx,esi`
+# at 66C18C), plain ret at 66C195. The mov is carried into the forwarding thunk, so the generic window is register-agnostic.
+BRAIN_W_FORWARD_EDGES = {
+    'BRAIN_W_COMMON_STEP': {0x670EB3, 0x670EE8, 0x670F10, 0x670F21, 0x670F2A, 0x670F32},
+    'BRAIN_W_HOLDER_STEP': {0x66C17D, 0x66C18E},
+    'BRAIN_W_BEGIN': {0x6666B2},
+    'BRAIN_W_STEP': {0x66E672},
+    'BRAIN_W_HOT_BEGIN': {0x816909, 0x816915, 0x816939, 0x816951, 0x81695B, 0x816972, 0x816A41},
+    'BRAIN_W_HOT_STEP': {0x819316, 0x819322, 0x81934C, 0x819358},
+    'BRAIN_W_HOT_CTOR': {0x7E2C89},
+    'BRAIN_W_HOT_DTOR': {0x7EDD03, 0x7EDD16},
+    'BRAIN_W_HOT_INSTALL': {0x650DE4, 0x650DF8},
+    'BRAIN_W_NODE_BEGIN_7FF9E0': {0x7FFA52},
+    'BRAIN_W_NODE_DISPATCH_80A190': {0x80A197},
+    'BRAIN_W_NODE_BEGIN_7FF5C0': {0x7FF5C6},
+    'BRAIN_W_NODE_DISPATCH_809D80': {0x809D87},
+}
+# Pinned indirect tail jumps `jmp [eax+disp32]` (exact bytes). FF /4 becomes FF /6 `push [eax+disp32]` evaluated with the
+# original registers and ESP, then `push site; jmp B2_SERVICE_GATE`: the gate sees the caller's return address on top, exactly
+# as for a forwarded relative tail jump. Any other indirect jump in a BRAIN_W source still fails the census.
+BRAIN_W_INDIRECT_TAILS = {
+    'BRAIN_W_NODE_DISPATCH_80A190': {0x80A197: bytes.fromhex('ffa088010000')},
+    'BRAIN_W_NODE_DISPATCH_809D80': {0x809D87: bytes.fromhex('ffa034010000')},
+}
+BRAIN_W_FORWARD_WINDOWS = {
+    'BRAIN_W_COMMON_STEP': {0x670F0E: bytes.fromhex('8bcfff5004'), 0x670F1F: bytes.fromhex('8bcfff5008')},
+    'BRAIN_W_HOLDER_STEP': {0x66C17B: bytes.fromhex('8bceff5004'), 0x66C18C: bytes.fromhex('8bceff5008')},
+}
+
+
+def brain_w_plan(image, registry, name, header_clones, header_bindings):
+    """Same-size source body, exact call-site forwarding, out-of-line thunks.
+
+    This is a closure census, not an allow-list of presumed harmless calls:
+    every direct/indirect call and external tail is gated. Unknown destinations
+    remain unknown at runtime and still execute synchronously. The whole image
+    SHA and each copied source span pin the complete original instruction set.
+    No service argument/return type needs to be guessed by generated code.
+    """
+    source = registry.by_name[BRAIN_W_SOURCES[name]]
+    va, end = source['va'], source['end']
+    _, insns = decode_span(image, va, source['size'])
+    by_site = {ins.address: k for k, ins in enumerate(insns)}
+    incoming = {branch_target(ins) for ins in insns if is_rel_branch(ins)}
+    table_specs = BRAIN_W_TABLES.get(name, ())
+    for table_name, _ in table_specs:
+        table = registry.by_name[table_name]
+        incoming.update(struct.unpack(f'<{table["size"] // 4}I',
+                                      image.read(table['va'], table['size'])))
+    tails, rewrites, site_calls, site_jumps, occupied = [], {}, {}, {}, set()
+    cursor = source['size']
+
+    def append(label, pieces):
+        nonlocal cursor
+        target = Clone(name, cursor)
+        tails.append((label, pieces))
+        cursor += pieces_length(pieces)
+        return target
+
+    def copied(begin, finish):
+        # Move source-pinned instructions into a private thunk. Relocations are
+        # explicit IMAGE fixups, never embedded preferred-base game pointers.
+        pieces, at = [], begin
+        for field in image.span_relocs(begin, finish - begin):
+            if field > at:
+                pieces.append(image.read(at, field - at))
+            value = struct.unpack('<I', image.read(field, 4))[0]
+            pieces.append(Fix('abs', Img(value)))
+            at = field + 4
+        if at < finish:
+            pieces.append(image.read(at, finish - at))
+        return pieces
+
+    def replace_window(index, observation=False):
+        ins = insns[index]
+        first, last = index, index
+        while ins.address + ins.size - insns[first].address < 5:
+            if first == 0 or insns[first].address in incoming:
+                break
+            prior = insns[first - 1]
+            if prior.group(capstone.CS_GRP_CALL) or prior.group(capstone.CS_GRP_JUMP) or prior.group(capstone.CS_GRP_RET):
+                break
+            first -= 1
+        while insns[last].address + insns[last].size - insns[first].address < 5:
+            last += 1
+            if last >= len(insns):
+                fail(f'{name}: no complete forwarding window at {ins.address:#x}')
+            following = insns[last]
+            if following.address in incoming or following.group(capstone.CS_GRP_CALL) or following.group(capstone.CS_GRP_JUMP) or following.group(capstone.CS_GRP_RET):
+                fail(f'{name}: forwarding suffix crosses control flow at {following.address:#x}')
+        begin, finish = insns[first].address, insns[last].address + insns[last].size
+        covered = {item.address for item in insns[first:last + 1]}
+        if (covered - {begin}) & incoming or covered & occupied:
+            fail(f'{name}: overlapping/interior-entry forwarding window at {begin:#x}')
+        occupied.update(covered)
+        if observation:
+            # The observer is stdcall-like RET 4 and preserves the entire CPU
+            # state. The source instruction sees its exact original ESP.
+            pieces = copied(begin, ins.address)
+            pieces += [b'\x68' + u32(ins.address), b'\xe8', Fix('rel', Bind('B2_OBSERVE'))]
+            pieces += copied(ins.address, finish)
+            pieces += [b'\xe9', Fix('rel', Clone(name, finish - va))]
+        else:
+            return_target = Clone(name, finish - va)
+            if finish != ins.address + ins.size:
+                # Compact `mov eax,[ecx]; call [eax]` needs the following test
+                # to fit a jump. Replay it only after the forwarded call returns.
+                suffix = copied(ins.address + ins.size, finish)
+                suffix += [b'\xe9', Fix('rel', return_target)]
+                return_target = append(f'forward_return_{ins.address:x}', suffix)
+            pieces = copied(begin, ins.address)
+            raw = bytearray(ins.bytes)
+            if len(raw) < 2 or raw[0] != 0xFF or (raw[1] >> 3) & 7 != 2:
+                fail(f'{name}: unsupported indirect call encoding at {ins.address:#x}')
+            # FF /2 call r/m32 -> FF /6 push r/m32, evaluated at original ESP.
+            raw[1] = (raw[1] & 0xC7) | 0x30
+            at = 0
+            for field in image.span_relocs(ins.address, ins.size):
+                offset = field - ins.address
+                pieces.append(bytes(raw[at:offset]))
+                pieces.append(Fix('abs', Img(struct.unpack_from('<I', raw, offset)[0])))
+                at = offset + 4
+            pieces.append(bytes(raw[at:]))
+            pieces += [b'\x50\x8b\x44\x24\x04\xc7\x44\x24\x04',
+                       Fix('abs', return_target), b'\x87\x04\x24',
+                       b'\x68' + u32(ins.address), b'\xe9', Fix('rel', Bind('B2_SERVICE_GATE'))]
+        target = append(f'forward_{ins.address:x}', pieces)
+        length = finish - begin
+        rewrites[begin] = (image.read(begin, length),
+                           [b'\xe9', Fix('rel', target), b'\x90' * (length - 5)])
+
+    points = BRAIN_W_POINTS.get(name, set())
+    for point in sorted(points):
+        if point not in by_site:
+            fail(f'{name}: missing observation point {point:#x}')
+        replace_window(by_site[point], observation=True)
+    node_rewrites, node_calls = {}, set()
+    for site, (old, slot) in BRAIN_W_NODE_VIRTUALS.get(name, {}).items():
+        k = by_site.get(site)
+        if k is None or k + 1 >= len(insns):
+            fail(f'{name}: node virtual window {site:#x} is not an instruction boundary')
+        mov, call_ins = insns[k], insns[k + 1]
+        if (mov.bytes != bytes.fromhex('8bcf') or call_ins.bytes != bytes.fromhex('ff50') + bytes([slot]) or
+                mov.bytes + call_ins.bytes != old or call_ins.address in incoming):
+            fail(f'{name}: node virtual window {site:#x} is not the pinned `mov ecx,edi; call [eax+{slot:#x}]`')
+        node_rewrites[site] = (old, append(f'node_virtual_{site:x}',
+                                           [bytes.fromhex('8bcf') + bytes.fromhex('ff70') + bytes([slot]),
+                                            b'\x68' + u32(call_ins.address), b'\xe9', Fix('rel', Bind('B2_SERVICE_GATE'))]))
+        node_calls.add(k + 1)
+    for index, ins in enumerate(insns):
+        relative = is_rel_branch(ins)
+        call = ins.group(capstone.CS_GRP_CALL) and index not in node_calls
+        external_tail = relative and relative[0] != 'call' and not va <= branch_target(ins) < end
+        tail_jump = BRAIN_W_INDIRECT_TAILS.get(name, {}).get(ins.address)
+        if tail_jump is not None:
+            if bytes(ins.bytes) != tail_jump or image.span_relocs(ins.address, ins.size) or ins.address in incoming:
+                fail(f'{name}: indirect tail at {ins.address:#x} is not the pinned {tail_jump.hex()}')
+            raw = bytearray(ins.bytes)
+            raw[1] = (raw[1] & 0xC7) | 0x30
+            thunk = append(f'forward_{ins.address:x}', [bytes(raw), b'\x68' + u32(ins.address),
+                                                         b'\xe9', Fix('rel', Bind('B2_SERVICE_GATE'))])
+            rewrites[ins.address] = (bytes(ins.bytes), [b'\xe9', Fix('rel', thunk), b'\x90' * (ins.size - 5)])
+            occupied.add(ins.address)
+        elif call and relative is None:
+            replace_window(index)
+        elif (call or external_tail) and relative:
+            if relative[1] != 4:
+                fail(f'{name}: external short transfer at {ins.address:#x}')
+            target = branch_target(ins)
+            thunk = append(f'forward_{ins.address:x}',
+                           [b'\x68', Fix('abs', Img(target)), b'\x68' + u32(ins.address),
+                            b'\xe9', Fix('rel', Bind('B2_SERVICE_GATE'))])
+            if call:
+                site_calls[ins.address] = thunk
+            else:
+                site_jumps[ins.address] = (target, thunk)
+    table_offsets, table_cursor = {}, cursor
+    for table_name, _ in table_specs:
+        table = registry.by_name[table_name]
+        table_offsets[table['va']] = table_cursor
+        table_cursor += table['size']
+
+    def absolute(value, site):
+        if value in table_offsets:
+            return Clone(name, table_offsets[value])
+        return None
+
+    cfg = dict(clone=name, source=source['name'], forward_gates=True, call_rewrites=node_rewrites,
+               site_calls=site_calls, site_jumps=site_jumps, run_rewrites=rewrites,
+               tail=tails, indirect_calls=set(),
+               indirect_ok={jump for _, jump in table_specs},
+               expect_rets={ins.address: bytes(ins.bytes) for ins in insns if ins.group(capstone.CS_GRP_RET)},
+               expect_calls=set(), expect_jumps=set(), abs_retarget=absolute,
+               abs_expected=len(table_specs))
+    construct = BRAIN_W_NODE_CONSTRUCT.get(name)
+    if construct:
+        site, callee = construct
+        ins = insns[by_site[site]]
+        if ins.bytes != b'\xe8' + u32((callee - site - 5) & 0xFFFFFFFF) or site not in site_calls:
+            fail(f'{name}: node constructor {callee:#x} at {site:#x} is not one exact gated direct call')
+    plan = plan_clone(image, registry, cfg, header_clones, header_bindings)
+    plan.forward_tables = []
+    for table_name, jump in table_specs:
+        table = registry.by_name[table_name]
+        entries = struct.unpack(f'<{table["size"] // 4}I', image.read(table['va'], table['size']))
+        append_table(image, registry, plan,
+                     dict(clone=table_name, source=table_name, target_clone=name,
+                          expected_entries=entries, offset=table_offsets[table['va']], jump=jump))
+        plan.forward_tables.append((table_offsets[table['va']], entries, jump))
+    pinned = BRAIN_W_FORWARD_EDGES.get(name)
+    tail_ins = [ins for ins in insns if ins.mnemonic not in ('nop', 'int3')]
+    last = tail_ins[-1]
+    if not (last.group(capstone.CS_GRP_RET) or last.mnemonic == 'jmp'):
+        fail(f'{name}: span ends with {last.mnemonic} at {last.address:#x} and would fall through into its appended thunks')
+    if pinned is not None:
+        got = {int(label.rsplit('_', 1)[1], 16) for label, _ in tails}
+        if got != pinned or insns[-1].address + insns[-1].size != end:
+            fail(f'{name}: forwarded edges {sorted(hex(x) for x in got)} != {sorted(hex(x) for x in pinned)}')
+        for begin, old in BRAIN_W_FORWARD_WINDOWS.get(name, {}).items():
+            if rewrites.get(begin, (None,))[0] != old:
+                fail(f'{name}: pinned virtual window {begin:#x} is not {old.hex()}')
+    # Every original call must be either one exact redirect or a moved indirect
+    # call. No missing target is silently accepted as a pure/inactive operation.
+    if plan.external_calls or plan.external_jumps or plan.indirect_calls:
+        fail(f'{name}: unforwarded closure edge')
+    plan.notes.append('BRAIN2 v2: exact owner-serial forwarding; unknown destinations counted separately')
+    return plan
+
+def build_all(image, header_path):
+    header_bindings, header_clones = parse_header(header_path)
+    registry = SourceRegistry(image)
+    for name, va, end, role in SOURCES:
+        allowed = HIDDEN_ABS_OK.get(name, {})
+        for field_va, value in allowed.items():
+            if not va <= field_va <= end - 4 or image.read(field_va, 4) != u32(value):
+                fail(f'{name}: pinned non-pointer operand changed at {field_va:#x}')
+        registry.add(name, va, end, role, code=not role.endswith('data'), hidden_abs_ok=allowed)
+    plans = {}
+    configs = {cfg['clone']: cfg for cfg in clone_configs()}
+    for name, cfg in configs.items():
+        if name not in EXPECT_CALLS:
+            fail(f'{name}: external call census is not pinned')
+        cfg['expect_calls'] = EXPECT_CALLS[name]
+        cfg['expect_jumps'] = EXPECT_JUMPS.get(name, set())
+    for name in header_clones:
+        if name == 'BAL_STEP':
+            plans[name] = plan_literal(name, BAL_STEP_PIECES)
+        elif name == 'QUERY_TABLE':
+            plans[name] = plan_table(image, registry, QUERY_TABLE_CFG, registry.by_name['QUERY'])
+        elif name in BRAIN_W_SOURCES:
+            plans[name] = brain_w_plan(image, registry, name, header_clones, header_bindings)
+        elif name in configs:
+            plans[name] = plan_clone(image, registry, configs[name], header_clones, header_bindings)
+        else:
+            fail(f'header clone {name} has no pinned construction')
+    extra = set(configs) | set(BRAIN_W_SOURCES) | {'BAL_STEP', 'QUERY_TABLE'}
+    if extra - set(header_clones):
+        fail(f'generator clones not in the header: {sorted(extra - set(header_clones))}')
+    query_extra_checks(image, plans['QUERY'])
+    visual_extra_checks(plans)
+    loco_extra_checks(image, plans, header_path)
+    node_projection_extra_checks(image, plans, header_clones, header_path)
+    manager = plans['MANAGER']
+    by_addr = {i.address: i for i, _, _ in manager.instructions}
+    if (by_addr[MANAGER_TABLE_JMP].bytes != bytes.fromhex('ff24b5') + u32(MANAGER_TABLE_VA) or
+            by_addr[0x580688].bytes != bytes.fromhex('83fe07') or
+            by_addr[0x58068B].bytes != bytes.fromhex('0f8738010000') or
+            by_addr[0x58094B].bytes != b'\x90'):   # ret 0x58094A, then one NOP alignment byte before the table
+        fail('MANAGER: switch range guard, table jump or alignment byte changed')
+    append_table(image, registry, manager, MANAGER_TABLE_CFG)
+    append_table(image, registry, plans['BRAIN'], BRAIN_TABLE_CFG)
+    append_table(image, registry, plans['AI_CONTROLLER'], AI_CONTROLLER_TABLE_CFG)
+    army_insns = {i.address: i for i, _, _ in plans['ARMY'].instructions}
+    if army_insns[0x58037F].bytes != bytes.fromhex('e9fc9afbff'):
+        fail('ARMY: timed tail is no longer the pinned jmp 0x539E80')
+    update_insns = {i.address: i for i, _, _ in plans['ARMY_UPDATE'].instructions}
+    for site, target in ARMY_UPDATE_CALLS:
+        if update_insns[site].bytes != b'\xe8' + u32((target - site - 5) & 0xFFFFFFFF):
+            fail(f'ARMY_UPDATE: direct callee at {site:#x} no longer targets {target:#x}')
+    wrap_insns = {i.address: i for i, _, _ in plans['AIWRAP'].instructions}
+    if (wrap_insns[0x583380].bytes != bytes.fromhex('8b490c') or
+            wrap_insns[0x583383].bytes != bytes.fromhex('85c9') or
+            wrap_insns[0x583385].mnemonic != 'jne'):
+        fail('AIWRAP: controller load, null test or conditional tail changed')
+    planner = {i.address: i for i, _, _ in plans['PLANNER'].instructions}
+    planner_kind = {i.address: e['kind'] for i, _, e in plans['PLANNER'].instructions}
+    if (planner[0x7D9A39].bytes != bytes.fromhex('807c240c00') or planner[0x7D9A3E].mnemonic != 'je' or
+            planner[0x7D9A94].bytes != bytes.fromhex('ff86b8000000') or
+            planner[0x7D9A6E].bytes != b'\xff\xd0' or planner[0x7D9A7F].bytes != bytes.fromhex('ff5010') or
+            planner[0x7D9AB9].bytes != b'\xff\xd0' or planner[0x7D9ABB].bytes != bytes.fromhex('84c0') or
+            planner[0x7D9ABD].mnemonic != 'jne' or planner[0x7D9AC5].bytes != bytes.fromhex('8b0c07') or
+            planner[0x7D9AFA].bytes != b'\xff\xd0' or planner[0x7D9AFC].bytes != bytes.fromhex('84c0') or
+            planner[0x7D9AFE].mnemonic != 'jne' or planner[0x7D9B06].bytes != bytes.fromhex('8b0c07') or
+            planner_kind[0x7D9AC8] != 'plain' or planner_kind[0x7D9ACA] != 'plain' or
+            planner_kind[0x7D9B09] != 'plain' or planner_kind[0x7D9B0B] != 'plain' or
+            planner_kind[0x7D9A6E] != 'plain' or planner_kind[0x7D9A7F] != 'plain'):
+        fail('PLANNER: flag test, counter increment, vt[+0x20] guards, think sequences or full-walk calls changed')
+    tail = re.search(r'#define\s+NTW2_BAL_ITEM_TAIL_OFFSET\s+(0x[0-9A-Fa-f]+)u?', Path(header_path).read_text(encoding='utf-8'))
+    item = plans['BAL_ITEM']
+    mapped = item.mapping.get(0x6F5936)
+    if mapped is None or mapped != 0x6F5936 - 0x6F54E0 or mapped != 0x456 or not tail or int(tail.group(1), 16) != mapped:
+        fail(f'BAL_ITEM: original 0x6F5936 maps to {mapped!r}, header NTW2_BAL_ITEM_TAIL_OFFSET '
+             f'{tail.group(1) if tail else None}; both must be 0x456')
+    for name, expected in EXPECT_CENSUS.items():
+        plan = plans[name]
+        got = (len(plan.instructions), len(plan.source['relocs']) if plan.source else 0,
+               sum(plan.external_calls.values()), sum(plan.external_jumps.values()))
+        if got != expected:
+            fail(f'{name}: census (instructions, relocations, external call sites, external jump sites) {got} != {expected}')
+    if set(EXPECT_CENSUS) | set(BRAIN_W_SOURCES) != set(plans):
+        fail('census is not pinned for every clone')
+    readonly = set()
+    for s in image.pe.sections:
+        if not s.Characteristics & 0x80000000:
+            readonly.add((PREFERRED_BASE + s.VirtualAddress, PREFERRED_BASE + s.VirtualAddress + s.Misc_VirtualSize))
+    # Pure numeric kernels read only constants: every absolute operand must lie in a read-only image section.
+    for source_name in ('BAL_PREFIX', 'UNIT_HIT', 'PIN_UNIT_LEAF_7FA000', 'PIN_UNIT_LEAF_10DB090'):
+        item = registry.by_name[source_name]
+        for r in item['relocs']:
+            value = struct.unpack_from('<I', image.read(item['va'] + r, 4))[0]
+            if not any(lo <= value < hi for lo, hi in readonly):
+                fail(f'{source_name}: absolute operand {value:#x} is not a read-only image constant')
+    for plan in plans.values():
+        for kind, field, target in plan.fixups:
+            validate_target(target, header_clones, header_bindings, plan.name)
+    # no clone may reach back into original code that another clone replaces, except through its replaced calls
+    clone_spans = [(s['va'], s['end'], s['name']) for s in registry.items if s['role'] == 'clone']
+    for plan in plans.values():
+        for target in list(plan.external_calls) + list(plan.external_jumps):
+            for lo, hi, owner in clone_spans:
+                if lo <= target < hi:
+                    fail(f'{plan.name}: untouched call/jump to {target:#x} inside cloned original {owner}')
+        if plan.source is not None and plan.source['code']:
+            for r in image.span_relocs(plan.source['va'], plan.source['size']):
+                value = struct.unpack_from('<I', image.read(r, 4))[0]
+                if any(lo <= value < hi for lo, hi, owner in clone_spans) and plan.name != 'QUERY_TABLE':
+                    if not (plan.name == 'QUERY' and value == TABLE_VA):
+                        fail(f'{plan.name}: absolute reference {value:#x} at {r:#x} points into cloned original code')
+    return registry, plans, header_bindings, header_clones
+
+
+def self_check(image, registry, plans, header_bindings, header_clones):
+    """Materialise like the runtime emitter at several image deltas and compare against the original decode."""
+    by_index = registry.items
+    for delta, base0 in ((0, 0x30000000), (0x01230000, 0x50010000), (0x7FE0000, 0x7000000)):
+        bases, cursor = {}, base0
+        for name in header_clones:
+            bases[name] = cursor
+            cursor += (plans[name].size + 0xFFF) & ~0xFFF
+        bindings = {name: 0x60000000 + 0x1000 * k + 0x10 for k, name in enumerate(header_bindings)}
+        mat = Materializer(image, by_index, plans, delta, bases, bindings)
+        built = {name: mat.build(plans[name]) for name in header_clones}
+        for name in header_clones:
+            plan = plans[name]
+            verify_plan(image, plan, built[name], bases, delta, mat, None)
+            if hasattr(plan, 'entries'):
+                for k, entry in enumerate(plan.entries):
+                    got = struct.unpack_from('<I', built[name], 4 * k)[0]
+                    want = bases['QUERY'] + entry - registry.by_name['QUERY']['va']
+                    if got != want:
+                        fail(f'{name}: table entry {k} = {got:#x}, expected {want:#x}')
+            tables = getattr(plan, 'forward_tables', None)
+            if tables is None:
+                tables = [(*plan.embedded_table, plan.embedded_jump)] if hasattr(plan, 'embedded_table') else []
+            for offset, entries, jump in tables:
+                for k, entry in enumerate(entries):
+                    got = struct.unpack_from('<I', built[name], offset + 4 * k)[0]
+                    if got != bases[name] + plan.mapping[entry]:
+                        fail(f'{name}: embedded table entry {k} does not reach cloned instruction {entry:#x}')
+                field = plan.mapping[jump] + 3
+                if struct.unpack_from('<I', built[name], field)[0] != bases[name] + offset:
+                    fail(f'{name}: switch does not reference the embedded table')
+        # query table jump field
+        q = plans['QUERY']
+        field = plans['QUERY'].mapping[QUERY_TABLE_JMP] + 3
+        if struct.unpack_from('<I', built['QUERY'], field)[0] != bases['QUERY_TABLE']:
+            fail('QUERY: jump-table displacement does not reference the private table')
+        # prefix exits: fallthrough into ready stub, skip branch lands on the skip stub
+        pp = plans['BAL_PREFIX']
+        if pp.body_end != pp.labels['ready'] or built['BAL_PREFIX'][pp.labels['skip']:pp.labels['skip'] + 2] != b'\x31\xc0':
+            fail('BAL_PREFIX: exit stub layout is wrong')
+        # manager insertion executes for branches to its address and precedes the original instruction
+        mp = plans['BAL_MANAGER']
+        entry_off = mp.mapping[0x6F6BFF]
+        if built['BAL_MANAGER'][entry_off:entry_off + 4] != b'\x52\x8b\xcf\xba':
+            fail('BAL_MANAGER: insertion is not at the mapped branch destination')
+        # worker: all three insertion points and the context ABI
+        wp = plans['BATCH_WORKER']
+        for va, head in ((0x78BB9D, b'\x55\x81\xec'), (0x78BBF5, b'\x55'), (0x78BC1E, b'\x8b\xcd\xe8')):
+            off = wp.mapping[va]
+            if built['BATCH_WORKER'][off:off + len(head)] != head:
+                fail(f'BATCH_WORKER: insertion at {va:#x} is not at its mapped destination')
+        # The mover must be independent of TLS/static initialization after explicit host construction.
+        # Selector TLS is intentionally retained: it owns the native global staging object's lifecycle.
+        loco = plans['LOCO_MOVE']
+        for ins in ENGINE.disasm(built['LOCO_MOVE'], bases['LOCO_MOVE']):
+            if any(op.type == x86.X86_OP_MEM and op.mem.segment == x86.X86_REG_FS for op in ins.operands):
+                fail('LOCO_MOVE: emitted warm body still accesses TLS')
+            if is_rel_branch(ins) == ('call', 4) and branch_target(ins) in {
+                    delta + 0x126DF40, delta + 0x126DEF6, delta + 0x126E299}:
+                fail('LOCO_MOVE: emitted warm body still calls static initialization')
+        for site in LOCO_WARM_BRANCHES:
+            off = loco.mapping[site]
+            if built['LOCO_MOVE'][off:off + 6] != b'\x90' * 6:
+                fail('LOCO_MOVE: a cold-tail entrance survived')
+    return True
+
+
+def c_hex_bytes(data):
+    rows = []
+    for k in range(0, len(data), 16):
+        rows.append('    ' + ', '.join(f'0x{b:02X}' for b in data[k:k + 16]))
+    return ',\n'.join(rows)
+
+
+def edge_route(plan, field, reader_va):
+    """Static route class of a retargeted rel32 edge, identical to the runtime's ntw2_grid_edge_route().
+    IMAGE: the resolved destination IS the original reader VA (each call is an exact native reader entry);
+    BINDING/CLONE/OTHER are routes whose reader entry is not proven."""
+    for kind, f, target in plan.fixups:
+        if kind != 'rel' or f != field:
+            continue
+        if target.kind == 'BINDING':
+            return 'BINDING', f'NTW2_BIND_{target.ident}', target.addend
+        if target.kind == 'CLONE':
+            return 'CLONE', f'NTW2_CLONE_{target.ident}', target.addend
+        if target.ident + target.addend == reader_va:
+            return 'IMAGE', hex(reader_va), target.addend
+        return 'OTHER', hex(target.ident + target.addend), target.addend
+    fail(f'grid census: no relative fixup for edge field {field:#x}')
+
+
+def grid_metadata(plans, header_clones, path):
+    """Inventory surviving source calls; never overwrite their resolved targets."""
+    document = json.loads(Path(path).read_text(encoding='utf-8'))
+    readers = document['readers']
+    if not 0 < len(readers) <= 64:
+        fail('grid census requires 1..64 readers')
+    previous = 0
+    for index, reader in enumerate(readers):
+        va, end = reader['va'], reader['end']
+        if reader['id'] != index or not isinstance(va, int) or not isinstance(end, int) or va <= previous or end <= va:
+            fail('grid census reader IDs/ranges must be stable, sorted integer VAs')
+        previous = va
+    by_va = {reader['va']: reader['id'] for reader in readers}
+    edges, ranges, removed, jumps, undeclared = [], [], [], [], []
+    for name in header_clones:
+        plan = plans[name]
+        fixups = {field for kind, field, _target in plan.fixups if kind == 'rel'}
+        for ins, destination, expected in plan.instructions:
+            rel = is_rel_branch(ins)
+            target = branch_target(ins) if rel is not None else None
+            is_call = ins.mnemonic == 'call' and rel is not None
+            if expected['kind'] in ('rewrite', 'rewrite_covered'):
+                # The source instruction no longer exists in the emitted body, so no exact edge can be gated.
+                if is_call and target in by_va:
+                    removed.append({'reader': by_va[target], 'site': ins.address, 'clone': name})
+            elif is_call and target in by_va:
+                field = destination + ins.imm_offset
+                if ins.size != 5 or field not in fixups:
+                    # Intra-clone call: it needs no relocation fixup, so there is no host-visible edge to gate. Reported, never hidden.
+                    jumps.append({'reader': by_va[target], 'site': ins.address, 'clone': name, 'form': 'internal-call'})
+                else:
+                    edges.append((by_va[target], ins.address, name, field))
+                    declared = {int(edge['site'], 0) if isinstance(edge['site'], str) else edge['site']
+                                for edge in readers[by_va[target]].get('exact_clone_calls', [])}
+                    if ins.address not in declared:
+                        undeclared.append({'reader': by_va[target], 'site': ins.address, 'clone': name})
+            elif rel is not None and not is_call and target in by_va:
+                jumps.append({'reader': by_va[target], 'site': ins.address, 'clone': name})
+            for reader in readers:
+                if reader['va'] <= ins.address < reader['end']:
+                    if ins.address + ins.size > reader['end']:
+                        fail(f'grid census reader end splits instruction {ins.address:#x}')
+                    row = (reader['id'], name, destination, destination + ins.size)
+                    if ranges and ranges[-1][:2] == row[:2] and ranges[-1][3] == row[2]:
+                        ranges[-1] = (*row[:2], ranges[-1][2], row[3])
+                    else:
+                        ranges.append(row)
+    if len(edges) > 512:
+        fail(f'grid census has {len(edges)} emitted edges, capacity is 512')
+    routes = {}
+    for r, s, c, f in edges:
+        routes[(c, f)] = edge_route(plans[c], f, readers[r]['va'])
+    report = {'surviving_edges': [
+                  {'reader': r, 'reader_va': readers[r]['va'], 'site': s, 'clone': c, 'field': f,
+                   'route': routes[(c, f)][0], 'route_target': routes[(c, f)][1], 'route_addend': routes[(c, f)][2],
+                   'exact_native_reader_entry': routes[(c, f)][0] == 'IMAGE'}
+                  for r, s, c, f in edges],
+              'exact_native_reader_entries': [
+                  {'reader': r, 'reader_va': readers[r]['va'], 'site': s, 'clone': c}
+                  for r, s, c, f in edges if routes[(c, f)][0] == 'IMAGE'],
+              'route_counts': {k: sum(1 for v in routes.values() if v[0] == k) for k in ('IMAGE', 'BINDING', 'CLONE', 'OTHER')},
+              'removed_source_calls': removed, 'direct_jump_edges_not_gated': jumps,
+              'emitted_edges_not_in_manifest_exact_clone_calls': undeclared}
+    return readers, edges, ranges, report
+
+
+def write_grid_report(path, metadata):
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, 'w', encoding='utf-8', newline='\n') as handle:
+        json.dump(metadata[3], handle, indent=2, sort_keys=True)
+        handle.write('\n')
+
+
+def emit_grid_metadata(metadata):
+    readers, edges, ranges, report = metadata
+    out = ['/* Conservative reader ranges and all surviving direct clone edges. */']
+    out.append('static const ntw2_grid_reader_spec ntw2_grid_readers[] = {')
+    out.extend(f'    {{ 0x{r["va"]:X}u, 0x{r["end"]:X}u }},' for r in readers)
+    out.append('};')
+    out.append('static const ntw2_grid_edge_spec ntw2_grid_edges[] = {')
+    out.extend(f'    {{ {r}u, 0x{s:X}u, NTW2_CLONE_{c}, 0x{f:X}u }},' for r, s, c, f in edges)
+    if not edges:
+        out.append('    { 0, 0, 0, 0 },')
+    out.append('};')
+    out.append(f'static const uint32_t ntw2_grid_edge_count = {len(edges)}u;')
+    out.append('static const ntw2_grid_range_spec ntw2_grid_ranges[] = {')
+    out.extend(f'    {{ {r}u, NTW2_CLONE_{c}, 0x{a:X}u, 0x{b:X}u }},' for r, c, a, b in ranges)
+    if not ranges:
+        out.append('    { 0, 0, 0, 0 },')
+    out.append('};')
+    out.append(f'static const uint32_t ntw2_grid_range_count = {len(ranges)}u;')
+    out.append(f'static const uint32_t ntw2_grid_unresolved_edge_count = {len(report["direct_jump_edges_not_gated"])}u;')
+    return '\n'.join(out) + '\n'
+
+
+def emit(image, registry, plans, header_bindings, header_clones, grid=None):
+    out = []
+    w = out.append
+    w('/* Generated by tools/generate_clone_specs.py -- do not edit. Deterministic.')
+    w(f'   Pinned image SHA-256 {image.sha256}, preferred base 0x{PREFERRED_BASE:X}.')
+    w('   Requires ntw2_clones.h (and <stdint.h>) to be included first.')
+    w('   Contains source metadata and our own authored literals only; no original executable bytes. */')
+    w('')
+    for s in registry.items:
+        w(f'#define NTW2_SRC_{s["name"]} {s["index"]}u')
+    w('')
+    for s in registry.items:
+        if s['relocs']:
+            w(f'static const uint32_t ntw2_reloc_{s["name"]}[] = {{')
+            rows = []
+            for k in range(0, len(s['relocs']), 8):
+                rows.append('    ' + ', '.join(f'0x{r:X}u' for r in s['relocs'][k:k + 8]))
+            w(',\n'.join(rows))
+            w('};')
+    w('')
+    w('static const ntw2_source_spec ntw2_sources[] = {')
+    for s in registry.items:
+        reloc = f'ntw2_reloc_{s["name"]}' if s['relocs'] else '0'
+        w(f'    {{ 0x{s["va"]:X}u, 0x{s["size"]:X}u, 0x{s["hash"]:016X}ull, {reloc}, {len(s["relocs"])}u }}, /* {s["name"]} {s["role"]} */')
+    w('};')
+    w('static const uint32_t ntw2_source_count = (uint32_t)(sizeof(ntw2_sources) / sizeof(ntw2_sources[0]));')
+    w('')
+    target_kind = {'IMAGE': 'NTW2_TARGET_IMAGE', 'CLONE': 'NTW2_TARGET_CLONE', 'BINDING': 'NTW2_TARGET_BINDING'}
+
+    def ident(target):
+        if target.kind == 'IMAGE':
+            return f'0x{target.ident:X}u'
+        if target.kind == 'CLONE':
+            return f'NTW2_CLONE_{target.ident}'
+        return f'NTW2_BIND_{target.ident}'
+
+    for name in header_clones:
+        plan = plans[name]
+        lit_names = []
+        for k, (dest, data) in enumerate(plan.literals):
+            w(f'static const uint8_t ntw2_literal_{name}_{k}[] = {{')
+            w(c_hex_bytes(data))
+            w('};')
+            lit_names.append(f'ntw2_literal_{name}_{k}')
+        w(f'static const ntw2_clone_op ntw2_ops_{name}[] = {{')
+        li = 0
+        for dest, kind, a, b in plan.segments:
+            if kind == 'copy':
+                w(f'    {{ NTW2_COPY, 0x{dest:X}u, 0x{b:X}u, NTW2_SRC_{plan.source["name"]}, 0x{a:X}u, 0, 0 }},')
+            elif kind == 'copy_from':
+                w(f'    {{ NTW2_COPY, 0x{dest:X}u, 0x{b:X}u, NTW2_SRC_{a["name"]}, 0, 0, 0 }},')
+            else:
+                w(f'    {{ NTW2_LITERAL, 0x{dest:X}u, 0x{len(a):X}u, 0, 0, 0, {lit_names[li]} }},')
+                li += 1
+        for kind, field, target in plan.fixups:
+            opk = 'NTW2_ABSOLUTE' if kind == 'abs' else 'NTW2_RELATIVE'
+            w(f'    {{ {opk}, 0x{field:X}u, 4u, {target_kind[target.kind]}, {ident(target)}, {target.addend}, 0 }},')
+        w('};')
+        w('')
+    w('static const ntw2_clone_spec ntw2_specs[NTW2_CLONE_COUNT] = {')
+    for name in header_clones:
+        w(f'    {{ 0x{plans[name].size:X}u, ntw2_ops_{name}, (uint32_t)(sizeof(ntw2_ops_{name}) / sizeof(ntw2_ops_{name}[0])) }}, /* NTW2_CLONE_{name} */')
+    w('};')
+    if grid is None:
+        grid = grid_metadata(plans, header_clones, HERE.parent.parent / 'analysis' / 'native-grid-reader-census.json')
+    w(emit_grid_metadata(grid))
+    return '\n'.join(out) + '\n'
+
+
+def target_text(t):
+    return repr(t)
+
+
+def manifest(image, registry, plans, header_bindings, header_clones):
+    m = {'image_sha256': image.sha256, 'preferred_base': hex(PREFERRED_BASE), 'tool': 'generate_clone_specs.py',
+         'sources': [], 'clones': []}
+    for s in registry.items:
+        m['sources'].append({'index': s['index'], 'name': s['name'], 'role': s['role'], 'va': hex(s['va']),
+                             'end': hex(s['end']), 'size': s['size'], 'fnv1a64': f'0x{s["hash"]:016X}',
+                             'relocation_count': len(s['relocs']), 'relocations': [hex(r) for r in s['relocs']],
+                             'instructions': s.get('instructions')})
+    for name in header_clones:
+        p = plans[name]
+        entry = {'name': name, 'size': p.size, 'source': p.source['name'] if p.source else None,
+                 'source_range': [hex(p.source['va']), hex(p.source['end'])] if p.source else None,
+                 'instructions': len(p.instructions),
+                 'copy_ops': len(p.copies), 'literal_ops': len(p.literals), 'fixups': len(p.fixups),
+                 'external_calls': {hex(k): v for k, v in sorted(p.external_calls.items())},
+                 'external_jumps': {hex(k): v for k, v in sorted(p.external_jumps.items())},
+                 'returns': {hex(k): v.hex() for k, v in sorted(p.rets.items())},
+                 'indirect_calls': [hex(a) for a in sorted(p.indirect_calls)],
+                 'instruction_patches': [{'source': hex(s), 'destination': hex(d), 'old': o.hex(), 'new': n.hex()}
+                                         for s, d, o, n in sorted(p.insn_patches)],
+                 'call_rewrites': [{'source': w, 'destination': hex(d), 'old': o.hex(), 'length': len(o)}
+                                   for d, _pieces, w, o in p.rewrites],
+                 'fixup_list': [{'kind': k, 'destination': hex(f), 'target': target_text(t)} for k, f, t in p.fixups],
+                 'insertions': [{'before_source': w, 'destination': hex(d), 'length': pieces_length(pieces)}
+                                for d, pieces, w in p.inserts],
+                 'tail': [{'label': label, 'destination': hex(d), 'length': pieces_length(pieces)}
+                          for label, d, pieces in p.tails if p.source is not None]}
+        if hasattr(p, 'mapping'):
+            entry['mapping_entry_offsets'] = {hex(k): v for k, v in p.mapping.items() if k in (
+                p.source['va'], 0x6F6BFF, 0x78BB9D, 0x78BBF5, 0x78BC1E)}
+        if hasattr(p, 'embedded_table'):
+            offset, entries = p.embedded_table
+            entry['embedded_table'] = {'destination': hex(offset),
+                                       'entries': [hex(a) for a in entries]}
+        m['clones'].append(entry)
+    return m
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--image', default=DEFAULT_IMAGE)
+    ap.add_argument('--output', default=str(HERE.parent / 'src' / OUTPUT_NAME))
+    ap.add_argument('--header', default=str(HERE.parent / 'src' / HEADER_NAME))
+    ap.add_argument('--manifest', default=None, help='optional JSON inspection manifest')
+    ap.add_argument('--grid-census', default=str(HERE.parent.parent / 'analysis' / 'native-grid-reader-census.json'))
+    ap.add_argument('--grid-report', default=None, help='optional JSON report of surviving/removed reader call edges')
+    ap.add_argument('--check', action='store_true', help='compare with --output instead of writing')
+    args = ap.parse_args(argv)
+    try:
+        image = Image(args.image)
+        registry, plans, header_bindings, header_clones = build_all(image, args.header)
+        self_check(image, registry, plans, header_bindings, header_clones)
+        grid = grid_metadata(plans, header_clones, args.grid_census)
+        if args.grid_report:
+            write_grid_report(args.grid_report, grid)
+        text = emit(image, registry, plans, header_bindings, header_clones, grid)
+    except GenerationError as error:
+        print(f'generate_clone_specs: error: {error}', file=sys.stderr)
+        return 1
+    out = Path(args.output)
+    if args.check:
+        if not out.exists() or out.read_text(encoding='utf-8') != text:
+            print(f'generate_clone_specs: {out} differs from regenerated metadata', file=sys.stderr)
+            return 2
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, 'w', encoding='utf-8', newline='\n') as handle:
+            handle.write(text)
+    if args.manifest:
+        mp = Path(args.manifest)
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        with open(mp, 'w', encoding='utf-8', newline='\n') as handle:
+            json.dump(manifest(image, registry, plans, header_bindings, header_clones), handle, indent=2, sort_keys=True)
+            handle.write('\n')
+    print(f'{"checked" if args.check else "wrote"} {out}: {len(registry.items)} sources, {len(header_clones)} clones')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

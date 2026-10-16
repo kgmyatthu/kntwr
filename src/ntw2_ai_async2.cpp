@@ -1,0 +1,442 @@
+// NTW2_AI_ASYNC2 boundary schedule, join and marshalling protocol. See the header for the contract.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <intrin.h>
+#include <stdint.h>
+#include <string.h>
+#include "ntw2_ai_async2.h"
+
+namespace ntw2_ai_async2 {
+namespace {
+// Slot 19 of the five replacement tables (0x6EA520, ret, no stack argument) and slot 20 of three (0x6B3010, ret 4) as
+// audited for ai_census; destructor tables slot 0 (ret 4, deleting flag); command callbacks: vtable 0x1348838 slot 27
+// = 0x805CE0 (thiscall, plain ret; 0x805EAE calls effect dispatch 0x80A4E0) and 0x1346B5C slot 21 = 0x7DEC70
+// (ret 4; delegate trampoline to 0x805F40, whose 0x805FDC calls 0x80A4E0). Pin 12 has no data slot: it is the clone-call
+// gate for AI2_POSITION_UPDATE -> 0x83FD00 (thiscall, ret 0x18), marshalled because its closure reaches original walk
+// owners and owner transactions.
+const Pin kPins[kPinCount] = {
+    {0x13378F8, 19, 0x6EA520, KReplace, 0}, {0x1337998, 19, 0x6EA520, KReplace, 0}, {0x1337BB8, 19, 0x6EA520, KReplace, 0},
+    {0x1337C30, 19, 0x6EA520, KReplace, 0}, {0x1349C18, 19, 0x6EA520, KReplace, 0},
+    {0x1337BB8, 20, 0x6B3010, KReplace, 4}, {0x1337C30, 20, 0x6B3010, KReplace, 4}, {0x1349C18, 20, 0x6B3010, KReplace, 4},
+    {0x13376FC, 0, 0x69D710, KDestroy, 4}, {0x13376AC, 0, 0x69D750, KDestroy, 4},
+    {0x1348838, 27, 0x805CE0, KCommand, 0}, {0x1346B5C, 21, 0x7DEC70, KCommand, 4},
+    {0, 0, 0x83FD00, KCommand, 0x18},
+};
+constexpr U kMaxArgs = 6;
+
+volatile LONG g_words[kWords], g_route[kRouteWords];
+volatile LONG g_on, g_inFlight, g_running, g_hold, g_fallback, g_workerAsync, g_measure;
+volatile U g_serving; // thread executing a marshalled call (0 none)
+volatile long* g_tickOwner;
+volatile U* g_worker;
+U g_original[kPinCount], g_planner[kMaxQueued], g_flag[kMaxQueued];
+// Absolute queue indices: [head, published) published to the worker, [published, tail) staged by the current tick.
+// tail/published: tick owner writes; head: worker writes. Publish and the worker's idle transition hold g_queueLock.
+volatile LONG g_head, g_published, g_tail;
+U g_tick, g_spanMark, g_joinPending; // tick owner only
+SRWLOCK g_queueLock = SRWLOCK_INIT;
+LONGLONG g_dispatchQpc, g_completeQpc, g_qpcFreq;
+HANDLE g_idle, g_drained, g_posted, g_served, g_wake;
+struct Mail { U target, self, count, args[kMaxArgs], result, kind, pin; };
+Mail g_mail;
+
+void Inc(U w) { _InterlockedIncrement(&g_words[w]); }
+void Add(U w, U v) { _InterlockedExchangeAdd(&g_words[w], static_cast<LONG>(v)); }
+void Max(U w, U v) {
+    for (LONG old = g_words[w]; static_cast<U>(old) < v; old = g_words[w])
+        if (_InterlockedCompareExchange(&g_words[w], static_cast<LONG>(v), old) == old) return;
+}
+void RInc(U w) { _InterlockedIncrement(&g_route[w]); }
+void RAdd(U w, U v) { _InterlockedExchangeAdd(&g_route[w], static_cast<LONG>(v)); }
+void RMax(U w, U v) {
+    for (LONG old = g_route[w]; static_cast<U>(old) < v; old = g_route[w])
+        if (_InterlockedCompareExchange(&g_route[w], static_cast<LONG>(v), old) == old) return;
+}
+void Hist(U first, U us) {
+    U bucket = 0, ceiling = 125;
+    while (bucket < kBuckets - 1 && us > ceiling) { ++bucket; ceiling *= 2; }
+    Inc(first + bucket);
+}
+U Load(volatile LONG* p) { return static_cast<U>(_InterlockedCompareExchange(p, 0, 0)); }
+LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+U Micro(LONGLONG a, LONGLONG b) { return b > a ? static_cast<U>((b - a) * 1000000 / g_qpcFreq) : 0; }
+U Tid() { return GetCurrentThreadId(); }
+bool IsTick() { return g_tickOwner && static_cast<U>(*g_tickOwner) == Tid(); }
+bool IsWorker() { return g_worker && *g_worker && *g_worker == Tid(); }
+
+// Calls a thiscall/stdcall original with `count` stack words; the callee pops them.
+U __stdcall Invoke(U target, U self, const U* args, U count) {
+    U result;
+    __asm {
+        mov ecx, count
+        mov esi, args
+    push_args:
+        test ecx, ecx
+        jz call_target
+        push dword ptr [esi + ecx * 4 - 4]
+        dec ecx
+        jmp push_args
+    call_target:
+        mov ecx, self
+        call target
+        mov result, eax
+    }
+    return result;
+}
+
+// Any servicing thread: execute the worker's posted call on its behalf, then release it. Main/render must be able to do
+// this: the tick cannot start until main returns from its own lease wait, so leaving the call for the tick would deadlock.
+void Serve(bool nested) {
+    const U kind = g_mail.kind, pin = g_mail.pin;
+    const bool main = !IsTick();
+    _InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_serving), static_cast<LONG>(Tid()));
+    g_mail.result = Invoke(g_mail.target, g_mail.self, g_mail.args, g_mail.count);
+    _InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_serving), 0);
+    Inc(WMarshalled); Inc(WKindMarshal + kind); if (pin < kPinCount) RInc(RPinMarshal + pin);
+    if (nested) Inc(WMarshalledNested);
+    if (main) RInc(RMainServed);
+    SetEvent(g_served);
+}
+
+// Non-blocking seam service: exactly one posted call, if any. Returns true when a call was executed.
+bool ServePosted() {
+    if (WaitForSingleObject(g_posted, 0) != WAIT_OBJECT_0) return false;
+    Serve(false);
+    return true;
+}
+
+void Watchdog() {
+    Inc(WDeadlock);
+    _InterlockedExchange(&g_fallback, 1); g_words[WFallback] = 1;
+    g_route[RFallbackTick] = g_tick; // divergence point: the schedule changes after this tick
+}
+
+// Waits until `drained` ? no published call is outstanding : no native call is executing. Every waiter services the
+// mailbox (a main/render waiter is the only thread that can unblock the worker before the next tick). The watchdog
+// records and falls back but never abandons the wait.
+U WaitIdle(U kind, bool drained, bool nested) {
+    const LONGLONG begin = Now();
+    const ULONGLONG deadline = GetTickCount64() + kWatchdogMs;
+    bool expired = false;
+    for (;;) {
+        if (!Load(drained ? &g_inFlight : &g_running)) break;
+        DWORD timeout = INFINITE;
+        if (!expired) {
+            const ULONGLONG now = GetTickCount64();
+            timeout = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+        }
+        const HANDLE handles[2] = {drained ? g_drained : g_idle, g_posted};
+        const DWORD r = WaitForMultipleObjects(2, handles, FALSE, timeout);
+        if (r == WAIT_OBJECT_0 + 1) { Serve(nested); if (!IsTick()) RInc(RMainMarshalWaits); }
+        else if (r == WAIT_TIMEOUT) { expired = true; Watchdog(); }
+        else if (r == WAIT_FAILED) Sleep(1); // fail closed: never treat a wait error as completion
+    }
+    const U us = Micro(begin, Now());
+    Inc(WKindWaits + 2 * kind); Max(WKindWaits + 2 * kind + 1, us);
+    return us;
+}
+
+// Worker inside an async think: hand the whole original call to the next servicing thread and block until it returns.
+U Marshal(U pin, U* frame) {
+    const LONGLONG begin = Now();
+    g_mail.target = g_original[pin];
+    g_mail.self = frame[6]; // pushad ECX
+    g_mail.count = kPins[pin].argBytes / 4;
+    for (U i = 0; i < g_mail.count; ++i) g_mail.args[i] = frame[10 + i]; // EFLAGS at +32, return at +36, args from +40
+    g_mail.kind = kPins[pin].kind;
+    g_mail.pin = pin;
+    SetEvent(g_posted);
+    while (WaitForSingleObject(g_served, INFINITE) != WAIT_OBJECT_0) Sleep(1);
+    const U us = Micro(begin, Now());
+    Add(WMarshalWaitSum, us); Max(WMarshalWaitMax, us);
+    return g_mail.result;
+}
+
+// Tick owner: publish every staged call. The lock orders this against the worker's idle transition, so g_inFlight and
+// g_drained can never report "drained" for a batch published here.
+void PublishLocked() {
+    const LONG tail = g_tail;
+    AcquireSRWLockExclusive(&g_queueLock);
+    const bool staged = g_published != tail;
+    if (staged) {
+        _InterlockedExchange(&g_published, tail);
+        ResetEvent(g_drained);
+        _InterlockedExchange(&g_inFlight, 1);
+        g_words[WInFlight] = 1;
+    }
+    ReleaseSRWLockExclusive(&g_queueLock);
+    if (!staged) return;
+    g_spanMark = 0;
+    g_joinPending = 1;
+    g_dispatchQpc = Now();
+    _InterlockedExchange(&g_measure, 1);
+    RInc(RPublishedBatches);
+    Inc(WDispatches);
+    if (g_wake) SetEvent(g_wake);
+}
+
+// Per published batch (tick owner only): one overlap sample at its first seam or join (dispatch -> completion, or -> now
+// while still running) and one join-wait sample: 0 when the batch had completed by its first seam or join, otherwise
+// how long the first blocking structural join stalled the tick (the cost of a spanning think).
+bool TakeMeasure() { return _InterlockedExchange(&g_measure, 0) != 0; }
+void Overlap(bool flying) {
+    const U overlap = Micro(g_dispatchQpc, flying ? Now() : g_completeQpc);
+    Add(WOverlapSum, overlap); Max(WOverlapMax, overlap); Hist(WOverlapHist, overlap);
+}
+void JoinSample(U waited) {
+    g_joinPending = 0;
+    Add(WJoinWaitSum, waited); Max(WJoinWaitMax, waited); Hist(WJoinWaitHist, waited);
+}
+
+void CompleteJoin(U kind) {
+    Inc(WKindEntries + kind);
+    const bool flying = Load(&g_inFlight) != 0;
+    if (TakeMeasure()) Overlap(flying);
+    U waited = 0;
+    if (flying) waited = WaitIdle(kind, true, kind == KReplace || kind == KDestroy);
+    if (g_joinPending) JoinSample(waited);
+}
+} // namespace
+
+// Gate body. frame = pushad block (EDI ESI EBP ESP EBX EDX ECX EAX), then EFLAGS, return address, stack arguments.
+// 0: tail-jump the original with the caller's exact stack; 1: handled here, frame EAX holds the result.
+extern "C" U __stdcall Ntw2Ai2SlotGate(U pin, U* frame) {
+    const U kind = kPins[pin].kind;
+    if (!_InterlockedCompareExchange(&g_on, 0, 0)) return 0;
+    const U tid = Tid();
+    const bool worker = IsWorker();
+    if (!worker && kind != KCommand && static_cast<U>(g_serving) != tid && IsTick()) {
+        Join(kind); // counts the entry; the tick admits at site 34 only, so it needs no lease
+        return 0;
+    }
+    Inc(WKindEntries + kind);
+    if (worker) {
+        if (!_InterlockedCompareExchange(&g_workerAsync, 0, 0)) return 0;
+        if (pin == kPinCount - 1) RInc(RUnroutedEntries);
+        frame[7] = Marshal(pin, frame);
+        return 1;
+    }
+    if (static_cast<U>(g_serving) == tid) return 0; // inside a marshalled call executed on the worker's behalf
+    if (kind == KCommand) return 0;                 // tick/main effects proceed; stale observation is admitted
+    // Main/render structural writer: stop new native calls first, then wait only for the one already executing.
+    // g_running is set under the same interlocked handshake as the worker's hold check, so no new call starts here.
+    _InterlockedIncrement(&g_hold); Inc(WLeaseHolds);
+    if (_InterlockedCompareExchange(&g_running, 0, 0)) WaitIdle(kind, false, false);
+    frame[7] = Invoke(g_original[pin], frame[6], frame + 10, kPins[pin].argBytes / 4);
+    if (!_InterlockedDecrement(&g_hold) && g_wake) SetEvent(g_wake); // resume the worker at its next call boundary
+    return 1;
+}
+
+#define NTW2_AI2_GATE(i, bytes) \
+    __declspec(naked) void Gate##i() { \
+        __asm pushfd \
+        __asm pushad \
+        __asm mov eax, esp \
+        __asm push eax \
+        __asm push i \
+        __asm cld \
+        __asm call Ntw2Ai2SlotGate \
+        __asm test eax, eax \
+        __asm jnz handled \
+        __asm popad \
+        __asm popfd \
+        __asm jmp dword ptr [g_original + 4 * i] \
+        __asm handled: \
+        __asm popad \
+        __asm popfd \
+        __asm ret bytes \
+    }
+NTW2_AI2_GATE(0, 0)
+NTW2_AI2_GATE(1, 0)
+NTW2_AI2_GATE(2, 0)
+NTW2_AI2_GATE(3, 0)
+NTW2_AI2_GATE(4, 0)
+NTW2_AI2_GATE(5, 4)
+NTW2_AI2_GATE(6, 4)
+NTW2_AI2_GATE(7, 4)
+NTW2_AI2_GATE(8, 4)
+NTW2_AI2_GATE(9, 4)
+NTW2_AI2_GATE(10, 0)
+NTW2_AI2_GATE(11, 4)
+NTW2_AI2_GATE(12, 0x18)
+#undef NTW2_AI2_GATE
+
+const Pin* Pins() { return kPins; }
+
+U Gate(U pin) {
+    static void (*const gates[kPinCount])() = {&Gate0, &Gate1, &Gate2, &Gate3, &Gate4, &Gate5, &Gate6, &Gate7,
+                                               &Gate8, &Gate9, &Gate10, &Gate11, &Gate12};
+    static_assert(kPinCount == 13, "one naked gate per pin");
+    return pin < kPinCount ? static_cast<U>(reinterpret_cast<uintptr_t>(gates[pin])) : 0;
+}
+
+
+bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerThread) {
+    _InterlockedExchange(&g_on, 0);
+    if (!g_idle) g_idle = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (!g_drained) g_drained = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (!g_posted) g_posted = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_served) g_served = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_idle || !g_drained || !g_posted || !g_served) return false;
+    if (!g_qpcFreq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_qpcFreq = f.QuadPart; }
+    for (U i = 0; i < kWords; ++i) g_words[i] = 0;
+    for (U i = 0; i < kRouteWords; ++i) g_route[i] = 0;
+    g_inFlight = g_running = g_hold = g_fallback = g_workerAsync = g_measure = 0;
+    g_head = g_published = g_tail = 0;
+    g_tick = g_spanMark = g_joinPending = 0;
+    g_dispatchQpc = g_completeQpc = 0;
+    SetEvent(g_idle); SetEvent(g_drained); ResetEvent(g_posted); ResetEvent(g_served);
+    g_tickOwner = tickOwner; g_worker = workerThread;
+    for (U i = 0; i < kPinCount; ++i) g_original[i] = kPins[i].original + delta;
+    if (enabled) {
+        g_words[WVersion] = kVersion;
+        g_route[RVersion] = kVersion;
+        g_route[RSchedule] = 1; // boundary schedule
+        g_words[WSpottingUnresolved] = 1; // main spotting 0x6A94B0 route is not in a cloned source: no gate (see report)
+        _InterlockedExchange(&g_on, 1);
+    }
+    return true;
+}
+
+U Admit(U planner, U flag) {
+    if (Load(&g_fallback)) {
+        Join(KSite34);
+        Inc(WFallbackJoins);
+        Inc(WFallbackThinks);
+        return Synchronous;
+    }
+    if (static_cast<U>(g_tail - Load(&g_head)) >= kMaxQueued) {
+        // Deterministic emergency: the FIFO is full by call order. Publish now and drain before accepting more.
+        PublishLocked();
+        Join(KSite34);
+        Inc(WCapacityJoins); RInc(RCapacityJoins);
+        g_spanMark = 1; // a capacity drain is a divergence point: this batch overlaps the tick
+        if (!g_route[RSpanningFirstTick]) g_route[RSpanningFirstTick] = g_tick;
+        g_route[RSpanningLastTick] = g_tick;
+    }
+    if (Load(&g_hold)) {
+        Inc(WLeaseWaits); RInc(RLeaseWaits);
+        WaitIdle(KSite34, false, false);
+    }
+    const U slot = static_cast<U>(g_tail) % kMaxQueued;
+    g_planner[slot] = planner;
+    g_flag[slot] = flag;
+    _InterlockedIncrement(&g_tail); // full barrier: the slot is written before the index that covers it
+    RInc(RQueued); RMax(RQueuedMax, static_cast<U>(g_tail - Load(&g_head)));
+    return Queued;
+}
+
+void PublishBatch() {
+    if (!Load(&g_on)) return;
+    PublishLocked();
+}
+
+void AbortBatch() {
+    const LONG staged = g_tail - g_published;
+    if (staged <= 0) return;
+    RAdd(RQueued, static_cast<U>(-staged));
+    _InterlockedExchange(&g_tail, g_published);
+}
+
+void TickSeam() {
+    if (!Load(&g_on)) return;
+    ++g_tick; g_route[RTicks] = g_tick;
+    if (!g_measure && !Load(&g_inFlight)) return; // nothing published since the previous seam
+    RInc(RSeamPolls);
+    if (ServePosted()) RInc(RSeamMarshalServes);
+    Inc(WKindEntries + static_cast<U>(KTickEnd));
+    const bool flying = Load(&g_inFlight) != 0;
+    const bool first = TakeMeasure();
+    if (first) Overlap(flying);
+    if (!flying && g_joinPending) JoinSample(0); // complete without stalling the tick
+    if (!flying) { if (first) RInc(RSeamCompleteJoins); return; }
+    // The batch overlaps this tick: an approved latency choice, and a divergence point because its reads now race the
+    // tick's mutations. The structural joins still drain it before their own writes.
+    RInc(RSpanningTicks);
+    if (!g_spanMark) {
+        g_spanMark = 1;
+        const U outstanding = static_cast<U>(Load(&g_published) - Load(&g_head)) + (Load(&g_running) ? 1u : 0u);
+        RAdd(RSpanningThinks, outstanding ? outstanding : 1u);
+        if (!g_route[RSpanningFirstTick]) g_route[RSpanningFirstTick] = g_tick;
+    }
+    g_route[RSpanningLastTick] = g_tick;
+}
+
+void Join(U kind) { CompleteJoin(kind); }
+
+bool WorkerNext(U* planner, U* flag) {
+    if (!Load(&g_on)) return false;
+    // Lease handshake: announce the call first, then check for a holder (the holder increments, then checks g_running).
+    ResetEvent(g_idle);
+    _InterlockedExchange(&g_running, 1);
+    if (Load(&g_hold)) {
+        _InterlockedExchange(&g_running, 0);
+        SetEvent(g_idle);
+        return false; // resumed by the lease release's wake
+    }
+    AcquireSRWLockExclusive(&g_queueLock);
+    const LONG head = g_head;
+    if (head == g_published) {
+        _InterlockedExchange(&g_running, 0);
+        SetEvent(g_idle);
+        g_words[WInFlight] = 0;
+        _InterlockedExchange(&g_inFlight, 0);
+        SetEvent(g_drained);
+        ReleaseSRWLockExclusive(&g_queueLock);
+        return false;
+    }
+    ReleaseSRWLockExclusive(&g_queueLock);
+    const U slot = static_cast<U>(head) % kMaxQueued;
+    *planner = g_planner[slot];
+    *flag = g_flag[slot];
+    _InterlockedIncrement(&g_head);
+    return true;
+}
+
+void WorkerBegin() { _InterlockedExchange(&g_workerAsync, 1); }
+
+void WorkerEnd(U us) {
+    _InterlockedExchange(&g_workerAsync, 0);
+    Add(WThinkSum, us); Max(WThinkMax, us); Hist(WThinkHist, us);
+    Inc(WCompletions);
+    g_completeQpc = Now();
+    _InterlockedExchange(&g_running, 0);
+    SetEvent(g_idle);
+}
+
+void NoteRoute(bool scratchReady) {
+    Inc(WRouteEntries);
+    g_words[WScratchReady] = scratchReady ? 1 : 0;
+}
+
+void NotePrivate(U word, U value) { if (word < 4) g_route[RLookupCapacity + word] = static_cast<LONG>(value); }
+
+void NoteGate(U slot, bool routedPrivate) {
+    if (!Load(&g_on) || slot >= kRouteSlots) return;
+    const U cls = IsWorker() ? (routedPrivate ? CWorkerPrivate : CWorkerIdle) : IsTick() ? CTick : COther;
+    RInc(RGateMatrix + slot * kRouteClasses + cls);
+}
+
+U FunctionCounters() { return static_cast<U>(reinterpret_cast<uintptr_t>(&g_route[RFunctionEntries])); }
+
+void SetWake(U handle) { g_wake = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle)); }
+
+bool Drain(U timeoutMs) {
+    const bool staged = g_tail != g_published;
+    if (!Load(&g_inFlight)) return !staged;
+    const LONGLONG begin = Now();
+    const bool ok = WaitForSingleObject(g_drained, timeoutMs) == WAIT_OBJECT_0 && !Load(&g_inFlight);
+    const U us = Micro(begin, Now());
+    Inc(WKindWaits + 2 * KStop); Max(WKindWaits + 2 * KStop + 1, us);
+    return ok && !staged;
+}
+
+void Snapshot(volatile U* out) {
+    for (U i = 0; i < kWords; ++i) out[i] = static_cast<U>(g_words[i]);
+}
+
+void RouteSnapshot(volatile U* out) {
+    for (U i = 0; i < kRouteWords; ++i) out[i] = static_cast<U>(g_route[i]);
+}
+}
