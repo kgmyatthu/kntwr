@@ -3066,6 +3066,7 @@ bool Deactivate() {
     for (U i=slotCount;i;--i)
         if ((slots[i-1].owned || slots[i-1].protectionDirty) && !SwapSlot(slots[i-1],false)) ok=false;
     if (!StopModules()) ok=false;
+    ntw2_poly::Release(); // --ai-poly*: slots are restored and the AI worker drained; a thread somehow still inside keeps its buffer (Release never frees an in-flight evaluation)
     if (ok) {
         siteCallees[6]=V(0x585d10); // drained: no dispatcher remains bound outside an active generation
         siteCallees[5]=V(0x57dc30);

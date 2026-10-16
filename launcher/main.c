@@ -1223,16 +1223,26 @@ static void print_ai_prepass(const uint32_t *w)
     say(L"\n");
 }
 /* --ai-poly-shadow / --ai-poly (src/ntw2_planner_search.h): one verdict line, then every nonzero labelled word. */
-static void print_ai_poly(const uint32_t *w)
+static void print_ai_poly(const uint32_t *w, uint32_t thinks)
 {
     unsigned i;
     if (!w[0]) return;
-    say(L"  ai_poly: mode=%hs calls=%lu served=%.1f%% fallback kind=%lu fp_state=%lu domain=%lu walk_cap=%lu mean_vertices=%.1f max_vertices=%lu",
+    say(L"  ai_poly: mode=%hs calls=%lu served=%.1f%% fallback kind=%lu fp_state=%lu domain=%lu walk_cap=%lu busy=%lu mean_vertices=%.1f max_vertices=%lu",
         w[1] == 1 ? "shadow" : "live", (unsigned long)w[2], pct(w[3], w[2]), (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6],
-        (unsigned long)w[7], w[3] ? (double)w[13] / w[3] : 0.0, (unsigned long)w[14]);
+        (unsigned long)w[7], (unsigned long)w[25], w[3] ? (double)w[13] / w[3] : 0.0, (unsigned long)w[14]);
     if (w[1] == 1)
         say(L" shadow_compares=%lu mismatch_al=%lu mismatch_x87=%lu mismatch_mxcsr=%lu verdict=%hs", (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
             (unsigned long)w[11], (w[9] || w[10] || w[11]) ? "MISMATCH" : "bit_identical");
+    /* Within-run gain estimate (rdtsc kilocycles): native cost of the served calls = served_fast * sampled_native / sampled_fast. */
+    if (w[26] && w[28] && w[29] && w[31]) {
+        const double est_native = (double)w[26] * (double)w[27] / (double)w[28];
+        const double saved_ms = (est_native - (double)w[26]) * 1024.0 / ((double)w[31] * 1000.0);
+        say(L"\n  ai_poly gain: sampled=%lu S=%.2f served_fast=%.1f ms est_native_served=%.1f ms fallback_native=%.1f ms served_time_share=%.1f%% est_saved=%.1f ms",
+            (unsigned long)w[29], (double)w[27] / (double)w[28], (double)w[26] * 1024.0 / ((double)w[31] * 1000.0),
+            est_native * 1024.0 / ((double)w[31] * 1000.0), (double)w[30] * 1024.0 / ((double)w[31] * 1000.0),
+            100.0 * est_native / (est_native + (double)w[30]), saved_ms);
+        if (thinks) say(L" per_think=%.2f ms (thinks=%lu)", saved_ms / (double)thinks, (unsigned long)thinks);
+    }
     say(L"\n  ai_poly words:");
     for (i = 0; i < NTW2_AI_PREPASS_WORDS; ++i)
         if (w[i]) say(L" %hs=%lu", k_ai_prepass_metrics[i], (unsigned long)w[i]);
@@ -1989,7 +1999,7 @@ static void print_module_words(const ntw2_status *s)
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_ai_ctrl(s->ai_ctrl_reuse_words);
     print_ai_prepass(s->ai_prepass_census_words);
-    print_ai_poly(s->ai_prepass_words);
+    print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
     if (s->requested_mask & NTW2_PUPPET)
         print_puppet(s->puppet_words, s->puppet_motion_words, s->puppet_divert_words, s->puppet_mover_words,
                      s->puppet_select_words);

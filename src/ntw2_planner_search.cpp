@@ -1,5 +1,7 @@
 #include "ntw2_planner_search.h"
 #include <emmintrin.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <intrin.h>
 #include <string.h>
 
@@ -54,8 +56,16 @@ inline __m128i OutsideG(__m128 v) {
 
 // x[n]=x[0], z[n]=z[0] (the wrap edge's end), everything after that zero; lanes >= n of the last block are masked out of every result.
 struct Poly {
-    alignas(16) float x[kMaxVertices + 12], z[kMaxVertices + 12];
+    float *x, *z;   // 16-byte aligned views into the module buffer (x[n]=x[0], zeros up to padded+8)
     U n, padded;
+};
+constexpr U kStride = kMaxVertices + 16;     // floats per coordinate array (multiple of 4)
+float* gBuffer;                              // 2*kStride floats, VirtualAlloc'd by Configure (never in a tick)
+volatile LONG gBusy = 1;                     // 0 = free; 1 = in use, or locked (no buffer)
+struct Claim {
+    bool held;
+    Claim() : held(_InterlockedCompareExchange(&gBusy, 1, 0) == 0) {}
+    ~Claim() { if (held) _InterlockedExchange(&gBusy, 0); }
 };
 struct Seg { __m128 b1x, b1z, bx, bz; };
 inline Seg MakeSeg(float b1x, float b1z, float b2x, float b2z) {
@@ -137,7 +147,10 @@ Reason Evaluate(const void* shape, const void* polygon, unsigned char* result, u
     const float hAx = Mul(Mul(S[5], S[3]), kHalf), hAz = Mul(Mul(S[6], S[3]), kHalf);
     const float c0x = Sub(Add(S[0], hBx), hAx), c0z = Sub(Add(S[1], hBz), hAz);
     if (!InG(c0x) || !InG(c0z)) return FallDomain;
+    Claim claim;
+    if (!claim.held || !gBuffer) return FallBusy; // a locked (released/unconfigured) module also lands here: gBusy stays 1
     Poly p;
+    p.x = gBuffer; p.z = gBuffer + kStride;
     {
         const U* node = static_cast<const U*>(polygon);
         U n = 0;
@@ -180,38 +193,83 @@ inline void Account(Reason why, uint32_t vertices, unsigned char result) {
         words[13] = words[13] + vertices;
         if (vertices > words[14]) words[14] = vertices;
         Bump(vertices <= 16 ? 15 : vertices <= 64 ? 16 : vertices <= 256 ? 17 : 18);
-    } else Bump(3 + static_cast<uint32_t>(why)); // FallKind..FallWalkCap -> words 4..7
+        if (vertices > 256) Bump(vertices <= 1024 ? 21 : vertices <= 4096 ? 22 : vertices <= 16384 ? 23 : 24);
+    } else if (why == FallBusy) Bump(25);
+    else Bump(3 + static_cast<uint32_t>(why)); // FallKind..FallWalkCap -> words 4..7
 }
+}
+namespace { uint64_t gServedFast, gSampledNative, gSampledFast, gFallbackNative; uint32_t gSampled, gServedCount; void Calibrate(); }
+void Release() {
+    // Claim the in-use flag for good: an in-flight evaluation keeps its buffer (nothing is freed), otherwise the buffer goes and the
+    // flag stays locked so a late call can only answer FallBusy.
+    if (_InterlockedCompareExchange(&gBusy, 1, 0) != 0) return;
+    if (gBuffer) { VirtualFree(gBuffer, 0, MEM_RELEASE); gBuffer = nullptr; }
 }
 void Configure(Native native, uint32_t mode) {
     nativeKernel = native; gMode = mode;
     for (uint32_t i = 0; i < kWords; ++i) words[i] = 0;
-    if (mode != ModeOff) { words[0] = 1; words[1] = mode; }
+    if (mode == ModeOff) { Release(); return; }
+    words[0] = 1; words[1] = mode;
+    gServedFast = gSampledNative = gSampledFast = gFallbackNative = 0; gSampled = gServedCount = 0;
+    Calibrate();
+    if (!gBuffer) gBuffer = static_cast<float*>(VirtualAlloc(nullptr, 2u * kStride * sizeof(float), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (gBuffer) _InterlockedExchange(&gBusy, 0); // a failed allocation leaves the module locked: every call is a counted native FallBusy
 }
 void NoteObserver(bool routed) { if (gMode) Bump(routed ? 19 : 20); }
+namespace {
+// Timing (rdtsc, no QPC per call; the calibration at Configure is the only QPC use and changes no behaviour). 64-bit accumulators,
+// published >> 10 (kilocycles, modulo 2^32). Row words: 26 served fast kcycles, 27/28 sampled native/fast kcycles, 29 sampled calls,
+// 30 native kcycles of fallback calls, 31 tsc ticks per microsecond.
+inline void Publish() {
+    words[26] = static_cast<uint32_t>(gServedFast >> 10); words[27] = static_cast<uint32_t>(gSampledNative >> 10);
+    words[28] = static_cast<uint32_t>(gSampledFast >> 10); words[29] = gSampled; words[30] = static_cast<uint32_t>(gFallbackNative >> 10);
+}
+void Calibrate() {
+    LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+    const unsigned __int64 t0 = __rdtsc();
+    do QueryPerformanceCounter(&b); while ((b.QuadPart - a.QuadPart) * 1000 < f.QuadPart); // ~1 ms
+    const unsigned __int64 t1 = __rdtsc();
+    const double us = 1e6 * static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(f.QuadPart);
+    words[31] = us > 0 ? static_cast<uint32_t>(static_cast<double>(t1 - t0) / us + 0.5) : 0;
+}
+}
 unsigned char __fastcall Gate(void* shape, void*, void* polygon) {
     Bump(2);
     unsigned char fast = 0; uint32_t v = 0;
-    if (gMode == ModeLive) {
-        const Reason why = Evaluate(shape, polygon, &fast, &v);
-        Account(why, v, fast);
-        return why == Served ? fast : nativeKernel(shape, nullptr, polygon);
-    }
-    // Shadow: both start from the identical FP state; native runs last so the caller observes exactly the native state.
+    const bool shadow = gMode == ModeShadow;
+    // Shadow samples every served call; live samples every 32nd served call (by count, never by time): both start from the identical FP
+    // state, native runs last on the sampled call and is compared; live then restores the fast path's state and returns the fast AL.
+    const bool sample = shadow || ((gServedCount + 1) & 31u) == 0;
     alignas(16) unsigned char initial[512], afterFast[512], afterNative[512];
-    _fxsave(initial);
+    if (sample) _fxsave(initial);
+    const unsigned __int64 t0 = __rdtsc();
     const Reason why = Evaluate(shape, polygon, &fast, &v);
+    const unsigned __int64 t1 = __rdtsc();
+    Account(why, v, fast);
+    if (why != Served) {
+        if (sample) _fxrstor(initial);
+        const unsigned __int64 t2 = __rdtsc();
+        const unsigned char native = nativeKernel(shape, nullptr, polygon);
+        gFallbackNative += __rdtsc() - t2;
+        Publish();
+        return native;
+    }
+    ++gServedCount; gServedFast += t1 - t0;
+    if (!sample) { Publish(); return fast; }
     _fxsave(afterFast);
     _fxrstor(initial);
+    const unsigned __int64 t2 = __rdtsc();
     const unsigned char native = nativeKernel(shape, nullptr, polygon);
-    Account(why, v, fast);
-    if (why == Served) {
-        _fxsave(afterNative);
-        Bump(8);
-        if (native != fast) Bump(9);
-        if (memcmp(afterFast, afterNative, 5)) Bump(10);
-        if (memcmp(afterFast + 24, afterNative + 24, 4)) Bump(11);
-    }
-    return native;
+    const unsigned __int64 t3 = __rdtsc();
+    _fxsave(afterNative);
+    Bump(8);
+    if (native != fast) Bump(9);
+    if (memcmp(afterFast, afterNative, 5)) Bump(10);
+    if (memcmp(afterFast + 24, afterNative + 24, 4)) Bump(11);
+    gSampledNative += t3 - t2; gSampledFast += t1 - t0; ++gSampled;
+    Publish();
+    if (shadow) return native;
+    _fxrstor(afterFast);
+    return fast;
 }
 }

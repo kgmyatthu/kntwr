@@ -296,8 +296,8 @@ enum ntw2_memory_word {
 #define NTW2_AI_PREPASS_LABELS \
     "version", "mode", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", "shadow_compares", \
     "mismatch_al", "mismatch_x87", "mismatch_mxcsr", "true_results", "vertices_sum", "vertices_max", "v_le16", "v_le64", \
-    "v_le256", "v_gt256", "observer_routed", "observer_unrouted", "spare21", "spare22", "spare23", "spare24", "spare25", \
-    "spare26", "spare27", "spare28", "spare29", "spare30", "spare31"
+    "v_le256", "v_gt256", "observer_routed", "observer_unrouted", "v_le1024", "v_le4096", "v_le16384", "v_le65536", "fall_busy", \
+    "served_fast_kcycles", "sampled_native_kcycles", "sampled_fast_kcycles", "sampled_calls", "fallback_native_kcycles", "tsc_per_us"
 #define NTW2_AI_PREPASS_CENSUS_WORDS 82u /* ai_prepass_census_words */
 #define NTW2_AI_PREPASS_CLASS_LABELS(c) c "_thinks", c "_think_us", c "_walk_us"
 #define NTW2_AI_PREPASS_CENSUS_LABELS \

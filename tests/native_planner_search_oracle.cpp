@@ -126,10 +126,10 @@ static void RandomShape(float cx,float cz,bool orthonormal,bool integers) {
 static double Now() { LARGE_INTEGER f,c; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c); return 1e9*double(c.QuadPart)/double(f.QuadPart); }
 static void Bench() {
     std::printf("class     V   hit%%   native ns/test   fast ns/test   S     (warm cache, sequential nodes, PE sticky set)\n");
-    const U sizes[]={1,4,8,16,32,64,128,256,512,1024};
+    const U sizes[]={1,4,8,16,32,64,128,256,512,1024,2048,8192,32768};
     for(U v:sizes) {
         std::vector<std::vector<Vertex>> polys; std::vector<std::vector<float>> shapes;
-        const U cases=64; U served=0;
+        const U cases=v>=2048 ? 16 : 64; U served=0;
         std::vector<std::vector<Vertex>> store(cases);
         for(U c=0;c<cases;++c) {
             Star(v,0,0,60,100,false); store[c]=verts; // pointers fixed up below
@@ -147,7 +147,6 @@ static void Bench() {
         ntw2_poly::Configure(native,ntw2_poly::ModeLive); ResetFp(); t0=Now();   // the clone-bound host gate: Evaluate + counters + refusal path
         for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) sink+=ntw2_poly::Gate(shp[c].data(),nullptr,store[c].data());
         const double tg=(Now()-t0)/(double(reps)*cases);
-        ntw2_poly::Configure(native,ntw2_poly::ModeOff);
         // Cross-check the benchmark inputs themselves.
         for(U c=0;c<cases;++c) { ResetFp(); const B n=native(shp[c].data(),nullptr,store[c].data()); ResetFp();
             if(ntw2_poly::Evaluate(shp[c].data(),store[c].data(),&res,nullptr)==ntw2_poly::Served) Require(res==n,"bench input equality"); }
@@ -158,6 +157,7 @@ int main(int argc,char** argv) {
     if(argc<2) { std::fprintf(stderr,"usage: native_planner_search_oracle Napoleon.exe [--bench]\n"); return 2; }
     Map(argv[1]); native=reinterpret_cast<Native>(At(0x80dcf0));
     Require(*reinterpret_cast<U*>(At(0x1318038))==Bits(0.5f) && *reinterpret_cast<U*>(At(0x1318048))==Bits(1.0f),"image constants 0.5/1.0");
+    ntw2_poly::Configure(native,ntw2_poly::ModeLive); // module-owned vertex buffer (the runtime allocates it at activation)
     if(argc>2 && !std::strcmp(argv[2],"--bench")) { Bench(); return 0; }
     // Random finite polygons: V classes, orthonormal and arbitrary axes, float and integer coordinates, hit/miss mix.
     const U classes[]={1,2,3,4,5,7,8,17,64,65,256,1000,1024};
@@ -194,8 +194,21 @@ int main(int argc,char** argv) {
       cw&=~1u; __asm { fldcw cw }  // unmask invalid
       Require(ntw2_poly::Evaluate(shape,verts.data(),&res,&vs)==ntw2_poly::FallFp,"x87 mask precondition"); ResetFp(); }
     { // Too many vertices: refused (native would also be correct, just slow). A list that never returns to P must not hang us.
-      Star(1025,0,0,10,20,false); float s[9]={100,100,0,2,2,1,0,0,1}; SetShape(s);
-      Require(Compare(kCsr,false,"V=1025")==ntw2_poly::FallWalkCap,"walk cap"); }
+      Star(65537,0,0,10,20,false); float s[9]={100,100,0,2,2,1,0,0,1}; SetShape(s);
+      Require(Compare(kCsr,false,"V=65537")==ntw2_poly::FallWalkCap,"walk cap at 65537"); }
+    // Large rings are served (module-owned buffer): byte-equal AL/x87/MXCSR on hits (early exit) and on full-traversal misses.
+    for(U v:{1025u,2048u,4096u,20000u,65536u}) {
+        Star(v,0,0,10,60,false); float miss[9]={200,200,0,2,2,1,0,0,1}, hit[9]={0,0,0,40,40,1,0,0,1}, crossing[9]={30,0,0,60,2,1,0,0,1};
+        SetShape(miss); Require(Compare(kCsr,true,"large ring miss")==ntw2_poly::Served,"large miss served");
+        SetShape(hit); Require(Compare(kCsr,true,"large ring hit")==ntw2_poly::Served,"large hit served");
+        SetShape(crossing); Require(Compare(kCsr,true,"large ring crossing")==ntw2_poly::Served,"large crossing served");
+        for(U k=0;k<8;++k) { RandomShape(R(-70,70),R(-70,70),k&1,false); Require(Compare(kCsr,true,"large ring random")==ntw2_poly::Served,"large random served"); }
+    }
+    { // The busy guard: an unconfigured/released module refuses every call to native, counted; Configure restores service.
+      ntw2_poly::Release(); float s[9]={200,200,0,2,2,1,0,0,1}; SetShape(s); Star(8,0,0,10,60,false);
+      Require(Compare(kCsr,false,"released")==ntw2_poly::FallBusy,"released module answers FallBusy");
+      ntw2_poly::Configure(native,ntw2_poly::ModeLive);
+      Require(Compare(kCsr,true,"reconfigured")==ntw2_poly::Served,"configure restores service"); }
     { std::vector<Vertex> cyc(3); for(U i=0;i<3;++i) { cyc[i].v[2]=static_cast<U>(reinterpret_cast<uintptr_t>(&cyc[(i+1)%3])); cyc[i].v[3]=Bits(9.0f); cyc[i].v[4]=Bits(float(9+i)); }
       Vertex head={}; head.v[2]=static_cast<U>(reinterpret_cast<uintptr_t>(&cyc[0])); head.v[3]=Bits(9.0f); head.v[4]=Bits(8.0f);
       float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); B res; ResetFp();
@@ -234,15 +247,32 @@ int main(int argc,char** argv) {
         }
         const volatile U* w=ntw2_poly::words;
         Require(w[0]==1 && w[1]==mode && w[2]==60*(sizeof(classes)/sizeof(classes[0])) && w[3]>500,"gate counters: version, mode, calls, served");
-        if(mode==ntw2_poly::ModeShadow) Require(w[8]==w[3] && !w[9] && !w[10] && !w[11],"shadow compares every served call bit-identical");
-        else {
-            std::printf("live gate: calls=%u served=%u kind=%u fp=%u domain=%u cap=%u\n",w[2],w[3],w[4],w[5],w[6],w[7]);
+        Require(w[31]>=100 && w[31]<=20000,"tsc_per_us calibrated");
+        if(mode==ntw2_poly::ModeShadow) {
+            Require(w[8]==w[3] && !w[9] && !w[10] && !w[11],"shadow compares every served call bit-identical");
+            Require(w[29]==w[3] && w[26]==w[28] && w[27]>0 && w[28]>0,"shadow samples every served call: native and fast timed on the same calls");
+        } else {
+            Require(w[29]==w[3]/32 && w[8]==w[29] && !w[9] && !w[10] && !w[11],"live samples every 32nd served call by count and compares it bit-identical");
+            Require(w[26]>0 && w[27]>0 && w[28]>0 && w[26]>=w[28],"live: served time covers the sampled subset");
+            std::printf("live gate: calls=%u served=%u kind=%u fp=%u domain=%u cap=%u busy=%u sampled=%u\n",w[2],w[3],w[4],w[5],w[6],w[7],w[25],w[29]);
             Require(w[4]==0 && w[6]<=w[2]/50,"live: (almost) no kind/domain refusals on finite random input");
+            // Refusals run native and are timed: a domain-refused polygon (1e9 coordinate) 300 times.
+            const U f0=w[30]; std::vector<std::pair<float,float>> bigPoly={{1e9f,0},{2,2},{3,1}}; SetPolygon(bigPoly); float sh[9]={0,0,0,2,2,1,0,0,1}; SetShape(sh);
+            for(U k=0;k<300;++k) { ResetFp(); const B nn=native(shape,nullptr,verts.data()); ResetFp(); Require(nn==ntw2_poly::Gate(shape,nullptr,verts.data()),"fallback gate result equals native"); }
+            Require(w[6]>=300 && w[30]>f0,"fallback native time accumulates");
         }
     }
+    { // Large-ring classes through the gate (shadow): words 21..24 split the served V>256 calls, busy stays zero.
+      ntw2_poly::Configure(native,ntw2_poly::ModeShadow);
+      const U big[]={300,1025,4096,5000,16385,40000,65536};
+      for(U v:big) { Star(v,0,0,10,60,false); { float farS[9]={300,300,0,2,2,1,0,0,1}; SetShape(farS); } // full traversal: the ring is always walked
+                     ResetFp(); const B n=native(shape,nullptr,verts.data()); ResetFp(); Require(n==ntw2_poly::Gate(shape,nullptr,verts.data()),"large gate result equals native"); }
+      const volatile U* w=ntw2_poly::words;
+      Require(w[2]==7 && w[3]==7 && w[18]==7 && w[21]+w[22]+w[23]+w[24]==7 && w[21]==1 && w[22]==2 && w[23]==1 && w[24]==3 && !w[25] &&
+              w[8]==7 && !w[9] && !w[10] && !w[11] && w[14]==65536,"gate V classes above 256 (<=1024,<=4096,<=16384,<=65536), no busy, shadow clean"); }
     ntw2_poly::Configure(native,ntw2_poly::ModeOff);
     { bool zero=true; for(U i=0;i<ntw2_poly::kWords;++i) zero=zero && !ntw2_poly::words[i]; Require(zero,"row all zero when off"); }
-    std::printf("coverage: served=%u hit=%u miss=%u kind=%u fp=%u domain=%u cap=%u\n",counts[ntw2_poly::Served],hits,misses,counts[ntw2_poly::FallKind],counts[ntw2_poly::FallFp],counts[ntw2_poly::FallDomain],counts[ntw2_poly::FallWalkCap]);
+    std::printf("coverage: served=%u hit=%u miss=%u kind=%u fp=%u domain=%u cap=%u busy=%u\n",counts[ntw2_poly::Served],hits,misses,counts[ntw2_poly::FallKind],counts[ntw2_poly::FallFp],counts[ntw2_poly::FallDomain],counts[ntw2_poly::FallWalkCap],counts[ntw2_poly::FallBusy]);
     Require(counts[ntw2_poly::Served]>5000 && hits>100 && misses>100,"coverage of served hit/miss");
     std::printf("planner search oracle: %u checks; served=%u (hit %u, miss %u) kind=%u fp=%u domain=%u cap=%u\n",checks,
         counts[ntw2_poly::Served],hits,misses,counts[ntw2_poly::FallKind],counts[ntw2_poly::FallFp],counts[ntw2_poly::FallDomain],counts[ntw2_poly::FallWalkCap]);
