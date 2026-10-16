@@ -131,6 +131,12 @@ void RunWorklist(U manager, const U* cloneEntries);
 // Owner thread only; an observer must not write native memory. Null uninstalls; Release uninstalls.
 struct StageObserver { void (*begin)(U manager); void (*observe)(U entity); void (*end)(); };
 void SetStageObserver(const StageObserver* observer);
+// --brain-s0 occurrence runner (native_brain_s0.h). When installed and census is off, RunWorklist calls begin() before
+// the first occurrence and end() after the last (inside any observer bracket), and RunOccurrence hands the call of the
+// occurrence's step to run(entity, class, original vt+0C entry, clone entries), which executes it exactly once (the
+// original or its instruction-identical BRAIN_S0 clone). Owner thread only. Null uninstalls; Release uninstalls.
+struct OccurrenceRunner { void (*begin)(); void (*end)(); void (*run)(U entity, U cls, U original, const U* cloneEntries); };
+void SetOccurrenceRunner(const OccurrenceRunner* runner);
 // Site-6 dispatch witness (owner thread only; RunWorklist calls Begin/End).
 // Begin snapshots the read sets of the current ==1 worklist (replacing any open
 // snapshot); End re-checks only the rows (and slot rows / army entries) that a

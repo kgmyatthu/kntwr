@@ -110,6 +110,21 @@ enum ntw2_binding {
     /* NTW2_ARMY_UNIT_SHADOW B0 (appended): ARMY_UNIT's call 58202E of the unit FSM update 582530 (ECX = S = U+D68, plain
        return, AL result). Observer gate: reads [S+4] before/after and forwards the original exactly once. */
     NTW2_BIND_ARMY_FSM_UPDATE,
+    /* --brain-s0 (appended; src/brain2/native_brain_s0.h): diagnostic timing gates of the BRAIN_S0 clone family. Each
+       counts the call, then forwards ONE original (or its BRAIN_S0 clone) with the native registers, EFLAGS, x87/SSE
+       state, stack arguments and RET n; a sampled occurrence also brackets the call with serialized RDTSCP. Direct-call
+       gates: TARGET 66D3B1->6718F0, DRIVER 66D3F9->658C50, DRIVER_ALT 66D402->64DE80, TIMER 66D4FD->602E00,
+       ORDER_FINAL 6543ED->6631A0, ORDER_NODE ->662E70, ORDER_ADJUST ->66AE10, ORDER_PREDICATE ->64F8F0,
+       UNIT_ARRIVAL ->57E1F0, UNIT_MODIFIER 6544DB->649520, STANCE ->662E50, PATH 654513->819770, POSTURE
+       819A01->10FC370. Virtual-call gates (the replaced run's movs are performed by the gate): SELECTOR 66D43D
+       [vt+108], NODE_BEGIN 658F70 [vt+4] (`mov ecx,edi` too), NODE_STEP 658F81 [vt+8] (`mov ecx,edi`), FINALIZE
+       658F9B [vt+1A4], POSTURE_NEXT 10FBBDA (`mov ecx,[esi+4]; mov eax,[ecx]; call [eax]`), TIMER_PROVIDER0 602E3D
+       (`mov eax,[esi]; mov eax,[eax]; call eax`), TIMER_PROVIDER1 602E68 (`mov eax,[eax+4]; call eax`). */
+    NTW2_BIND_S0_TARGET, NTW2_BIND_S0_DRIVER, NTW2_BIND_S0_DRIVER_ALT, NTW2_BIND_S0_SELECTOR, NTW2_BIND_S0_TIMER,
+    NTW2_BIND_S0_NODE_BEGIN, NTW2_BIND_S0_NODE_STEP, NTW2_BIND_S0_FINALIZE, NTW2_BIND_S0_ORDER_FINAL,
+    NTW2_BIND_S0_ORDER_NODE, NTW2_BIND_S0_ORDER_ADJUST, NTW2_BIND_S0_ORDER_PREDICATE, NTW2_BIND_S0_UNIT_ARRIVAL,
+    NTW2_BIND_S0_UNIT_MODIFIER, NTW2_BIND_S0_STANCE, NTW2_BIND_S0_PATH, NTW2_BIND_S0_POSTURE, NTW2_BIND_S0_POSTURE_NEXT,
+    NTW2_BIND_S0_TIMER_PROVIDER0, NTW2_BIND_S0_TIMER_PROVIDER1,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -217,6 +232,20 @@ enum ntw2_clone_id {
     NTW2_CLONE_AI2_809110,          /* gather node traversal (no absolutes); recursion stays private */
     NTW2_CLONE_AI2_80DCF0,          /* AI2_WALK polygon predicate (no absolutes) */
     NTW2_CLONE_ARMY_UNIT,           /* 0x581F30..0x5821A7 (B0 shadow only): FSM update call 58202E -> ARMY_FSM_UPDATE */
+    /* --brain-s0 timing family (appended). Instruction-identical to the originals except the S0_* gate call sites listed
+       with the bindings; every other call/jump stays the original. Entered only by the S0 occurrence runner. */
+    NTW2_CLONE_BRAIN_S0,             /* 66CE00..66D6BC + rebased two-entry switch table */
+    NTW2_CLONE_BRAIN_S0_602EB0,      /* 602EB0 wrapper: 6F50F0 -> BRAIN_S0 */
+    NTW2_CLONE_BRAIN_S0_5FCEB0,      /* 5FCEB0 wrapper: 6F50F0 -> BRAIN_S0; tail jmp 5B9720 original */
+    NTW2_CLONE_BRAIN_S0_MOVEORDER,   /* 658C50 driver: node begin/step and finalizer virtuals gated */
+    NTW2_CLONE_BRAIN_S0_FINALIZE,    /* 6543D0 + four rebased tables: 6631A0, 649520, 819770 gated */
+    NTW2_CLONE_BRAIN_S0_PATH,        /* 819770..81A0B5: 10FC370 gated */
+    NTW2_CLONE_BRAIN_S0_POSTURE,     /* 10FC370..10FC3A6: 10FBBD0 -> BRAIN_S0_POSTURE_STEP */
+    NTW2_CLONE_BRAIN_S0_POSTURE_STEP,/* 10FBBD0..10FBC0F: next-state virtual 10FBBDA gated */
+    NTW2_CLONE_BRAIN_S0_TIMER,       /* 602E00..602EA7: providers 602E3D/602E68 gated */
+    NTW2_CLONE_BRAIN_S0_HOT_BEGIN, NTW2_CLONE_BRAIN_S0_HOT_STEP, NTW2_CLONE_BRAIN_S0_IDLE_STEP,
+    NTW2_CLONE_BRAIN_S0_ACTION_BEGIN, NTW2_CLONE_BRAIN_S0_ACTION_STEP,
+    NTW2_CLONE_BRAIN_S0_RELATED_BEGIN, NTW2_CLONE_BRAIN_S0_RELATED_STEP, /* node classes: order/stance/lookups gated */
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

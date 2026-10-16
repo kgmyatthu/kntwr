@@ -22,6 +22,7 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 #include <stdarg.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -39,6 +40,7 @@
 #include "brain2/native_fire.h"
 #include "brain2/native_brain_workers.h"
 #include "brain2/native_unit_brain.h"
+#include "brain2/native_brain_s0.h"
 #include "army/native_army_unit.h"
 #include "puppet/native_puppet.h"
 #include "collision/native_contact.h"
@@ -176,6 +178,7 @@ typedef struct Options {
     BOOL brain_parallel;     /* BRAIN2 Stage 2: per-soldier brain step on pool workers with guarded owner commit; requires census or quiet. */
     BOOL brain_quiet;        /* --brain-quiet: performance mode of --brain-parallel; owner runs the original step, no census/QPC bookkeeping. */
     BOOL brain_unit_shadow;  /* --brain-unit-shadow: per-unit brain Stage A; UnitDecision vs each soldier's native step, shadow only. */
+    BOOL brain_s0;           /* --brain-s0: S0 attribution timer (BRAIN_S0 clone family, 1/64 RDTSCP strata); diagnostics only. */
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -1272,6 +1275,102 @@ static void print_army_unit(const uint32_t *u)
             pct(v[2], v[1]), v[1] ? (double)v[3] / v[1] : 0.0, v[3] / ticks / 1000.0, pct(v[3], u[16]), pct(v[4], v[1]));
     }
 }
+/* --brain-s0 attribution (src/brain2/native_brain_s0.h). Occurrences are sampled uniformly by deterministic strata, so a
+   row's population total is (occurrences / timed occurrences) x its timed cycles after the in-build calibration is
+   subtracted: gate rows excl - sampled*o - children*c, incl - sampled*o - descendants*(o+c); step rows use the root floor r
+   instead of o. stat = one standard error of that total from the per-occurrence second moments (finite-population
+   corrected); cal = the same subtraction moved by one robust sigma of each calibration (a conservative systematic bound:
+   the calibration ran warm, the game runs cold). share = exclusive / total +0C step inclusive. */
+typedef struct {
+    double calls, sampled, excl_ms, excl_stat, excl_cal, incl_ms, incl_stat, share;
+} BrainS0Row;
+typedef struct {
+    double stages, occurrences, timed, cycles_per_ms, o, so, c, sc, r, sr;
+    double step_ms, site6_ms, overhead_ms;
+    BrainS0Row rows[NTW2_BRAIN_S0_ROWS];
+} BrainS0Table;
+static uint64_t s0_u64(const uint32_t *p) { return ((uint64_t)p[1] << 32) | p[0]; }
+static double s0_f64(const uint32_t *p) { double d; uint64_t v = s0_u64(p); memcpy(&d, &v, sizeof d); return d; }
+static int s0_dispatch_row(unsigned r) { return (r >= 6 && r <= 16) || r == 29 || r == 30; }
+static int brain_s0_table(const uint32_t *w, BrainS0Table *t)
+{
+    const double qpc = (double)s0_u64(w + 12), freq = (double)s0_u64(w + 14), tsc = (double)s0_u64(w + 10);
+    double scale, step_incl = 0.0, pass = w[23] / 16.0, dispatch = w[24] / 16.0, decide = w[25] / 16.0;
+    double static_calls = 0.0, dispatch_calls = 0.0, timed_frames = 0.0;
+    unsigned r;
+    memset(t, 0, sizeof *t);
+    t->stages = w[4]; t->occurrences = (double)s0_u64(w + 5); t->timed = w[7];
+    t->cycles_per_ms = (qpc > 0.0 && freq > 0.0 && tsc > 0.0) ? tsc / (qpc / freq * 1000.0) : w[16];
+    t->o = w[17] / 16.0; t->so = w[18] / 16.0; t->c = w[19] / 16.0; t->sc = w[20] / 16.0;
+    t->r = w[21] / 16.0; t->sr = w[22] / 16.0;
+    if (!w[4] || !w[7] || t->cycles_per_ms <= 0.0) return 0;
+    scale = t->occurrences / t->timed;
+    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) {
+        const uint32_t *q = w + NTW2_BRAIN_S0_HEADER_WORDS + r * NTW2_BRAIN_S0_ROW_WORDS;
+        const double s = q[2], ch = q[4], de = q[5], incl = (double)s0_u64(q + 6);
+        const double excl = (double)(int64_t)s0_u64(q + 8), sq_incl = s0_f64(q + 10), sq_excl = s0_f64(q + 12);
+        const int step = r <= 2;
+        const double floor = step ? t->r : t->o, floor_sigma = step ? t->sr : t->so;
+        const double unit = scale / t->cycles_per_ms / t->stages, n = t->timed, N = t->occurrences;
+        const double fpc = N > n ? sqrt((N - n) / N) : 0.0;
+        double var_e = n > 1.0 ? (sq_excl - excl * excl / n) / (n - 1.0) : 0.0;
+        double var_i = n > 1.0 ? (sq_incl - incl * incl / n) / (n - 1.0) : 0.0;
+        BrainS0Row *row = &t->rows[r];
+        if (var_e < 0.0) var_e = 0.0;
+        if (var_i < 0.0) var_i = 0.0;
+        row->calls = (double)s0_u64(q) / t->stages; row->sampled = s;
+        row->excl_ms = (excl - s * floor - ch * t->c) * unit;
+        row->incl_ms = (incl - s * floor - de * (t->o + t->c)) * unit;
+        row->excl_stat = N * sqrt(var_e / n) * fpc / t->cycles_per_ms / t->stages;
+        row->incl_stat = N * sqrt(var_i / n) * fpc / t->cycles_per_ms / t->stages;
+        row->excl_cal = (s * floor_sigma + ch * t->sc) * unit;
+        if (step) step_incl += row->incl_ms;
+        else if (r != 18 && r != 20) {
+            if (s0_dispatch_row(r)) dispatch_calls += (double)s0_u64(q); else static_calls += (double)s0_u64(q);
+            timed_frames += s;
+        } else timed_frames += s;
+    }
+    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) t->rows[r].share = step_incl > 0.0 ? t->rows[r].excl_ms / step_incl : 0.0;
+    t->step_ms = step_incl;
+    t->site6_ms = (double)s0_u64(w + 8) / t->cycles_per_ms / t->stages;
+    t->overhead_ms = (static_calls * pass + dispatch_calls * dispatch + t->occurrences * decide +
+                      timed_frames * (t->o + t->c) + t->timed * t->r) / t->cycles_per_ms / t->stages;
+    return 1;
+}
+static void print_brain_s0(const uint32_t *w)
+{
+    static const char *const rows[] = { NTW2_BRAIN_S0_ROW_LABELS };
+    static const unsigned depth[] = { NTW2_BRAIN_S0_ROW_DEPTHS };
+    static const char *const states[] = { "not started", "running", "refused: no RDTSCP/invariant TSC", "refused: BRAIN_S0 clones missing" };
+    BrainS0Table t;
+    unsigned r;
+    if (!w[1]) return;
+    say(L"  brain S0 attribution (v%lu, %hs; 1/%lu strata of (stage, unit ordinal, member ordinal)):\n",
+        (unsigned long)w[0], w[2] < 4 ? states[w[2]] : "?", 1ul << w[3]);
+    if (!brain_s0_table(w, &t)) { say(L"    no timed stage yet (stages=%lu, timed occurrences=%lu)\n", (unsigned long)w[4], (unsigned long)w[7]); return; }
+    say(L"    stages=%.0f occurrences=%.0f (%.1f/stage) timed=%.0f; TSC %.1f MHz (QPC span; start calibration %lu kHz)\n",
+        t.stages, t.occurrences, t.occurrences / t.stages, t.timed, t.cycles_per_ms / 1000.0, (unsigned long)w[16]);
+    say(L"    calibration (cycles, median +- robust sigma): gate floor o %.1f+-%.1f, nest c %.1f+-%.1f, root r %.1f+-%.1f; "
+        L"unsampled pass %.2f, dispatch %.2f, stratum %.2f; depth max %lu overflow %lu, abandoned %lu, unit overflow %lu, nested %lu\n",
+        t.o, t.so, t.c, t.sc, t.r, t.sr, w[23] / 16.0, w[24] / 16.0, w[25] / 16.0, (unsigned long)w[28],
+        (unsigned long)w[26], (unsigned long)w[27], (unsigned long)w[29], (unsigned long)w[30]);
+    say(L"    +0C step total %.3f ms/stage vs site-6 worklist inclusive %.3f ms/stage (step %.1f%% of site 6); "
+        L"S0 overhead est. %.3f ms/stage\n", t.step_ms, t.site6_ms, t.site6_ms > 0.0 ? 100.0 * t.step_ms / t.site6_ms : 0.0,
+        t.overhead_ms);
+    say(L"    %-34hs %11hs %8hs %9hs %8hs %8hs %9hs %8hs %7hs\n", "mechanic (exclusive = minus timed children)", "calls/stage",
+        "timed", "excl ms", "+-stat", "+-cal", "incl ms", "+-stat", "share");
+    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) {
+        const BrainS0Row *x = &t.rows[r];
+        char name[48];
+        if (!x->calls && !x->sampled) continue;
+        _snprintf_s(name, sizeof name, _TRUNCATE, "%*s%s", (int)(2 * depth[r]), "", rows[r]);
+        say(L"    %-34hs %11.1f %8.0f %9.4f %8.4f %8.4f %9.4f %8.4f %6.2f%%\n", name, x->calls, x->sampled, x->excl_ms,
+            x->excl_stat, x->excl_cal, x->incl_ms, x->incl_stat, 100.0 * x->share);
+    }
+    say(L"    not separately timed (inside a parent's exclusive): engage policy 658C62/658FDE/6590FC and fire latches "
+        L"658DEF/658DFB in driver_658C50; 660180/660230 have no step call site; animation select 66B7E0/66B990 "
+        L"(fsm.vt+40/+44) in posture_10FC370; 64DE80 internals; other node classes' order calls\n");
+}
 /* Army Stage B0 qualification (native_army_unit.h B0 comment, analysis/native-army-stage-b-plan.md sections 6, 7, 9).
    Refusal buckets are mutually exclusive whole-occurrence costs (unreadable, alloc_list, FSM transition, recorder not
    replayable, other refused, completable). Section 6 inputs: a = alloc_list + unreadable, t = FSM transition,
@@ -1659,6 +1758,7 @@ static void print_module_words(const ntw2_status *s)
                 }
             }
             print_unit_brain(s->brain_unit_words);
+            print_brain_s0(s->brain_s0_words);
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
@@ -2726,7 +2826,30 @@ static void sb_brain2(Sb *b, const Run *r)
     sb_fmt(b, "}, \"brain_worker_phase_words\": [");
     for (i = 0; i < NTW2_BRAIN_WORKER_PHASE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_worker_phase_words[i]);
-    sb_fmt(b, "], \"unknown_site_words\": [");
+    sb_fmt(b, "], \"requested_s0\": %s, \"brain_s0_words\": [", r->opt.brain_s0 ? "true" : "false");
+    for (i = 0; i < NTW2_BRAIN_S0_WORDS; ++i)
+        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_s0_words[i]);
+    {
+        /* Labelled header and the launcher's per-mechanic estimate (print_brain_s0 / brain_s0_table formulas). */
+        static const char *const header[] = { NTW2_BRAIN_S0_HEADER_LABELS };
+        static const char *const rows[] = { NTW2_BRAIN_S0_ROW_LABELS };
+        BrainS0Table t;
+        unsigned k;
+        const int ok = brain_s0_table(r->last.brain_s0_words, &t);
+        sb_fmt(b, "], \"brain_s0\": {\"header\": {");
+        for (k = 0; k < NTW2_BRAIN_S0_HEADER_WORDS; ++k)
+            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", header[k], (unsigned long)r->last.brain_s0_words[k]);
+        sb_fmt(b, "}, \"estimated\": %s, \"cycles_per_ms\": %.3f, \"step_ms_per_stage\": %.6f, \"site6_ms_per_stage\": %.6f, "
+                  "\"s0_overhead_ms_per_stage\": %.6f, \"rows\": {", ok ? "true" : "false", t.cycles_per_ms, t.step_ms,
+               t.site6_ms, t.overhead_ms);
+        for (k = 0; k < NTW2_BRAIN_S0_ROWS; ++k) {
+            const BrainS0Row *x = &t.rows[k];
+            sb_fmt(b, "%s\"%s\": {\"calls_per_stage\": %.3f, \"timed\": %.0f, \"excl_ms\": %.6f, \"excl_stat_ms\": %.6f, "
+                      "\"excl_cal_ms\": %.6f, \"incl_ms\": %.6f, \"incl_stat_ms\": %.6f, \"share\": %.6f}", k ? ", " : "",
+                   rows[k], x->calls, x->sampled, x->excl_ms, x->excl_stat, x->excl_cal, x->incl_ms, x->incl_stat, x->share);
+        }
+        sb_fmt(b, "}}, \"unknown_site_words\": [");
+    }
     for (i = 0; i < NTW2_BRAIN2_UNKNOWN_SITE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain2_unknown_site_words[i]);
     sb_fmt(b, "], \"idle_node_words\": [");
@@ -3644,7 +3767,8 @@ static BOOL write_receipt(Run *r, int exit_code)
                         16u * (256u + NTW2_TIMED_SITES * 128u) + NTW2_TIMED_SITES * 192u +
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
                         NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u +
-                        NTW2_ARMY_B0_WORDS * 64u + NTW2_PUPPET_MOTION_WORDS * 64u + 4096u];
+                        NTW2_ARMY_B0_WORDS * 64u + NTW2_PUPPET_MOTION_WORDS * 64u + NTW2_BRAIN_S0_WORDS * 16u +
+                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -3719,6 +3843,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
+    sb_fmt(&b, "  \"brain_s0\": %s,\n", r->opt.brain_s0 ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
     sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & NTW2_ARMY_UNIT_SHADOW) ? "true" : "false");
@@ -4392,7 +4517,8 @@ static int install_runtime(Run *r)
                          (r->opt.brain_finalizer_shadow ? NTW2_BRAIN_FINALIZER_SHADOW : 0u) |
                          (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
-                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
+                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
+                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
@@ -4867,6 +4993,10 @@ static void usage(void)
         L"  --brain-unit-shadow   requires brain2; excludes --brain-parallel/--brain-quiet: per-unit brain Stage A, shadow only. Before\n"
         L"                        the unchanged site-6 loop pool workers decide every unit from unit-level inputs; after each\n"
         L"                        soldier's native step its decided fields are compared with its unit's decision (brain_unit_words)\n"
+        L"  --brain-s0            requires brain2; excludes every other --brain-* option and puppet: S0 attribution timer. Each\n"
+        L"                        step runs the BRAIN_S0 clone family (identical code, counting gates around target, drivers,\n"
+        L"                        node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue, timers);\n"
+        L"                        1/64 deterministic occurrences timed with RDTSCP, calibrated gate cost subtracted (brain_s0_words)\n"
         L"  --collide-contact-shadow  requires collide: contact callbacks are planned on pool workers from stage-entry state and each\n"
         L"                        plan is compared with the original callback the owner still runs (collide.contact)\n"
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
@@ -5010,6 +5140,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--brain-parallel")) o->brain_parallel = TRUE;
         else if (!wcscmp(name, L"--brain-quiet")) o->brain_quiet = TRUE;
         else if (!wcscmp(name, L"--brain-unit-shadow")) o->brain_unit_shadow = TRUE;
+        else if (!wcscmp(name, L"--brain-s0")) o->brain_s0 = TRUE;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
@@ -5111,8 +5242,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow ||
-         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow) && !(o->mask & NTW2_BRAIN2)) {
-        errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow and brain shadow options require --features brain2.\n");
+         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0) && !(o->mask & NTW2_BRAIN2)) {
+        errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow, --brain-s0 and brain shadow options require --features brain2.\n");
         return -1;
     }
     if (o->brain_parallel && ((!o->brain_census && !o->brain_quiet) || o->workers == 0)) {
@@ -5128,13 +5259,18 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--brain-unit-shadow observes the serial site-6 loop and excludes --brain-parallel and --brain-quiet.\n");
         return -1;
     }
+    if (o->brain_s0 && (o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow ||
+                        o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet || o->brain_unit_shadow)) {
+        errsay(L"--brain-s0 owns the site-6 occurrence call and excludes every other --brain-* option.\n");
+        return -1;
+    }
     if ((o->mask & NTW2_PUPPET) && !o->puppet_units) {
         errsay(L"puppet_probe needs its unit count: use --puppet-probe N (1..%u) or --puppet-probe all.\n", NTW2_PUPPET_MAX_UNITS);
         return -1;
     }
     if ((o->mask & NTW2_PUPPET) && ((o->mask & (NTW2_BRAIN2 | NTW2_BRAIN)) || o->brain_census || o->brain_timing ||
         o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet ||
-        o->brain_unit_shadow)) {
+        o->brain_unit_shadow || o->brain_s0)) {
         errsay(L"--puppet-probe is the sole owner of site 6 and the infantry step slot: it excludes brain2, brain and every --brain-* option.\n");
         return -1;
     }
@@ -5251,7 +5387,8 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_finalizer_shadow ? NTW2_BRAIN_FINALIZER_SHADOW : 0u) |
                          (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
-                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
+                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
+                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;

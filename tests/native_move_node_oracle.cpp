@@ -12,11 +12,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <vector>
 #include "native_image_relocation.h"
 #include "ntw2_clones.h"
 #include "native_brain2.h"
 #include "native_move_node.h"
+#include "native_brain_s0.h"
 #include "native_node_projection.h"
 #pragma fenv_access(on)
 using U = uint32_t;
@@ -149,6 +152,7 @@ static void Map(const char* path) {
     Put(At(0x131a7b8), 0, 1.25f);
     std::fill(std::begin(bindings), std::end(bindings), Fn(&Unexpected));
     Require(brain::Bind(Addr(image), bindings), "bind production generic gates");
+    Require(ntw2_brain_s0::Bind(Addr(image), bindings), "bind S0 timing gates");
     Require(projection::Initialize(Addr(image), bindings), "initialize private projection banks");
     hot::Bind(Addr(image)); SeedBanks();
     U detail = 0;
@@ -473,6 +477,42 @@ static void CertifiedProjectionCases() {
         Equal(expected, actual, 20, "post-refusal reuse remains bit exact"); ++cases;
     }
 }
+// --brain-s0: the BRAIN_S0 hot-step clone (819310 with its 64F8F0 order predicate behind the S0_ORDER_PREDICATE gate) is
+// bit-exact against the mapped original on every no-order fixture, timed (shift 0 root) and untimed, AL result included.
+// Zero-filled storage: struct padding stays zero in every copy, so whole-object byte comparison is meaningful.
+struct FixtureFree { void operator()(Fixture* p) const { std::free(p); } };
+using FixturePtr = std::unique_ptr<Fixture, FixtureFree>;
+static FixturePtr ZeroedFixture(const Fixture* from = nullptr) {
+    void* p = std::calloc(1, sizeof(Fixture));
+    Require(p != nullptr, "fixture storage");
+    return FixturePtr(from ? new (p) Fixture(*from) : new (p) Fixture());
+}
+static void S0HotStepCases() {
+    namespace s0 = ntw2_brain_s0;
+    s0::Reset();
+    Require(s0::Start(production.entries, 0), "S0 starts on the production family");
+    const U clone = production.entries[NTW2_CLONE_BRAIN_S0_HOT_STEP];
+    U steps = 0;
+    for (bool timed : {false, true}) for (U state : {0u, 6u, 7u}) for (B flag : {B(0), B(1), B(2), B(255)}) {
+        label = "S0 hot-step clone vs mapped original (no-order states)";
+        const FixturePtr f = ZeroedFixture();
+        Put(f->owner.data(), 0x390, state); Put(f->Node(), 0x44, flag);
+        if (flag == 2) { f->Group(); f->ownerVtable[0xec / 4] = Addr(At(0x447880)); f->ownerVtable[0xf0 / 4] = Fn(&Unexpected); }
+        const FixturePtr before = ZeroedFixture(f.get());
+        ResetFp(); reinterpret_cast<void (__thiscall*)(U)>(At(0x819310))(f->NodeAddress());
+        const FixturePtr expected = ZeroedFixture(f.get());
+        *f = *before; ResetFp();
+        if (timed) s0::RunTimedRoot(s0::StepOther, clone, f->NodeAddress());
+        else reinterpret_cast<void (__thiscall*)(U)>(clone)(f->NodeAddress());
+        Equal(expected.get(), f.get(), sizeof(Fixture), "S0 hot step leaves every fixture byte as the original");
+        ++steps; ++cases;
+    }
+    U words[s0::kWords]; s0::Snapshot(words);
+    const U* predicate = words + s0::kHeaderWords + s0::OrderPredicate * s0::kRowWords;
+    Require(predicate[s0::CallsLo] == steps && predicate[s0::Sampled] == steps / 2,
+            "every hot step reaches the 64F8F0 gate once; timed only inside timed roots");
+    s0::Stop(); s0::Reset();
+}
 #include "native_idle_node_oracle.inc"
 #include "native_action_node_oracle.inc"
 static int RunOracle(int argc, char** argv) {
@@ -481,7 +521,7 @@ static int RunOracle(int argc, char** argv) {
     { label = "mapped original constructor"; Fixture f; memset(f.Node(), 0x6d, hot::kNodeBytes); Invoke(f, hot::Construct, 0, true); }
     { label = "mapped original destructor including empty delete branch"; Fixture f; Invoke(f, hot::Destroy, 0, true); }
     StepCases(); BeginCases(); RefusalCases(); ProductionRoutes();
-    CertifiedProjectionCases(); RunIdleNodeCases(); RunActionNodeCases();
+    CertifiedProjectionCases(); RunIdleNodeCases(); RunActionNodeCases(); S0HotStepCases();
     hot::Release();
     for (U p = 0; p < projection::kParticipants; ++p) {
         Put(reinterpret_cast<void*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]), 4, U(0));

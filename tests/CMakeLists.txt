@@ -262,6 +262,7 @@ ntw2_harness(native_brain2_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
           "${NTW2_SRC}/brain2/native_move_node.cpp"
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
+          "${NTW2_SRC}/brain2/native_brain_s0.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_brain_workers_oracle STD 20 FP strict
   SOURCES native_brain_workers_oracle.cpp "${NTW2_SRC}/brain2/native_brain_workers.cpp"
@@ -307,6 +308,7 @@ ntw2_harness(native_move_node_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
           "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+          "${NTW2_SRC}/brain2/native_brain_s0.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_fire_oracle STD 20 FP strict

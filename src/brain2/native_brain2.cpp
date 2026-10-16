@@ -1495,6 +1495,8 @@ void Configure(bool census, bool timing, bool nodeShadow, bool fireShadow, bool 
     g_route[ConfiguredDriver] = g_censusEnabled ? 1u : 0u;
 }
 void BeginDispatch() { Metadata(); ++g_words[Dispatches]; }
+const OccurrenceRunner* g_runner;
+void SetOccurrenceRunner(const OccurrenceRunner* runner) { g_runner = runner; }
 void RunOccurrence(U entity, const U* cloneEntries) {
     Metadata(); ++g_words[Occurrences];
     const U original = D(D(entity) + 0xC);
@@ -1522,8 +1524,10 @@ void RunOccurrence(U entity, const U* cloneEntries) {
     LARGE_INTEGER start = {};
     const bool timed = g_timingEnabled && Clock(start);
     bool completed = false;
+    const OccurrenceRunner* const runner = g_censusEnabled ? nullptr : g_runner;
     __try {
-        reinterpret_cast<void (__thiscall*)(void*)>(entry)(reinterpret_cast<void*>(entity));
+        if (runner) runner->run(entity, static_cast<U>(cls), original, cloneEntries);
+        else reinterpret_cast<void (__thiscall*)(void*)>(entry)(reinterpret_cast<void*>(entity));
         completed = true;
     } __finally {
         if (timed) {
@@ -1684,6 +1688,8 @@ void RunWorklist(U manager, const U* cloneEntries) {
     if (witness) WitnessBegin(manager);
     const StageObserver* const observer = g_observer;
     if (observer) observer->begin(manager);
+    const OccurrenceRunner* const runner = g_censusEnabled ? nullptr : g_runner;
+    if (runner) runner->begin();
     U cursor = *reinterpret_cast<volatile U*>(manager + 0x264);
     U end = cursor + 4 * *reinterpret_cast<volatile U*>(manager + 0x260);
     while (cursor != end) {
@@ -1696,6 +1702,7 @@ void RunWorklist(U manager, const U* cloneEntries) {
         end = *reinterpret_cast<volatile U*>(manager + 0x264) +
               4 * *reinterpret_cast<volatile U*>(manager + 0x260);
     }
+    if (runner) runner->end();
     if (observer) observer->end();
     if (witness) WitnessEnd();
 }
@@ -1718,7 +1725,7 @@ void Reset() {
 void Release() {
     g_clones = g_readyClones = nullptr; g_entity = g_firstActive = g_firstUnknown = g_poseMask = 0;
     g_depth = 0; g_censusEnabled = g_timingEnabled = false;
-    g_nodeShadow = g_fireShadow = g_finalizerShadow = false; g_witnessOpen = false; g_observer = nullptr;
+    g_nodeShadow = g_fireShadow = g_finalizerShadow = false; g_witnessOpen = false; g_observer = nullptr; g_runner = nullptr;
     ntw2_finalizer::Configure(false);
     ntw2_node::Release(); ntw2_move_node::Release(); ntw2_fire::Stop();
     ntw2_idle_node::Release(); ntw2_action_node::Release();

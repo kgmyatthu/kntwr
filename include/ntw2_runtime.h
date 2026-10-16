@@ -43,6 +43,7 @@ extern "C" {
 #define NTW2_PUPPET_STATS_OFF 0x80000000u   /* ntw2_config::puppet_units flag (launcher --puppet-stats 0): production-stats mode, no per-man diagnostics, no site-13 hash pass */
 #define NTW2_PUPPET_MOVER_WORDS 32u /* puppet_mover_words; layout src/puppet/native_puppet.h (MoverWord), labels NTW2_PUPPET_MOVER_LABELS */
 #define NTW2_PUPPET_SELECT_WORDS 32u /* puppet_select_words; layout src/puppet/native_puppet.h (SelectWord), labels NTW2_PUPPET_SELECT_LABELS */
+#define NTW2_BRAIN_S0_WORDS 560u /* brain_s0_words (NTW2_BRAIN_S0 attribution timer); layout src/brain2/native_brain_s0.h (Word/RowWord), labels NTW2_BRAIN_S0_HEADER_LABELS / NTW2_BRAIN_S0_ROW_LABELS / NTW2_BRAIN_S0_ROW_WORD_LABELS */
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
 #define NTW2_LOCO_SHADOW 0x4u /* Owner-thread sweep/resolve oracle; requires LOCO_CLONE. */
@@ -79,7 +80,8 @@ extern "C" {
 #define NTW2_BRAIN_FINALIZER_SHADOW 0x20u /* --brain-finalizer-shadow: owner-only private-copy rerun of proved 0x819770 calls, bit-exact compare; implies gated census. Words: brain2_unknown_site_words witness 21..23 (native_brain2.h). */
 #define NTW2_BRAIN_QUIET 0x40u /* --brain-quiet: the performance configuration of NTW2_BRAIN_PARALLEL (required). Owner-run occurrences execute the ORIGINAL step (no serial gated census clone, no per-service bookkeeping, no first-unresolved histograms, no QPC per service); workers keep their classification gates and the guarded commit; guard misses are counted without block checksums. Excludes NTW2_BRAIN_CENSUS, TIMING and every shadow flag. Phase telemetry: brain_worker_phase_words. */
 #define NTW2_BRAIN_UNIT_SHADOW 0x80u /* --brain-unit-shadow: per-unit brain Stage A, shadow only. Before the unchanged site-6 loop, pool workers compute one UnitDecision per unit from unit-level inputs (no writes); after each soldier's native step the owner compares the fields it decided against its unit's decision. Requires BRAIN2; excludes NTW2_BRAIN_PARALLEL/QUIET. Words: brain_unit_words, src/brain2/native_unit_brain.h. */
-#define NTW2_BRAIN_FLAGS_VALID 0xffu
+#define NTW2_BRAIN_S0 0x100u /* --brain-s0: diagnostics-only S0 attribution timer (analysis/native-unit-compromise-plan.md 5.3). Each occurrence's step runs through the BRAIN_S0 clone family whose candidate decision calls (target, drivers, node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue selector, timer/providers) reach counting gates; deterministic 1/64 occurrences are timed with serialized RDTSCP (gate overhead calibrated at start and subtracted). Native work runs exactly once, unchanged; no game-state write. Requires BRAIN2; excludes every other NTW2_BRAIN_* flag and NTW2_PUPPET. Words: brain_s0_words, src/brain2/native_brain_s0.h. */
+#define NTW2_BRAIN_FLAGS_VALID 0x1ffu
 #define NTW2_BRAIN_UNIT_WORDS 176u
 #define NTW2_BRAIN_WORKER_WORDS 144u
 #define NTW2_BRAIN_WORKER_PHASE_WORDS 40u
@@ -796,6 +798,11 @@ typedef struct ntw2_status {
        pinned infantry tables, top rejected majority class tables. Layout and labels in src/puppet/native_puppet.h
        (SelectWord, NTW2_PUPPET_SELECT_LABELS). Tick-owner writer. */
     uint32_t puppet_select_words[NTW2_PUPPET_SELECT_WORDS];
+    /* NTW2_BRAIN_S0 attribution timer (appended after puppet_select_words): 32 header words (calibration, stages,
+       occurrences, site-6 cycles, TSC/QPC span) then 33 mechanic rows x 16 words (calls, sampled calls, nesting counts,
+       inclusive/exclusive cycles and per-occurrence second moments). Layout and labels in src/brain2/native_brain_s0.h.
+       Tick-owner writer. Reset at activation, retained after stop. */
+    uint32_t brain_s0_words[NTW2_BRAIN_S0_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1183,7 +1190,8 @@ static_assert(offsetof(ntw2_status,node_words) + NTW2_NODE_WORDS * sizeof(uint32
               offsetof(ntw2_status,brain_unit_words) + NTW2_BRAIN_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,collide_contact_words) &&
               NTW2_AI_ASYNC2 == 0x20000u && (NTW2_VALID_MASK & NTW2_AI_ASYNC2) && !(NTW2_ALL & NTW2_AI_ASYNC2) &&
               NTW2_BRAIN_PARALLEL == 0x10u && NTW2_BRAIN_FINALIZER_SHADOW == 0x20u && NTW2_BRAIN_QUIET == 0x40u &&
-              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_FLAGS_VALID == 0xffu && NTW2_BRAIN_UNIT_WORDS == 176u,
+              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_S0 == 0x100u && NTW2_BRAIN_FLAGS_VALID == 0x1ffu &&
+              NTW2_BRAIN_UNIT_WORDS == 176u,
               "class shadow and target rows append after the existing fire commit ABI");
 static_assert(offsetof(ntw2_status,collide_contact_words) + NTW2_COLLIDE_CONTACT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,grid_probation_words) &&
               NTW2_COLLIDE_CONTACT_WORDS == 48u && NTW2_COLLIDE_CONTACT_SHADOW == 0x1u && NTW2_COLLIDE_CONTACT_WORKERS == 0x2u &&
@@ -1208,8 +1216,10 @@ static_assert(offsetof(ntw2_status,puppet_divert_words) + NTW2_PUPPET_DIVERT_WOR
               NTW2_PUPPET_DIVERT_WORDS == 32u, "puppet divert row appends after puppet_motion_words");
 static_assert(offsetof(ntw2_status,puppet_mover_words) + NTW2_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_select_words) &&
               NTW2_PUPPET_MOVER_WORDS == 32u, "puppet mover row appends after puppet_divert_words");
-static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_PUPPET_SELECT_WORDS == 32u, "puppet select row appends after puppet_mover_words");
+static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after puppet_select_words");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

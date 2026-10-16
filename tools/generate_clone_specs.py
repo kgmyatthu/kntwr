@@ -1074,6 +1074,179 @@ ARMY_UPDATE_CALLS = (
 ARMY_UNIT_FSM_SITE, ARMY_UNIT_FSM_TARGET = 0x58202E, 0x582530
 ARMY_UNIT_CALLS = {0x55AC80, 0x56D8B0, 0x4A8A50, 0x56AC40, 0x5691F0, 0x57F070, 0x5557E0, 0x582680, 0x56D910, 0x585D50,
                    0x52E840, 0x56E410, 0x601500, 0x600EF0, 0x53A9E0, 0x54C1F0}
+# --brain-s0 (S0 attribution, analysis/native-unit-compromise-plan.md section 5.3): private copies of the per-man step whose
+# candidate decision calls reach counting/timing gates (bindings S0_*). Every gate forwards exactly one original (or the
+# next BRAIN_S0 clone) with the original register/stack/RET contract; every other call or jump stays the original target.
+S0_ORDER_NODE_SITES = {
+    'BRAIN_S0_HOT_BEGIN': (0x816951,), 'BRAIN_S0_HOT_STEP': (0x819358,),
+    'BRAIN_S0_IDLE_STEP': (0x66DD52, 0x66DDB3, 0x66DDCE, 0x66DE48, 0x66DEBC, 0x66DEDE, 0x66DF4F, 0x66DF89, 0x66DFC3,
+                           0x66DFD7, 0x66DFEC),
+    'BRAIN_S0_ACTION_BEGIN': (0x8160CF, 0x8161C4), 'BRAIN_S0_ACTION_STEP': (0x81854B, 0x818586, 0x8185AD, 0x8185EE, 0x8187FF),
+    'BRAIN_S0_RELATED_BEGIN': (0x81601F,), 'BRAIN_S0_RELATED_STEP': (0x818353, 0x8183B4, 0x8183C7),
+}
+S0_NODE_GATES = {   # clone -> {site: (original callee, binding)} besides the 662E70 order sites above
+    'BRAIN_S0_HOT_BEGIN': {0x816909: (0x64F8F0, 'S0_ORDER_PREDICATE'), 0x816939: (0x66AE10, 'S0_ORDER_ADJUST'),
+                           0x81695B: (0x662E50, 'S0_STANCE')},
+    'BRAIN_S0_HOT_STEP': {0x819316: (0x64F8F0, 'S0_ORDER_PREDICATE'), 0x81934C: (0x66AE10, 'S0_ORDER_ADJUST')},
+    'BRAIN_S0_IDLE_STEP': {0x66DD94: (0x64F8F0, 'S0_ORDER_PREDICATE'), 0x66DECD: (0x66AE10, 'S0_ORDER_ADJUST')},
+    'BRAIN_S0_ACTION_BEGIN': {0x81608B: (0x64F8F0, 'S0_ORDER_PREDICATE'), 0x8160BC: (0x66AE10, 'S0_ORDER_ADJUST'),
+                              0x8160D9: (0x662E50, 'S0_STANCE'), 0x81611E: (0x57E1F0, 'S0_UNIT_ARRIVAL'),
+                              0x816129: (0x57E1F0, 'S0_UNIT_ARRIVAL')},
+    'BRAIN_S0_ACTION_STEP': {0x818509: (0x64F8F0, 'S0_ORDER_PREDICATE'),
+                             **{s: (0x66AE10, 'S0_ORDER_ADJUST') for s in (0x81853F, 0x81857A, 0x8185A1, 0x8185E2, 0x8187F3)}},
+    'BRAIN_S0_RELATED_BEGIN': {}, 'BRAIN_S0_RELATED_STEP': {},
+}
+S0_NODE_SOURCES = {'BRAIN_S0_HOT_BEGIN': 'BRAIN_W_HOT_BEGIN', 'BRAIN_S0_HOT_STEP': 'BRAIN_W_HOT_STEP',
+                   'BRAIN_S0_IDLE_STEP': 'BRAIN_W_IDLE_STEP', 'BRAIN_S0_ACTION_BEGIN': 'BRAIN_ACTION_BEGIN',
+                   'BRAIN_S0_ACTION_STEP': 'BRAIN_ACTION_STEP', 'BRAIN_S0_RELATED_BEGIN': 'BRAIN_ACTION_RELATED_BEGIN',
+                   'BRAIN_S0_RELATED_STEP': 'BRAIN_ACTION_RELATED_STEP'}
+S0_NODE_INDIRECT = {
+    'BRAIN_S0_HOT_BEGIN': set(), 'BRAIN_S0_HOT_STEP': set(),
+    'BRAIN_S0_IDLE_STEP': {0x66DD1F, 0x66DD65, 0x66DD84, 0x66DF18},
+    'BRAIN_S0_ACTION_BEGIN': set(),
+    'BRAIN_S0_ACTION_STEP': {0x81866A, 0x818683, 0x81868E, 0x8186A4, 0x8186BD, 0x8186CD, 0x8186D4, 0x8186E4, 0x8186EB,
+                             0x818705},
+    'BRAIN_S0_RELATED_BEGIN': {0x816008}, 'BRAIN_S0_RELATED_STEP': {0x818387, 0x8183A2},
+}
+S0_NODE_RETS = {   # every RET of the source (all plain C3)
+    'BRAIN_S0_HOT_BEGIN': (0x816A4A,), 'BRAIN_S0_HOT_STEP': (0x819377, 0x819388),
+    'BRAIN_S0_IDLE_STEP': (0x66DD5A, 0x66DE54, 0x66DEC8, 0x66DEEA, 0x66DF5B, 0x66DF95, 0x66DFCF, 0x66DFE3, 0x66DFF8,
+                           0x66E047),
+    'BRAIN_S0_ACTION_BEGIN': (0x8161BA, 0x8161D3, 0x8162CE), 'BRAIN_S0_ACTION_STEP': (0x81880D,),
+    'BRAIN_S0_RELATED_BEGIN': (0x816025,), 'BRAIN_S0_RELATED_STEP': (0x818359, 0x8183BA, 0x8183CD),
+}
+# Finalizer 6543D0: its activity switch and three posture switches are rebased behind the body (BRAIN_W_TABLES layout).
+S0_FINALIZE_TABLES = (('BRAIN_W_FINALIZE_TABLE', 0x6545AF), ('BRAIN_W_POSTURE0', 0x6545C1),
+                      ('BRAIN_W_POSTURE1', 0x6545ED), ('BRAIN_W_POSTURE2', 0x654644))
+# Exact pinned virtual-call runs the gates replace (the gate performs the run's movs itself, or they are kept).
+S0_SELECTOR_RUN = bytes.fromhex('8bcfff9008010000')       # 66D43B mov ecx,edi; call [eax+108] (keep the mov)
+S0_NODE_BEGIN_RUN = bytes.fromhex('8bcfff5004')            # 658F6E mov ecx,edi; call [eax+4]
+S0_NODE_STEP_RUN = bytes.fromhex('8bcfff5008')             # 658F7F mov ecx,edi; call [eax+8]
+S0_FINALIZE_RUN = bytes.fromhex('8bceff90a4010000')       # 658F99 mov ecx,esi; call [eax+1A4] (keep the mov)
+S0_POSTURE_NEXT_RUN = bytes.fromhex('8b4e048b01ff10')      # 10FBBD5 mov ecx,[esi+4]; mov eax,[ecx]; call [eax]
+S0_PROVIDER0_RUN = bytes.fromhex('8b068b00ffd0')           # 602E39 mov eax,[esi]; mov eax,[eax]; call eax
+S0_PROVIDER1_RUN = bytes.fromhex('8b4004ffd0')             # 602E65 mov eax,[eax+4]; call eax
+# Untouched calls from S0 clones into originals that other clones also copy (profiling TRIGGER and WATCHER, the NODE_PROJ
+# worker projection): the S0 family deliberately runs the ORIGINAL there, exactly as the native step does.
+S0_ORIGINAL_OK = {0x63C440, 0x7FD070, 0x66E780}
+
+
+def brain_s0_configs():
+    def rets(*sites, ret=b'\xc3'):
+        return {s: ret for s in sites}
+    configs = [
+        dict(clone='BRAIN_S0', source='BRAIN',
+             site_calls={0x66D3B1: Bind('S0_TARGET'), 0x66D3F9: Bind('S0_DRIVER'), 0x66D402: Bind('S0_DRIVER_ALT'),
+                         0x66D4FD: Bind('S0_TIMER')},
+             call_rewrites={0x66D43B: (S0_SELECTOR_RUN, Bind('S0_SELECTOR'), 2)},
+             indirect_ok={BRAIN_TABLE_JMP}, abs_expected=1,
+             abs_retarget=lambda value, site: (Clone('BRAIN_S0', BRAIN_TABLE_VA - 0x66CE00)
+                                               if value == BRAIN_TABLE_VA and site == BRAIN_TABLE_JMP + 3 else None),
+             indirect_calls=BRAIN_INDIRECT_CALLS | {0x66D433},
+             expect_rets=rets(0x66CE66, 0x66D6AE, 0x66D6BB)),
+        dict(clone='BRAIN_S0_602EB0', source='WRAP_602EB0', calls={0x6F50F0: (Clone('BRAIN_S0'), 1, [0x602EB6])},
+             indirect_calls=set(), expect_rets=rets(0x602F48)),
+        dict(clone='BRAIN_S0_5FCEB0', source='WRAP_5FCEB0', calls={0x6F50F0: (Clone('BRAIN_S0'), 1, [0x5FCF67])},
+             indirect_calls={0x5FCF02, 0x5FCF21}, expect_rets=rets(0x5FCFAA)),
+        dict(clone='BRAIN_S0_MOVEORDER', source='MOVEORDER',
+             call_rewrites={0x658F6E: (S0_NODE_BEGIN_RUN, Bind('S0_NODE_BEGIN')),
+                            0x658F7F: (S0_NODE_STEP_RUN, Bind('S0_NODE_STEP')),
+                            0x658F99: (S0_FINALIZE_RUN, Bind('S0_FINALIZE'), 2)},
+             indirect_calls={0x658DD7, 0x658E69, 0x658EBB, 0x658FF3, 0x659008, 0x65901E, 0x659090, 0x6590D8},
+             expect_rets=rets(0x65910D, 0x659122, ret=RET(4))),
+        dict(clone='BRAIN_S0_FINALIZE', source='BRAIN_W_FINALIZE',
+             site_calls={0x6543ED: Bind('S0_ORDER_FINAL'), 0x6544DB: Bind('S0_UNIT_MODIFIER'), 0x654513: Bind('S0_PATH')},
+             indirect_ok={jump for _, jump in S0_FINALIZE_TABLES}, abs_expected=len(S0_FINALIZE_TABLES),
+             abs_retarget=s0_finalize_abs_retarget, indirect_calls=set(),
+             expect_rets=rets(0x654575, 0x65459C, 0x6545D4, 0x6545E1, *range(0x654600, 0x654635, 0xD),
+                              *range(0x654657, 0x654735, 0xD))),
+        dict(clone='BRAIN_S0_PATH', source='S0_PATH', site_calls={0x819A01: Bind('S0_POSTURE')},
+             indirect_calls={0x8198AE, 0x819920, 0x819F96}, expect_rets=rets(0x8197A9, 0x819F85, 0x81A068, 0x81A0B4)),
+        dict(clone='BRAIN_S0_POSTURE', source='S0_POSTURE',
+             calls={0x10FBBD0: (Clone('BRAIN_S0_POSTURE_STEP'), 1, [0x10FC389])},
+             indirect_calls=set(), expect_rets=rets(0x10FC39F, 0x10FC3A5)),
+        dict(clone='BRAIN_S0_POSTURE_STEP', source='S0_POSTURE_STEP',
+             run_rewrites={0x10FBBD5: (S0_POSTURE_NEXT_RUN,
+                                       [b'\xe8', Fix('rel', Bind('S0_POSTURE_NEXT')), b'\x90\x90'])},
+             indirect_calls={0x10FBBE8, 0x10FBBF3, 0x10FBBFB, 0x10FBC02}, expect_rets=rets(0x10FBBFA, 0x10FBC0E)),
+        dict(clone='BRAIN_S0_TIMER', source='BRAIN_W_TIMER',
+             run_rewrites={0x602E39: (S0_PROVIDER0_RUN, [b'\xe8', Fix('rel', Bind('S0_TIMER_PROVIDER0')), b'\x90'])},
+             call_rewrites={0x602E65: (S0_PROVIDER1_RUN, Bind('S0_TIMER_PROVIDER1'))},
+             indirect_calls=set(), expect_rets=rets(0x602EA6)),
+    ]
+    for name, source in S0_NODE_SOURCES.items():
+        sites = {s: Bind('S0_ORDER_NODE') for s in S0_ORDER_NODE_SITES[name]}
+        sites.update({s: Bind(binding) for s, (_, binding) in S0_NODE_GATES[name].items()})
+        configs.append(dict(clone=name, source=source, site_calls=sites, indirect_calls=S0_NODE_INDIRECT[name],
+                            expect_rets=rets(*S0_NODE_RETS[name])))
+    return configs
+
+
+# The ONE original callee each direct-call gate forwards (mirrored by src/brain2/native_brain_s0.cpp kStaticGates): a gate
+# site whose original call targets anything else would forward the wrong function, so every site is pinned here.
+S0_GATE_CALLEE = {'S0_TARGET': 0x6718F0, 'S0_DRIVER': 0x658C50, 'S0_DRIVER_ALT': 0x64DE80, 'S0_TIMER': 0x602E00,
+                  'S0_ORDER_FINAL': 0x6631A0, 'S0_ORDER_NODE': 0x662E70, 'S0_ORDER_ADJUST': 0x66AE10,
+                  'S0_ORDER_PREDICATE': 0x64F8F0, 'S0_UNIT_ARRIVAL': 0x57E1F0, 'S0_UNIT_MODIFIER': 0x649520,
+                  'S0_STANCE': 0x662E50, 'S0_PATH': 0x819770, 'S0_POSTURE': 0x10FC370}
+
+
+def s0_extra_checks(image):
+    """Every S0 direct-call gate site is `call rel32` to its binding's pinned callee; every binding is reached."""
+    reached = set()
+    for cfg in brain_s0_configs():
+        for site, target in cfg.get('site_calls', {}).items():
+            callee = S0_GATE_CALLEE.get(target.ident)
+            if callee is None or image.read(site, 5) != b'\xe8' + u32((callee - site - 5) & 0xFFFFFFFF):
+                fail(f'{cfg["clone"]}: gate site {site:#x} ({target.ident}) is not a direct call of its pinned callee')
+            reached.add(target.ident)
+    if reached != set(S0_GATE_CALLEE):
+        fail(f'BRAIN_S0: direct gates {sorted(set(S0_GATE_CALLEE) - reached)} have no site')
+
+
+S0_EXPECT_CALLS = {
+    'BRAIN_S0': {0x444B60, 0x53EEE0, 0x55AC60, 0x55C2E0, 0x5B77A0, 0x62DFF0, 0x639200, 0x63C440, 0x659480, 0x663730,
+                 0x6666E0, 0x66B080, 0x66C160, 0x66EEB0, 0x679300, 0x679C50, 0x6E9DA0, 0x7EE750, 0x7FD070, 0x7FD9E0,
+                 0x805880, 0x80E9D0, 0xE5F760, 0x10F1160},
+    'BRAIN_S0_602EB0': {0x5B7B20, 0x5CB830},
+    'BRAIN_S0_5FCEB0': {0x5E52F0, 0x607540, 0x60CAC0, 0x610470},
+    'BRAIN_S0_MOVEORDER': {0x5AA400, 0x61DA90, 0x643C90, 0x6460E0, 0x663730, 0x66AD00, 0x66B080, 0x66E780, 0x6C4FE0,
+                           0x7E1D70, 0x7E1ED0, 0x7E2040, 0x80E9D0, 0x811870},
+    'BRAIN_S0_FINALIZE': {0x55AB90, 0x55ABF0, 0x55C1C0, 0x55C2A0, 0x643900, 0x659600, 0x663730, 0x66EE30},
+    'BRAIN_S0_PATH': {0x5574A0, 0x7F2220, 0x80E9D0, 0x814AA0, 0x10D0900},
+    'BRAIN_S0_POSTURE': set(),
+    'BRAIN_S0_POSTURE_STEP': set(),
+    'BRAIN_S0_TIMER': {0x5B7F20},
+    'BRAIN_S0_HOT_BEGIN': {0x63B3E0, 0x659520, 0x66AD00},
+    'BRAIN_S0_HOT_STEP': {0x63B3E0},
+    'BRAIN_S0_IDLE_STEP': {0x55AD60, 0x5FC070, 0x62DF10, 0x63B3E0, 0x664B40, 0x6666E0, 0x80E020},
+    'BRAIN_S0_ACTION_BEGIN': {0x61E9A0, 0x63B3E0, 0x659520, 0x66AD00, 0x66B9D0, 0x80E9D0},
+    'BRAIN_S0_ACTION_STEP': {0x45C180, 0x63B3E0, 0x659D50, 0x6669B0, 0x66AD00, 0x6ABC80, 0x80E9D0},
+    'BRAIN_S0_RELATED_BEGIN': set(),
+    'BRAIN_S0_RELATED_STEP': set(),
+}
+S0_EXPECT_CENSUS = {
+    'BRAIN_S0': (578, 16, 34, 0), 'BRAIN_S0_602EB0': (34, 1, 2, 0), 'BRAIN_S0_5FCEB0': (64, 0, 4, 1),
+    'BRAIN_S0_MOVEORDER': (282, 1, 17, 0), 'BRAIN_S0_FINALIZE': (243, 6, 8, 1), 'BRAIN_S0_PATH': (523, 29, 5, 0),
+    'BRAIN_S0_POSTURE': (30, 0, 0, 0), 'BRAIN_S0_POSTURE_STEP': (33, 0, 0, 0), 'BRAIN_S0_TIMER': (45, 4, 1, 0),
+    'BRAIN_S0_HOT_BEGIN': (88, 1, 3, 0), 'BRAIN_S0_HOT_STEP': (43, 0, 1, 0), 'BRAIN_S0_IDLE_STEP': (273, 5, 12, 0),
+    'BRAIN_S0_ACTION_BEGIN': (168, 1, 7, 0), 'BRAIN_S0_ACTION_STEP': (239, 3, 8, 0),
+    'BRAIN_S0_RELATED_BEGIN': (20, 0, 0, 0), 'BRAIN_S0_RELATED_STEP': (55, 0, 0, 0),
+}
+
+
+def s0_finalize_abs_retarget(value, site):
+    """The four finalizer switch tables, appended in S0_FINALIZE_TABLES order right behind the 0x380-byte body."""
+    offset = 0x654750 - 0x6543D0
+    for table, jump in S0_FINALIZE_TABLES:
+        va = next(s[1] for s in SOURCES if s[0] == table)
+        if value == va:
+            if site != jump + 3:
+                fail(f'BRAIN_S0_FINALIZE: table {table} referenced at {site:#x}')
+            return Clone('BRAIN_S0_FINALIZE', offset)
+        offset += next(s[2] - s[1] for s in SOURCES if s[0] == table)
+    return None
+
+
 AICTRL_CALLS = (
     (0x7B25B7, 0x756C80), (0x7B264D, 0x7D6510), (0x7B2654, 0x7DBA90), (0x7B265B, 0x755E50),
     (0x7B2686, 0x6387F0), (0x7B26AB, 0x7D7020), (0x7B26B3, 0x7B5F20), (0x7B26BA, 0x7C8BD0),
@@ -1170,6 +1343,10 @@ SOURCES = [
     ('BRAIN_ACTION_RELATED_STEP', 0x818330, 0x8183CE, 'forward'),
     ('BRAIN_ACTION_RELATED_BEGIN', 0x815FF0, 0x816026, 'forward'),
     ('BRAIN_ACTION_EMPTY', 0x444B60, 0x444B61, 'forward'),
+    # --brain-s0 timing family: bodies that no other clone owns (role 's0': not a replaced original).
+    ('S0_PATH', 0x819770, 0x81A0B5, 's0'),                    # path follower; RETs 8197A9/819F85/81A068/81A0B4, INT3 from 81A0B5
+    ('S0_POSTURE', 0x10FC370, 0x10FC3A6, 's0'),               # posture FSM loop; RETs 10FC39F/10FC3A5
+    ('S0_POSTURE_STEP', 0x10FBBD0, 0x10FBC0F, 's0'),          # one FSM step; RETs 10FBBFA/10FBC0E, INT3 from 10FBC0F
     ('PIN_IDLE_TABLE', 0x133405C, 0x1334090, 'pin-data'),
     ('PIN_WAIT_TABLE', 0x1334028, 0x133405C, 'pin-data'),
     ('PIN_ACTION_TABLE', 0x1347270, 0x13472A4, 'pin-data'),
@@ -1757,6 +1934,7 @@ AI2_EXPECT_CENSUS = {
 }
 
 
+
 def clone_configs():
     manager_insert = [b'\x52\x8b\xcf\xba', Fix('abs', Bind('BAL_JOB')), b'\xe8', Fix('rel', Bind('BAL_STAGE')), b'\x5a']
     worker_init = b'\x55\x81\xec' + u32(BATCH_CONTEXT_BYTES) + bytes.fromhex('8bec894d00c7450400000000')
@@ -1946,6 +2124,7 @@ def clone_configs():
              indirect_calls=set(), expect_rets={0x7C8C8B: b'\xc3'}),
         *node_projection_configs(),
         *ai2_configs(),
+        *brain_s0_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2004,8 +2183,9 @@ EXPECT_CALLS = {
 EXPECT_CALLS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CALLS[entry]
                      for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CALLS})
 EXPECT_CALLS.update(AI2_EXPECT_CALLS)
+EXPECT_CALLS.update(S0_EXPECT_CALLS)
 EXPECT_JUMPS = {'FORM_COMMAND': {0x58123C, 0x581286}, 'AI_POSITION_UPDATE': {0x6D3E30}, 'AI_CONTROLLER': {0x7C8F70},
-                'AI2_POSITION_UPDATE': {0x6D3E30}}
+                'AI2_POSITION_UPDATE': {0x6D3E30}, 'BRAIN_S0_5FCEB0': {0x5B9720}, 'BRAIN_S0_FINALIZE': {0x444B60}}
 # (decoded instructions, HIGHLOW relocations, external call sites kept original, external jump sites). QUERY matches the
 # earlier source-pinned census: 641 instructions, 30 image absolutes + 1 jump-table reference, 34 external calls.
 EXPECT_CENSUS = {
@@ -2031,6 +2211,7 @@ EXPECT_CENSUS = {
 EXPECT_CENSUS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CENSUS[entry]
                       for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CENSUS})
 EXPECT_CENSUS.update(AI2_EXPECT_CENSUS)
+EXPECT_CENSUS.update(S0_EXPECT_CENSUS)
 
 
 # ============================================================================================ generation
@@ -2569,6 +2750,17 @@ def build_all(image, header_path):
         fail('MANAGER: switch range guard, table jump or alignment byte changed')
     append_table(image, registry, manager, MANAGER_TABLE_CFG)
     append_table(image, registry, plans['BRAIN'], BRAIN_TABLE_CFG)
+    append_table(image, registry, plans['BRAIN_S0'], dict(BRAIN_TABLE_CFG, clone='BRAIN_S0_TABLE', target_clone='BRAIN_S0'))
+    finalize = plans['BRAIN_S0_FINALIZE']
+    finalize.forward_tables = []
+    for table_name, jump in S0_FINALIZE_TABLES:
+        table = registry.by_name[table_name]
+        entries = struct.unpack(f'<{table["size"] // 4}I', image.read(table['va'], table['size']))
+        offset = finalize.size
+        append_table(image, registry, finalize, dict(clone=table_name, source=table_name, target_clone='BRAIN_S0_FINALIZE',
+                                                     expected_entries=entries, offset=offset, jump=jump))
+        finalize.forward_tables.append((offset, entries, jump))
+    s0_extra_checks(image)
     append_table(image, registry, plans['AI_CONTROLLER'], AI_CONTROLLER_TABLE_CFG)
     army_insns = {i.address: i for i, _, _ in plans['ARMY'].instructions}
     if army_insns[0x58037F].bytes != bytes.fromhex('e9fc9afbff'):
@@ -2635,7 +2827,7 @@ def build_all(image, header_path):
     for plan in plans.values():
         for target in list(plan.external_calls) + list(plan.external_jumps):
             for lo, hi, owner in clone_spans:
-                if lo <= target < hi:
+                if lo <= target < hi and not (plan.name.startswith('BRAIN_S0') and target in S0_ORIGINAL_OK):
                     fail(f'{plan.name}: untouched call/jump to {target:#x} inside cloned original {owner}')
         if plan.source is not None and plan.source['code']:
             for r in image.span_relocs(plan.source['va'], plan.source['size']):

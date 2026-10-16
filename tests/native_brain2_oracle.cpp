@@ -7,7 +7,9 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <xmmintrin.h>
+#include <intrin.h>
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstdarg>
 #include <cstdint>
@@ -19,6 +21,7 @@
 #include "ntw2_clones.h"
 #include "native_brain2.h"
 #include "native_finalizer.h"
+#include "native_brain_s0.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
@@ -92,6 +95,7 @@ static void Map(const char* path) {
         reinterpret_cast<IMAGE_NT_HEADERS32*>(image + dos->e_lfanew), delta), "image relocation");
     std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
     brain::Bind(A(image), bindings);
+    Require(ntw2_brain_s0::Bind(A(image), bindings), "S0 gates bind with collision-free dispatch tables");
     U detail = 0;
     const U error = ntw2_build_clones(A(image), bindings, &clones, &detail);
     if (error) Fail("clone construction error=%u detail=%u", error, detail);
@@ -1831,21 +1835,22 @@ static void SiteHistogramChecks() {
         Require(sum <= t[3] && (!t[2] || sum < t[3]), "retained site rows never exceed the counted calls");
     }
 }
+// Real-step fixture specs (order, posture, expected activity, ...): shared by the census/observe and S0 runs.
+static const Spec kRunSpecs[] = {
+    {4,0,9}, {4,1,0xc}, {0,0,8}, {5,0,0xa}, {4,3,0xb},
+    {4,0,1,0,0,0x20,0}, {5,0,2,0,0,0x20,0}, {0x17,0,0x23},
+    {4,0,0x17,2,0,0x20,1,1}, {4,0,0x18,2,0,0x20,1,0,1},
+    {4,0,0x1d,0,3}, {4,0,0x1d,1,3}, {4,0,0x1d,2,3},
+    {4,0,0x1d,0,3,0x5d}, {4,1,0xc,0,0,0x20,1,0,0,true},
+    {5,0,0x1d,0,2,0x5e,1,0,0,true}
+};
 static void RunCases(World& world, bool census, bool timing, bool missingClone = false) {
     currentCase = missingClone ? "missing clone forwards original once" :
         census ? "owner serial census" : "owner serial observe";
-    const Spec specs[] = {
-        {4,0,9}, {4,1,0xc}, {0,0,8}, {5,0,0xa}, {4,3,0xb},
-        {4,0,1,0,0,0x20,0}, {5,0,2,0,0,0x20,0}, {0x17,0,0x23},
-        {4,0,0x17,2,0,0x20,1,1}, {4,0,0x18,2,0,0x20,1,0,1},
-        {4,0,0x1d,0,3}, {4,0,0x1d,1,3}, {4,0,0x1d,2,3},
-        {4,0,0x1d,0,3,0x5d}, {4,1,0xc,0,0,0x20,1,0,0,true},
-        {5,0,0x1d,0,2,0x5e,1,0,0,true}
-    };
     brain::Configure(census, timing); brain::Reset(); brain::BeginDispatch();
     std::vector<World> worldBefore(1), worldExpected(1);
     U count = 0;
-    for (const Spec& spec : specs) {
+    for (const Spec& spec : kRunSpecs) {
         Fixture fixture; fixture.Init(world, spec, ++count);
         const Fixture before = fixture;
         worldBefore[0] = world;
@@ -2053,6 +2058,283 @@ static void CheckLifecycle() {
     status = StatusNow();
     Require(status[brain::Bound] == 1 && status[brain::Occurrences] == 0, "rebind starts a fresh activation");
 }
+// ---- --brain-s0 attribution timer (native_brain_s0.h) ----------------------------------------------------------
+namespace s0 = ntw2_brain_s0;
+using S0Words = std::array<U, s0::kWords>;
+static S0Words S0Now() { S0Words w{}; s0::Snapshot(w.data()); return w; }
+static const U* S0Row(const S0Words& w, U row) { return w.data() + s0::kHeaderWords + row * s0::kRowWords; }
+static uint64_t S0Pair(const U* p) { return (static_cast<uint64_t>(p[1]) << 32) | p[0]; }
+static int64_t S0Excl(const S0Words& w, U row) { return static_cast<int64_t>(S0Pair(S0Row(w, row) + s0::ExclLo)); }
+static uint64_t S0Incl(const S0Words& w, U row) { return S0Pair(S0Row(w, row) + s0::InclLo); }
+static const brain::OccurrenceRunner kS0Runner = {&s0::BeginStage, &s0::EndStage, &s0::RunOccurrence};
+static bool S0StepRow(U row) { return row <= s0::StepOther; }
+// Exact accounting identities of any set of timed occurrences: every timed frame is either a root (step row) or the
+// child of exactly one frame, and every frame's exclusive cycles are its inclusive minus its direct children's, so the
+// exclusive cycles of all rows sum to the roots' inclusive cycles.
+static void S0Identities(const S0Words& w, const char* what) {
+    int64_t excl = 0; uint64_t roots = 0, children = 0, nonRoot = 0;
+    for (U r = 0; r < s0::RowCount; ++r) {
+        excl += S0Excl(w, r); children += S0Row(w, r)[s0::Children];
+        if (S0StepRow(r)) roots += S0Incl(w, r); else nonRoot += S0Row(w, r)[s0::Sampled];
+    }
+    Require(excl == static_cast<int64_t>(roots), what);
+    Require(children == nonRoot, "every timed gate frame is charged to exactly one parent");
+}
+// Register/EFLAGS/stack/RET-n contract probe: the caller loads patterns, pushes two arguments and calls the gate; the
+// target records what it received, loads output patterns and returns with RET 8.
+static U probeGate, probeEaxIn, probeEntry[9], probeExit[8], probeEspBefore, probeEspAfter;
+__declspec(naked) static void ProbeTarget() {
+    __asm pushfd
+    __asm mov dword ptr [probeEntry + 0], eax
+    __asm mov dword ptr [probeEntry + 4], ecx
+    __asm mov dword ptr [probeEntry + 8], edx
+    __asm mov dword ptr [probeEntry + 12], ebx
+    __asm mov dword ptr [probeEntry + 16], esi
+    __asm mov dword ptr [probeEntry + 20], edi
+    __asm mov dword ptr [probeEntry + 24], ebp
+    __asm pop eax
+    __asm mov dword ptr [probeEntry + 28], eax
+    __asm mov eax, dword ptr [esp + 4]
+    __asm mov dword ptr [probeEntry + 32], eax
+    __asm mov eax, 0x11111111
+    __asm mov ecx, 0x22222222
+    __asm mov edx, 0x33333333
+    __asm push 0x0097
+    __asm popfd
+    __asm ret 8
+}
+static void RunProbe() {
+    __asm {
+        pushad
+        pushfd
+        push ebp
+        push 0xBBBB0002
+        push 0xAAAA0001
+        mov dword ptr [probeEspBefore], esp
+        mov eax, dword ptr [probeEaxIn]
+        mov ecx, 0xC1C1C1C1
+        mov edx, 0xD2D2D2D2
+        mov ebx, 0xB3B3B3B3
+        mov esi, 0x5E5E5E5E
+        mov edi, 0xD1D1D1D1
+        mov ebp, 0xEBEBEBEB
+        push 0x0847
+        popfd
+        call dword ptr [probeGate]
+        pushfd
+        mov dword ptr [probeExit + 0], eax
+        mov dword ptr [probeExit + 4], ecx
+        mov dword ptr [probeExit + 8], edx
+        mov dword ptr [probeExit + 12], ebx
+        mov dword ptr [probeExit + 16], esi
+        mov dword ptr [probeExit + 20], edi
+        mov dword ptr [probeExit + 24], ebp
+        pop eax
+        mov dword ptr [probeExit + 28], eax
+        mov dword ptr [probeEspAfter], esp
+        pop ebp
+        popfd
+        popad
+    }
+}
+static void __fastcall ProbeRoot(void*, void*) { RunProbe(); }
+static void CheckProbe(U ecxAtTarget, const char* what) {
+    const U arithmetic = 0x8D5, df = 0x400;
+    Require(probeEntry[0] == probeEaxIn && probeEntry[1] == ecxAtTarget && probeEntry[2] == 0xD2D2D2D2 &&
+            probeEntry[3] == 0xB3B3B3B3 && probeEntry[4] == 0x5E5E5E5E && probeEntry[5] == 0xD1D1D1D1 &&
+            probeEntry[6] == 0xEBEBEBEB, what);
+    Require((probeEntry[7] & (arithmetic | df)) == 0x845 && probeEntry[8] == 0xAAAA0001,
+            "gate delivers the caller's EFLAGS (DF clear) and stack arguments");
+    Require(probeExit[0] == 0x11111111 && probeExit[1] == 0x22222222 && probeExit[2] == 0x33333333 &&
+            probeExit[3] == 0xB3B3B3B3 && probeExit[4] == 0x5E5E5E5E && probeExit[5] == 0xD1D1D1D1 &&
+            probeExit[6] == 0xEBEBEBEB && (probeExit[7] & (arithmetic | df)) == 0x095,
+            "gate returns the callee's registers and EFLAGS");
+    Require(probeEspAfter == probeEspBefore + 8, "callee RET 8 removes exactly its arguments through the gate");
+}
+static void S0Start(U shift) {
+    s0::Reset();
+    Require(s0::Start(clones.entries, shift), "S0 starts: RDTSCP, invariant TSC, complete BRAIN_S0 family");
+}
+static void S0Probe() {
+    currentCase = "S0 gate register/EFLAGS/RET-n contract";
+    S0Start(0);
+    Require(s0::OverrideGateTarget(NTW2_BIND_S0_TARGET, Fn(&ProbeTarget)), "direct gate accepts an oracle target");
+    Require(!s0::OverrideGateTarget(NTW2_BIND_S0_SELECTOR, Fn(&ProbeTarget)), "dispatch gates are table-routed only");
+    probeGate = bindings[NTW2_BIND_S0_TARGET]; probeEaxIn = 0xA0A0A0A0;
+    RunProbe(); CheckProbe(0xC1C1C1C1, "unsampled direct gate delivers every register");
+    s0::RunTimedRoot(s0::StepOther, Fn(&ProbeRoot), 0);
+    CheckProbe(0xC1C1C1C1, "timed direct gate delivers every register");
+    // Selector gate (66D43B keeps `mov ecx,edi`): EAX = vtable, target [vt+108]; an unknown class is its miss row.
+    static U vtable[0x110 / 4];
+    vtable[0x108 / 4] = Fn(&ProbeTarget);
+    probeGate = bindings[NTW2_BIND_S0_SELECTOR]; probeEaxIn = A(vtable);
+    RunProbe(); CheckProbe(0xC1C1C1C1, "unsampled dispatch gate delivers every register");
+    s0::RunTimedRoot(s0::StepOther, Fn(&ProbeRoot), 0);
+    CheckProbe(0xC1C1C1C1, "timed dispatch gate delivers every register");
+    // Node-step gate performs the replaced `mov ecx,edi` itself.
+    vtable[8 / 4] = Fn(&ProbeTarget);
+    probeGate = bindings[NTW2_BIND_S0_NODE_STEP];
+    RunProbe(); CheckProbe(0xD1D1D1D1, "node gate performs the replaced mov ecx,edi");
+    const S0Words w = S0Now();
+    Require(S0Pair(S0Row(w, s0::SelectorOther)) == 2 && S0Row(w, s0::SelectorOther)[s0::Sampled] == 1 &&
+            S0Pair(S0Row(w, s0::Target)) == 2 && S0Row(w, s0::Target)[s0::Sampled] == 1 &&
+            S0Pair(S0Row(w, s0::NodeStepOther)) == 1 && S0Row(w, s0::NodeStepOther)[s0::Sampled] == 0,
+            "every gate call counted once, timed only inside a timed occurrence, unknown targets on the miss row");
+    S0Identities(w, "probe roots: exclusive cycles sum to root inclusive cycles");
+    ++cases;
+}
+// Synthetic call tree through four direct gates: root{spin A; Target{spin E}; Driver{spin B; Path{spin C; Posture{D}}}}.
+static U treeGate[4];
+static uint64_t treeSpin[5];
+static void Spin(uint64_t cycles) { const uint64_t s = __rdtsc(); while (__rdtsc() - s < cycles) {} }
+static void __cdecl TreePosture() { Spin(treeSpin[4]); }
+static void __cdecl TreePath() { Spin(treeSpin[3]); reinterpret_cast<void (*)()>(treeGate[3])(); }
+static void __cdecl TreeDriver() { Spin(treeSpin[2]); reinterpret_cast<void (*)()>(treeGate[2])(); }
+static void __cdecl TreeTarget() { Spin(treeSpin[1]); }
+static void __fastcall TreeRoot(void*, void*) {
+    Spin(treeSpin[0]);
+    reinterpret_cast<void (*)()>(treeGate[0])();
+    reinterpret_cast<void (*)()>(treeGate[1])();
+}
+static void S0Nesting() {
+    currentCase = "S0 nesting accounting on a synthetic call tree";
+    treeGate[0] = bindings[NTW2_BIND_S0_TARGET]; treeGate[1] = bindings[NTW2_BIND_S0_DRIVER];
+    treeGate[2] = bindings[NTW2_BIND_S0_PATH]; treeGate[3] = bindings[NTW2_BIND_S0_POSTURE];
+    const uint64_t spins[5] = {400000, 100000, 300000, 200000, 150000};
+    std::copy(std::begin(spins), std::end(spins), treeSpin);
+    const U rows[5] = {s0::StepOther, s0::Target, s0::Driver, s0::Path, s0::Posture};
+    bool close = false;
+    for (U attempt = 0; attempt < 8 && !close; ++attempt) {
+        S0Start(0);
+        Require(s0::OverrideGateTarget(NTW2_BIND_S0_TARGET, Fn(&TreeTarget)) &&
+                s0::OverrideGateTarget(NTW2_BIND_S0_DRIVER, Fn(&TreeDriver)) &&
+                s0::OverrideGateTarget(NTW2_BIND_S0_PATH, Fn(&TreePath)) &&
+                s0::OverrideGateTarget(NTW2_BIND_S0_POSTURE, Fn(&TreePosture)), "tree gates take oracle targets");
+        const uint64_t measured = s0::RunTimedRoot(s0::StepOther, Fn(&TreeRoot), 0);
+        const S0Words w = S0Now();
+        // Exact structure: sampled / direct children / descendants per frame.
+        const U expect[5][3] = {{1, 2, 4}, {1, 0, 0}, {1, 1, 2}, {1, 1, 1}, {1, 0, 0}};
+        for (U i = 0; i < 5; ++i) {
+            const U* row = S0Row(w, rows[i]);
+            Require(row[s0::Sampled] == expect[i][0] && row[s0::Children] == expect[i][1] &&
+                    row[s0::Descendants] == expect[i][2], "tree frame counts (sampled, children, descendants)");
+        }
+        Require(S0Incl(w, s0::StepOther) == measured, "root inclusive is the measured occurrence");
+        S0Identities(w, "tree: exclusive cycles sum to root inclusive cycles");
+        Require(S0Incl(w, s0::StepOther) == static_cast<uint64_t>(S0Excl(w, s0::StepOther)) + S0Incl(w, s0::Target) +
+                S0Incl(w, s0::Driver), "root inclusive = root exclusive + direct children inclusive");
+        Require(S0Incl(w, s0::Driver) == static_cast<uint64_t>(S0Excl(w, s0::Driver)) + S0Incl(w, s0::Path) &&
+                S0Incl(w, s0::Path) == static_cast<uint64_t>(S0Excl(w, s0::Path)) + S0Incl(w, s0::Posture),
+                "inner timers subtract from their parent, never double-charged");
+        // Calibrated corrections recover the bodies (spin loops) within 3% + 2000 cycles (interrupts: best of 8).
+        const double o = w[s0::GateFloorX16] / 16.0, c = w[s0::GateNestX16] / 16.0, r = w[s0::RootFloorX16] / 16.0;
+        close = true;
+        for (U i = 0; i < 5; ++i) {
+            const U* row = S0Row(w, rows[i]);
+            const double corrected = S0Excl(w, rows[i]) - (i ? o : r) - row[s0::Children] * c;
+            close = close && std::fabs(corrected - static_cast<double>(spins[i])) <= 0.03 * spins[i] + 2000.0;
+        }
+        const double inclDriver = static_cast<double>(S0Incl(w, s0::Driver)) - o - 2 * (o + c);
+        close = close && std::fabs(inclDriver - static_cast<double>(spins[2] + spins[3] + spins[4])) <=
+                         0.03 * (spins[2] + spins[3] + spins[4]) + 2000.0;
+    }
+    Require(close, "calibrated exclusive/inclusive cycles recover each synthetic body");
+    S0Start(0); // restores the routed targets
+    ++cases;
+}
+static void S0Calibration() {
+    currentCase = "S0 calibration sanity";
+    S0Start(s0::kDefaultShift);
+    const S0Words w = S0Now();
+    std::printf("S0 calibration: tsc %u kHz, gate floor %.1f (spread %.1f), nest %.1f (spread %.1f), root %.1f, "
+                "pass %.2f, dispatch %.2f, occurrence %.2f cycles\n", w[s0::CalTscKhz], w[s0::GateFloorX16] / 16.0,
+                w[s0::GateFloorSpreadX16] / 16.0, w[s0::GateNestX16] / 16.0, w[s0::GateNestSpreadX16] / 16.0,
+                w[s0::RootFloorX16] / 16.0, w[s0::PassCostX16] / 16.0, w[s0::DispatchCostX16] / 16.0,
+                w[s0::OccurrenceCostX16] / 16.0);
+    Require(w[s0::Version] == s0::kVersion && w[s0::State] == 1 && w[s0::SampleShift] == s0::kDefaultShift &&
+            w[s0::CalibrationSamples] == 2048, "S0 running with 1/64 sampling and a full calibration");
+    Require(w[s0::CalTscKhz] > 100000 && w[s0::CalTscKhz] < 10000000, "TSC rate against QPC is a CPU clock");
+    Require(w[s0::GateFloorX16] > 0 && w[s0::GateFloorX16] < 3000 * 16, "empty-gate floor is positive and bounded");
+    Require(w[s0::GateNestX16] < 3000 * 16 && w[s0::RootFloorX16] > 0 && w[s0::RootFloorX16] < 3000 * 16,
+            "nesting and root floors bounded");
+    Require(w[s0::PassCostX16] < 100 * 16 && w[s0::DispatchCostX16] < 200 * 16 && w[s0::OccurrenceCostX16] < 400 * 16,
+            "unsampled gate and stratum costs are cheap");
+    for (U r = 0; r < s0::RowCount; ++r) {
+        const U* row = S0Row(w, r);
+        for (U k = 0; k < s0::kRowWords; ++k) Require(row[k] == 0, "calibration never leaks into the attribution rows");
+    }
+    ++cases;
+}
+// The real step through the BRAIN_S0 family: bit-exact soldier/world/FP/callbacks against the original, every
+// occurrence timed (shift 0); then deterministic 1/64 strata.
+static void S0Fixtures(World& world) {
+    currentCase = "S0 clone family executes each original exactly once";
+    S0Start(0);
+    brain::Configure(false, false); brain::Reset(); brain::SetOccurrenceRunner(&kS0Runner); brain::BeginDispatch();
+    s0::BeginStage();
+    std::vector<World> worldBefore(1), worldExpected(1);
+    U count = 0;
+    for (const Spec& spec : kRunSpecs) {
+        Fixture fixture; fixture.Init(world, spec, ++count);
+        const Fixture before = fixture;
+        worldBefore[0] = world;
+        std::vector<Observed> expectedEvents, actualEvents;
+        observations = &expectedEvents; ResetFp(); NativeStep(fixture, count);
+        const FpState expectedFp = CaptureFp();
+        const Fixture expected = fixture; worldExpected[0] = world;
+        fixture = before; world = worldBefore[0];
+        observations = &actualEvents; ResetFp();
+        SerialStep(A(fixture.agent.data()), clones.entries, count);
+        CompareFp(expectedFp);
+        CompareBytes(&expected, &fixture, sizeof(Fixture), "S0 family: complete soldier and nested objects");
+        CompareBytes(&worldExpected[0], &world, sizeof(World), "S0 family: shared world");
+        CompareObservations(expectedEvents, actualEvents);
+        ++cases;
+    }
+    s0::EndStage();
+    const S0Words w = S0Now();
+    std::printf("S0 fixture rows:");
+    for (U r = 0; r < s0::RowCount; ++r)
+        if (S0Pair(S0Row(w, r)) || S0Row(w, r)[s0::Sampled]) std::printf(" %u:%u/%u", r, S0Row(w, r)[0], S0Row(w, r)[s0::Sampled]);
+    std::printf("\n");
+    Require(w[s0::Stages] == 1 && w[s0::OccurrencesLo] == count && w[s0::SampledOccurrences] == count,
+            "one stage, every occurrence timed at shift 0");
+    Require(S0Pair(S0Row(w, s0::StepCore)) == count && S0Row(w, s0::StepCore)[s0::Sampled] == count,
+            "core-class occurrences are the step_core row");
+    for (U r = s0::Target; r < s0::RowCount; ++r) {
+        if (r == s0::OrderFinalChanged || r == s0::OrderNodeChanged) continue;
+        const U changed = (r == s0::OrderFinal || r == s0::OrderNode) ? S0Row(w, r + 1)[s0::Sampled] : 0;
+        Require(S0Pair(S0Row(w, r)) == S0Row(w, r)[s0::Sampled] + changed, "shift 0: every gate call is timed once");
+    }
+    Require(S0Pair(S0Row(w, s0::Target)) == count && S0Pair(S0Row(w, s0::Fatigue)) == count,
+            "every fixture step reaches target acquisition 6718F0 and the fatigue selector 670F40");
+    S0Identities(w, "fixtures: exclusive cycles sum to step inclusive cycles");
+    Require(w[s0::DepthOverflow] == 0 && w[s0::Abandoned] == 0 && w[s0::NestedRoot] == 0, "no overflow/abandon");
+    // Deterministic strata: the same stage sequence samples the same occurrences.
+    currentCase = "S0 deterministic 1/64 strata";
+    std::array<S0Words, 2> runs;
+    for (S0Words& run : runs) {
+        S0Start(s0::kDefaultShift);
+        for (U stage = 0; stage < 4; ++stage) {
+            s0::BeginStage();
+            for (U i = 0; i < 64; ++i) {
+                Fixture fixture; fixture.Init(world, kRunSpecs[i % 5], 500 + i);
+                observations = nullptr; std::vector<Observed> ignored; observations = &ignored;
+                SerialStep(A(fixture.agent.data()), clones.entries, i);
+            }
+            s0::EndStage();
+        }
+        run = S0Now();
+    }
+    std::printf("S0 strata: %u of %u occurrences timed\n", runs[0][s0::SampledOccurrences], runs[0][s0::OccurrencesLo]);
+    Require(runs[0][s0::OccurrencesLo] == 256 && runs[0][s0::SampledOccurrences] < 256, "1/64 strata sample a subset");
+    for (U r = 0; r < s0::RowCount; ++r)
+        Require(S0Row(runs[0], r)[s0::Sampled] == S0Row(runs[1], r)[s0::Sampled] &&
+                S0Pair(S0Row(runs[0], r)) == S0Pair(S0Row(runs[1], r)), "identical strata and counts across runs");
+    Require(runs[0][s0::SampledOccurrences] == runs[1][s0::SampledOccurrences], "identical sampled occurrences");
+    brain::SetOccurrenceRunner(nullptr); s0::Stop(); s0::Reset();
+    ++cases;
+}
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_brain2_oracle Napoleon.exe\n"); return 2; }
     ownerThread = GetCurrentThreadId(); Map(argv[1]);
@@ -2070,6 +2352,10 @@ int main(int argc, char** argv) {
     STAGE(RunCases(world, true, true));
     STAGE(RunCases(world, true, false, true));
     STAGE(RunOrderedDuplicates(world));
+    STAGE(S0Calibration());
+    STAGE(S0Probe());
+    STAGE(S0Nesting());
+    STAGE(S0Fixtures(world));
     STAGE(CheckLifecycle());
     STAGE(RunCases(world, true, false));
     *vcc = saved; brain::Release();
