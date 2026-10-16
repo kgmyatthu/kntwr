@@ -4636,7 +4636,7 @@ static void usage(void)
         L"                        update (sites 18/101/103): per-unit 0x581F30 cost, owner-only reasons, RNG draws, foreign-unit\n"
         L"                        witness, command classes and projected site-18 time (army_unit_words, receipt army_unit);\n"
         L"                        add ai,ai_census to measure planner writes\n"
-        L"  --workers N           worker threads 1..8 (default 4)\n"
+        L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
         L"  --collide-lod-m N      far-unit surface separation in world metres, 1..100000 (default 40)\n"
@@ -4769,7 +4769,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             if (!parse_features(val, &o->mask)) return -1;
         } else if (!wcscmp(name, L"--workers")) {
             NEEDVAL();
-            if (!parse_uint(val, 1, 8, &o->workers)) { errsay(L"--workers must be 1..8.\n"); return -1; }
+            if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
         } else if (!wcscmp(name, L"--poll-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 10, 1000, &o->poll_ms)) { errsay(L"--poll-ms must be 10..1000.\n"); return -1; }

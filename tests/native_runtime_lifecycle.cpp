@@ -1819,7 +1819,7 @@ int main(int argc,char** argv) {
     if(unreadable) VirtualFree(unreadable,0,MEM_RELEASE);
     Check(start(&config)==2,"valid 10ms configuration refuses a foreign main image");
     config.poll_ms=9; Check(start(&config)==1,"poll below supported boundary refused"); config.poll_ms=10;
-    config.workers=9; Check(start(&config)==1,"unsupported worker count refused"); config.workers=0;
+    config.workers=17; Check(start(&config)==1,"unsupported worker count refused"); config.workers=0;
     config.profile_site=NTW2_TIMED_SITES+1; Check(start(&config)==1,"profile site beyond the timed sites refused"); config.profile_site=0;
     config.enabled_mask=0; Check(start(&config)==1,"empty feature set refused");
     config.enabled_mask=0x10000u; Check(start(&config)==1,"undefined feature bit refused");

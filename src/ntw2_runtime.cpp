@@ -3029,7 +3029,7 @@ DWORD WINAPI Monitor(void*) {
 static U StartImpl(void* raw) {
     ntw2_config next;
     if (!Read(Address(raw),&next,sizeof(next)) || next.abi!=NTW2_ABI || next.size!=sizeof(next) ||
-        !next.enabled_mask || (next.enabled_mask&~NTW2_VALID_MASK) || next.workers>8 || next.poll_ms<10 || next.poll_ms>1000 ||
+        !next.enabled_mask || (next.enabled_mask&~NTW2_VALID_MASK) || next.workers>16 || next.poll_ms<10 || next.poll_ms>1000 ||
         ((next.enabled_mask&NTW2_BRAIN) && !(next.enabled_mask&NTW2_PROFILE)) || // brain sites exist only inside the profiling epoch
         ((next.enabled_mask&NTW2_AI_CTRL) && !(next.enabled_mask&NTW2_AI_ASYNC)) ||
         (next.collide_lod_m&NTW2_COLLIDE_LOD_METRES_MASK)>100000 ||
