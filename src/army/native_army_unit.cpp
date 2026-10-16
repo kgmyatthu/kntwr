@@ -29,6 +29,7 @@ struct Storage {
     Slot seen[kSetSlots];    // per stage (stamp = stage number): repeated occurrences
     U tickCosts[kTickCapacity];
     U snapshot[kSnapshotUnits * kSnapshotCells];
+    uint8_t own[kUnitObjectBytes + 8 * kInfantryFormationBytes + kListCap * 4]; // B0 first-order own-state copy
 };
 
 Storage* g_s;
@@ -39,6 +40,19 @@ U (*g_planner)();
 LARGE_INTEGER g_frequency;
 unsigned long long g_unitQ, g_strictQ, g_dynamicQ, g_stageQ, g_observerQ, g_snapshotQ, g_rngQ, g_unreadableQ,
                    g_reasonQ[kReasons], g_commandQ[kCommands];
+// B0 (native_army_unit.h): row, QPC accumulators per us word, per-occurrence FSM gate state, stage recorder manager.
+U g_b0[kB0Words];
+unsigned long long g_b0Q[kB0Words];
+U g_inFsm, g_lastManager, g_haveManager, g_stageManager;
+struct FsmOccurrence { U calls, transition, stepped, stepState, unknown; LONGLONG observerQ; };
+FsmOccurrence g_occ;
+// preferred-base VAs (analysis/native-army-update-per-unit.md 10.2, 10.3; native-army-stage-b-plan.md 2-4)
+constexpr U kFsmTable = 0x1320F28, kStateA = 0x1450908, kSentinel = 0x1466CC4;
+constexpr U kSecondaryFirst = 0x1450BDC, kFormationCommandClass = 0x1324B54, kDirtyCommandClass = 0x1323B64;
+constexpr U kDistanceHeader = 0x14A3EC4, kRecordHeader = 0x14A3ED8;
+constexpr U kRecorderEnable = 0x1459B00, kRecorderDcc = 0x1459DCC, kRecorderManager = 0x15F8BC0,
+            kRecorderProvider = 0x15F9054;
+constexpr U kScratchNCap = 1u << 20;
 
 LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 U Us(unsigned long long q) { return g_frequency.QuadPart ? static_cast<U>(q * 1000000ull / g_frequency.QuadPart) : 0; }
@@ -159,6 +173,7 @@ void PublishTimes() {
     g_words[RngDrawingUs] = Us(g_rngQ); g_words[UnreadableUs] = Us(g_unreadableQ);
     for (U r = 0; r < kReasons; ++r) g_words[ReasonUs + r] = Us(g_reasonQ[r]);
     for (U c = 0; c < kCommands; ++c) g_words[CommandRows + c * kCommandStride + 3] = Us(g_commandQ[c]);
+    for (U w = 0; w < kB0Words; ++w) if (g_b0Q[w]) g_b0[w] = Us(g_b0Q[w]); // only us words accumulate QPC ticks
 }
 void Census(U command, bool dynamicOwner, bool rng, LONGLONG q) {
     U row = kCommands;
@@ -246,6 +261,111 @@ U Classify(const Probe& a, const Probe& b, U plannerDelta, U rngSteps, U& detail
     return r;
 }
 
+// ---- B0 pure surface
+U FsmStateIndex(U s) {
+    if (s == kSentinel) return SSentinel;
+    return s - kStateA < 5 * 4 && !((s - kStateA) & 3) ? (s - kStateA) / 4 : SOther; // A..E: 1450908 + 4*i
+}
+U SecondaryStateIndex(U s) {
+    if (s == kSentinel) return 4;
+    return s - kSecondaryFirst < 4 * 4 && !((s - kSecondaryFirst) & 3) ? (s - kSecondaryFirst) / 4 : 5;
+}
+void ReadGlobals(U delta, ntw2_region::Table& t, U& q, Globals& g) {
+    memset(&g, 0, sizeof(g));
+    if (t.Readable(kDistanceHeader + delta, kRecordHeader + 0x14 - kDistanceHeader, q)) {
+        g.scratchOk = 1;
+        g.distCap = D(kDistanceHeader + delta + 4); g.distCount = D(kDistanceHeader + delta + 8);
+        g.distBacking = D(kDistanceHeader + delta + 0xC);
+        g.recCap = D(kRecordHeader + delta + 4); g.recCount = D(kRecordHeader + delta + 8);
+        g.recBacking = D(kRecordHeader + delta + 0xC);
+    }
+    if (t.Readable(kRecorderEnable + delta, 1, q) && t.Readable(kRecorderDcc + delta, 1, q) &&
+        t.Readable(kRecorderManager + delta, 4, q) && t.Readable(kRecorderProvider + delta, 4, q)) {
+        g.recorderOk = 1;
+        g.enable = B(kRecorderEnable + delta); g.dcc = B(kRecorderDcc + delta);
+        g.manager = D(kRecorderManager + delta); g.provider = D(kRecorderProvider + delta);
+        if (g.manager && t.Readable(g.manager, 0x24, q)) { // DACCD0: M+4/+C counters, +18 comparator, +1C byte, +20 drops
+            g.managerOk = 1;
+            g.m4 = D(g.manager + 4); g.m20 = D(g.manager + 0x20); g.comparator = D(g.manager + 0x18);
+            g.inhibit = B(g.manager + 0x1C);
+        }
+    }
+}
+bool RecorderQualified(const Globals& g) {
+    return g.recorderOk && g.enable && g.manager && g.managerOk && !g.provider && !g.comparator && !g.inhibit;
+}
+U RecorderAppends(const Globals& a, const Globals& b) {
+    if (!a.managerOk || !b.managerOk || a.manager != b.manager) return ~0u;
+    return (b.m4 - a.m4) + (b.m20 - a.m20);
+}
+bool ReadB0Probe(U u, U delta, ntw2_region::Table& t, U& q, B0Probe& o) {
+    memset(&o, 0, sizeof(o));
+    if (!u || !t.Readable(u, kUnitObjectBytes, q)) return false;
+    o.readable = 1;
+    o.span[o.spans++] = {u, kUnitObjectBytes};
+    const U attached = D(u + 0x1F4);
+    if (attached && t.Readable(attached + 0x10, 8, q)) {
+        const U n = D(attached + 0x10), data = D(attached + 0x14);
+        if (n && n <= kListCap && t.Readable(data, n * 4, q)) o.span[o.spans++] = {data, n * 4};
+    }
+    const U nf = D(u + 0xACC), fdata = D(u + 0xAD0);
+    if (nf > kFormationCap) ++o.unreadable; // beyond the observed cap (also a garbage count): one unreadable mark
+    const U listed = nf < kFormationCap ? nf : kFormationCap;
+    const bool listOk = !listed || t.Readable(fdata, listed * 4, q);
+    if (!listOk) o.unreadable += listed;
+    for (U i = 0; listOk && i < listed; ++i) {
+        const U f = D(fdata + 4 * i);
+        if (!f || !t.Readable(f, 4, q)) { ++o.unreadable; continue; }
+        if (D(f) != kInfantryFormation + delta) {
+            if (t.Readable(f, kOtherFormationBytes, q)) { ++o.other; o.span[o.spans++] = {f, kOtherFormationBytes}; }
+            else ++o.unreadable;
+            continue;
+        }
+        if (!t.Readable(f, kInfantryFormationBytes, q)) { ++o.unreadable; continue; }
+        ++o.infantry;
+        o.span[o.spans++] = {f, kInfantryFormationBytes};
+        const U members = D(f + 0x18), dirty2790 = B(f + 0x2790) ? 1u : 0u;
+        o.members += members;
+        if (dirty2790 || B(f + 0x2791)) o.dirty = 1;
+        const U agg = D(f + 0x62C + 4); // 53C1D7/53C1DA: N = [[C+4]+C], C = F+62C
+        if (agg && t.Readable(agg + 0xC, 4, q)) { const U n = D(agg + 0xC); if (n > o.nMax) o.nMax = n < kScratchNCap ? n : kScratchNCap; }
+        const U count = D(f + 0x20 + 0x440); // Q = F+20: count Q+440, {pointer,size} rows Q+400
+        U dirtyCommands = 0;
+        if (count > kQueueRows) ++o.queueBad;
+        else {
+            o.queue += count;
+            for (U j = 0; j < count; ++j) {
+                const U cmd = D(f + 0x20 + 0x400 + 8 * j);
+                const U cls = cmd && t.Readable(cmd, 0x20, q) ? D(cmd) - delta : ~0u;
+                if (cls == kDirtyCommandClass) ++dirtyCommands;
+                if (o.commands < kQueueSample) {
+                    o.commandClass[o.commands] = cls;
+                    o.commandState[o.commands] = cls == kFormationCommandClass ? D(cmd + 0x1C) - delta : ~0u;
+                    ++o.commands;
+                }
+            }
+        }
+        o.bound += members * (1 + dirtyCommands + dirty2790);
+    }
+    for (U i = 0; i < o.spans; ++i) o.ownBytes += o.span[i].bytes;
+    return true;
+}
+U Refuse(bool observed, U reasons, bool transition, bool recorderRefused, bool otherRefused) {
+    if (!observed) return RefUnreadable;
+    if (reasons & 1u << RAllocList) return RefAlloc;
+    if (transition) return RefTransition;
+    if (recorderRefused) return RefRecorder;
+    if (otherRefused || (reasons & (1u << RNotification | 1u << RPlanner | 1u << RReturn))) return RefOther;
+    return RefCompletable;
+}
+U AllocSplit(U detail, bool growth, bool reserved) {
+    if (growth) return AllocGrowth;
+    if (reserved) return AllocReserve;
+    if (detail & (1u << EMembers | 1u << EAttached | 1u << EDrivers | 1u << ECommand | 1u << KAttachedRemove))
+        return AllocListChange;
+    return AllocPredicateOnly;
+}
+
 // Guarded observation. Proofs are re-established first: a native call (this unit's or an earlier occurrence's) may
 // have freed or decommitted probed memory. Every load runs under SEH bracketed by ntw2::probeDepth, so a stale or
 // racing range records an unreadable observation instead of faulting (and is not taken as a crash capture).
@@ -276,6 +396,145 @@ static U SnapshotContainer(U c) {
     return units;
 }
 
+// ---- B0 guarded reads (same discipline as Observe, which re-proved the table just before).
+struct B0Reading { B0Probe probe; Globals globals; };
+static void ObserveB0(U u, B0Reading& out) {
+    ntw2_region::Table& t = g_s->table;
+    bool ok = false;
+    ++ntw2::probeDepth;
+    __try {
+        ReadGlobals(g_delta, t, g_queries, out.globals);
+        ok = ReadB0Probe(u, g_delta, t, g_queries, out.probe);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; memset(&out.globals, 0, sizeof(out.globals)); }
+    --ntw2::probeDepth;
+    if (!ok) out.probe.readable = 0;
+}
+static void ObserveGlobals(Globals& g) {
+    ++ntw2::probeDepth;
+    __try { ReadGlobals(g_delta, g_s->table, g_queries, g); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { memset(&g, 0, sizeof(g)); }
+    --ntw2::probeDepth;
+}
+// First-order own-state copy into module storage: bytes copied, ~0 when a span faulted.
+static U CopyOwn(const B0Probe& p) {
+    U n = 0;
+    bool ok = true;
+    ++ntw2::probeDepth;
+    __try {
+        for (U i = 0; i < p.spans; ++i) {
+            memcpy(g_s->own + n, reinterpret_cast<const void*>(static_cast<uintptr_t>(p.span[i].base)), p.span[i].bytes);
+            n += p.span[i].bytes;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    --ntw2::probeDepth;
+    return ok ? n : ~0u;
+}
+static bool ReadFsm(U s, U& table, U& state) {
+    ntw2_region::Table& t = g_s->table;
+    bool ok = false;
+    ++ntw2::probeDepth;
+    __try { if (s && t.Readable(s, 0x14, g_queries)) { table = D(s); state = D(s + 4); ok = true; } }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    --ntw2::probeDepth;
+    return ok;
+}
+static void NoteRecorder(const Globals& g) {
+    U* const w = g_b0;
+    ++w[RecorderObservations];
+    if (!g.recorderOk) { ++w[RecorderUnreadable]; return; }
+    if (!g.enable) ++w[RecorderEnable0];
+    if (!g.dcc) ++w[RecorderDccZero];
+    if (!g.manager) ++w[RecorderManagerNull];
+    else if (!g.managerOk) ++w[RecorderUnreadable];
+    if (g.provider) ++w[RecorderProviderSet];
+    if (g.comparator) ++w[RecorderComparatorSet];
+    if (g.inhibit) ++w[RecorderInhibit];
+    if (g_haveManager && g.manager != g_lastManager) ++w[RecorderManagerChanges];
+    g_haveManager = 1; g_lastManager = g.manager;
+    w[RecorderManagerLast] = g.manager; w[RecorderProviderLast] = g.provider; w[RecorderComparatorLast] = g.comparator;
+}
+static void NoteScratch(const Globals& g) {
+    U* const w = g_b0;
+    if (!g.scratchOk) { ++w[ScratchUnreadable]; return; }
+    if (g.recCap > w[RecordCapMax]) w[RecordCapMax] = g.recCap;
+    if (g.distCap > w[DistanceCapMax]) w[DistanceCapMax] = g.distCap;
+    if (g.recCount || g.distCount) ++w[ScratchCountNonzero];
+}
+static void Add(U word, unsigned long long q) { ++g_b0[word]; g_b0Q[word + 1] += q; } // (count, us) pair
+// One classified occurrence: FSM gate summary, pre/post B0 readings, own-state copy and the exclusive refusal bucket.
+static void AccountB0(bool observed, U reasons, U detail, U steps, unsigned long long uq, const B0Reading& a,
+                      const B0Reading& b, U copied, unsigned long long copyQ) {
+    U* const w = g_b0;
+    unsigned long long* const wq = g_b0Q;
+    ++w[B0Occurrences];
+    if (!g_occ.calls) wq[FsmNotReachedUs] += uq;
+    else { ++w[FsmOccurrences]; if (g_occ.calls > 1) ++w[FsmMulti]; }
+    if (g_occ.stepped) wq[FsmStateRows + g_occ.stepState * kFsmStride + 2] += uq;
+    if (g_occ.transition) Add(TransitionOccurrences, uq);
+    const B0Probe& p = a.probe;
+    if (p.readable) {
+        w[FormationInfantry] += p.infantry; w[FormationOther] += p.other; w[FormationUnreadable] += p.unreadable;
+        w[ScratchNSum] += p.nMax; w[MembersSum] += p.members;
+        if (p.nMax > w[ScratchNMax]) { w[ScratchNMax] = p.nMax; w[ScratchBytesMax] = p.nMax * (28 + 4); }
+        w[QueueCommandsSum] += p.queue; w[QueueUnreadable] += p.queueBad;
+        U seen = 0;
+        for (U i = 0; i < p.commands; ++i) {
+            if (p.commandState[i] != ~0u) ++w[SecondaryStateCounts + SecondaryStateIndex(p.commandState[i])];
+            U row = kQueueClasses;
+            for (U r = 0; r < w[QueueClassDistinct]; ++r) if (w[QueueClassRows + r * kQueueStride] == p.commandClass[i]) { row = r; break; }
+            if (row == kQueueClasses && w[QueueClassDistinct] < kQueueClasses) {
+                row = w[QueueClassDistinct]++;
+                w[QueueClassRows + row * kQueueStride] = p.commandClass[i];
+            }
+            if (row == kQueueClasses) { ++w[QueueClassOverflow]; continue; }
+            ++w[QueueClassRows + row * kQueueStride + 1];
+            seen |= 1u << row;
+        }
+        for (U r = 0; r < kQueueClasses; ++r) if (seen >> r & 1) wq[QueueClassRows + r * kQueueStride + 2] += uq;
+    }
+    const bool probes = p.readable && b.probe.readable;
+    const bool reserved = probes && b.probe.queue > p.queue;
+    if (reserved) ++w[QueueReserved]; else if (probes && b.probe.queue < p.queue) ++w[QueueTruncated];
+    NoteScratch(a.globals); NoteScratch(b.globals);
+    bool growth = false;
+    if (a.globals.scratchOk && b.globals.scratchOk) {
+        if (a.globals.recCap != b.globals.recCap || a.globals.recBacking != b.globals.recBacking) { ++w[RecordGrowth]; growth = true; }
+        if (a.globals.distCap != b.globals.distCap || a.globals.distBacking != b.globals.distBacking) { ++w[DistanceGrowth]; growth = true; }
+    }
+    NoteRecorder(a.globals); NoteRecorder(b.globals);
+    const U tails = RecorderAppends(a.globals, b.globals);
+    const bool qualified = RecorderQualified(a.globals) && RecorderQualified(b.globals) && a.globals.manager == g_stageManager;
+    const bool tailed = tails == ~0u ? p.infantry != 0 : tails != 0; // unknown count: an infantry formation reaches 580C00
+    if (tails != ~0u && tails) {
+        w[RecorderTails] += tails; ++w[RecorderTailOccurrences]; wq[RecorderTailUs] += uq;
+        if (tails > w[RecorderTailMax]) w[RecorderTailMax] = tails;
+        w[RecorderDrops] += b.globals.m20 - a.globals.m20;
+    }
+    const bool recorderRefused = tailed && !qualified;
+    if (recorderRefused) ++w[RecorderUnqualified];
+    w[RngMemberBoundSum] += p.bound;
+    if (steps) {
+        if (steps != ~0u && steps <= p.bound) ++w[RngWithinBound]; else ++w[RngOverBound];
+        if (steps != ~0u && steps > w[RngDrawMax]) w[RngDrawMax] = steps;
+    }
+    if (copied == ~0u) ++w[OwnUnreadable];
+    else {
+        w[OwnKbSum] += (copied + 1023) / 1024; wq[OwnCopyUs] += copyQ;
+        if (copied > w[OwnBytesMax]) w[OwnBytesMax] = copied;
+    }
+    const bool dirty = p.readable && p.dirty;
+    if (dirty) { ++w[DirtyOccurrences]; wq[DirtyUs] += uq; }
+    const bool stageA = (reasons & (1u << RNotification | 1u << RPlanner | 1u << RReturn)) != 0;
+    const U ref = Refuse(observed, reasons, g_occ.transition != 0, recorderRefused, dirty || g_occ.unknown);
+    Add(RefusalRows + 2 * ref, uq);
+    if (ref == RefAlloc) Add(AllocRows + 2 * AllocSplit(detail, growth, reserved), uq);
+    if (ref == RefOther) Add(OtherRows + 2 * (stageA ? OtherStageA : dirty ? OtherDirty : OtherFsmUnknown), uq);
+    if (ref == RefCompletable) {
+        if (!g_occ.stepped) Add(CompletableNoStep, uq);
+        else if (!(kClosedStepMask >> g_occ.stepState & 1)) Add(CompletableStepUnclosed, uq);
+    }
+}
+
 bool Start(const Binding& binding) {
     Stop();
     void* memory = VirtualAlloc(nullptr, sizeof(Storage), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -289,7 +548,7 @@ bool Start(const Binding& binding) {
 }
 void Stop() {
     if (g_s) VirtualFree(g_s, 0, MEM_RELEASE);
-    g_s = nullptr; g_inStage = g_inUnit = 0;
+    g_s = nullptr; g_inStage = g_inUnit = g_inFsm = 0;
 }
 void Reset() {
     memset(g_words, 0, sizeof(g_words));
@@ -297,6 +556,8 @@ void Reset() {
     memset(g_reasonQ, 0, sizeof(g_reasonQ)); memset(g_commandQ, 0, sizeof(g_commandQ));
     g_haveTick = g_tickN = g_stageStamp = g_occurrenceStamp = g_stageOccurrences = 0;
     if (g_s) { memset(g_s->foreign, 0, sizeof(g_s->foreign)); memset(g_s->seen, 0, sizeof(g_s->seen)); }
+    memset(g_b0, 0, sizeof(g_b0)); memset(g_b0Q, 0, sizeof(g_b0Q)); g_occ = {};
+    g_haveManager = g_lastManager = g_stageManager = 0;
 }
 bool Started() { return g_s != nullptr; }
 
@@ -315,6 +576,13 @@ U Stage(void* container, U model, Native native) {
     const U tick = g_model ? D(g_model + 0x58) : 0;
     if (!g_haveTick || tick != g_tick) { FinalizeTick(); g_haveTick = 1; g_tick = tick; ++g_words[Ticks]; }
     ++g_stageStamp; g_stageOccurrences = 0; g_seenUsed = 0;
+    if (!g_b0[B0Version]) { g_b0[B0Version] = kB0Version; g_b0[ClosedStepMask] = kClosedStepMask; }
+    Globals globals;
+    ObserveGlobals(globals); // recorder qualification and manager identity at the stage start (plan 3.2)
+    ++g_b0[RecorderStages];
+    if (RecorderQualified(globals)) ++g_b0[RecorderStageQualified];
+    NoteRecorder(globals); NoteScratch(globals);
+    g_stageManager = globals.manager;
     const U c = static_cast<U>(reinterpret_cast<uintptr_t>(container));
     const LONGLONG k0 = Now();
     const U units = SnapshotContainer(c);
@@ -341,15 +609,25 @@ U Unit(void* unit, U list, Native native) {
     const U u = static_cast<U>(reinterpret_cast<uintptr_t>(unit));
     ++g_occurrenceStamp; g_distinct = 0;
     Reading pre = {}, post = {};
+    B0Reading pre0 = {}, post0 = {};
     Observe(u, true, pre);
+    const LONGLONG o0 = Now();
+    ObserveB0(u, pre0);
+    const LONGLONG c0 = Now();
+    const U copied = pre0.probe.readable ? CopyOwn(pre0.probe) : ~0u;
+    const LONGLONG c1 = Now();
+    g_occ = {};
     const U planner0 = g_planner ? g_planner() : 0;
     const LONGLONG a = Now();
     const U result = native(unit);
     const LONGLONG b = Now();
     const U plannerDelta = g_planner ? g_planner() - planner0 : 0;
     Observe(u, false, post);
+    const LONGLONG o1 = Now();
+    ObserveB0(u, post0);
+    const LONGLONG o2 = Now();
 
-    const LONGLONG q = b - a;
+    const LONGLONG q = (b - a) - g_occ.observerQ; // the FSM gate's own reads are instrumentation, not unit cost
     const unsigned long long uq = static_cast<unsigned long long>(q);
     // Only a complete pre+post observation is classified; an unreadable one is its own bucket, never eligible.
     const bool observed = pre.probe.readable && post.probe.readable;
@@ -385,11 +663,51 @@ U Unit(void* unit, U list, Native native) {
     if (g_distinct > g_words[ForeignDistinctMax]) g_words[ForeignDistinctMax] = g_distinct;
     bool fresh = true;
     if (Insert(g_s->seen, g_stageStamp, u, g_seenUsed, fresh) && !fresh) ++g_words[DuplicateOccurrences];
+    AccountB0(observed, reasons, detail, steps, uq, pre0, post0, copied, static_cast<unsigned long long>(c1 - c0));
     const LONGLONG t1 = Now();
+    g_b0Q[B0ObserverUs] += static_cast<unsigned long long>((a - o0) + (o2 - o1) + g_occ.observerQ);
     g_observerQ += static_cast<unsigned long long>((t1 - t0) - q);
     g_inUnit = 0;
     return result;
 }
+
+U Fsm(void* fsm, Native native) {
+    if (!g_s || g_inFsm) return native(fsm);
+    if (!g_inUnit) { ++g_b0[FsmOutsideUnit]; return native(fsm); }
+    g_inFsm = 1;
+    const LONGLONG o0 = Now();
+    const U s = static_cast<U>(reinterpret_cast<uintptr_t>(fsm));
+    U table = 0, before = 0, table1 = 0, after = 0;
+    const bool okBefore = ReadFsm(s, table, before);
+    const LONGLONG a = Now();
+    const U result = native(fsm);
+    const LONGLONG b = Now();
+    const bool okAfter = ReadFsm(s, table1, after);
+    U* const w = g_b0;
+    unsigned long long* const wq = g_b0Q;
+    const unsigned long long q = static_cast<unsigned long long>(b - a);
+    ++w[FsmCalls]; ++g_occ.calls; wq[FsmUs] += q;
+    if (!okBefore || !okAfter) { ++w[FsmUnreadable]; g_occ.unknown = 1; }
+    else {
+        if (table != kFsmTable + g_delta) { ++w[FsmForeignTable]; g_occ.unknown = 1; }
+        const U from = FsmStateIndex(before - g_delta), to = FsmStateIndex(after - g_delta);
+        U* const row = w + FsmStateRows;
+        if (before != after) { // nonzero query: old leave + new enter ran (10FBBE8/10FBBF3)
+            ++w[FsmTransitions]; wq[FsmTransitionUs] += q; g_occ.transition = 1;
+            ++row[from * kFsmStride + 3]; ++row[to * kFsmStride + 4];
+        } else {                // zero query: the step of the current state ran (10FBBFB)
+            ++w[FsmSteps]; wq[FsmStepUs] += q;
+            ++row[from * kFsmStride]; wq[FsmStateRows + from * kFsmStride + 1] += q;
+            g_occ.stepped = 1; g_occ.stepState = from;
+            if (from == SOther) g_occ.unknown = 1;
+        }
+    }
+    const LONGLONG o1 = Now();
+    g_occ.observerQ += (o1 - o0) - (b - a);
+    g_inFsm = 0;
+    return result;
+}
+void SnapshotB0(U* words) { memcpy(words, g_b0, sizeof(g_b0)); }
 
 void Snapshot(U* words) { memcpy(words, g_words, sizeof(g_words)); }
 } // namespace ntw2_army_unit

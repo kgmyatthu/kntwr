@@ -1271,6 +1271,89 @@ static void print_army_unit(const uint32_t *u)
             pct(v[2], v[1]), v[1] ? (double)v[3] / v[1] : 0.0, v[3] / ticks / 1000.0, pct(v[3], u[16]), pct(v[4], v[1]));
     }
 }
+/* Army Stage B0 qualification (native_army_unit.h B0 comment, analysis/native-army-stage-b-plan.md sections 6, 7, 9).
+   Refusal buckets are mutually exclusive whole-occurrence costs (unreadable, alloc_list, FSM transition, recorder not
+   replayable, other refused, completable). Section 6 inputs: a = alloc_list + unreadable, t = FSM transition,
+   x = recorder + other, p = completable; Tnew = O + U(a+t+x) + U p / P_eff + F + D + H. Gates: coverage p >= 60%
+   (completable once the reached classes are closed) and p_closed (completable with only the closed step bodies,
+   closed_step_mask) within 5 points of it (closed common steps); recorder qualified at every stage and occurrence;
+   projected saving >= 4 ms at the plan's expected P_eff 6, D .044, H .750. */
+static void print_army_b0(const uint32_t *u, const uint32_t *b)
+{
+    static const char *const refusal[] = { "unreadable", "alloc_list", "fsm_transition", "recorder", "other", "completable" };
+    static const char *const split[] = { "growth", "reserve_522D70", "list_change", "predicate_only" };
+    static const char *const others[] = { "stage_a_notify_planner_return", "dirty_formation", "fsm_unknown" };
+    static const char *const states[] = { "A", "B", "C", "D", "E", "sentinel", "other" };
+    static const char *const secondary[] = { "1450BDC", "1450BE0", "1450BE4", "1450BE8", "sentinel", "other" };
+    const double occ = b[1] ? (double)b[1] : 1.0, ticks = u[6] ? (double)u[6] : 1.0, U = u[16] ? (double)u[16] : 1.0;
+    const double unit_ms = u[16] / ticks / 1000.0, snap_ms = u[21] / ticks / 1000.0;
+    const double native_ms = ((double)u[19] - u[20] - u[21]) / ticks / 1000.0, other_ms = native_ms - unit_ms;
+    const double a = ((double)b[133] + b[135]) / U, t = b[137] / U, x = ((double)b[139] + b[141]) / U, p = b[143] / U;
+    const double p_closed = ((double)b[143] - b[145]) / U, copy_ms = b[127] / ticks / 1000.0;
+    const double fsm_x = b[155] / U;
+    const double t_exp = other_ms + unit_ms * (a + t + x) + unit_ms * p / 6.0 + snap_ms + 0.044 + 0.750;
+    const double t_opt = other_ms + unit_ms * (a + t + x) + unit_ms * p / 8.0 + snap_ms + 0.026 + 0.100;
+    const int g_cover = p >= 0.60, g_steps = p - p_closed <= 0.05;
+    const int g_rec = b[101] && b[102] == b[101] && !b[103] && !b[104] && !b[105] && !b[106] && !b[107] && !b[108] && !b[110] &&
+                      !b[119];
+    const int g_save = native_ms - t_exp >= 4.0;
+    unsigned i;
+    if (!b[0]) { say(L"  army B0: no stage observed\n"); return; }
+    say(L"  army B0 qualification v%lu (shadow only, ARMY_UNIT clone + FSM gate 58202E; no native write): occurrences=%lu "
+        L"instrumentation %.3f ms/tick\n", (unsigned long)b[0], (unsigned long)b[1], b[13] / ticks / 1000.0);
+    say(L"    refusal (exclusive, units%% / cost%% / ms/tick):");
+    for (i = 0; i < 6u; ++i)
+        say(L" %hs=%.2f/%.2f/%.3f", refusal[i], pct(b[132u + 2u * i], b[1]), pct(b[133u + 2u * i], u[16]), b[133u + 2u * i] / ticks / 1000.0);
+    say(L"\n      completable split: step not closed %.2f%% cost, no FSM step %.2f%% cost; other split:",
+        pct(b[145], u[16]), pct(b[147], u[16]));
+    for (i = 0; i < 3u; ++i) say(L" %hs=%.2f%%", others[i], pct(b[149u + 2u * i], u[16]));
+    say(L"; alloc_list split (units/cost%%):");
+    for (i = 0; i < 4u; ++i) say(L" %hs=%lu/%.2f%%", split[i], (unsigned long)b[93u + 2u * i], pct(b[94u + 2u * i], u[16]));
+    say(L"\n    FSM 582530: calls=%lu (occurrences %lu, multi %lu, outside unit %lu) transitions=%lu (%.2f%% of units, %.2f%% "
+        L"of cost) steps=%lu unreadable=%lu foreign_table=%lu; native %.3f ms/tick (transition %.3f, step %.3f); not reached "
+        L"%.2f%% of cost; closed_step_mask=0x%lX\n", (unsigned long)b[2], (unsigned long)b[3], (unsigned long)b[4],
+        (unsigned long)b[14], (unsigned long)b[5], pct(b[154], b[1]), 100.0 * fsm_x, (unsigned long)b[6], (unsigned long)b[7],
+        (unsigned long)b[8], b[9] / ticks / 1000.0, b[10] / ticks / 1000.0, b[11] / ticks / 1000.0, pct(b[15], u[16]),
+        (unsigned long)b[12]);
+    say(L"      per state: steps / step ms/tick / cost%% of stepping occurrences / transitions from / to:");
+    for (i = 0; i < 7u; ++i) {
+        const uint32_t *s = b + 16u + 5u * i;
+        if (s[0] || s[3] || s[4])
+            say(L" %hs%ls=%lu/%.3f/%.2f%%/%lu/%lu", states[i], (b[12] >> i & 1u) ? L"(closed)" : L"", (unsigned long)s[0],
+                s[1] / ticks / 1000.0, pct(s[2], u[16]), (unsigned long)s[3], (unsigned long)s[4]);
+    }
+    say(L"\n    formation: infantry %.2f/unit other %.2f unreadable %lu; scratch N (largest per unit) mean %.1f max %lu (participant bank %lu B); "
+        L"members %.1f/unit; cap max record %lu distance %lu; growth record %lu distance %lu; nonzero scratch count %lu "
+        L"(unreadable %lu)\n", b[51] / occ, b[52] / occ, (unsigned long)b[53], b[54] / occ,
+        (unsigned long)b[55], (unsigned long)b[131], b[56] / occ, (unsigned long)b[57], (unsigned long)b[58], (unsigned long)b[59],
+        (unsigned long)b[60], (unsigned long)b[61], (unsigned long)b[62]);
+    say(L"      queue: commands %.2f/unit (unreadable %lu) reserved %lu truncated %lu dirty %lu (%.2f%% cost); 1324B54 "
+        L"secondary:", b[63] / occ, (unsigned long)b[64], (unsigned long)b[65], (unsigned long)b[66], (unsigned long)b[129],
+        pct(b[130], u[16]));
+    for (i = 0; i < 6u; ++i) if (b[67u + i]) say(L" %hs=%lu", secondary[i], (unsigned long)b[67u + i]);
+    say(L"; classes (distinct %lu overflow %lu): VA/commands/cost%%", (unsigned long)b[73], (unsigned long)b[74]);
+    for (i = 0; i < 6u && i < b[73]; ++i)
+        say(L" 0x%08lX/%lu/%.2f%%", (unsigned long)b[75u + 3u * i], (unsigned long)b[76u + 3u * i], pct(b[77u + 3u * i], u[16]));
+    say(L"\n    recorder: stages %lu qualified %lu; enable0=%lu manager_null=%lu manager_changes=%lu provider_set=%lu "
+        L"comparator_set=%lu inhibit=%lu dcc_zero=%lu unreadable=%lu (of %lu observations); last manager 0x%08lX provider "
+        L"0x%08lX comparator 0x%08lX; tails %.3f/unit (max %lu, %lu units, %.2f%% cost) drops %lu unqualified-tail units %lu\n",
+        (unsigned long)b[101], (unsigned long)b[102], (unsigned long)b[103], (unsigned long)b[104], (unsigned long)b[105],
+        (unsigned long)b[106], (unsigned long)b[107], (unsigned long)b[108], (unsigned long)b[109], (unsigned long)b[110],
+        (unsigned long)b[114], (unsigned long)b[111], (unsigned long)b[112], (unsigned long)b[113], b[115] / occ,
+        (unsigned long)b[116], (unsigned long)b[117], pct(b[120], u[16]), (unsigned long)b[118], (unsigned long)b[119]);
+    say(L"    RNG model+50: member-loop bound %.1f/unit; drawing units within bound %lu, over bound/unresolved %lu, max draws %lu\n",
+        b[121] / occ, (unsigned long)b[122], (unsigned long)b[123], (unsigned long)b[124]);
+    say(L"    own state (first order: U E38 + formations + attached list; members not copied): %.1f KiB/unit max %lu B; copy "
+        L"%.3f ms/tick (%.2f us/unit; unreadable %lu)\n", b[125] / occ, (unsigned long)b[126], copy_ms, b[127] / occ,
+        (unsigned long)b[128]);
+    say(L"    section 6: U=%.3f O=%.3f F=%.3f ms; a=%.4f t=%.4f x=%.4f p=%.4f (p_closed %.4f); Tnew expected (P_eff 6, D .044, "
+        L"H .750) %.3f ms save %.3f; optimistic (8, .026, .100) %.3f save %.3f; H floor from own copy %.3f ms\n",
+        unit_ms, other_ms, snap_ms, a, t, x, p, p_closed, t_exp, native_ms - t_exp, t_opt, native_ms - t_opt, copy_ms);
+    say(L"    release gates: coverage p>=60%% %ls (%.2f%%); closed common steps %ls (p_closed %.2f%%); recorder qualified %ls "
+        L"(owner residue %.2f%% cost); projected saving>=4 ms %ls (%.3f) => B1 %ls\n", g_cover ? L"PASS" : L"FAIL", 100.0 * p,
+        g_steps ? L"PASS" : L"FAIL", 100.0 * p_closed, g_rec ? L"PASS" : L"FAIL", pct(b[139], u[16]), g_save ? L"PASS" : L"FAIL",
+        native_ms - t_exp, g_cover && g_steps && g_rec && g_save ? L"GO" : L"NO-GO");
+}
 /* Puppet probe stage 1 (NTW2_PUPPET, native_puppet.h): every labelled word plus the derived per-stage rates. */
 static void print_puppet(const uint32_t *p)
 {
@@ -1496,7 +1579,7 @@ static void print_module_words(const ntw2_status *s)
             print_unit_brain(s->brain_unit_words);
         }
     }
-    if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) print_army_unit(s->army_unit_words);
+    if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
@@ -2894,7 +2977,8 @@ static void print_ai_census(const Run *r)
     }
 }
 
-/* army_unit (NTW2_ARMY_UNIT_SHADOW): raw words plus the labelled header/reason/foreign words and command rows. */
+/* army_unit (NTW2_ARMY_UNIT_SHADOW): raw words plus the labelled header/reason/foreign words and command rows; b0 holds
+   the labelled Stage B0 qualification row (army_b0_words, native_army_unit.h B0Word). */
 static void sb_army_unit(Sb *b, const Run *r)
 {
     static const char *const header[] = { NTW2_ARMY_UNIT_HEADER_LABELS };
@@ -2902,6 +2986,7 @@ static void sb_army_unit(Sb *b, const Run *r)
     static const char *const details[] = { NTW2_ARMY_UNIT_DETAIL_LABELS };
     static const char *const foreign[] = { NTW2_ARMY_UNIT_FOREIGN_LABELS };
     static const char *const command[] = { NTW2_ARMY_UNIT_COMMAND_LABELS };
+    static const char *const b0[] = { NTW2_ARMY_B0_LABELS };
     const uint32_t *w = r->last.army_unit_words;
     unsigned i, c;
     if (!(r->opt.mask & NTW2_ARMY_UNIT_SHADOW) || !r->have_status || !w[0]) {
@@ -2929,6 +3014,11 @@ static void sb_army_unit(Sb *b, const Run *r)
     }
     sb_fmt(b, "], \"words\": [");
     for (i = 0; i < NTW2_ARMY_UNIT_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "], \"b0\": {");
+    for (i = 0; i < NTW2_ARMY_B0_WORDS; ++i)
+        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", b0[i], (unsigned long)r->last.army_b0_words[i]);
+    sb_fmt(b, "}, \"b0_words\": [");
+    for (i = 0; i < NTW2_ARMY_B0_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.army_b0_words[i]);
     sb_fmt(b, "]},\n");
 }
 /* puppet (NTW2_PUPPET, --puppet-probe N): every labelled word of native_puppet.h plus the raw row. */
@@ -3439,7 +3529,8 @@ static BOOL write_receipt(Run *r, int exit_code)
                         NTW2_GRID_READERS * (2048u + NTW2_GRID_SITES * 80u) + NTW2_GRID_EDGES * 384u +
                         16u * (256u + NTW2_TIMED_SITES * 128u) + NTW2_TIMED_SITES * 192u +
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
-                        NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u + 4096u];
+                        NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u +
+                        NTW2_ARMY_B0_WORDS * 64u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -4684,7 +4775,9 @@ static void usage(void)
         L"  --army-unit-shadow    requires profile or a simulation feature: item 4 Stage A instrumentation of the army per-unit\n"
         L"                        update (sites 18/101/103): per-unit 0x581F30 cost, owner-only reasons, RNG draws, foreign-unit\n"
         L"                        witness, command classes and projected site-18 time (army_unit_words, receipt army_unit);\n"
-        L"                        add ai,ai_census to measure planner writes\n"
+        L"                        add ai,ai_census to measure planner writes. Also Stage B0 qualification (army_b0_words,\n"
+        L"                        receipt army_unit.b0): FSM steps/transitions, formation queue/scratch, recorder pins, RNG\n"
+        L"                        member bound, own-state copy, exclusive refusal cost and the Stage B release gates\n"
         L"  --puppet-probe N      puppet survival probe stage 1: N = 1..4 ordinary foot-infantry units (class 0x1333714, registry\n"
         L"                        order) get the engine's real wait node; their native site-6 step and common-step node/slot\n"
         L"                        advancement are gated (stationary; puppet_words, receipt puppet). Owns site 6: excludes\n"

@@ -1069,6 +1069,11 @@ ARMY_UPDATE_CALLS = (
     (0x5803B4, 0x55CB50), (0x5803CE, 0x575AE0), (0x580409, 0x6D0750), (0x580423, 0x575720),
     (0x580458, 0x57FFE0), (0x580488, 0x57FD20), (0x5804C2, 0x581F30), (0x5804F4, 0x55AB80),
     (0x5804FF, 0x581F30), (0x58054E, 0x579AD0), (0x580598, 0x579AD0))
+# B0 (NTW2_ARMY_UNIT_SHADOW): the per-unit update 0x581F30, cloned only to observe its unit FSM update call 58202E
+# (ECX = U+D68 -> 0x582530 -> 10FBBD0 query/leave/enter/step). Every other edge stays original.
+ARMY_UNIT_FSM_SITE, ARMY_UNIT_FSM_TARGET = 0x58202E, 0x582530
+ARMY_UNIT_CALLS = {0x55AC80, 0x56D8B0, 0x4A8A50, 0x56AC40, 0x5691F0, 0x57F070, 0x5557E0, 0x582680, 0x56D910, 0x585D50,
+                   0x52E840, 0x56E410, 0x601500, 0x600EF0, 0x53A9E0, 0x54C1F0}
 AICTRL_CALLS = (
     (0x7B25B7, 0x756C80), (0x7B264D, 0x7D6510), (0x7B2654, 0x7DBA90), (0x7B265B, 0x755E50),
     (0x7B2686, 0x6387F0), (0x7B26AB, 0x7D7020), (0x7B26B3, 0x7B5F20), (0x7B26BA, 0x7C8BD0),
@@ -1086,6 +1091,7 @@ SOURCES = [
     ('AIPASS', 0x5832C0, 0x583371, 'clone'),
     ('ARMY', 0x580320, 0x580387, 'clone'),
     ('ARMY_UPDATE', 0x580390, 0x5805D5, 'clone'),
+    ('ARMY_UNIT', 0x581F30, 0x5821A7, 'clone'),               # ret at 0x5821A6, int3 padding from 0x5821A7
     ('AIWRAP', 0x583380, 0x58338C, 'clone'),
     ('AICTRL', 0x7B25A0, 0x7B274E, 'clone'),
     ('AI_STATE_UPDATE', 0x702BB0, 0x702BC5, 'clone'),
@@ -1818,6 +1824,9 @@ def clone_configs():
         dict(clone='ARMY_UPDATE', source='ARMY_UPDATE',
              site_calls={site: Bind(f'SITE_CALL_{95+i}') for i, (site, _) in enumerate(ARMY_UPDATE_CALLS)},
              indirect_calls={0x580556, 0x5805A0}, expect_rets={0x5805D4: b'\xc3'}),
+        dict(clone='ARMY_UNIT', source='ARMY_UNIT',
+             site_calls={ARMY_UNIT_FSM_SITE: Bind('ARMY_FSM_UPDATE')},
+             indirect_calls={0x581F8F, 0x581FF3, 0x582022, 0x582081, 0x5820A7}, expect_rets={0x5821A6: b'\xc3'}),
         dict(clone='AIWRAP', source='AIWRAP',
              site_jumps={0x583385: (0x7B25A0, Clone('AICTRL'))},
              indirect_calls=set(), expect_rets={0x58338B: b'\xc3'}),
@@ -1951,6 +1960,7 @@ EXPECT_CALLS = {
     'AIPASS': set(),
     'ARMY': set(),
     'ARMY_UPDATE': set(),
+    'ARMY_UNIT': ARMY_UNIT_CALLS,
     'AIWRAP': set(),
     'AICTRL': set(),
     'AI_STATE_UPDATE': set(),
@@ -2007,6 +2017,7 @@ EXPECT_CENSUS = {
     'MANAGER': (208, 3, 26, 0), 'ACTIVE': (66, 0, 0, 0),
     'ARMIES': (104, 1, 0, 0), 'AIPASS': (60, 0, 0, 0), 'ARMY': (38, 0, 0, 0),
     'ARMY_UPDATE': (176, 0, 0, 0),
+    'ARMY_UNIT': (165, 1, 16, 0),
     'AIWRAP': (4, 0, 0, 0), 'AICTRL': (99, 0, 0, 0),
     'AI_STATE_UPDATE': (7, 0, 0, 0), 'AI_POSITION_UPDATE': (233, 11, 19, 1),
     'AI_SHAPE_SEARCH': (256, 17, 21, 0), 'AI_WALK': (112, 17, 4, 0), 'AI_GATHER': (117, 12, 6, 0),
@@ -2566,6 +2577,13 @@ def build_all(image, header_path):
     for site, target in ARMY_UPDATE_CALLS:
         if update_insns[site].bytes != b'\xe8' + u32((target - site - 5) & 0xFFFFFFFF):
             fail(f'ARMY_UPDATE: direct callee at {site:#x} no longer targets {target:#x}')
+    unit_insns = {i.address: i for i, _, _ in plans['ARMY_UNIT'].instructions}
+    if (unit_insns[0x582028].bytes != bytes.fromhex('8d8e680d0000') or   # lea ecx, [esi+0xD68]: S = U+D68
+            unit_insns[ARMY_UNIT_FSM_SITE].bytes !=
+            b'\xe8' + u32((ARMY_UNIT_FSM_TARGET - ARMY_UNIT_FSM_SITE - 5) & 0xFFFFFFFF) or
+            unit_insns[0x581F32].bytes != bytes.fromhex('8bf1') or        # mov esi, ecx: U kept in ESI
+            unit_insns[0x5821A6].bytes != b'\xc3'):
+        fail('ARMY_UNIT: FSM receiver U+D68, call 58202E -> 582530, unit register or plain ret changed')
     wrap_insns = {i.address: i for i, _, _ in plans['AIWRAP'].instructions}
     if (wrap_insns[0x583380].bytes != bytes.fromhex('8b490c') or
             wrap_insns[0x583383].bytes != bytes.fromhex('85c9') or

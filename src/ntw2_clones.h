@@ -107,6 +107,9 @@ enum ntw2_binding {
        AI2_UNROUTED_83FD00: gate for AI2_POSITION_UPDATE's call 7A6D1D of 83FD00 (thiscall, ret 18): marshals the whole call
        to the tick owner while an async think runs, else tail-jumps the original. */
     NTW2_BIND_AI2_SPOT_IMAGE, NTW2_BIND_AI2_ROUTE_COUNTS, NTW2_BIND_AI2_UNROUTED_83FD00,
+    /* NTW2_ARMY_UNIT_SHADOW B0 (appended): ARMY_UNIT's call 58202E of the unit FSM update 582530 (ECX = S = U+D68, plain
+       return, AL result). Observer gate: reads [S+4] before/after and forwards the original exactly once. */
+    NTW2_BIND_ARMY_FSM_UPDATE,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -213,6 +216,7 @@ enum ntw2_clone_id {
     NTW2_CLONE_AI2_7F1CF0,          /* AI2_7F6F20's slow path; 7F1CC0 -> AI2_7F1CC0 */
     NTW2_CLONE_AI2_809110,          /* gather node traversal (no absolutes); recursion stays private */
     NTW2_CLONE_AI2_80DCF0,          /* AI2_WALK polygon predicate (no absolutes) */
+    NTW2_CLONE_ARMY_UNIT,           /* 0x581F30..0x5821A7 (B0 shadow only): FSM update call 58202E -> ARMY_FSM_UPDATE */
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

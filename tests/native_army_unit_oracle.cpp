@@ -1,13 +1,17 @@
-// Army per-unit update Stage A oracle (src/army/native_army_unit.h): synthetic units and containers, no image.
+// Army per-unit update Stage A + B0 oracle (src/army/native_army_unit.h): synthetic units and containers, no image.
 // Covers the pure classifier, the probe reader, the LCG step counter and the module end to end (stage/unit
-// gates around host "native" functions), including that the module never writes the observed memory.
+// gates around host "native" functions), including that the module never writes the observed memory; and the B0
+// qualification observers: FSM gate (step/transition per state), formation/queue/scratch reader, recorder globals and
+// tail counting, RNG member bound, own-state copy and the exclusive refusal buckets.
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <algorithm>
 #include <vector>
 #include "army/native_army_unit.h"
 #include "ntw2_runtime.h"
 static_assert(ntw2_army_unit::kWords == NTW2_ARMY_UNIT_WORDS, "module row matches the status ABI tail");
+static_assert(ntw2_army_unit::kB0Words == NTW2_ARMY_B0_WORDS, "B0 row matches the status ABI tail");
 #include "brain2/native_region_table.h"
 
 using namespace ntw2_army_unit;
@@ -251,12 +255,220 @@ static void DecommitCases() {
     Stop(); Reset();
 }
 
+// ---- B0. Synthetic image globals: one allocation spanning preferred 1459000..15FA000, mapped by the delta.
+struct Image { uint8_t* base; U delta; };
+static Image MakeImage() { Image i; i.base = Page(0x1A2000); i.delta = A(i.base) - 0x1459000u; return i; }
+static uint8_t* At(const Image& i, U va) { return i.base + (va - 0x1459000u); }
+static const char* const kB0Labels[] = { NTW2_ARMY_B0_LABELS };
+static_assert(sizeof(kB0Labels) / sizeof(kB0Labels[0]) == kB0Words, "one B0 label per word");
+
+static void B0PureCases() {
+    Check(FsmStateIndex(0x1450908) == SA && FsmStateIndex(0x1450918) == SE && FsmStateIndex(0x1466CC4) == SSentinel &&
+          FsmStateIndex(0x145091C) == SOther && FsmStateIndex(0x1450909) == SOther && FsmStateIndex(0) == SOther,
+          "unit FSM state objects A..E (1450908 + 4i), sentinel, other");
+    Check(SecondaryStateIndex(0x1450BDC) == 0 && SecondaryStateIndex(0x1450BE8) == 3 && SecondaryStateIndex(0x1466CC4) == 4 &&
+          SecondaryStateIndex(0x1450BEC) == 5, "formation-command secondary states");
+    Check(Refuse(false, 1u << RAllocList, true, true, true) == RefUnreadable, "unreadable first");
+    Check(Refuse(true, 1u << RAllocList | 1u << RReturn, true, true, true) == RefAlloc, "alloc_list before transition");
+    Check(Refuse(true, 1u << RReturn, true, true, false) == RefTransition, "transition before recorder");
+    Check(Refuse(true, 1u << RNonClosed, false, true, true) == RefRecorder, "recorder before other");
+    Check(Refuse(true, 1u << RNotification | 1u << RNonClosed, false, false, false) == RefOther &&
+          Refuse(true, 1u << RNonClosed, false, false, true) == RefOther, "Stage A notification or dirty/unknown: other");
+    Check(Refuse(true, 1u << RNonClosed, false, false, false) == RefCompletable, "non_closed alone is completable");
+    Check(AllocSplit(1u << EMembers, true, true) == AllocGrowth && AllocSplit(1u << EMembers, false, true) == AllocReserve &&
+          AllocSplit(1u << KAttachedRemove, false, false) == AllocListChange &&
+          AllocSplit(1u << KFormationCommand, false, false) == AllocPredicateOnly, "alloc_list split order");
+    Globals a = {}, b = {};
+    a.recorderOk = b.recorderOk = 1; a.enable = b.enable = 1; a.manager = b.manager = 0x1000; a.managerOk = b.managerOk = 1;
+    a.m4 = 10; b.m4 = 13; a.m20 = 1; b.m20 = 2;
+    Check(RecorderQualified(a) && RecorderAppends(a, b) == 4, "qualified recorder; appends = dM+4 + dM+20");
+    b.manager = 0x2000;
+    Check(RecorderAppends(a, b) == ~0u, "manager switch: tail count not comparable");
+    a.comparator = 1; Check(!RecorderQualified(a), "comparator set: not qualified"); a.comparator = 0;
+    a.inhibit = 1; Check(!RecorderQualified(a), "inhibit set: not qualified"); a.inhibit = 0;
+    a.provider = 1; Check(!RecorderQualified(a), "provider set: not qualified"); a.provider = 0;
+    a.enable = 0; Check(!RecorderQualified(a), "disabled: not qualified");
+}
+
+static void B0GlobalsCases() {
+    const Image img = MakeImage();
+    uint8_t* m = Page();
+    ntw2_region::Table* t = new ntw2_region::Table(); t->Clear();
+    U q = 0;
+    Put(At(img, 0x14A3EC4), 4, 16); Put(At(img, 0x14A3EC4), 8, 3); Put(At(img, 0x14A3EC4), 0xC, 0xAAAA0000u);
+    Put(At(img, 0x14A3ED8), 4, 32); Put(At(img, 0x14A3ED8), 8, 0); Put(At(img, 0x14A3ED8), 0xC, 0xBBBB0000u);
+    *At(img, 0x1459B00) = 1; *At(img, 0x1459DCC) = 1; Put(At(img, 0x15F8BC0), 0, A(m)); Put(At(img, 0x15F9054), 0, 0);
+    Put(m, 4, 77); Put(m, 0x18, 0); m[0x1C] = 0; Put(m, 0x20, 5);
+    Globals g;
+    ReadGlobals(img.delta, *t, q, g);
+    Check(g.scratchOk && g.distCap == 16 && g.distCount == 3 && g.distBacking == 0xAAAA0000u && g.recCap == 32 &&
+          g.recCount == 0 && g.recBacking == 0xBBBB0000u, "scratch headers 14A3EC4/14A3ED8: capacity +4, count +8, backing +C");
+    Check(g.recorderOk && g.enable == 1 && g.dcc == 1 && g.manager == A(m) && g.managerOk && g.m4 == 77 && g.m20 == 5 &&
+          RecorderQualified(g), "recorder enable/manager/provider and M+4/+18/+1C/+20");
+    m[0x1C] = 1;
+    ReadGlobals(img.delta, *t, q, g);
+    Check(g.inhibit == 1 && !RecorderQualified(g), "inhibit byte M+1C");
+    Put(At(img, 0x15F8BC0), 0, 0);
+    ReadGlobals(img.delta, *t, q, g);
+    Check(g.recorderOk && !g.manager && !g.managerOk && !RecorderQualified(g), "null manager is read, not dereferenced");
+    delete t;
+    VirtualFree(img.base, 0, MEM_RELEASE);
+    t = new ntw2_region::Table(); t->Clear(); // fresh proofs: the released image range must be re-proved unreadable
+    ReadGlobals(img.delta, *t, q, g);
+    Check(!g.scratchOk && !g.recorderOk, "released image globals refused without a fault");
+    delete t;
+}
+
+// Infantry formation page (vtable 13211D8 at the given delta): N = [[F+630]+C], members F+18, queue Q=F+20.
+static uint8_t* Formation(U delta, U n, U members) {
+    uint8_t* f = Page(0x3000); uint8_t* agg = Page();
+    Put(f, 0, 0x13211D8u + delta); Put(f, 0x18, members); Put(f, 0x630, A(agg)); Put(agg, 0xC, n);
+    return f;
+}
+static void QueueCommand(uint8_t* f, U index, U delta, U cls, U state) {
+    uint8_t* cmd = Page();
+    Put(cmd, 0, cls + delta); Put(cmd, 0x1C, state ? state + delta : 0);
+    Put(f, 0x420 + 8 * index, A(cmd)); Put(f, 0x424 + 8 * index, 0x34); Put(f, 0x460, index + 1);
+}
+
+static void B0ProbeCases() {
+    uint8_t* u = Page(); uint8_t* att = Page(); uint8_t* list = Page(); uint8_t* other = Page();
+    uint8_t* f = Formation(0, 5, 12);
+    QueueCommand(f, 0, 0, 0x1324B54u, 0x1450BE4u);
+    QueueCommand(f, 1, 0, 0x1323B64u, 0);
+    f[0x2790] = 1;
+    Put(other, 0, 0x1321000u);
+    Put(u, 0x1F4, A(att)); Put(att, 0x10, 3); Put(att, 0x14, A(att) + 0x80);
+    Put(u, 0xACC, 2); Put(u, 0xAD0, A(list)); Put(list, 0, A(f)); Put(list, 4, A(other));
+    ntw2_region::Table* t = new ntw2_region::Table(); t->Clear();
+    U q = 0;
+    B0Probe p;
+    Check(ReadB0Probe(A(u), 0, *t, q, p), "readable unit probed for B0");
+    Check(p.infantry == 1 && p.other == 1 && p.unreadable == 0 && p.nMax == 5 && p.members == 12 && p.dirty == 1,
+          "formation census: infantry/other, aggregate N, members, dirty F+2790");
+    Check(p.queue == 2 && p.commands == 2 && p.commandClass[0] == 0x1324B54u && p.commandState[0] == 0x1450BE4u &&
+          p.commandClass[1] == 0x1323B64u && p.commandState[1] == ~0u, "queue rows Q+400, classes and 1324B54 secondary state");
+    Check(p.bound == 12 * (1 + 1 + 1), "RNG member bound: members x (1 + queued 1323B64 + dirty 2790)");
+    Check(p.spans == 4 && p.ownBytes == kUnitObjectBytes + 12 + kInfantryFormationBytes + kOtherFormationBytes,
+          "own spans: unit E38, attached data, infantry 0x2794, other 0x6F0");
+    Put(f, 0x460, 9);
+    Check(ReadB0Probe(A(u), 0, *t, q, p) && p.queueBad == 1 && p.queue == 0, "queue count above Q's 8 rows is unreadable");
+    Put(u, 0xACC, 0x7FFFFFFF);
+    Check(ReadB0Probe(A(u), 0, *t, q, p) && p.unreadable >= 1, "garbage formation count: one unreadable mark, bounded walk");
+    Check(!ReadB0Probe(0x10, 0, *t, q, p) && !p.readable, "null-page unit refused");
+    delete t;
+}
+
+// End to end with the FSM gate: six units in one stage, host natives standing in for the ARMY_UNIT clone.
+struct B0World {
+    Image img;
+    uint8_t *c, *model, *manager, *units[6], *forms[6];
+    U list[6];
+    unsigned fsmCalls;
+};
+static B0World b;
+static U Pref(U va) { return va + b.img.delta; }
+static U __fastcall FsmStep(void*) { ++b.fsmCalls; return 0; }
+static U __fastcall FsmToB(void* s) { ++b.fsmCalls; Put(static_cast<uint8_t*>(s), 4, Pref(0x145090C)); return 1; }
+static U __fastcall B0Unit(void* unit) {
+    uint8_t* const u = static_cast<uint8_t*>(unit);
+    const U i = static_cast<U>(std::find(b.units, b.units + 6, u) - b.units);
+    uint8_t* const s = u + 0xD68;
+    Check(Fsm(s, i == 1 ? &FsmToB : &FsmStep) == (i == 1 ? 1u : 0u), "FSM gate returns the native AL/EAX");
+    U r = Get(b.model, 0x50);
+    if (i == 0) for (U k = 0; k < 5; ++k) r = Step(r);  // no formation: bound 0, five draws
+    if (i == 2) for (U k = 0; k < 3; ++k) r = Step(r);  // bound 24, three draws
+    Put(b.model, 0x50, r);
+    if (i == 2 || i == 3) Put(b.manager, 4, Get(b.manager, 4) + 1);          // one recorder append each
+    if (i == 3) { Put(b.manager, 0x18, 0xC0C0u); Put(At(b.img, 0x14A3ED8), 4, 64); } // comparator set; record growth
+    if (i == 4) QueueCommand(b.forms[4], 0, b.img.delta, 0x1324B54u, 0x1450BDCu);       // 522D70 reserve reached
+    return 0x77;
+}
+static U __fastcall B0Stage(void*) {
+    static const U order[6] = {0, 1, 2, 4, 5, 3};
+    for (U k = 0; k < 6; ++k) Check(Unit(b.units[order[k]], 0, &B0Unit) == 0x77, "unit gate returns the clone's EAX");
+    return 0;
+}
+static void B0ModuleCases() {
+    b = B0World{};
+    b.img = MakeImage();
+    b.c = Page(); b.model = Page(); b.manager = Page();
+    *At(b.img, 0x1459B00) = 1; *At(b.img, 0x1459DCC) = 1; Put(At(b.img, 0x15F8BC0), 0, A(b.manager));
+    Put(At(b.img, 0x14A3EC4), 4, 16); Put(At(b.img, 0x14A3ED8), 4, 16);
+    static const U states[6] = {0x1450908, 0x1450908, 0x1450910, 0x1466CC4, 0x1450914, 0x1450918}; // A A C sentinel D E
+    for (U i = 0; i < 6; ++i) {
+        uint8_t* const u = b.units[i] = Page();
+        Put(u, 0x1EC, A(b.c)); Put(u, 0x2CC, 10);
+        Put(u, 0xD68, Pref(0x1320F28)); Put(u, 0xD6C, Pref(states[i]));
+        b.list[i] = A(u);
+        if (i < 2) continue;
+        uint8_t* const f = b.forms[i] = Formation(b.img.delta, 5, 12);
+        uint8_t* const fl = Page(); Put(fl, 0, A(f));
+        Put(u, 0xACC, 1); Put(u, 0xAD0, A(fl));
+        if (i == 2 || i == 3) { QueueCommand(f, 0, b.img.delta, 0x1324B54u, 0x1450BE4u); QueueCommand(f, 1, b.img.delta, 0x1323B64u, 0); }
+        if (i == 4) { f[0x515] = 1; f[0x508] = 0; } // formation-command predicate with an empty queue (F+460 == 0)
+        if (i == 5) f[0x2790] = 1;                    // dirty: 576EA0 command rebuild
+    }
+    Put(b.c, 0xF0, 6); Put(b.c, 0xF4, A(b.list));
+    Put(b.model, 0x50, 0x1234u); Put(b.model, 0x58, 5);
+    std::vector<uint8_t> beforeU0(b.units[0], b.units[0] + 0x1000), beforeF2(b.forms[2], b.forms[2] + 0x3000);
+    Binding binding = {0x400000u + b.img.delta, 8, nullptr, 0};
+    Check(Start(binding), "module starts for B0");
+    Check(Fsm(b.units[0] + 0xD68, &FsmStep) == 0 && b.fsmCalls == 1, "FSM gate outside an occurrence only forwards");
+    Stage(b.c, A(b.model), &B0Stage);
+    Check(b.fsmCalls == 7, "every FSM native ran exactly once");
+    Check(beforeU0 == std::vector<uint8_t>(b.units[0], b.units[0] + 0x1000) &&
+          beforeF2 == std::vector<uint8_t>(b.forms[2], b.forms[2] + 0x3000), "observed unit/formation bytes unchanged");
+    U x[kB0Words];
+    SnapshotB0(x);
+    const U* row = x + FsmStateRows;
+    Check(x[B0Version] == kB0Version && x[B0Occurrences] == 6 && x[FsmOutsideUnit] == 1 && x[ClosedStepMask] == kClosedStepMask,
+          "B0 header");
+    Check(x[FsmCalls] == 6 && x[FsmOccurrences] == 6 && x[FsmMulti] == 0 && x[FsmTransitions] == 1 && x[FsmSteps] == 5 &&
+          x[FsmUnreadable] == 0 && x[FsmForeignTable] == 0, "FSM calls: one transition, five steps");
+    Check(row[SA * kFsmStride] == 1 && row[SA * kFsmStride + 3] == 1 && row[SB * kFsmStride + 4] == 1 &&
+          row[SC * kFsmStride] == 1 && row[SD * kFsmStride] == 1 && row[SE * kFsmStride] == 1 &&
+          row[SSentinel * kFsmStride] == 1 && row[SOther * kFsmStride] == 0, "per-state steps and A->B transition");
+    Check(x[TransitionOccurrences] == 1, "one occurrence with an FSM transition");
+    Check(x[FormationInfantry] == 4 && x[ScratchNMax] == 5 && x[ScratchNSum] == 20 && x[MembersSum] == 48 &&
+          x[ScratchBytesMax] == 5 * 32, "formation census and scratch participant bound");
+    Check(x[QueueCommandsSum] == 4 && x[QueueReserved] == 1 && x[QueueTruncated] == 0 && x[SecondaryStateCounts + 2] == 2 &&
+          x[QueueClassDistinct] == 2 && x[QueueClassRows] == 0x1324B54u && x[QueueClassRows + 1] == 2 &&
+          x[QueueClassRows + kQueueStride] == 0x1323B64u && x[QueueClassRows + kQueueStride + 1] == 2,
+          "queue census (pre state) and the 522D70 reserve");
+    Check(x[RecordGrowth] == 1 && x[DistanceGrowth] == 0 && x[RecordCapMax] == 64 && x[ScratchCountNonzero] == 0,
+          "record scratch growth reached once");
+    Check(x[RecorderStages] == 1 && x[RecorderStageQualified] == 1 && x[RecorderObservations] == 13 &&
+          x[RecorderTails] == 2 && x[RecorderTailOccurrences] == 2 && x[RecorderTailMax] == 1 && x[RecorderUnqualified] == 1 &&
+          x[RecorderComparatorSet] == 1 && x[RecorderManagerChanges] == 0 && x[RecorderManagerLast] == A(b.manager),
+          "recorder: two tail appends, one after the comparator was set");
+    Check(x[RngWithinBound] == 1 && x[RngOverBound] == 1 && x[RngDrawMax] == 5 && x[RngMemberBoundSum] == 24 + 24 + 12 + 24,
+          "RNG draws against the member-loop bound (units 2, 3, 4, 5)");
+    Check(x[OwnUnreadable] == 0 && x[OwnBytesMax] == kUnitObjectBytes + kInfantryFormationBytes, "own-state bytes copied");
+    const U* ref = x + RefusalRows;
+    Check(ref[2 * RefUnreadable] == 0 && ref[2 * RefAlloc] == 1 && ref[2 * RefTransition] == 1 && ref[2 * RefRecorder] == 1 &&
+          ref[2 * RefOther] == 1 && ref[2 * RefCompletable] == 2, "exclusive refusal buckets");
+    Check(x[AllocRows + 2 * AllocReserve] == 1 && x[OtherRows + 2 * OtherDirty] == 1 && x[DirtyOccurrences] == 1 &&
+          x[CompletableStepUnclosed] == 2 && x[CompletableNoStep] == 0, "alloc split, dirty other, unclosed steps");
+    U stageA[kWords];
+    Snapshot(stageA);
+    Check(stageA[Occurrences] == 6, "Stage A row counts the same occurrences");
+    Stop(); Reset();
+    SnapshotB0(x);
+    Check(x[B0Occurrences] == 0 && x[B0Version] == 0, "reset zeroes the B0 row");
+    VirtualFree(b.img.base, 0, MEM_RELEASE);
+}
+
 int main() {
     ClassifierCases();
     RngCases();
     ProbeCases();
     ModuleCases();
     DecommitCases();
+    B0PureCases();
+    B0GlobalsCases();
+    B0ProbeCases();
+    B0ModuleCases();
     printf("native_army_unit_oracle: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

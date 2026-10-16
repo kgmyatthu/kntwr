@@ -539,20 +539,28 @@ U __fastcall PuppetCommonGate(U entity, U) {
     return reinterpret_cast<U (__thiscall*)(U)>(V(0x670eb0))(entity);
 }
 static_assert(ntw2_army_unit::kWords==NTW2_ARMY_UNIT_WORDS, "army unit status word contract");
-// NTW2_ARMY_UNIT_SHADOW (item 4 Stage A): site 18 (ARMY clone's call of the ARMY_UPDATE clone, ECX = container) and
+static_assert(ntw2_army_unit::kB0Words==NTW2_ARMY_B0_WORDS, "army B0 status word contract");
+// NTW2_ARMY_UNIT_SHADOW (item 4 Stage A + B0): site 18 (ARMY clone's call of the ARMY_UPDATE clone, ECX = container) and
 // sites 101/103 (that clone's calls of 0x581F30, ECX = unit). Only the tick owner inside an epoch with the feature
-// enters the module; the native call always runs exactly once, unchanged, and its EAX is returned.
+// enters the module; the unit update always runs exactly once and its EAX is returned. Inside the epoch it runs as the
+// ARMY_UNIT clone (instruction-identical to 0x581F30 except its FSM update call 58202E, bound to ArmyFsmGate: B0).
 U __fastcall ArmyStageGate(void* container) {
     const auto native=reinterpret_cast<ntw2_army_unit::Native>(clones.entries[NTW2_CLONE_ARMY_UPDATE]);
     return Epoch(NTW2_ARMY_UNIT_SHADOW) ? ntw2_army_unit::Stage(container,world.model,native) : native(container);
 }
 U __fastcall ArmyUnitGateMain(void* unit) {
-    const auto native=reinterpret_cast<ntw2_army_unit::Native>(V(0x581f30));
-    return Epoch(NTW2_ARMY_UNIT_SHADOW) ? ntw2_army_unit::Unit(unit,0,native) : native(unit);
+    if (!Epoch(NTW2_ARMY_UNIT_SHADOW)) return reinterpret_cast<ntw2_army_unit::Native>(V(0x581f30))(unit);
+    return ntw2_army_unit::Unit(unit,0,reinterpret_cast<ntw2_army_unit::Native>(clones.entries[NTW2_CLONE_ARMY_UNIT]));
 }
 U __fastcall ArmyUnitGateAlternate(void* unit) {
-    const auto native=reinterpret_cast<ntw2_army_unit::Native>(V(0x581f30));
-    return Epoch(NTW2_ARMY_UNIT_SHADOW) ? ntw2_army_unit::Unit(unit,1,native) : native(unit);
+    if (!Epoch(NTW2_ARMY_UNIT_SHADOW)) return reinterpret_cast<ntw2_army_unit::Native>(V(0x581f30))(unit);
+    return ntw2_army_unit::Unit(unit,1,reinterpret_cast<ntw2_army_unit::Native>(clones.entries[NTW2_CLONE_ARMY_UNIT]));
+}
+// ARMY_UNIT's call 58202E of 0x582530 (ECX = S = U+D68, no stack argument, plain return, AL result; EAX/ECX/EDX are
+// caller-saved there). Forwards the original exactly once; the module only reads S around it.
+U __fastcall ArmyFsmGate(void* fsm) {
+    const auto native=reinterpret_cast<ntw2_army_unit::Native>(V(0x582530));
+    return Epoch(NTW2_ARMY_UNIT_SHADOW) ? ntw2_army_unit::Fsm(fsm,native) : native(fsm);
 }
 __declspec(naked) void CollisionSlot44() {
     __asm mov eax, dword ptr [ecx]
@@ -2092,6 +2100,7 @@ bool BuildClones() {
     }
     U bindings[NTW2_BIND_COUNT]={};
     bindings[NTW2_BIND_AI_CENSUS_REBUILD]=ntw2_ai_census::Gate(6);
+    bindings[NTW2_BIND_ARMY_FSM_UPDATE]=FnAddress(&ArmyFsmGate);
     bindings[NTW2_BIND_TICK_ENTRY]=FnAddress(&TickGate);
     bindings[NTW2_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
     bindings[NTW2_BIND_FORM_MANAGER]=FnAddress(&FormationGate);
@@ -2765,6 +2774,7 @@ void SampleCounters() {
     ntw2_unit_brain::Snapshot(const_cast<U*>(ntw2_state.brain_unit_words));
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
+    ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -2888,6 +2898,7 @@ bool Activate(const World& candidate) {
     ntw2_unit_brain::Snapshot(const_cast<U*>(ntw2_state.brain_unit_words));
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
+    ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -3160,6 +3171,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_GRID_PROBATION_WORDS;++i) ntw2_state.grid_probation_words[i]=0;
     for (U i=0;i<NTW2_ARMY_UNIT_WORDS;++i) ntw2_state.army_unit_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_WORDS;++i) ntw2_state.puppet_words[i]=0;
+    for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;
