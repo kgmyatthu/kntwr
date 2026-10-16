@@ -7,30 +7,42 @@
 //     incremental: the delayed call is the approved AI-order latency. Every call is queued exactly once; nothing is
 //     admitted or skipped on wall-clock timing. The queue cap is a deterministic function of call order, not of progress.
 //   * the tick-end seam hands the staged batch to the worker. The worker runs the queued calls in order during the
-//     inter-tick window, when only main/render runs, with its private walk/observer clone family (no shared scratch).
-//   * the next tick's START is the effect seam: it services one posted worker call and never blocks. A batch that has
-//     completed by then is counted as joined; a think still running overlaps the new tick. That overlap is the one
-//     remaining timing-dependent outcome and is counted as a divergence point (ticks and thinks, first/last tick index).
-//     The structural-writer joins below still drain it before their mutation.
-//   * tick-side joins: site 33 (controller 0x7C8BD0 entry, before its 0x7492F0 rebuild), TICK 57DFDF (dynamic quadtree
-//     update 0x817D20) and the tick-owner delegate gates. They service the mailbox while waiting, so a spanning think
-//     blocked on a marshal cannot deadlock the tick.
+//     inter-tick window with its private walk/observer clone family (no shared scratch).
+//   * the next tick's START is a BLOCKING join (lifetime barrier): no think ever crosses into a tick, so every tick-side
+//     owner teardown -- including the direct-call routes into 0x8254D0/0x69C720 that no slot can gate -- runs after the
+//     think returned (the 0x7D99F0 _purecall class). The join services worker calls while it waits. Its stall is
+//     reported separately (seam_stalls, seam_wait_sum_us, seam_wait_max_us): it is the cost of a think longer than the
+//     inter-tick window. With this seam the schedule is deterministic with respect to tick boundaries.
+//   * tick-side joins (site 33, TICK 57DFDF, tick-owner gates) remain as a second line; they find nothing in flight
+//     except after a capacity drain.
 //   * vtable-slot gates (pinned original words, the runtime's ordinary Slot machinery): delegate replacement
-//     0x6EA520/0x6B3010, delegate destructors 0x69D710/0x69D750, command callbacks 0x805CE0/0x7DEC70.
-//       - non-tick, non-worker thread (main/render UI): takes the admission lease (stop-admission handshake), waits for
-//         the executing native call, then runs the original under the lease. It also services the mailbox while waiting:
-//         the tick cannot start until main returns, so leaving the worker blocked on main would deadlock. Commands pass.
+//     0x6EA520/0x6B3010, delegate destructors 0x69D710/0x69D750, command callbacks 0x805CE0/0x7DEC70, and the owner
+//     deleting destructors that tear down an observer/operation graph (seven observer tables slot 2, the five
+//     operation tables slot 26; list in ntw2_ai_async2.cpp).
+//       - non-tick, non-worker thread (main/render UI), replacement: takes the admission lease (stop-admission
+//         handshake), waits for the executing native call, then runs the original under the lease.
+//       - non-tick, non-worker thread, destructor (owner teardown lease): waits until the whole published batch has
+//         drained -- queued calls hold raw planner pointers, so waiting for the executing call alone is not enough --
+//         then takes the lease (no new call starts) and runs the original before any byte of the owner is touched.
+//       - every non-tick waiter services the mailbox: leaving the worker blocked on main would deadlock the next tick.
 //       - tick owner: joins the published batch before the original runs (replacement/destructor); commands pass through.
 //       - AI worker inside an async think: the call is MARSHALLED. It executes on the first servicing thread (tick start
-//         seam, a structural join, or a main/render lease waiter), with the same ECX/stack arguments; the worker's
-//         borrowed frame stays blocked until the original returns. A worker marshal posted in the inter-tick window
-//         therefore waits for the next tick start and makes its think span that tick.
+//         join, a structural join, a main/render waiter or the stop quiesce), with the same ECX/stack arguments; the
+//         worker's borrowed frame stays blocked until the original returns.
 //       - thread currently executing a marshalled call: pass-through.
 //       - 0x83FD00 is the same marshalled kind, reached by call gate AI2_UNROUTED_83FD00 from AI2_POSITION_UPDATE: its
 //         23-function closure reaches original walk owners AND owner transactions, so it is never run on the worker.
+//   * residual (not gateable without .text patches, documented in the report): owner teardown executed by a non-tick
+//     thread through direct calls (0x8254D0 from 0x739240 <- 0x73DCC3, 0x739460 <- 0x73930C/0x739344/0x7CB02E/0x7D31BE,
+//     0x76B870; 0x69C720 from the 0x825AE0.. family; battle exit) while a think runs in the inter-tick window. The
+//     feature stays experimental for this.
+//   * stop (Quiesce, generation still enabled): admission closes (site 34 runs synchronously), the next tick start
+//     drains the batch; if no tick comes within the grace period the stopping thread services each posted call itself
+//     while the receivers are still bound, otherwise it aborts the call (EAX = 0, the original is NOT executed) so the
+//     think can return. Native frames are never abandoned.
 //   * watchdog: any blocking wait longer than 5 s records deadlock_suspected and sets a sticky synchronous fallback for
-//     the generation; the tick index is logged as a divergence point. The wait itself is NOT aborted (a native frame cannot
-//     be cancelled without SuspendThread/unwinding; both are excluded by design).
+//     the generation; the tick index is logged. The wait itself is NOT aborted (a native frame cannot be cancelled
+//     without SuspendThread/unwinding; both are excluded by design).
 // Queue: single producer (tick owner: Admit/PublishBatch/AbortBatch), single consumer (AI worker: WorkerNext). Absolute
 // indices head <= published <= tail; the publish and the worker's idle transition are serialized by one lock, so a join
 // never observes "drained" while a published call is outstanding. The lease and the worker's call start use a
@@ -41,7 +53,8 @@
 namespace ntw2_ai_async2 {
 using U = uint32_t;
 
-constexpr U kVersion = 2, kWords = 96, kBuckets = 12, kKinds = 8, kPinCount = 13, kWatchdogMs = 5000;
+constexpr U kVersion = 3, kWords = 96, kBuckets = 12, kKinds = 8, kPinCount = 25, kWatchdogMs = 5000;
+constexpr U kRoutePins = 13, kUnroutedPin = 12; // pins with a route-row marshal counter; the 83FD00 clone-call gate
 constexpr U kMaxQueued = 64; // staged + published-not-run + running native calls, FIFO across ticks
 constexpr U kRouteWords = 65, kRouteFunctions = 21, kRouteSlots = 2, kRouteClasses = 4;
 enum Kind : U { KSite34, KController, KSpatial, KTickEnd, KReplace, KDestroy, KCommand, KStop };
@@ -54,19 +67,20 @@ enum Word : U {
     WKindWaits = WJoinWaitHist + kBuckets,      // per kind: {waits, max wait us}
     WKindEntries = WKindWaits + 2 * kKinds,     // gate/join entries per kind
     WKindMarshal = WKindEntries + kKinds,       // worker calls marshalled to the tick per kind
-    WSpottingUnresolved = WKindMarshal + kKinds, WLeaseHolds, WRouteEntries, WScratchReady, WReserved
+    WSpottingUnresolved = WKindMarshal + kKinds, WLeaseHolds, WRouteEntries, WScratchReady,
+    WStopServed, WStopAborted, WOwnerLeases, WReserved
 };
-static_assert(WSpottingUnresolved == 88 && WReserved == 92 && kWords == 96, "ai_async2 word layout");
+static_assert(WSpottingUnresolved == 88 && WStopServed == 92 && WReserved == 95 && kWords == 96, "ai_async2 word layout");
 
 // Appended route/boundary row ntw2_status::ai_async2_route_words (labels NTW2_AI_ASYNC2_ROUTE_LABELS).
 enum RouteWord : U {
     RVersion, RSchedule, RTicks, RQueued, RPublishedBatches, RQueuedMax, RCapacityJoins, RLeaseWaits,
-    RSeamPolls, RSeamCompleteJoins, RSeamMarshalServes, RSpanningTicks, RSpanningThinks, RSpanningFirstTick,
-    RSpanningLastTick, RFallbackTick, RMainServed, RMainMarshalWaits,
+    RSeamPolls, RSeamCompleteJoins, RSeamMarshalServes, RSeamStalls, RSeamWaitSum, RSeamWaitMax,
+    RSeamStallLastTick, RFallbackTick, RMainServed, RMainMarshalWaits,
     RGateMatrix = 18,                    // kRouteSlots x kRouteClasses, slot-major (RouteSlot, RouteClass)
     RFunctionEntries = RGateMatrix + kRouteSlots * kRouteClasses, // generator AI2_ROUTE_ORDER: private-function entries
-    RPinMarshal = RFunctionEntries + kRouteFunctions, // 13 per-pin marshalled-call counters
-    RUnroutedEntries = RPinMarshal + kPinCount, // worker calls reaching the unrouted 83FD00 gate inside an async think
+    RPinMarshal = RFunctionEntries + kRouteFunctions, // per-pin marshalled-call counters, pins 0..12
+    RUnroutedEntries = RPinMarshal + kRoutePins, // worker calls reaching the unrouted 83FD00 gate inside an async think
     RLookupCapacity, RGatherCapacity, RWalkCapacity, // private vector capacities (word 1) after the last think
     RScratchMask,                        // bit 0: walk search objects constructed, bit 1: observer search object
 };
@@ -90,7 +104,7 @@ enum Admission : U { Queued, Synchronous };
 U Admit(U planner, U flag = 0);
 void PublishBatch();                // tick-end seam: hand the staged calls to the worker, do not join
 void AbortBatch();                  // exceptional tick exit: drop the not-yet-published calls
-void TickSeam();                    // next tick's start: non-blocking service, completion and divergence accounting
+void TickSeam();                    // next tick's start: blocking lifetime join; complete/stall accounting
 void SetWake(U handle);             // runtime's AI wake event, signalled when queued work or a lease release needs it
 void Join(U kind);                  // blocking structural-writer join; services worker calls while waiting
 bool WorkerNext(U* planner, U* flag); // AI worker: pop the next published call; false = idle or a lease is held
@@ -104,6 +118,9 @@ void NotePrivate(U word, U value); // RLookupCapacity + word, word < 4
 void NoteGate(U slot, bool routedPrivate);
 // Address of the kRouteFunctions entry counters (AI2_ROUTE_COUNTS binding; the private clones increment them).
 U FunctionCounters();
+// Stopping thread, BEFORE the generation stops routing ticks: close admission and drain (see the stop rule above).
+// receiversValid() is re-evaluated before each self-serviced call. False: not drained within timeoutMs.
+bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)());
 bool Drain(U timeoutMs);
 void Snapshot(volatile U* out);
 void RouteSnapshot(volatile U* out);

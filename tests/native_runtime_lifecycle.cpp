@@ -1236,14 +1236,16 @@ static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
 }
 
 // ---- NTW2_AI_ASYNC2 boundary schedule ------------------------------------------------------------------------------------
-// Every ntw2_ai_async2_boundary call is one synthetic tick: non-blocking tick-start seam, site-34 queueing, a tick-side
-// callback, the optional blocking TICK quadtree join and the tick-end publish. The planner 0x7D99F0, the destructor
-// 0x69D750 (slot 0 of 0x13376AC, ret 4) and the observer 0x6A95A0 (slot 16 of 0x13376FC, ret 0xC) are redirected in the
-// owned image to probes. No installed executable is patched.
+// Every ntw2_ai_async2_boundary call is one synthetic tick: the blocking tick-start lifetime join, site-34 queueing, a
+// tick-side callback, the optional TICK quadtree join and the tick-end publish. The planner 0x7D99F0, the delegate
+// destructor 0x69D750 (slot 0 of 0x13376AC, ret 4), the observer owner destructor 0x73E180 (slot 2 of 0x1343318, ret 4)
+// and the observer 0x6A95A0 (slot 16 of 0x13376FC, ret 0xC) are redirected in the owned image to probes. No installed
+// executable is patched.
 struct Ai2Planner { volatile U calls; volatile LONG started; U delayMs, thread, destroyFromWorker, walk; };
 struct Ai2Probe { volatile LONG calls; U thread, thinksAtEntry; Ai2Planner* planner; };
 static Ai2Probe ai2Probe;
 static U* Ai2DestroyCell() { return At(0x13376AC); }
+static U* Ai2OwnerCell() { return At(0x1343318+4*2); }
 static U* Ai2ObserverCell() { return At(0x13376FC+4*16); }
 static void* __fastcall Ai2FakeDestroy(void* self,void*,U) {
     ai2Probe.thread=GetCurrentThreadId();
@@ -1251,10 +1253,11 @@ static void* __fastcall Ai2FakeDestroy(void* self,void*,U) {
     InterlockedIncrement(&ai2Probe.calls);
     return self;
 }
-static void CallDestroySlot() {
+static void CallDeleting(U* cell) {
     U object=0;
-    reinterpret_cast<void* (__fastcall*)(void*,void*,U)>(static_cast<uintptr_t>(*Ai2DestroyCell()))(&object,nullptr,0);
+    reinterpret_cast<void* (__fastcall*)(void*,void*,U)>(static_cast<uintptr_t>(*cell))(&object,nullptr,0);
 }
+static void CallDestroySlot() { CallDeleting(Ai2DestroyCell()); }
 static volatile LONG ai2ObserverCalls;
 static U ai2ObserverThread[4];
 static U __fastcall Ai2FakeObserver(void*,void*,U,U,U) {
@@ -1268,8 +1271,9 @@ static void CallObserverSlot() {
 }
 
 // AI-thread private walk vs shared-global mutation. The AI worker, inside a think, runs the real AI2_WALK clone
-// (7F1D40 family: AI2_GATHER, AI2_809110, kept originals 7EE620/6DC9A0/448B90/7FA540) on a synthetic static interest
-// tree while another thread keeps sentinels in the ORIGINAL scratch the clones were rebased away from.
+// (7F1D40 family: AI2_GATHER, AI2_809110, kept originals 7EE620/6DC9A0/448B90/7FA540; vector growth through the owned
+// image's 444B40/FF7EF0 fixture) on a synthetic static interest tree while another thread keeps sentinels in the ORIGINAL
+// scratch the clones were rebased away from.
 // Layouts (recovered from 7F1D40/804DD0/809110/7FA540/7EE620/6DC9A0): walker[0]=obj, obj+8=model, model+0xBC=tree holder,
 // [holder+0x24]+0x1C=root node; node +4..+0x18 = min xyz/max xyz, +0x1C interest list, +0x20 four children (leaf: 0);
 // interest +0 type (0x10 = owner record), +0xC owner, +0x14 next; owner +8 tag, +0xC vtable (slot 0: live predicate,
@@ -1281,8 +1285,6 @@ struct Ai2Interest { U type, pad[2], owner, pad2, next; };
 static_assert(sizeof(Ai2Node)==0x30 && offsetof(Ai2Node,list)==0x1C && offsetof(Ai2Node,child)==0x20 &&
               offsetof(Ai2Owner,tag)==8 && offsetof(Ai2Owner,vtable)==0xC && offsetof(Ai2Owner,los)==0x1C &&
               offsetof(Ai2Interest,owner)==0xC && offsetof(Ai2Interest,next)==0x14, "synthetic tree layouts");
-static __declspec(thread) U ai2TlsBlock[4]; // the clones' dead MSVC static-init TLS loads read [exe TLS block + 8]
-extern "C" unsigned long _tls_index;
 constexpr U kAi2WalkIterations=2000, kAi2Hits=5;
 static const U kAi2ExpectedHits[kAi2Hits]={0x100,0x200,0x302,0x303,0x220};
 struct Ai2WalkTest {
@@ -1304,8 +1306,6 @@ static U __fastcall Ai2RecordLos(void*,void*,U ownerTag) {
     ai2Walk.hitCount=n+1;
     return 0; // not blocked: the walk reports every gathered owner
 }
-static void* __cdecl Ai2FakeAlloc(int count,U) { return HeapAlloc(GetProcessHeap(),0,count>0 ? 4u*static_cast<U>(count) : 4u); }
-static void __cdecl Ai2FakeFree(void* p) { if(p) HeapFree(GetProcessHeap(),0,p); }
 static volatile LONG ai2CtorCalls;
 static U ai2CtorSelf[8], ai2CtorThread[8];
 static U __fastcall Ai2FakeSearchCtor(U self,void*) {
@@ -1347,7 +1347,6 @@ static void Ai2BuildTree() {
 static void Ai2WalkThink() {
     Ai2WalkTest& t=ai2Walk;
     t.thread=GetCurrentThreadId();
-    ++ai2TlsBlock[0];
     t.walkEntry=t.entry(NTW2_CLONE_AI2_WALK);
     t.observerEntry=t.entry(NTW2_CLONE_AI2_6A95A0);
     t.badEntry=t.entry(NTW2_CLONE_TICK);
@@ -1389,25 +1388,41 @@ static DWORD WINAPI Ai2Mutator(void*) { // shared-global writer: any foreign wri
 static void __fastcall Ai2FakeThink(Ai2Planner* planner,void*,U) {
     planner->thread=GetCurrentThreadId();
     InterlockedIncrement(&planner->started);
-    if(planner->destroyFromWorker) CallDestroySlot(); // worker-side delegate destruction inside the think
+    if(planner->destroyFromWorker) CallDestroySlot(); // worker-side delegate destruction inside the think: marshalled
     if(planner->walk) Ai2WalkThink();
     Sleep(planner->delayMs);
     ++planner->calls;
 }
-static DWORD WINAPI Ai2DestroyHelper(void*) { CallDestroySlot(); return 0; }
+static DWORD WINAPI Ai2DestroyHelper(void* cell) { CallDeleting(static_cast<U*>(cell)); return 0; }
 struct Ai2Mid { Ai2Planner* planner; ULONGLONG begin, elapsed; U thinksAtMid, sleepMs; bool destroy, observer; };
 static void __stdcall Ai2MidTick(void* raw) {
     Ai2Mid& m=*static_cast<Ai2Mid*>(raw);
     m.elapsed=GetTickCount64()-m.begin;
     m.thinksAtMid=m.planner->calls;
     if(m.sleepMs) Sleep(m.sleepMs);
-    if(m.destroy) CallDestroySlot();  // tick-owner writer: must join the published batch before the original runs
+    if(m.destroy) CallDestroySlot();   // tick-owner writer: the batch has already been joined at the tick start
     if(m.observer) CallObserverSlot(); // routed observer slot on the tick thread: original
 }
 static bool Ai2WaitCalls(const Ai2Planner& p,U calls,U ms) {
     const ULONGLONG end=GetTickCount64()+ms;
     while(p.calls<calls) { if(GetTickCount64()>=end) return false; Sleep(1); }
     return true;
+}
+static bool Ai2WaitStarted(const Ai2Planner& p,LONG started,U ms) {
+    const ULONGLONG end=GetTickCount64()+ms;
+    while(p.started<started) { if(GetTickCount64()>=end) return false; Sleep(1); }
+    return true;
+}
+// A non-tick owner/delegate destructor started while the published batch runs: it must not enter before every queued
+// call of that batch returned (thinksAtEntry), and it must block while they run.
+static void Ai2TeardownWhileThinking(Ai2Planner& p,U* cell,LONG started,U callsAtEntry,LONG probeCalls,const char* what) {
+    Check(Ai2WaitStarted(p,started,3000),what);
+    DWORD helperId=0;
+    HANDLE helper=CreateThread(nullptr,0,Ai2DestroyHelper,cell,0,&helperId);
+    Check(helper && WaitForSingleObject(helper,40)==WAIT_TIMEOUT,what);
+    if(helper) { WaitForSingleObject(helper,15000); CloseHandle(helper); }
+    Check(ai2Probe.calls==probeCalls && ai2Probe.thinksAtEntry==callsAtEntry && ai2Probe.thread==helperId,what);
+    Sleep(50); // the lease release resumes the worker, which reports idle before the next tick start
 }
 static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
     auto boundary=reinterpret_cast<ntw2_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_boundary"));
@@ -1420,17 +1435,26 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     config.enabled_mask=NTW2_AI_ASYNC2; Check(start(&config)==1,"ai_async2 without ai is refused");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CTRL; Check(start(&config)==1,"ai_async2 with ai_ctrl is refused");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CENSUS; Check(start(&config)==1,"ai_async2 with ai_census is refused");
-    const U destroyOriginal=*Ai2DestroyCell(), walkOriginal=*At(0x133E2DC), observerOriginal=*Ai2ObserverCell();
-    Check(destroyOriginal==0x69D750+delta && walkOriginal==0x702BB0+delta && observerOriginal==0x6A95A0+delta,"pinned originals before start");
+    const U destroyOriginal=*Ai2DestroyCell(), walkOriginal=*At(0x133E2DC), observerOriginal=*Ai2ObserverCell(),
+            ownerOriginal=*Ai2OwnerCell();
+    Check(destroyOriginal==0x69D750+delta && walkOriginal==0x702BB0+delta && observerOriginal==0x6A95A0+delta &&
+          ownerOriginal==0x73E180+delta,"pinned originals before start");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai_async2 activates");
-    Check(InRuntime(*Ai2DestroyCell()) && ReadOnly(Ai2DestroyCell()) && InRuntime(*At(0x133E2DC)) &&
-          InRuntime(*Ai2ObserverCell()) && ReadOnly(Ai2ObserverCell()),
-          "destructor, walk-entry and observer slots hold read-only runtime gates");
-    Check(InRuntime(siteCallee(33)) && InRuntime(siteCallee(34)),"site 33 join gate and site 34 queueing gate are bound");
+    // Probes go in only after the first activation validated and copied the clone sources (0x7D99F0 and 0x6A95A0 are
+    // sources); the resident clones call the probed entries as kept externals.
     Check(RedirectImage(0x7D99F0,reinterpret_cast<const void*>(&Ai2FakeThink)) &&
           RedirectImage(0x69D750,reinterpret_cast<const void*>(&Ai2FakeDestroy)) &&
-          RedirectImage(0x6A95A0,reinterpret_cast<const void*>(&Ai2FakeObserver)),"install synthetic planner, destructor and observer probes");
+          RedirectImage(0x73E180,reinterpret_cast<const void*>(&Ai2FakeDestroy)) &&
+          RedirectImage(0x6A95A0,reinterpret_cast<const void*>(&Ai2FakeObserver)) &&
+          RedirectImage(0x7E6C30,reinterpret_cast<const void*>(&Ai2FakeSearchCtor)) &&
+          RedirectImage(0x808F90,reinterpret_cast<const void*>(&Ai2RecordLos)),
+          "install planner, delegate/owner destructor, observer, search-object ctor and LOS recorder probes");
+    Check(InRuntime(*Ai2DestroyCell()) && ReadOnly(Ai2DestroyCell()) && InRuntime(*At(0x133E2DC)) &&
+          InRuntime(*Ai2ObserverCell()) && ReadOnly(Ai2ObserverCell()) && InRuntime(*Ai2OwnerCell()) && ReadOnly(Ai2OwnerCell()) &&
+          InRuntime(*At(0x1349C18+4*26)) && InRuntime(*At(0x134B48C+4*2)),
+          "delegate, owner-destructor, walk-entry and observer slots hold read-only runtime gates");
+    Check(InRuntime(siteCallee(33)) && InRuntime(siteCallee(34)),"site 33 join gate and site 34 queueing gate are bound");
     Ai2Planner p={};
     ai2Probe={}; ai2Probe.planner=&p;
     const U owner=GetCurrentThreadId();
@@ -1448,51 +1472,50 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     Check(Ai2WaitCalls(p,1,3000) && p.thread!=owner,"T1: the think ran once on the AI worker after the tick end");
     CallObserverSlot(); // outside any tick: class other
     Check(ai2ObserverCalls==2 && ai2ObserverThread[0]==owner && ai2ObserverThread[1]==owner,"observer slot: tick and other threads run the original");
-    Sleep(50); // let the worker report idle so the next seam classifies the batch as complete
-    Check(tick(nullptr,0,0,nullptr)==1,"T2: tick-start seam joins the complete batch");
-    // T3/T4: a think still running at the next tick start does not stall it (no structural writer in T4).
+    Sleep(50); // let the worker report idle so the next start join counts the batch as complete
+    Check(tick(nullptr,0,0,nullptr)==1,"T2: tick start counts the complete batch without stalling");
+    // T3/T4: a think longer than the window: the next tick start blocks until it returns (no think crosses into a tick).
     Check(tick(&p,300,0,nullptr)==1,"T3: long think queued");
-    const ULONGLONG t4=GetTickCount64();
-    Check(tick(nullptr,0,2,nullptr)==1 && GetTickCount64()-t4<150 && p.calls==1,"T4: the tick start seam never blocks on a spanning think");
-    Check(tick(nullptr,0,0,nullptr)==1 && p.calls==2,"T5: the TICK quadtree join drains the spanning think");
-    // T6/T7: a tick-owner structural writer joins the published batch before the original runs.
-    Check(tick(&p,150,0,nullptr)==1,"T6: think queued");
+    m={};
+    Check(tick(nullptr,0,2,&m)==1 && m.thinksAtMid==2 && p.calls==2,"T4: the tick-start lifetime join waited for the whole think");
+    // T5/T6: a tick-owner structural writer runs after the start join, never concurrently with the think.
+    Check(tick(&p,150,0,nullptr)==1,"T5: think queued");
     m={}; m.destroy=true;
     Check(tick(nullptr,0,2,&m)==1 && ai2Probe.calls==1 && ai2Probe.thread==owner && ai2Probe.thinksAtEntry==3 && p.calls==3,
-          "T7: tick-side destructor ran only after the think completed");
-    // T8: a main/render writer takes the lease and waits for the executing think.
-    Check(tick(&p,150,0,nullptr)==1,"T8: think queued");
-    { const ULONGLONG end=GetTickCount64()+3000; while(p.started<4 && GetTickCount64()<end) Sleep(1); }
-    DWORD helperId=0;
-    HANDLE helper=p.started==4 ? CreateThread(nullptr,0,Ai2DestroyHelper,nullptr,0,&helperId) : nullptr;
-    Check(helper && WaitForSingleObject(helper,40)==WAIT_TIMEOUT,"T8: main/render writer blocks while the think executes");
-    if(helper) { WaitForSingleObject(helper,15000); CloseHandle(helper); }
-    Sleep(50); // the lease release resumes the worker, which then reports idle before T9's seam
-    Check(ai2Probe.calls==2 && ai2Probe.thinksAtEntry==4 && ai2Probe.thread==helperId,"T8: leased destructor ran after the think returned");
-    // T9-T11: the worker's own destructor call is marshalled; posted in the window it waits for the next tick start.
+          "T6: tick-side destructor ran only after the think completed");
+    // T7: a main/render delegate destructor waits for the executing think (owner teardown lease).
+    Check(tick(&p,150,0,nullptr)==1,"T7: think queued");
+    Ai2TeardownWhileThinking(p,Ai2DestroyCell(),4,4,2,"T7: non-tick delegate destructor blocks until the think returned");
+    Check(tick(nullptr,0,0,nullptr)==1,"T8: tick start counts the drained batch as complete");
+    // T9: owner teardown while a think runs and a second call of the same batch is still queued: the observer owner
+    // destructor (0x1343318 slot 2 -> 0x73E180) enters only after BOTH calls returned -- the queued call holds a raw
+    // planner pointer, so waiting for the executing call alone would let it run on a destroyed owner.
+    Check(tick(&p,100,1,nullptr)==1,"T9: two thinks queued in one tick");
+    Ai2TeardownWhileThinking(p,Ai2OwnerCell(),5,6,3,"T9: owner teardown waits for the whole published batch, not only the executing call");
+    Check(tick(nullptr,0,0,nullptr)==1,"T10: drained batch complete at tick start");
+    // T11/T12: the worker's own destructor call is marshalled; posted in the window it is served by the next tick start.
     p.destroyFromWorker=1;
-    Check(tick(&p,20,0,nullptr)==1,"T9: think queued");
+    Check(tick(&p,20,0,nullptr)==1,"T11: think queued");
     Sleep(100);
-    Check(ai2Probe.calls==2,"T9: the marshalled call waits for a servicing thread");
-    Check(tick(nullptr,0,2,nullptr)==1 && ai2Probe.calls==3 && ai2Probe.thread==owner && ai2Probe.thinksAtEntry==4,
-          "T10: the tick-start seam executed the worker's destructor call inside the think");
+    Check(ai2Probe.calls==3,"T11: the marshalled call waits for a servicing thread");
+    Check(tick(nullptr,0,2,nullptr)==1 && ai2Probe.calls==4 && ai2Probe.thread==owner && ai2Probe.thinksAtEntry==6 && p.calls==7,
+          "T12: the tick-start join executed the worker's destructor call and drained the think");
     p.destroyFromWorker=0;
-    Check(tick(nullptr,0,0,nullptr)==1 && p.calls==5,"T11: the quadtree join drains the marshalling think");
-    // T12/T13: two admissions in one tick both run in FIFO order (nothing is skipped).
-    Check(tick(&p,10,1,nullptr)==1 && Ai2WaitCalls(p,7,3000),"T12: both queued thinks ran");
+    // T13/T14: two admissions in one tick both run in FIFO order (nothing is skipped).
+    Check(tick(&p,10,1,nullptr)==1 && Ai2WaitCalls(p,9,3000),"T13: both queued thinks ran");
     Sleep(50);
-    Check(tick(nullptr,0,0,nullptr)==1,"T13: complete batch joined at the seam");
-    // T14/T15: watchdog. A join waiting more than 5 s records deadlock_suspected and the sticky fallback; it is not aborted.
-    Check(tick(&p,5600,0,nullptr)==1,"T14: very long think queued");
-    Check(tick(nullptr,0,0,nullptr)==1 && p.calls==8,"T15: the waiting quadtree join was not aborted");
-    // T16: sticky fallback: the planner now runs through the synchronous same-call barrier.
+    Check(tick(nullptr,0,0,nullptr)==1,"T14: complete batch counted at the tick start");
+    // T15/T16: watchdog. A join waiting more than 5 s records deadlock_suspected and the sticky fallback; it is not aborted.
+    Check(tick(&p,5600,0,nullptr)==1,"T15: very long think queued");
+    Check(tick(nullptr,0,2,nullptr)==1 && p.calls==10,"T16: the waiting tick-start join was not aborted");
+    // T17: sticky fallback: the planner now runs through the synchronous same-call barrier.
     m={};
-    Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==9 && p.calls==9,"T16: fallback think completes before site 34 returns");
+    Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==11 && p.calls==11,"T17: fallback think completes before site 34 returns");
     ntw2_status snapshot={};
     Check(stop(nullptr)==0,"ai_async2 generation stops");
     Check(*Ai2DestroyCell()==destroyOriginal && ReadOnly(Ai2DestroyCell()) && *At(0x133E2DC)==walkOriginal &&
-          *Ai2ObserverCell()==observerOriginal && ReadOnly(Ai2ObserverCell()),
-          "stop restores the pinned slot words and their protection");
+          *Ai2ObserverCell()==observerOriginal && ReadOnly(Ai2ObserverCell()) && *Ai2OwnerCell()==ownerOriginal &&
+          ReadOnly(Ai2OwnerCell()),"stop restores the pinned slot words and their protection");
     Check(ReadState(state,snapshot),"ai_async2 telemetry readable after stop");
     {
         const U* w=snapshot.ai_async2_words;
@@ -1500,48 +1523,42 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
         U think=0, overlap=0, join=0, fn=0;
         for(U i=0;i<12;++i) { think+=w[20+i]; overlap+=w[32+i]; join+=w[44+i]; }
         for(U i=26;i<47;++i) fn+=q[i];
-        Check(w[0]==2 && w[1]==7 && w[2]==8 && w[3]==0 && w[4]==0 && w[5]==1 && w[19]==0,
-              "seven published batches, eight async completions, one fallback join");
+        Check(w[0]==3 && w[1]==8 && w[2]==10 && w[3]==0 && w[4]==0 && w[5]==1 && w[19]==0,
+              "eight published batches, ten async completions, one fallback join");
         Check(w[6]>=1 && w[7]==1 && w[8]==1,"watchdog recorded deadlock_suspected, sticky fallback and one fallback think");
         Check(w[9]==1 && w[80+5]==1 && w[12]>=w[11],"one worker destructor call marshalled");
-        Check(think==8 && overlap==7 && join==7 && w[14]>=5600000u && w[18]>=5000000u,
-              "one think sample per async think; one overlap and one join-wait sample per batch (the T15 join stalled)");
-        Check(w[56+2*5]==2 && w[56+2*5+1]>=100000u && w[89]==1,"two destructor-gate waits (tick join, one leased helper)");
-        Check(w[88]==1,"main-thread spotting route is reported unresolved");
-        Check(q[0]==2 && q[1]==1 && q[2]==16 && q[3]==8 && q[4]==7 && q[6]==0 && q[7]==0,"route row: ticks, queued, batches");
-        Check(q[9]==3 && q[10]==1 && q[16]==0,"three batches complete before the next tick start; one seam marshal service");
-        Check(q[12]==4 && q[11]>=4 && q[13]==4 && q[14]==15 && q[15]==15,"four spanning thinks (first tick 4, last 15); fallback at tick 15");
+        Check(think==10 && overlap==8 && join==8 && w[14]>=5600000u && w[18]>=5000000u,
+              "one think sample per async think; one overlap and one join-wait sample per batch");
+        Check(w[56+2*5]==2 && w[56+2*5+1]>=50000u && w[89]==2 && w[94]==2,"two owner-teardown leases waited for their batches");
+        Check(w[88]==1 && w[92]==0 && w[93]==0,"spotting route reported unresolved; nothing serviced or aborted by stop");
+        Check(q[0]==3 && q[1]==2 && q[2]==17 && q[3]==10 && q[4]==8 && q[6]==0 && q[7]==0,"route row: ticks, queued, batches");
+        Check(q[8]==8 && q[9]==4 && q[10]==1 && q[16]==0,"four batches complete before the next tick start; one start-join marshal service");
+        Check(q[11]==4 && q[12]>=5600000u && q[13]>=5000000u && q[14]==16 && q[15]==16,
+              "four tick-start stalls reported separately (last at tick 16); fallback at tick 16");
         Check(q[18]==0 && q[19]==0 && q[20]==0 && q[21]==0 && q[22]==0 && q[23]==0 && q[24]==1 && q[25]==1,
               "route matrix: one tick and one other observer call, no walk-slot entry");
         Check(fn==0 && q[47+9]==1 && q[60]==0 && q[64]==0,"no private clone entered, pin 9 marshalled once, no scratch constructed");
-        printf("ai_async2 fixture: max_think_us=%u overlap_sum_us=%u join_wait_sum_us=%u marshal_wait_max_us=%u deadlock=%u spanning_ticks=%u\n",
-               w[14],w[15],w[17],w[12],w[6],q[11]);
+        printf("ai_async2 fixture: max_think_us=%u start_stalls=%u start_stall_sum_us=%u marshal_wait_max_us=%u deadlock=%u\n",
+               w[14],q[11],q[12],w[12],w[6]);
     }
 
-    // Second generation: the fallback is sticky only for its generation; then the AI-thread private walk runs on the real
-    // clones against a synthetic tree while the original scratch is continuously rewritten by another thread.
-    // The resident clones were built by the first generation, so these owned-image probes are not inherited by them;
-    // the ctor probe is installed before activation so a construction there would be observed.
-    Check(RedirectImage(0x7E6C30,reinterpret_cast<const void*>(&Ai2FakeSearchCtor)) &&
-          RedirectImage(0x444B40,reinterpret_cast<const void*>(&Ai2FakeAlloc)) &&
-          RedirectImage(0xFF7EF0,reinterpret_cast<const void*>(&Ai2FakeFree)) &&
-          RedirectImage(0x808F90,reinterpret_cast<const void*>(&Ai2RecordLos)),"install search-object ctor, vector allocator and LOS recorder probes");
+    // Second generation: the fallback is sticky only for its generation; the AI-thread private walk runs on the real
+    // clones against a synthetic tree while the original scratch is continuously rewritten by another thread; then the
+    // generation stops with a worker marshal pending and no tick to service it.
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"second ai_async2 generation activates");
     Check(ai2CtorCalls==0,"no private search object is constructed at activation");
-    ++ai2TlsBlock[0];
-    *At(0x1841BB8)=_tls_index; // mapped image's CRT TLS index names this executable's TLS block
     Ai2BuildTree();
     Check(ai2Walk.entry(NTW2_CLONE_AI2_WALK)==0,"private clone entries are refused to a non-worker thread");
     m={};
-    Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==9 && Ai2WaitCalls(p,10,3000),"new generation queues asynchronously again");
+    Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==11 && Ai2WaitCalls(p,12,3000),"new generation queues asynchronously again");
     Check(tick(nullptr,0,0,nullptr)==1,"second generation joins its first batch");
     Ai2FillSentinels();
     ai2MutatorStop=0; ai2MutatorPasses=0; ai2MutatorClobbers=0;
     HANDLE mutator=CreateThread(nullptr,0,Ai2Mutator,nullptr,0,nullptr);
     { const ULONGLONG end=GetTickCount64()+1000; while(mutator && ai2MutatorPasses<2 && GetTickCount64()<end) Sleep(1); }
     p.walk=1;
-    Check(mutator && tick(&p,0,0,nullptr)==1 && tick(nullptr,0,0,nullptr)==1 && p.calls==11,"walk think queued and joined");
+    Check(mutator && tick(&p,0,0,nullptr)==1 && tick(nullptr,0,0,nullptr)==1 && p.calls==13,"walk think queued and joined");
     p.walk=0;
     const LONG passes=ai2MutatorPasses;
     InterlockedExchange(&ai2MutatorStop,1);
@@ -1558,18 +1575,45 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
         constructed=ai2CtorThread[i]==p.thread && (ai2CtorSelf[i]&15u)==congruent[i] && InRuntime(ai2CtorSelf[i]) &&
                     ai2CtorSelf[i]!=A(At(originals[i]));
     Check(constructed,"the three private search objects were constructed once, lazily, on the AI worker, congruent mod 16");
-    Check(stop(nullptr)==0 && ReadState(state,snapshot),"second generation stops");
+    // Stop with an inter-tick marshal pending and the receivers still bound: no tick comes, so the stopping thread
+    // services the call itself after the grace period; the think returns and stop completes.
+    p.destroyFromWorker=1;
+    Check(tick(&p,0,0,nullptr)==1,"stop-pending: think queued");
+    Sleep(100);
+    Check(ai2Probe.calls==4 && p.calls==13,"stop-pending: the worker is blocked in its marshalled call");
+    const ULONGLONG stopBegin=GetTickCount64();
+    Check(stop(nullptr)==0 && GetTickCount64()-stopBegin<5000,"stop-pending: stop drains the pending marshal instead of timing out");
+    Check(ai2Probe.calls==5 && ai2Probe.thread!=owner && ai2Probe.thread!=p.thread && p.calls==14,
+          "stop-pending: the stopping thread executed the call while the receivers were bound; the think returned");
+    p.destroyFromWorker=0;
+    Check(*Ai2DestroyCell()==destroyOriginal && *Ai2OwnerCell()==ownerOriginal && *Ai2ObserverCell()==observerOriginal,
+          "stop-pending: slots restored after the drain");
+    Check(ReadState(state,snapshot),"second generation telemetry readable");
     {
         const U* w=snapshot.ai_async2_words;
         const U* q=snapshot.ai_async2_route_words;
         U otherFn=0;
         for(U i=26;i<47;++i) if(i!=29 && i!=30 && i!=45) otherFn+=q[i];
-        Check(w[7]==0 && w[1]==2 && w[2]==2,"fallback was reset at activation; two batches, two thinks");
+        Check(w[7]==0 && w[1]==3 && w[2]==3 && w[92]==1 && w[93]==0,"fallback reset at activation; three batches; one stop-serviced marshal");
         Check(q[29]==kAi2WalkIterations && q[30]==kAi2WalkIterations && q[45]==9*kAi2WalkIterations && otherFn==0,
               "route counters: one AI2_WALK and AI2_GATHER entry per walk, nine AI2_809110 node visits per walk");
         Check(q[64]==3 && q[63]>=6 && q[62]>=6 && w[90]==2 && w[91]==1,"private vectors grew in the private images; scratch constructed");
-        Check(*Ai2ObserverCell()==observerOriginal && ReadOnly(Ai2ObserverCell()),"observer slot restored after the second generation");
     }
+    // Third generation: the battle disappears (world unbound) with a worker marshal pending. The monitor's world-loss
+    // deactivation aborts the call (EAX = 0, the original is NOT executed on destroyed receivers) so the think returns.
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"third ai_async2 generation activates");
+    p.destroyFromWorker=1;
+    Check(tick(&p,0,0,nullptr)==1,"world-loss: think queued");
+    Sleep(100);
+    Check(ai2Probe.calls==5 && p.calls==14,"world-loss: the worker is blocked in its marshalled call");
+    Put(model,0,0); // the model no longer names the root: the battle is gone
+    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.phase==NTW2_WAITING_BATTLE; }) && Ai2WaitCalls(p,15,3000),
+          "world-loss: the monitor deactivated and the think returned");
+    Check(ai2Probe.calls==5,"world-loss: the aborted call never executed the destructor");
+    Check(stop(nullptr)==0 && ReadState(state,snapshot) && snapshot.ai_async2_words[93]==1 && snapshot.ai_async2_words[92]==0,
+          "world-loss: one aborted marshal recorded; stop succeeds");
+    Put(model,0,A(root));
+    p.destroyFromWorker=0;
     return failures ? 1 : 0;
 }
 

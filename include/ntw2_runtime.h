@@ -27,7 +27,7 @@ extern "C" {
 #define NTW2_GRID_CENSUS 0x8000u /* Opt-in reader edge counts and sampled occupancy; requires LOCO and a main thread id, not PROFILE. */
 #define NTW2_AI_CENSUS 0x10000u /* Opt-in observation of who mutates/destroys the AI planner object graph (ai_census_words): pinned vtable-slot gates, one clone-call gate and sampler ranges. Requires AI_ASYNC and a main thread id; outside NTW2_ALL. */
 #define NTW2_AI_CENSUS_WORDS 768u /* 16 header + 7 targets * (8 + 8 callers * 12) + 3 sample ranges * 8; layout: src/ntw2_ai_census.h */
-#define NTW2_AI_ASYNC2 0x20000u /* Opt-in experimental async think, boundary schedule (ai_async2_words, ai_async2_route_words): site 34 queues the whole planner call and returns; tick end publishes the batch; the AI worker runs it in the inter-tick window through its private walk/observer clone family; the next tick start is a non-blocking effect seam (a think still running is a counted divergence point); structural writers join (site 33 controller, TICK 57DFDF quadtree update, delegate replacement/destructor vtable slots); worker calls of those slots and of 0x83FD00 are marshalled; 5 s watchdog with sticky synchronous fallback. Requires AI_ASYNC; refuses AI_CTRL and AI_CENSUS (same slots/site 33); outside NTW2_ALL. */
+#define NTW2_AI_ASYNC2 0x20000u /* Opt-in experimental async think, boundary schedule (ai_async2_words, ai_async2_route_words): site 34 queues the whole planner call and returns; tick end publishes the batch; the AI worker runs it in the inter-tick window through its private walk/observer clone family; the next tick start is a blocking lifetime join (no think crosses into a tick); structural writers join (site 33 controller, TICK 57DFDF quadtree update, delegate replacement/destructor and observer/operation owner-destructor vtable slots; a non-tick owner teardown drains the whole batch first); worker calls of those slots and of 0x83FD00 are marshalled; stop drains before routing ends (servicing or aborting a pending marshal); 5 s watchdog with sticky synchronous fallback. Requires AI_ASYNC; refuses AI_CTRL and AI_CENSUS (same slots/site 33); outside NTW2_ALL. */
 #define NTW2_AI_ASYNC2_WORDS 96u /* layout: src/ntw2_ai_async2.h, labels NTW2_AI_ASYNC2_LABELS */
 #define NTW2_AI_ASYNC2_ROUTE_WORDS 65u /* ai_async2_route_words; layout src/ntw2_ai_async2.h (RouteWord), labels NTW2_AI_ASYNC2_ROUTE_LABELS */
 #define NTW2_ARMY_UNIT_SHADOW 0x40000u /* Opt-in --army-unit-shadow: item 4 Stage A, instrumentation only. Site 18 (ARMY_UPDATE clone) and its 0x581F30 calls (sites 101/103) are bound to owner-thread gates that time each unit update, classify it under the approved compromises (owner-only reasons, RNG draws, foreign-unit witness, command-class census) and measure a frozen-view copy; the native calls run unchanged. Requires a routed tick (PROFILE or a simulation feature); planner writes are measured only with AI_CENSUS. Outside NTW2_ALL. Words: army_unit_words, src/army/native_army_unit.h. */
@@ -174,7 +174,8 @@ enum ntw2_memory_word {
 /* ai_async2_words labels, word order (histogram buckets: <=125us, <=250us, ... <=128ms, >128ms; gate kinds: site 34
    admission (capacity drain, lease wait, fallback join), site 33 controller, TICK 57DFDF quadtree update, tick end
    (start seam, abort drain), delegate replacement 6EA520/6B3010, delegate destructor 69D710/69D750, command callback
-   805CE0/7DEC70 and the 83FD00 call gate, stop drain). Version 2 renamed words 3..5 for the boundary schedule. */
+   805CE0/7DEC70 and the 83FD00 call gate, stop drain). Version 2 renamed words 3..5 for the boundary schedule; version 3
+   (blocking tick-start join, owner-teardown pins, stop quiesce) names words 92..94. */
 #define NTW2_AI_ASYNC2_HIST_LABELS(p) p "_le125us", p "_le250us", p "_le500us", p "_le1ms", p "_le2ms", p "_le4ms", \
     p "_le8ms", p "_le16ms", p "_le32ms", p "_le64ms", p "_le128ms", p "_gt128ms"
 #define NTW2_AI_ASYNC2_KIND_LABELS(p) p "site34_admission", p "site33_controller", p "spatial_57dfdf", p "tick_end", \
@@ -191,17 +192,17 @@ enum ntw2_memory_word {
     "waits_command", "max_wait_us_command", "waits_stop", "max_wait_us_stop", \
     NTW2_AI_ASYNC2_KIND_LABELS("gate_"), NTW2_AI_ASYNC2_KIND_LABELS("marshal_"), \
     "spotting_gate_unresolved", "lease_holds", "walk_route_entries", "scratch_ready", \
-    "reserved92", "reserved93", "reserved94", "reserved95"
+    "stop_served_marshals", "stop_aborted_marshals", "owner_teardown_leases", "reserved95"
 /* ai_async2_route_words labels: boundary schedule counters (ticks = tick-start seams; a batch is "complete" when it had
-   finished by the next tick start: complete fraction = seam_complete_joins / published_batches; spanning_* are the
-   divergence points), the routed-slot thread matrix (slot 0x133E2DC walk state 702BB0, slot 0x133773C observer 6A95A0;
+   finished by the next tick start: complete fraction = seam_complete_joins / published_batches; seam_stalls and
+   seam_wait_sum_us/seam_wait_max_us are the tick-start lifetime join's stall for batches that had not), the routed-slot thread matrix (slot 0x133E2DC walk state 702BB0, slot 0x133773C observer 6A95A0;
    worker in a think -> private family, worker outside a think / tick owner / other thread -> original), entries of
    every private clone (generator AI2_ROUTE_ORDER), marshalled calls per pin, worker entries of the unrouted 83FD00 gate,
    private vector capacities after the last think and the private search-object construction mask. */
 #define NTW2_AI_ASYNC2_ROUTE_LABELS \
     "version", "schedule", "ticks", "queued", "published_batches", "queued_max", "capacity_joins", "lease_waits", \
-    "seam_polls", "seam_complete_joins", "seam_marshal_serves", "spanning_ticks", "spanning_thinks", \
-    "spanning_first_tick", "spanning_last_tick", "fallback_tick", "main_served", "main_marshal_waits", \
+    "seam_polls", "seam_complete_joins", "seam_marshal_serves", "seam_stalls", "seam_wait_sum_us", \
+    "seam_wait_max_us", "seam_stall_last_tick", "fallback_tick", "main_served", "main_marshal_waits", \
     "walk_worker_private", "walk_worker_idle", "walk_tick", "walk_other", \
     "observer_worker_private", "observer_worker_idle", "observer_tick", "observer_other", \
     "fn_state_update", "fn_position_update", "fn_shape_search", "fn_walk", "fn_gather", "fn_7fca40", "fn_7fca90", \

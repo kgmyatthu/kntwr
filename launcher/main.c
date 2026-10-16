@@ -1311,8 +1311,8 @@ static void print_module_words(const ntw2_status *s)
                 L"overlap_sum_us=%lu join_wait_sum_us=%lu deadlock_suspected=%lu fallback=%lu marshalled=%lu\n",
                 (unsigned long)w[0], (unsigned long)w[1], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4],
                 (unsigned long)w[15], (unsigned long)w[17], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[9]);
-            say(L"  ai_async2 boundary: ticks=%lu batches=%lu complete_before_next_tick=%lu (%.1f%%) spanning_ticks=%lu "
-                L"spanning_thinks=%lu first/last=%lu/%lu fallback_tick=%lu unrouted_83fd00=%lu\n",
+            say(L"  ai_async2 boundary: ticks=%lu batches=%lu complete_before_next_tick=%lu (%.1f%%) tick_start_stalls=%lu "
+                L"stall_sum_us=%lu stall_max_us=%lu last_stall_tick=%lu fallback_tick=%lu unrouted_83fd00=%lu\n",
                 (unsigned long)q[2], (unsigned long)q[4], (unsigned long)q[9], pct(q[9], q[4]), (unsigned long)q[11],
                 (unsigned long)q[12], (unsigned long)q[13], (unsigned long)q[14], (unsigned long)q[15], (unsigned long)q[60]);
             for (i = 0; i < NTW2_AI_ASYNC2_WORDS; ++i)
@@ -4584,8 +4584,9 @@ static void usage(void)
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
-        L"                        the next tick start never blocks (a still-running think is a counted divergence point); writers join\n"
-        L"                        (site 33, quadtree update, delegate slots; 5 s watchdog -> synchronous fallback); requires ai, excludes ai_ctrl/ai_census\n"
+        L"                        the next tick start joins it (no think crosses into a tick; the stall is reported); writers join\n"
+        L"                        (site 33, quadtree update, delegate and owner-destructor slots; 5 s watchdog -> synchronous fallback);\n"
+        L"                        requires ai, excludes ai_ctrl/ai_census; experimental (non-tick direct-call owner teardown is not covered)\n"
         L"                        collide = Phase B opt-in soft-collision solver (not in all); overrides the PROFILE collision census\n"
         L"                        collide_lod = half-rate far-unit queries (not in all); cannot combine with collide or formation\n"
         L"                        (~200 all-thread rounds/s, <=10%% measured duty)\n"

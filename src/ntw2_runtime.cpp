@@ -2106,8 +2106,7 @@ bool BuildClones() {
     bindings[NTW2_BIND_AI2_ROOT_INTEREST]=FnAddress(&Ai2RootInterest);
     bindings[NTW2_BIND_AI2_SPOT_IMAGE]=Address(ai2SpotImage)+kAi2SpotBias;
     bindings[NTW2_BIND_AI2_ROUTE_COUNTS]=ntw2_ai_async2::FunctionCounters();
-    bindings[NTW2_BIND_AI2_UNROUTED_83FD00]=ntw2_ai_async2::Gate(ntw2_ai_async2::kPinCount-1);
-    static_assert(ntw2_ai_async2::kPinCount==13, "pin 12 is the 83FD00 clone-call gate");
+    bindings[NTW2_BIND_AI2_UNROUTED_83FD00]=ntw2_ai_async2::Gate(ntw2_ai_async2::kUnroutedPin);
     ai2SpatialTarget=V(0x817D20); ai2ControllerTarget=V(0x7C8BD0);
     if (!ntw2_brain2::Bind(imageBase,bindings)) return false; // private scratch is initialized before clone publication
     ntw2_loco::Bind(delta,bindings); // before ntw2_build_clones: the module owns its clone bindings
@@ -2798,10 +2797,16 @@ bool StopModules() {
     }
     return all;
 }
+bool Ai2ReceiversValid() { return world.model && BoundModel(world.model); }
 bool Deactivate() {
+    // NTW2_AI_ASYNC2 first, while ticks are still routed: its tick-start join is the servicing path of a worker call
+    // posted in the inter-tick window. Quiesce closes admission and drains (servicing or aborting on this thread when
+    // no tick comes) before routing stops; otherwise the worker's borrowed frame would stay blocked forever.
+    const bool ai2Quiet=ntw2_ai_async2::Quiesce(500,kStopTimeoutMs,&Ai2ReceiversValid);
     _InterlockedExchange(&enabled,0);
     Phase(NTW2_RESTORING);
     bool ok=true;
+    if (!ai2Quiet) { RecordError(StopTimeout,NTW2_AI_ASYNC2); return false; }
     if (!AiDrain()) return false; // the tick's lifetime barrier must release every native AI frame first
     for (U i=slotCount;i;--i)
         if ((slots[i-1].owned || slots[i-1].protectionDirty) && !SwapSlot(slots[i-1],false)) ok=false;
