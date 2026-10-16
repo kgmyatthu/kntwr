@@ -39,6 +39,8 @@ extern "C" {
 #define NTW2_PUPPET_MAX_UNITS 2048u /* unit capacity; puppet_units == NTW2_PUPPET_MAX_UNITS is --puppet-probe all */
 #define NTW2_PUPPET_ROW_UNITS 4u    /* units with an identity row in puppet_words (words 40..55) */
 #define NTW2_PUPPET_DIVERT_WORDS 32u /* puppet_divert_words; layout src/puppet/native_puppet.h (DivertWord), labels NTW2_PUPPET_DIVERT_LABELS */
+#define NTW2_PUPPET_UNIT_MASK 0xFFFFu       /* ntw2_config::puppet_units bits 0..15: unit count 1..NTW2_PUPPET_MAX_UNITS */
+#define NTW2_PUPPET_STATS_OFF 0x80000000u   /* ntw2_config::puppet_units flag (launcher --puppet-stats 0): production-stats mode, no per-man diagnostics, no site-13 hash pass */
 #define NTW2_PUPPET_MOVER_WORDS 32u /* puppet_mover_words; layout src/puppet/native_puppet.h (MoverWord), labels NTW2_PUPPET_MOVER_LABELS */
 #define NTW2_PUPPET_SELECT_WORDS 32u /* puppet_select_words; layout src/puppet/native_puppet.h (SelectWord), labels NTW2_PUPPET_SELECT_LABELS */
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
@@ -240,7 +242,7 @@ typedef struct ntw2_config {
     uint32_t loco_flags;     /* Appended (config grew 36 -> 40 bytes); own field, no other field is reinterpreted. NTW2_LOCO_* flags; nonzero requires NTW2_LOCO. */
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
-    uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS; nonzero exactly when NTW2_PUPPET is set. */
+    uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS in bits 0..15 (NTW2_PUPPET_UNIT_MASK), nonzero exactly when NTW2_PUPPET is set; optional flag NTW2_PUPPET_STATS_OFF; other bits refused. */
 } ntw2_config;
 
 enum ntw2_phase {

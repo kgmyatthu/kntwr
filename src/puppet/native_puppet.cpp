@@ -43,14 +43,17 @@ enum Kind : U { Admit, Repark, HandTransfer, HandIneligible, DivertRepark, Diver
 enum Event : U { EvAdmit = 1, EvRepark, EvHandback, EvDepart, EvDivertBegin, EvDivertEnd };
 // ax/az: position at admission (or at the end of the last divert); px/pz: position at the previous motion sample.
 // divert: a +628 controller holds the member since divertStage (its site-6 step runs the original).
-struct Row { U entity, serial, unit, generation, state, seen, foreign, commonStage, divert, divertStage; float ax, az, px, pz; };
-// handle/vtable/ordinal/generation/active identify the unit; members/handed/army/x/z are its published identity row.
-struct Unit { U handle, vtable, ordinal, generation, active, members, handed, army, x, z; };
+// f370: +370 at the previous stats-mode seam (fatigue370_frozen).
+struct Row { U entity, serial, unit, generation, state, seen, foreign, commonStage, divert, divertStage, f370; float ax, az, px, pz; };
+// handle/vtable/ordinal/generation/active identify the unit; members/handed/army/x/z are its published identity row;
+// parked is maintained by SetState.
+struct Unit { U handle, vtable, ordinal, generation, active, members, handed, army, x, z, parked; };
 struct Action { U row, kind; };
 struct Storage { Row rows[kMaxRows]; U hash[kHash]; Action actions[kMaxRows]; U parked[kSerialBits / 32]; };
 
 U g_delta, g_requested, g_classVt, g_waitVt, g_crewVt, g_stage, g_generation, g_unitCount, g_rowCount, g_actionCount;
-bool g_started, g_selected, g_disabled;
+bool g_started, g_selected, g_disabled, g_stats;
+U g_parkedCount, g_pendingCount; // maintained by SetState (Publish is O(row units))
 U g_words[kWords], g_motion[kMotionWords], g_divert[kDivertWords], g_mover[kMoverWords], g_select[kSelectWords];
 U g_divertsThisStage, g_eventHash, g_moverStage, g_tables[kInfantryTableCount], g_tableCount, g_topCount;
 U* g_parked;
@@ -94,12 +97,14 @@ Row* Find(U serial) {
     }
     return nullptr;
 }
+void SetState(Row& r, U state);
 Row* AddRow(U entity, U serial, U unit, U state) {
     if (g_rowCount == kMaxRows) return nullptr;
     U slot = HashSlot(serial, kHash - 1);
     while (g_hash[slot]) slot = (slot + 1) & (kHash - 1); // load <= 1/2: never full
     Row& r = g_rows[g_rowCount];
-    r = {entity, serial, unit, g_units[unit].generation, state, g_stage};
+    r = {entity, serial, unit, g_units[unit].generation, Free, g_stage};
+    SetState(r, state);
     g_hash[slot] = ++g_rowCount;
     return &r;
 }
@@ -133,12 +138,23 @@ bool IsInfantry(U table) {
 // that enters or leaves Parked).
 inline bool ParkedBit(U serial) { return serial < kSerialBits && (g_parked[serial >> 5] >> (serial & 31) & 1); }
 void SetState(Row& r, U state) {
+    if (r.state == state) return;
     if (r.serial < kSerialBits) {
         const U mask = 1u << (r.serial & 31);
         if (state == Parked) g_parked[r.serial >> 5] |= mask;
         else if (r.state == Parked) g_parked[r.serial >> 5] &= ~mask;
     }
+    if (r.state == Parked) { --g_parkedCount; --g_units[r.unit].parked; }
+    else if (r.state == Pending) --g_pendingCount;
+    if (state == Parked) { ++g_parkedCount; ++g_units[r.unit].parked; }
+    else if (state == Pending) ++g_pendingCount;
     r.state = state;
+}
+// Divert occupancy (puppet_divert_words active/peak), maintained at every divert transition.
+void DivertOccupancy(int delta) {
+    U* d = g_divert;
+    d[DivertActive] += static_cast<U>(delta);
+    if (d[DivertActive] > d[DivertActivePeak]) d[DivertActivePeak] = d[DivertActive];
 }
 bool Current(const Row& r) { return r.state == Parked && r.generation == g_units[r.unit].generation; }
 // Hot path (every site-6 occurrence and every admitted-table common step): one +2C load and one bitset load; a set
@@ -165,6 +181,7 @@ void Act(U row, U kind) { g_actions[g_actionCount++] = {row, kind}; }
 // Ordered event chain of the determinism hash: (stage, serial, event) in the owner's order.
 void Log(const Row& r, U event) { g_eventHash = Fnv(Fnv(Fnv(g_eventHash, g_stage), r.serial), event); ++g_mover[MoverEvents]; }
 void HandBack(Row& r) {
+    if (r.divert) DivertOccupancy(-1);
     SetState(r, Native); r.divert = 0; ++g_words[Handbacks]; ++g_units[r.unit].handed; Log(r, EvHandback);
 }
 void Rebase(Row& r) { r.ax = r.px = F(r.entity + 0x48); r.az = r.pz = F(r.entity + 0x50); }
@@ -174,7 +191,7 @@ U DivertBucket(U stage) { U b = 0; while (b + 1 < kDivertBuckets && (stage >> (b
 // A +628 registration seen on a parked member (seam or site-6 occurrence): the event record and its histograms.
 void DivertBegin(Row& r) {
     const U a = r.entity, controller = D(a + 0x628), kind = D(a + 0x62C);
-    r.divert = 1; r.divertStage = g_stage; Log(r, EvDivertBegin);
+    r.divert = 1; r.divertStage = g_stage; Log(r, EvDivertBegin); DivertOccupancy(1);
     U* d = g_divert;
     ++d[DivertEvents]; ++g_divertsThisStage;
     ++d[DivertKind + (kind < kDivertKinds - 1 ? kind : kDivertKinds - 1)];
@@ -199,7 +216,7 @@ void DivertBegin(Row& r) {
 // position; resume skipping with the surviving wait node, else repark or hand back in Apply.
 void DivertEnd(Row& r, U index, U unit) {
     U* d = g_divert;
-    r.divert = 0; ++d[DivertReleased]; Log(r, EvDivertEnd);
+    r.divert = 0; ++d[DivertReleased]; Log(r, EvDivertEnd); DivertOccupancy(-1);
     const U duration = g_stage - r.divertStage;
     g_divertDurationSum += duration; if (duration > d[DivertDurationMax]) d[DivertDurationMax] = duration;
     d[DivertDurationMean] = static_cast<U>(g_divertDurationSum / d[DivertReleased]);
@@ -232,7 +249,8 @@ void RecordRejectedTable(U list, U n) {
     top[2 * g_topCount] = va; top[2 * g_topCount + 1] = 1; ++g_topCount;
 }
 bool Admissible(U m, U unit) {
-    return IsInfantry(D(m)) && D(m + 0x1F0) == unit && !D(m + 0x66C) && !(B(m + 0x2C4) == 1 && D(m + 0x22C) == g_crewVt);
+    return IsInfantry(D(m)) && D(m + 0x1F0) == unit && !D(m + 0x66C) && !(B(m + 0x2C4) == 1 && D(m + 0x22C) == g_crewVt) &&
+           D(m + 0x2C) < kSerialBits; // the gates' parked bit covers serials < 2^20 only
 }
 bool QualifyUnit(U unit, U ordinal, U army) {
     const U n = D(unit + 0x2CC), list = D(unit + 0x2D0), attached = D(unit + 0x1F4);
@@ -264,6 +282,7 @@ bool QualifyUnit(U unit, U ordinal, U army) {
         if (!selected) {
             if (!IsInfantry(D(m))) ++s[MemberOtherClass];
             else if (D(m + 0x1F0) != unit) ++s[MemberBacklink];
+            else if (serial >= kSerialBits) ++s[SerialOutOfRange];
             else ++s[MemberCrew];
             continue;
         }
@@ -314,7 +333,7 @@ void Retire(U ui) {
 }
 void Depart(Row& r) {
     if (r.state != Parked && r.state != Pending) return;
-    if (r.divert) { r.divert = 0; ++g_divert[DivertDeparted]; }
+    if (r.divert) { r.divert = 0; ++g_divert[DivertDeparted]; DivertOccupancy(-1); }
     SetState(r, Gone); ++g_words[DepartedMembers]; ++g_words[DeathsImported]; Log(r, EvDepart);
 }
 // Reads only, plus divert bookkeeping: classifies the live member lists into g_actions; native transactions run
@@ -342,7 +361,7 @@ void Import() {
             const U index = static_cast<U>(r - g_rows);
             if (r->unit != ui) { // moved between selected units
                 if (r->state == Parked) Act(index, HandTransfer);
-                else if (r->state == Pending) { r->state = Ignored; ++g_words[TransfersImported]; }
+                else if (r->state == Pending) { SetState(*r, Ignored); ++g_words[TransfersImported]; }
                 continue;
             }
             if (r->state == Parked) {
@@ -368,13 +387,15 @@ bool ImportGuarded() {
     __try { Import(); return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-// Reads only, after Import: parked members confirmed in their unit's live list this stage. Did they get movement intent,
-// did they move since the previous seam, how far from their admission position and from their delivered slot. Diverted
-// members only count their motion (the controller moves them natively).
+// Stats mode only, after Import: parked members confirmed in their unit's live list this stage. Did they get movement
+// intent, did they move since the previous seam, how far from their admission position and from their delivered slot,
+// and which skipped brain mechanics would have acted on them (mech_*). Diverted members only count their motion (the
+// controller moves them natively).
 void Motion() {
     U intent = 0, moved = 0, measured = 0, slotCount = 0, slotMismatch = 0, divertMoved = 0;
     unsigned long long dispSum = 0, slotSum = 0;
     U dispMax = 0, slotMax = 0;
+    U* v = g_mover;
     for (U i = 0; i < g_rowCount; ++i) {
         Row& r = g_rows[i];
         if (!Current(r) || r.seen != g_stage) continue;
@@ -384,6 +405,18 @@ void Motion() {
         const bool changed = x != r.px || z != r.pz;
         r.px = x; r.pz = z;
         if (r.divert) { divertMoved += changed; continue; }
+        // Skipped brain prologue/epilogue mechanics (0x66CE00 @0x66CE7B and 0x66D439..0x66D6BB).
+        const U ec = B(a + 0xEC), unit = D(a + 0x1F0), ref = D(a + 0x5B8), army = D(a + 0x1F8), f370 = D(a + 0x370);
+        ++v[MechMemberTicks];
+        v[Mech63C440] += ec == 1;
+        v[MechFatigueFrozen] += f370 == r.f370; r.f370 = f370;
+        v[MechRefHeading] += ref && (D(ref + 0x34) & 3);
+        v[Mech602E00] += D(a + 0x518) != 0;
+        v[MechF0] += ec == 1 && B(a + 0xA1) == 1 && unit && !D(a + 0x1EC);
+        v[MechMeleeLabel] += ec == 1 && D(a + 0x1B8) == 0xD;
+        v[MechF2] += army && D(army + 0x20F8);
+        v[Mech639200] += ec != 0;
+        v[Mech61C] += unit != 0;
         if (D(a + 0xD4) | D(a + 0xD8) | D(a + 0xDC)) ++intent; // any nonzero intent bits
         moved += changed; ++measured;
         const U disp = Centimetres(x - r.ax, z - r.az);
@@ -433,21 +466,13 @@ void Apply() {
     }
 }
 void Publish() {
-    U parked = 0, pending = 0, diverted = 0, perUnit[kRowUnits] = {};
-    for (U i = 0; i < g_rowCount; ++i) {
-        const Row& r = g_rows[i];
-        if (r.state == Parked) { ++parked; diverted += r.divert; if (r.unit < kRowUnits) ++perUnit[r.unit]; }
-        else if (r.state == Pending) ++pending;
-    }
-    g_words[MembersParked] = parked; g_words[MembersPending] = pending;
-    if (parked > g_words[ParkedPeak]) g_words[ParkedPeak] = parked;
-    g_divert[DivertActive] = diverted;
-    if (diverted > g_divert[DivertActivePeak]) g_divert[DivertActivePeak] = diverted;
+    g_words[MembersParked] = g_parkedCount; g_words[MembersPending] = g_pendingCount;
+    if (g_parkedCount > g_words[ParkedPeak]) g_words[ParkedPeak] = g_parkedCount;
     for (U ui = 0; ui < g_unitCount && ui < kRowUnits; ++ui) {
         const Unit& u = g_units[ui];
         U* row = g_words + UnitRows + 4 * ui;
         row[0] = (u.ordinal & 0xFFF) | (u.army & 0xF) << 12 | (u.members & 0xFFFF) << 16;
-        row[1] = (perUnit[ui] & 0xFFFF) | (u.handed & 0xFFFF) << 16;
+        row[1] = (u.parked & 0xFFFF) | (u.handed & 0xFFFF) << 16;
         row[2] = u.x; row[3] = u.z;
     }
 }
@@ -516,6 +541,7 @@ bool Start(const Binding& binding) {
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_frequency = f.QuadPart ? f.QuadPart : 1;
     g_requested = binding.units;
     g_words[UnitsRequested] = binding.units;
+    g_stats = binding.stats; g_mover[MoverStatsMode] = binding.stats ? 1 : 0;
     g_qpc0 = Now(); g_tsc0 = __rdtsc();
     g_started = true;
     return true;
@@ -530,7 +556,7 @@ void Stop() {
 }
 void Reset() {
     g_started = g_selected = g_disabled = false;
-    g_stage = g_generation = g_unitCount = g_actionCount = 0;
+    g_stage = g_generation = g_unitCount = g_actionCount = g_parkedCount = g_pendingCount = 0;
     g_adapterTicks = 0; g_dispatchCycles = 0; g_sampleSeq = 0;
     g_divertTargetSum = g_divertDurationSum = g_moverUsTotal = 0; g_eventHash = 2166136261u; g_moverStage = 0;
     memset(g_words, 0, sizeof(g_words)); memset(g_units, 0, sizeof(g_units)); memset(g_motion, 0, sizeof(g_motion));
@@ -561,11 +587,12 @@ static void PublishWindow(LONGLONG qpcNow) {
 void Stage(U manager) {
     if (!g_started) { OriginalLoop(manager); return; }
     const LONGLONG begin = Now();
-    PublishWindow(begin);
-    // Parked members that had no class common step since the previous seam (the window just closed).
+    if (g_stats) PublishWindow(begin);
     if (g_stage) {
-        for (U i = 0; i < g_rowCount; ++i)
-            if (Current(g_rows[i]) && g_rows[i].commonStage != g_stage) ++g_words[ParkedNoCommonTicks];
+        // Parked members that had no class common step since the previous seam (the window just closed).
+        if (g_stats)
+            for (U i = 0; i < g_rowCount; ++i)
+                if (Current(g_rows[i]) && g_rows[i].commonStage != g_stage) ++g_words[ParkedNoCommonTicks];
         ClosePeakWindow(); // divert events of the previous stage (its seam and loop)
     }
     ++g_stage; ++g_words[Stages];
@@ -574,7 +601,7 @@ void Stage(U manager) {
         if (!g_selected && (g_stage == 1 || !(g_stage & 63)) && !SelectGuarded(manager)) Disable(FaultSelectRead);
         else if (!ImportGuarded()) Disable(FaultImportRead);
         else {
-            if (!MotionGuarded()) RecordFault(FaultMotionRead); // diagnostics only: control continues
+            if (g_stats && !MotionGuarded()) RecordFault(FaultMotionRead); // diagnostics only: control continues
             Apply();
         }
         Publish();
@@ -585,33 +612,46 @@ void Stage(U manager) {
     g_words[AdapterUsLast] = us; g_words[AdapterUsTotal] += us;
     if (us > g_words[AdapterUsMax]) g_words[AdapterUsMax] = us;
     U cursor = D(manager + 0x264), end = cursor + 4 * D(manager + 0x260), skipped = 0, occurrences = 0, diverted = 0;
-    while (cursor != end) {
-        const U a = D(cursor);
-        if (B(a + 0x30) == 1) {
-            ++occurrences;
-            const bool sample = !(++g_sampleSeq & kSampleMask);
-            const unsigned long long t0 = sample ? __rdtsc() : 0;
-            Row* r = g_disabled ? nullptr : ParkedRow(a);
-            const bool divert = r && D(a + 0x628);
-            const bool skip = r && !divert && WaitNode(a);
-            if (sample) { g_dispatchCycles += __rdtsc() - t0; ++g_words[DispatchSamples]; }
-            if (skip) ++skipped;
-            else {
-                if (divert) { // native controller branch 0x67A050
-                    if (!r->divert) { // event first seen here: bookkeeping is adapter work, occupancy published now
-                        const LONGLONG t = Now();
-                        DivertBegin(*r);
-                        if (++g_divert[DivertActive] > g_divert[DivertActivePeak]) g_divert[DivertActivePeak] = g_divert[DivertActive];
-                        g_adapterTicks += Now() - t;
+    if (g_stats) { // diagnostics: sampled dispatch cost of the membership test
+        while (cursor != end) {
+            const U a = D(cursor);
+            if (B(a + 0x30) == 1) {
+                ++occurrences;
+                const bool sample = !(++g_sampleSeq & kSampleMask);
+                const unsigned long long t0 = sample ? __rdtsc() : 0;
+                Row* r = g_disabled ? nullptr : ParkedRow(a);
+                const bool divert = r && D(a + 0x628);
+                const bool skip = r && !divert && WaitNode(a);
+                if (sample) { g_dispatchCycles += __rdtsc() - t0; ++g_words[DispatchSamples]; }
+                if (skip) ++skipped;
+                else {
+                    if (divert) { // native controller branch 0x67A050
+                        if (!r->divert) { const LONGLONG t = Now(); DivertBegin(*r); g_adapterTicks += Now() - t; }
+                        ++diverted;
                     }
-                    ++diverted;
+                    else if (r && !r->foreign) { r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenLoop]; }
+                    Call(D(D(a) + 0xC), a);
                 }
-                else if (r && !r->foreign) { r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenLoop]; }
-                Call(D(D(a) + 0xC), a);
             }
+            cursor += 4;
+            end = D(manager + 0x264) + 4 * D(manager + 0x260);
         }
-        cursor += 4;
-        end = D(manager + 0x264) + 4 * D(manager + 0x260);
+    } else { // production stats: the parked-bit test and the native calls only
+        while (cursor != end) {
+            const U a = D(cursor);
+            if (B(a + 0x30) == 1) {
+                ++occurrences;
+                Row* r = g_disabled ? nullptr : ParkedRow(a);
+                if (r && !D(a + 0x628) && WaitNode(a)) ++skipped;
+                else {
+                    if (r && D(a + 0x628)) { if (!r->divert) DivertBegin(*r); ++diverted; }
+                    else if (r && !r->foreign) { r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenLoop]; }
+                    Call(D(D(a) + 0xC), a);
+                }
+            }
+            cursor += 4;
+            end = D(manager + 0x264) + 4 * D(manager + 0x260);
+        }
     }
     g_words[SkippedNativeSteps] += skipped; g_words[ParkedMemberTicks] += g_words[MembersParked];
     g_words[LoopOccurrences] += occurrences; g_divert[DivertNativeSteps] += diverted;
@@ -619,6 +659,17 @@ void Stage(U manager) {
 bool CommonStep(U a, U ret) {
     // Two loads and a TEB read: outside the tick owner's puppet epoch nothing is touched (not even a counter).
     if (!g_started || static_cast<U>(*g_tickOwner) != __readfsdword(0x24) || !(*g_epochMask & g_epochBit)) return false;
+    if (!g_stats) { // production stats: parked-bit test, node test, native calls
+        Row* r = g_disabled ? nullptr : ParkedRow(a);
+        if (!r || D(a + 0x628)) return false;
+        if (!WaitNode(a)) {
+            if (!r->foreign) { r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenCommon]; }
+            return false;
+        }
+        Call(V(kTerrain), a);
+        Call(V(kActivity), a);
+        return true;
+    }
     ++g_words[CommonCalls];
     const bool sample = !(++g_sampleSeq & kSampleMask);
     const unsigned long long t0 = sample ? __rdtsc() : 0;
@@ -657,6 +708,8 @@ void SnapshotDivert(U* words) {
     memcpy(words, g_divert, sizeof(g_divert));
     words[DivertVersion] = kDivertVersion;
 }
+U StorageBytes() { return g_store ? static_cast<U>(sizeof(Storage)) : 0; }
+U RequiredStorageBytes() { return static_cast<U>(sizeof(Storage)); }
 void SnapshotMover(U* words) {
     memcpy(words, g_mover, sizeof(g_mover));
     words[MoverVersion] = kMoverVersion;
@@ -666,38 +719,47 @@ void SnapshotSelect(U* words) {
     words[SelectVersion] = kSelectVersion;
 }
 
-bool PointMove(U a, float tx, float tz, U targetHeading, float cap, float accel, float turnRate) {
-    // 0x67A272..0x67A283: the point-move branch drops the action row and its marker word.
+bool PointMove(U a) {
+    const U kind = D(a + 0x62C), controller = D(a + 0x628);
+    // Contract domain (native_puppet.h "PointMove"); outside it nothing is written.
+    if (kind > 1 || B(a + 0xEC) != 1 || !controller || D(controller) != V(kControllerNull) || B(a + 0x65C) == 1 ||
+        (!D(a + 0x224) && B(a + 0x478) == 1) || (kind == 0 && D(a + 0x630) == 0x1D)) return false;
+    // 0x67A05D: 0x7FD9E0(0x20) clears bit 5 of +34/+38.
+    W32(a + 0x34, D(a + 0x34) & ~0x20u); W32(a + 0x38, D(a + 0x38) & ~0x20u);
+    // 0x67A272..0x67A2F5: drop the action row and its marker word; labels from the controller (kind 1: none/1).
     W32(a + 0x444, 0); W16(a + 0x458, 0);
+    if (kind == 1) { W32(a + 0x1B8, 0); W32(a + 0x1BC, 1); }
+    else { W32(a + 0x1C0, D(a + 0x638)); W32(a + 0x1B8, D(a + 0x630)); W32(a + 0x1BC, D(a + 0x634)); }
     // 0x67A326..0x67A3DC: step toward the target from the position plus pending intent, bounded by the speed state.
-    const float x = F(a + 0x48), z = F(a + 0x50);
-    float dx = tx - (F(a + 0xD4) + x), dz = tz - (F(a + 0xDC) + z);
+    const float x = F(a + 0x48), z = F(a + 0x50), cap = F(a + 0x64C);
+    float dx = F(a + 0x63C) - (F(a + 0xD4) + x), dz = F(a + 0x644) - (F(a + 0xDC) + z);
     const float dist = sqrtf(dx * dx + dz * dz);
-    const float speed = accel * kDt + F(a + 0x194);
+    const float speed = F(a + 0x650) * kDt + F(a + 0x194);
     float step = speed;
     WF(a + 0x194, speed);
     if (0.0f > speed) { WF(a + 0x194, 0.0f); step = 0.0f; } // 0x67A3A5..0x67A3AF: stopped, zero step
     else if (speed > cap) { WF(a + 0x194, cap); step = cap; }
     step *= kDt;
     if (dist > step) { const float f = step / dist; dz *= f; dx *= f; }
-    // 0x67A3DC..0x67A4DB: heading toward targetHeading, limited by min(turn*dt, 3.11 rad) in heading words.
-    float turn = turnRate * kDt;
-    turn = turn < kMaxTurnPerTick ? turn : kMaxTurnPerTick;
+    // 0x67A3DC..0x67A4DB: heading toward +648, limited by min(+654*dt, 3.11 rad) in heading words.
+    float turn = F(a + 0x654) * kDt;
+    turn = turn < kMaxTurnPerTick ? turn : kMaxTurnPerTick; // minss: equal or NaN -> the constant
     turn *= kHeadingPerRadian;
     const int maxTurn = _mm_cvt_ss2si(_mm_set_ss(turn)); // fistp, round to nearest
     const U current = H(a + 0x64);
-    const int diff = S16(targetHeading - current), low = S16(static_cast<U>(-maxTurn)), high = S16(static_cast<U>(maxTurn));
+    const int diff = S16(H(a + 0x648) - current), low = S16(static_cast<U>(-maxTurn)), high = S16(static_cast<U>(maxTurn));
     const U delta = diff < low ? static_cast<U>(-maxTurn) : (high < diff ? static_cast<U>(maxTurn) : static_cast<U>(diff));
     const float target[2] = {dx + x, dz + z};
     const bool written = !D(a + 0x18);
     reinterpret_cast<void (__thiscall*)(U, const float*, U)>(static_cast<uintptr_t>(V(kIntentWriter)))(
         a, target, (delta + current) & 0xFFFF);
     W8(a + 0xD0, 0); // 0x67A4E5: the point move owns its speed bound (no 0x7F08F0 overspeed clamp)
+    if (D(a + 0x658) < 0x10000) W32(a + 0x3C, D(a + 0x658)); // 0x67A4F3..0x67A500
     return written;
 }
 
 void Move() {
-    if (!g_started || g_disabled || !g_stage) return;
+    if (!g_started || g_disabled || !g_stage || !g_stats) return; // production stats: no hash pass
     const LONGLONG begin = Now();
     U* m = g_mover;
     ++g_moverStage; ++m[MoverStages];

@@ -137,12 +137,17 @@
 // Diverted members keep the native step: in the +628 branch the brain runs only the controller contract 0x67A050 plus
 // its common prologue/epilogue (0x63C440, vt+108 0x670F40, the +5B8/+518/+F0/+5C/+88/+F2/0x639200/+61C tail), which
 // a parked member currently also skips. Delivered here:
-//   PointMove  the engine's point-move branch of 0x67A050 (kinds 0/1, +EC==1) as a function of the controller's
-//              live parameters (target +63C/+644, heading +648, cap +64C, accel +650, turn +654): +444 = 0, word
-//              +458 = 0; speed state +194 += accel*0.1, zero when negative (zero step), capped; step toward the target
-//              from position + pending intent bounded by speed*0.1; heading limited by min(turn*0.1, 3.11 rad) with
-//              the engine's 0x8000 word convention; intent through the native writer 0x80B080 (+D4/+D8/+DC/+E0/+18C/
-//              +148, refused while +18 is pending); +D0 = 0. Byte-equal to native 0x67A050 kind 0 (oracle).
+//   PointMove  the whole of 0x67A050 for its point-move domain, reading the controller's live fields from the man:
+//              kind +62C in {0,1}, +EC == 1, controller slot 0 = 0x461180 (table 0x1334218: no +37C/+380/+5F0/+5F4
+//              tail), +65C != 1 (no 0x66B080 issue), not (+224 == 0 and +478 == 1) (no controller vt+4 callback),
+//              and for kind 0 activity +630 != 0x1D (no 0x7F1730/0x66EEB0 row path). Outside it nothing is written
+//              and false is returned. Effects: +34/+38 &= ~0x20 (0x7FD9E0); +444 = 0, word +458 = 0; labels (kind
+//              1: +1B8 = 0, +1BC = 1; kind 0: +1B8/+1BC/+1C0 = +630/+634/+638); speed state +194 = +650*0.1 + +194,
+//              zero when negative (zero step), capped at +64C; step toward +63C/+644 from position + pending intent,
+//              bounded by speed*0.1; heading toward +648 limited by min(+654*0.1, 3.11 rad) with the engine's 0x8000
+//              word convention; intent through the native writer 0x80B080 (+D4/+D8/+DC/+E0/+18C/+148, refused while
+//              +18 is pending); +D0 = 0; +3C = +658 when +658 < 0x10000. Byte-equal to native 0x67A050 (oracle, kinds
+//              0/1 and boundary fixtures). Returns true when the intent was written.
 //   Move       site 13 entry (the ACTIVE clone's call of the movement loop 0x531AF0, after every other producer of
 //              the tick, before the movement consumers; then the owned loco or the original loop runs): the
 //              determinism hash. FNV-1a over the stage, the ordered event chain (admit/repark/handback/departure/
@@ -150,18 +155,29 @@
 //              intent bits); chained, with checkpoints at mover stages 64/256/1024/4096 to compare runs (e.g.
 //              --workers 1 vs 8). slot_waiting counts parked members holding a delivered, unbegun slot node (the
 //              engine wants them to walk; native begin would install a MOVE node), with their mean/max distance.
+//   mech_*     brain mechanics a parked, non-diverted member skips with his +0C step, sampled at each seam over those
+//              members (member-ticks; mech_member_ticks is the denominator): 0x63C440 body (+EC == 1); vt+108
+//              0x670F40 adds every tick to +370 (fatigue370_frozen: +370 unchanged since the previous seam); tail
+//              +5B8 reference heading -> +3C (+5B8 and its +34 & 3); 0x602E00 on +518; +F0 recompute (+EC, +A1, unit,
+//              no target); +88 melee label (activity 0xD, +EC); +F2 via army +20F8 0x6E9DA0; 0x639200 (+EC != 0);
+//              +61C (unit present: 0x55AC60 path). Stats mode only.
+// Production-stats mode (Binding.stats false, launcher --puppet-stats 0): no Motion pass, no mech_* census, no site-13
+// hash pass, no sampled dispatch timing, no per-call common-step counters or QPC around the gated common step; the
+// gates keep only the epoch test, the parked-bit test and the native calls. Membership import, admission, divert
+// ownership and every outcome counter are unchanged.
 #define NTW2_PUPPET_MOVER_LABELS \
  "version", "stages", "mover_us_last", "mover_us_max", "mover_us_total", "hash_last", "hash_chain", "hash_s64", \
  "hash_s256", "hash_s1024", "hash_s4096", "events", "parked_hashed_last", "diverted_last", "slot_waiting_last", \
- "slot_waiting_mean_cm", "slot_waiting_max_cm", "slot_waiting_member_ticks", "reserved18", "reserved19", "reserved20", \
- "reserved21", "reserved22", "reserved23", "reserved24", "reserved25", "reserved26", "reserved27", "reserved28", \
- "reserved29", "reserved30", "reserved31"
+ "slot_waiting_mean_cm", "slot_waiting_max_cm", "slot_waiting_member_ticks", "mech_member_ticks", "mech_63c440", \
+ "fatigue370_frozen", "mech_ref_heading", "mech_602e00", "mech_f0", "mech_melee_label", "mech_f2", "mech_639200", \
+ "mech_61c", "stats_mode", "reserved29", "reserved30", "reserved31"
 // Selection diagnostics (ntw2_status::puppet_select_words), per examined unit (first failing reason) and per member:
 //   reject_*        member count 0/>512/null list, null member, artillery member (+0C 0x6F4660), cavalry member (+0C
 //                   0x602EB0), no admissible member, row capacity;
 //   units_attached  admitted units with attached container entries (U+1F4; the attached records are never touched);
 //   member_*        refused members of admitted units: crew (+66C or enabled crew node 0x133AE34), backlink +1F0 not
 //                   the unit, other class table (officers/ensigns/...), admitted on an alternative infantry table;
+//   serial_out_of_range  refused members whose registry serial +2C is >= 2^20 (beyond the gates' parked bitset);
 //   tables_pinned   infantry class tables admitted at Start (kInfantryTables whose slots equal 0x1333714's);
 //   top_table_k / top_count_k (k < 8): the majority member class table (preferred VA) of rejected units and how many
 //                   rejected units had it, in first-seen order; top_other: rejected units beyond eight distinct tables.
@@ -170,7 +186,7 @@
  "reject_capacity", "units_attached", "member_crew", "member_backlink", "member_other_class", "member_alt_table", \
  "tables_pinned", "top_other", "top_table_0", "top_count_0", "top_table_1", "top_count_1", "top_table_2", \
  "top_count_2", "top_table_3", "top_count_3", "top_table_4", "top_count_4", "top_table_5", "top_count_5", \
- "top_table_6", "top_count_6", "top_table_7", "top_count_7", "registry_infantry", "reserved31"
+ "top_table_6", "top_count_6", "top_table_7", "top_count_7", "registry_infantry", "serial_out_of_range"
 #ifdef __cplusplus
 namespace ntw2_puppet {
 using U = uint32_t;
@@ -217,20 +233,22 @@ enum DivertWord : U {
     DivertDurationMax, DivertMovedTicks, DivertFirstStage, DivertWordCount
 };
 static_assert(DivertTableSelf == 10 && DivertFirstStage == 31 && DivertWordCount == kDivertWords, "puppet divert row geometry");
-constexpr U kMoverVersion = 2, kMoverWords = 32;
+constexpr U kMoverVersion = 3, kMoverWords = 32;
 enum MoverWord : U {
     MoverVersion, MoverStages, MoverUsLast, MoverUsMax, MoverUsTotal, MoverHashLast, MoverHashChain, MoverHashS64,
     MoverHashS256, MoverHashS1024, MoverHashS4096, MoverEvents, MoverParkedHashed, MoverDiverted, MoverSlotWaiting,
-    MoverSlotWaitingMeanCm, MoverSlotWaitingMaxCm, MoverSlotWaitingTicks, MoverWordCount = kMoverWords
+    MoverSlotWaitingMeanCm, MoverSlotWaitingMaxCm, MoverSlotWaitingTicks, MechMemberTicks, Mech63C440,
+    MechFatigueFrozen, MechRefHeading, Mech602E00, MechF0, MechMeleeLabel, MechF2, Mech639200, Mech61C, MoverStatsMode,
+    MoverWordCount = kMoverWords
 };
-static_assert(MoverHashLast == 5 && MoverSlotWaitingTicks == 17, "puppet mover row geometry");
+static_assert(MoverHashLast == 5 && MoverSlotWaitingTicks == 17 && MoverStatsMode == 28, "puppet mover row geometry");
 constexpr U kSelectVersion = 1, kSelectWords = 32, kTopTables = 8;
 enum SelectWord : U {
     SelectVersion, RejectMemberCount, RejectNullMember, RejectArtillery, RejectCavalry, RejectNoInfantry,
     RejectCapacity, UnitsAttached, MemberCrew, MemberBacklink, MemberOtherClass, MemberAltTable, TablesPinned,
-    TopOther, TopTables, RegistryInfantry = TopTables + 2 * kTopTables, SelectWordCount = kSelectWords
+    TopOther, TopTables, RegistryInfantry = TopTables + 2 * kTopTables, SerialOutOfRange, SelectWordCount = kSelectWords
 };
-static_assert(TopTables == 14 && RegistryInfantry == 30, "puppet select row geometry");
+static_assert(TopTables == 14 && RegistryInfantry == 30 && SerialOutOfRange == 31, "puppet select row geometry");
 struct Binding {
     U image_base; // mapped base of the approved image; class/node/function constants are relocated by it
     U units;      // 1..kMaxUnits units to select (kMaxUnits = every qualifying unit)
@@ -238,6 +256,7 @@ struct Binding {
     const volatile long* tick_owner;
     const volatile U* epoch_mask;
     U epoch_bit;
+    bool stats;   // diagnostics mode (see "Production-stats mode"); false = production stats only
 };
 bool Start(const Binding& binding); // false: bad binding, storage refused, or the class/node tables differ
 void Stop();                        // owner drained: surviving members are handed back (no native write)
@@ -252,11 +271,12 @@ void SnapshotMotion(U* words /*[kMotionWords]*/);
 void SnapshotDivert(U* words /*[kDivertWords]*/);
 void SnapshotMover(U* words /*[kMoverWords]*/);
 void SnapshotSelect(U* words /*[kSelectWords]*/);
+U StorageBytes();         // retained activation storage (0 before the first Start; kept for the process lifetime)
+U RequiredStorageBytes(); // what the first Start allocates (budget it beforehand)
 // Site 13 entry (owner, puppet epoch): determinism hash and slot-waiting census of the members parked at this seam.
 void Move();
-// The point-move contract of 0x67A050 kinds 0/1 on one record with the controller's live parameters (see "PointMove"
-// above); byte-equal to native 0x67A050 kind 0. Returns false when the native writer refused (+18 pending).
-bool PointMove(U entity, float targetX, float targetZ, U targetHeading, float cap, float accel, float turnRate);
+// The point-move domain of 0x67A050 on one record with the controller's live fields (see "PointMove" above).
+bool PointMove(U entity);
 // Oracle surface: the admission transaction on one record. `stopped` reports begin's stop transaction. Returns the
 // postcondition: enabled wait node at +22C with owner = entity and context = holder +A0 (A+2C8).
 bool Install(U entity, bool& stopped);

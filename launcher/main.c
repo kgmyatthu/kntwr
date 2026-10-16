@@ -187,6 +187,7 @@ typedef struct Options {
     BOOL loco_grid_verify;   /* --loco-grid-verify: implies grid; owner-side verification */
     BOOL grid_probation;     /* --grid-probation: native cell-head trap detector; requires --loco-grid (or verify), not ballistic */
     uint32_t puppet_units;   /* --puppet-probe N|all: NTW2_PUPPET, N = 1..NTW2_PUPPET_MAX_UNITS ordinary foot-infantry units; all = NTW2_PUPPET_MAX_UNITS (ntw2_config::puppet_units) */
+    uint32_t puppet_stats;   /* --puppet-stats 0|1 (default 1): 0 sets NTW2_PUPPET_STATS_OFF (production-stats mode) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -1430,6 +1431,11 @@ static void print_puppet(const uint32_t *p, const uint32_t *m, const uint32_t *d
             L"s1024=0x%08lX s4096=0x%08lX events=%lu\n",
             (unsigned long)v[5], (unsigned long)v[6], (unsigned long)v[7], (unsigned long)v[8], (unsigned long)v[9],
             (unsigned long)v[10], (unsigned long)v[11]);
+        say(L"  puppet skipped brain mechanics (stats=%lu; member-ticks %lu): 0x63C440 %lu, +370 frozen %lu, +5B8 heading %lu, "
+            L"0x602E00 %lu, +F0 %lu, +88 melee label %lu, +F2 %lu, 0x639200 %lu, +61C %lu\n",
+            (unsigned long)v[28], (unsigned long)v[18], (unsigned long)v[19], (unsigned long)v[20], (unsigned long)v[21],
+            (unsigned long)v[22], (unsigned long)v[23], (unsigned long)v[24], (unsigned long)v[25], (unsigned long)v[26],
+            (unsigned long)v[27]);
     }
     {
         say(L"  puppet selection: registry infantry records=%lu tables pinned=%lu; rejected units by reason: member count=%lu "
@@ -1441,7 +1447,7 @@ static void print_puppet(const uint32_t *p, const uint32_t *m, const uint32_t *d
             (unsigned long)s[9], (unsigned long)s[10], (unsigned long)s[11]);
         say(L"  puppet rejected units by majority member class table:");
         for (i = 0; i < 8u; ++i) if (s[15 + 2 * i]) say(L" 0x%08lX=%lu", (unsigned long)s[14 + 2 * i], (unsigned long)s[15 + 2 * i]);
-        say(L" (beyond eight tables %lu)\n", (unsigned long)s[13]);
+        say(L" (beyond eight tables %lu); members refused for serial >= 2^20: %lu\n", (unsigned long)s[13], (unsigned long)s[31]);
     }
     say(L"   ");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) say(L" %hs=%lu", labels[i], (unsigned long)p[i]);
@@ -3716,7 +3722,8 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
     sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & NTW2_ARMY_UNIT_SHADOW) ? "true" : "false");
-    sb_fmt(&b, "  \"puppet_probe\": %lu,\n", (unsigned long)((r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u));
+    sb_fmt(&b, "  \"puppet_probe\": %lu,\n  \"puppet_stats\": %lu,\n", (unsigned long)((r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u),
+           (unsigned long)r->opt.puppet_stats);
     sb_fmt(&b, "  \"armed\": %s,\n  \"reached_full_activation\": %s,\n  \"remote_thread_outstanding\": %s,\n",
            r->ever_armed ? "true" : "false", r->ever_full ? "true" : "false", r->remote_leaked ? "true" : "false");
     sb_fmt(&b, "  \"game_exited\": %s,\n  \"game_exit_code\": %lu,\n", r->game_exited ? "true" : "false",
@@ -4388,7 +4395,7 @@ static int install_runtime(Run *r)
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u;
+    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
     {
@@ -4892,6 +4899,8 @@ static void usage(void)
         L"                        divert runs his native controller branch until released; site 13 hashes the parked cohort\n"
         L"                        for determinism checks; puppet_words, receipt puppet). Owns site 6 and enters site 13\n"
         L"                        before loco: excludes brain2, brain and every --brain-* option\n"
+        L"  --puppet-stats 0|1    with --puppet-probe: 1 (default) keeps the per-man diagnostics (motion, mechanics census,\n"
+        L"                        site-13 determinism hash, sampled gate cost); 0 is production-stats mode (cheap counters only)\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -4970,6 +4979,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->mask = NTW2_ALL;
     o->workers = 4;
     o->poll_ms = 100;
+    o->puppet_stats = 1;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
     o->activate = TRUE;
@@ -5026,6 +5036,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--workers")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
+        } else if (!wcscmp(name, L"--puppet-stats")) {
+            NEEDVAL();
+            if (!parse_uint(val, 0, 1, &o->puppet_stats)) { errsay(L"--puppet-stats must be 0 or 1.\n"); return -1; }
         } else if (!wcscmp(name, L"--puppet-probe")) {
             NEEDVAL();
             if (!wcscmp(val, L"all")) o->puppet_units = NTW2_PUPPET_MAX_UNITS;
@@ -5241,7 +5254,7 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units : 0u;
+    r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];

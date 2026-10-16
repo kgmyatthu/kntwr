@@ -76,7 +76,7 @@ static std::array<B, 0x100> transform{}; // 0x81AC80 reads [A+10]+5C
 // Tick-owner epoch bound into the module: the oracle thread is the owner unless a case clears it.
 static volatile long ownerTid;
 static U epochMask = NTW2_PUPPET_TEST_BIT;
-static pp::Binding Bind() { return {Addr(image), 1, &ownerTid, &epochMask, NTW2_PUPPET_TEST_BIT}; }
+static pp::Binding Bind(bool stats = true) { return {Addr(image), 1, &ownerTid, &epochMask, NTW2_PUPPET_TEST_BIT, stats}; }
 static U Caller() { return Addr(At(0x58395e)); } // a native slot-+08 return address (0x583940 loop)
 static void __fastcall Detach(U, U, U) {}
 static std::array<U, 4> requestTable{}, attachTable{};
@@ -169,7 +169,7 @@ static void InstallCase(const char* name, bool quiet, float speed, bool prior, b
 // ---- Stage scenario -------------------------------------------------------------------------------------------
 struct World {
     std::array<B, 0xe00> unit{}, rejectedUnit{};
-    std::array<B, 0x40> armyP{}, armyQ{};
+    std::array<B, 0x2100> armyP{}, armyQ{}; // the mech census reads army +20F8
     std::array<B, 0x300> manager{};
     Soldier s[6], officer, other, gunner, rejectedInfantry;
     std::array<U, 16> members{}, rejectedMembers{}, registry{}, worklist{};
@@ -352,7 +352,7 @@ static void AllUnitsCase() {
     static std::array<U, 2> lists[6];
     static std::array<B, 0x300> manager{};
     static std::array<U, 12> registry{};
-    static std::array<B, 0x40> army{};
+    static std::array<B, 0x2100> army{};
     for (U u = 0; u < 6; ++u) {
         Put(units[u].data(), 0, U(0x0b1e55ed));
         for (U k = 0; k < 2; ++k) {
@@ -387,48 +387,91 @@ static void AllUnitsCase() {
 }
 
 // ---- Stage 2 ---------------------------------------------------------------------------------------------------
-// PointMove versus the engine's own point-move branch 0x67A050 (vt+1A8, kind 0, battle-active) on byte copies: the
-// controller block carries the same target/heading/cap/accel/turn and the soldier's current labels, so the native
-// branch's writes are exactly the puppet step's (+444/+458 drop, +194 speed state, 0x80B080 intent, +D0).
-struct MoveParams { float x, z, d4, dc, speed; U heading; float tx, tz; U targetHeading; float cap, accel, turn; bool pending; };
+// PointMove(A) versus the engine's own 0x67A050 (vt+1A8) on byte copies of a battle-active soldier whose live
+// controller fields select the point-move domain (kinds 0/1, controller table 0x1334218). Boundary fixtures cover the
+// +63C..+654 domain edges; out-of-domain fixtures must be refused with no write.
+struct MoveParams {
+    U kind; float x, z, d4, dc, speed; U heading; float tx, tz; U targetHeading; float cap, accel, turn; bool pending;
+    U activity = 9, row = 5, frame = 7, bits34 = 0, field658 = 0x10000;
+};
+static void MoveFixture(Soldier& s, const MoveParams& p) {
+    InitSoldier(s, 1, 0);
+    Put(s.data(), 0xec, B(1)); Put(s.data(), 0xd0, B(1));
+    Put(s.data(), 0x34, p.bits34); Put(s.data(), 0x38, p.bits34 | 0x40); Put(s.data(), 0x3c, U(0x777));
+    Put(s.data(), 0x48, p.x); Put(s.data(), 0x4c, 3.0f); Put(s.data(), 0x50, p.z);
+    Put(s.data(), 0xd4, p.d4); Put(s.data(), 0xdc, p.dc); Put(s.data(), 0x194, p.speed);
+    Put(s.data(), 0x64, static_cast<uint16_t>(p.heading));
+    Put(s.data(), 0x1b8, U(0x23)); Put(s.data(), 0x1bc, U(2)); Put(s.data(), 0x1c0, U(4));
+    Put(s.data(), 0x444, Addr(target.data())); Put(s.data(), 0x458, static_cast<uint16_t>(0x0101));
+    if (p.pending) Put(s.data(), 0x18, Addr(target.data()));
+    Put(s.data(), 0x628, Addr(controllerNull.data())); Put(s.data(), 0x62c, p.kind); Put(s.data(), 0x630, p.activity);
+    Put(s.data(), 0x634, p.row); Put(s.data(), 0x638, p.frame); Put(s.data(), 0x63c, p.tx); Put(s.data(), 0x640, 0.0f);
+    Put(s.data(), 0x644, p.tz); Put(s.data(), 0x648, static_cast<uint16_t>(p.targetHeading));
+    Put(s.data(), 0x64c, p.cap); Put(s.data(), 0x650, p.accel); Put(s.data(), 0x654, p.turn);
+    Put(s.data(), 0x658, p.field658);
+}
 static void PointMoveCase(const char* name, const MoveParams& p) {
     label = name; ++cases;
     Soldier ours, native;
-    InitSoldier(ours, 1, 0);
-    Put(ours.data(), 0xec, B(1)); Put(ours.data(), 0xd0, B(1));
-    Put(ours.data(), 0x48, p.x); Put(ours.data(), 0x4c, 3.0f); Put(ours.data(), 0x50, p.z);
-    Put(ours.data(), 0xd4, p.d4); Put(ours.data(), 0xdc, p.dc); Put(ours.data(), 0x194, p.speed);
-    Put(ours.data(), 0x64, static_cast<uint16_t>(p.heading));
-    Put(ours.data(), 0x1b8, U(9)); Put(ours.data(), 0x1bc, U(5)); Put(ours.data(), 0x1c0, U(7));
-    Put(ours.data(), 0x444, Addr(target.data())); Put(ours.data(), 0x458, static_cast<uint16_t>(0x0101));
-    if (p.pending) Put(ours.data(), 0x18, Addr(target.data()));
-    Put(ours.data(), 0x628, Addr(controllerNull.data())); Put(ours.data(), 0x62c, U(0)); Put(ours.data(), 0x630, U(9));
-    Put(ours.data(), 0x634, U(5)); Put(ours.data(), 0x638, U(7)); Put(ours.data(), 0x63c, p.tx); Put(ours.data(), 0x640, 0.0f);
-    Put(ours.data(), 0x644, p.tz); Put(ours.data(), 0x648, static_cast<uint16_t>(p.targetHeading));
-    Put(ours.data(), 0x64c, p.cap); Put(ours.data(), 0x650, p.accel); Put(ours.data(), 0x654, p.turn);
-    Put(ours.data(), 0x658, U(0x10000));
+    MoveFixture(ours, p);
     native = ours; Put(native.data(), 0x228, A(native));
     B out = 0xcc;
     ResetFp();
     reinterpret_cast<void (__thiscall*)(U, U)>(Addr(At(0x67a050)))(A(native), Addr(&out));
     ResetFp();
-    const bool written = pp::PointMove(A(ours), p.tx, p.tz, p.targetHeading, p.cap, p.accel, p.turn);
+    const bool written = pp::PointMove(A(ours));
     Require(written == !p.pending && out == 0, "intent written exactly when nothing is pending; native branch returned +65D");
     for (U i = 0; i < 0x700; ++i) {
         if (i >= 0x228 && i < 0x22c) continue; // holder self pointer
-        if (ours[i] != native[i]) { std::fprintf(stderr, "offset +%03X ours %02X native %02X\n", i, ours[i], native[i]); Fail("puppet step bytes equal 0x67A050 kind 0"); }
+        if (ours[i] != native[i]) { std::fprintf(stderr, "offset +%03X ours %02X native %02X\n", i, ours[i], native[i]); Fail("PointMove bytes equal 0x67A050"); }
     }
     Require(!Get<U>(ours.data(), 0x444) && !Get<uint16_t>(ours.data(), 0x458) && !ours[0xd0], "presentation and clamp writes");
     Require(ours[0x18c] == (p.pending ? 0 : 1), "direct-move flag +18C set by the native writer");
+    Require(Get<U>(ours.data(), 0x1b8) == (p.kind ? 0 : p.activity) && Get<U>(ours.data(), 0x1bc) == (p.kind ? 1 : p.row),
+            "kind 1 labels none/1, kind 0 labels from +630/+634");
+}
+static void PointMoveRefused(const char* name, const MoveParams& p, void (*mutate)(Soldier&)) {
+    label = name; ++cases;
+    Soldier ours, before;
+    MoveFixture(ours, p);
+    if (mutate) mutate(ours);
+    before = ours;
+    Require(!pp::PointMove(A(ours)) && !memcmp(before.data(), ours.data(), ours.size()), "outside the domain: refused, no write");
 }
 static void PointMoveCases() {
-    PointMoveCase("point move: far target, turn-limited heading", {10, 20, 0, 0, 1.0f, 0, 30, 25, 0x2000, 2.0f, 4.0f, 3.0f, false});
-    PointMoveCase("point move: target inside one step", {10, 20, 0, 0, 1.0f, 0x100, 10.05f, 20.02f, 0x80, 2.0f, 4.0f, 3.0f, false});
-    PointMoveCase("point move: speed above cap, pending intent", {-4, 7, 0.1f, -0.05f, 5.0f, 0xf000, -9, 3, 0x1000, 2.0f, 4.0f, 3.0f, false});
-    PointMoveCase("point move: negative speed state", {1, 1, 0, 0, 0.5f, 0x4000, 5, 5, 0x3000, 2.0f, -30.0f, 3.0f, false});
-    PointMoveCase("point move: half-turn heading word 0x8000", {0, 0, 0, 0, 0.0f, 0x1000, 0, 3, 0x9000, 2.0f, 4.0f, 3.0f, false});
-    PointMoveCase("point move: turn rate above the 3.11 rad cap", {0, 0, 0, 0, 0.0f, 0xc000, 3, 0, 0x2000, 2.0f, 4.0f, 40.0f, false});
-    PointMoveCase("point move: pending request refuses the intent", {2, 2, 0, 0, 1.0f, 0, 6, 6, 0x2000, 2.0f, 4.0f, 3.0f, true});
+    // turn 3.0 rad/s -> 0.3 rad per tick -> 3129 heading words.
+    PointMoveCase("point move k0: far target, turn-limited heading", {0, 10, 20, 0, 0, 1.0f, 0, 30, 25, 0x2000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: far target, labels none/1", {1, 10, 20, 0, 0, 1.0f, 0, 30, 25, 0x2000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: controller labels differ from current", {0, 1, 2, 0, 0, 0.5f, 0, 9, 9, 0x100, 2.0f, 4.0f, 3.0f, false, 0x17, 3, 11});
+    PointMoveCase("point move k0: target inside one step", {0, 10, 20, 0, 0, 1.0f, 0x100, 10.05f, 20.02f, 0x80, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: speed above cap, pending intent offsets", {1, -4, 7, 0.1f, -0.05f, 5.0f, 0xf000, -9, 3, 0x1000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: negative speed state, zero step", {0, 1, 1, 0, 0, 0.5f, 0x4000, 5, 5, 0x3000, 2.0f, -30.0f, 3.0f, false});
+    PointMoveCase("point move k1: heading diff exactly +max turn", {1, 0, 0, 0, 0, 0.0f, 0, 3, 3, 3129, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: heading diff max turn + 1", {1, 0, 0, 0, 0, 0.0f, 0, 3, 3, 3130, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: heading diff exactly -max turn", {0, 0, 0, 0, 0, 0.0f, 0, 3, 3, 0x10000 - 3129, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: heading diff -max turn - 1", {0, 0, 0, 0, 0, 0.0f, 0, 3, 3, 0x10000 - 3130, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: heading diff 0x8000", {1, 0, 0, 0, 0, 0.0f, 0, 0, 3, 0x8000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: heading word 0x8000 current", {0, 0, 0, 0, 0, 0.0f, 0x8000, 0, 3, 0x1000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: turn rate above the 3.11 rad cap", {1, 0, 0, 0, 0, 0.0f, 0xc000, 3, 0, 0x2000, 2.0f, 4.0f, 40.0f, false});
+    PointMoveCase("point move k0: zero turn rate", {0, 0, 0, 0, 0, 0.0f, 0x100, 3, 0, 0x2000, 2.0f, 4.0f, 0.0f, false});
+    PointMoveCase("point move k1: speed reaches the cap exactly", {1, 0, 0, 0, 0, 1.6f, 0, 0, 9, 0, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k0: zero cap", {0, 0, 0, 0, 0, 1.0f, 0, 0, 9, 0, 0.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: zero accel and speed", {1, 0, 0, 0, 0, 0.0f, 0, 0, 9, 0, 2.0f, 0.0f, 3.0f, false});
+    PointMoveCase("point move k0: target on the man", {0, 4, 5, 0, 0, 1.0f, 0x200, 4, 5, 0x200, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move k1: +658 below 0x10000 sets +3C, bit 0x20 cleared",
+                  {1, 0, 0, 0, 0, 1.0f, 0, 3, 3, 0, 2.0f, 4.0f, 3.0f, false, 9, 5, 7, 0x21, 0x1234});
+    PointMoveCase("point move k0: pending request refuses the intent", {0, 2, 2, 0, 0, 1.0f, 0, 6, 6, 0x2000, 2.0f, 4.0f, 3.0f, true});
+    const MoveParams base = {0, 2, 2, 0, 0, 1.0f, 0, 6, 6, 0x2000, 2.0f, 4.0f, 3.0f, false};
+    MoveParams kind2 = base; kind2.kind = 2;
+    PointMoveRefused("point move refused: kind 2", kind2, nullptr);
+    MoveParams row = base; row.activity = 0x1d;
+    PointMoveRefused("point move refused: kind 0 activity 0x1D (row path)", row, nullptr);
+    PointMoveRefused("point move refused: not battle-active", base, [](Soldier& s) { s[0xec] = 0; });
+    PointMoveRefused("point move refused: controller table 0x1334250", base,
+                     [](Soldier& s) { Put(s.data(), 0x628, Addr(controllerSelf.data())); });
+    PointMoveRefused("point move refused: +65C order issue", base, [](Soldier& s) { s[0x65c] = 1; });
+    PointMoveRefused("point move refused: controller vt+4 phase callback", base,
+                     [](Soldier& s) { Put(s.data(), 0x224, U(0)); s[0x478] = 1; });
 }
 
 // Site 13 machinery on a parked unit: no intent is written (no owned motion policy), parked men holding a delivered,
@@ -438,7 +481,7 @@ struct MoverWorld {
     Soldier men[4];
     std::array<U, 4> list{}, registry{};
     std::array<B, 0x300> manager{};
-    std::array<B, 0x40> army{};
+    std::array<B, 0x2100> army{};
     void Init() {
         Put(unit.data(), 0, U(0x0b1e55ed));
         for (U k = 0; k < 4; ++k) {
@@ -476,7 +519,7 @@ static void MoverCase() {
     label = "site 13: slot-waiting census, no intent"; ++cases;
     static MoverWorld first, second;
     const auto m = RunMoverWorld(first);
-    Require(m[pp::MoverVersion] == 2 && m[pp::MoverStages] == 1 && m[pp::MoverParkedHashed] == 4 && !m[pp::MoverDiverted] &&
+    Require(m[pp::MoverVersion] == 3 && m[pp::MoverStatsMode] == 1 && m[pp::MoverStages] == 1 && m[pp::MoverParkedHashed] == 4 && !m[pp::MoverDiverted] &&
             m[pp::MoverSlotWaiting] == 2 && m[pp::MoverSlotWaitingMaxCm] == 500 && m[pp::MoverSlotWaitingMeanCm] == 250,
             "two parked men hold a delivered unbegun slot (5 m and 0 m)");
     for (const Soldier& s : first.men)
@@ -485,6 +528,13 @@ static void MoverCase() {
     pp::Stage(Addr(first.manager.data())); pp::Move();
     const U chainFirst = Mover()[pp::MoverHashChain];
     Require(Mover()[pp::MoverSlotWaitingTicks] == 6 && !Words()[pp::Faults], "slot-waiting member-ticks accumulate");
+    {   // Skipped brain mechanics census (stats mode): parked at the seams of stages 2 and 3; fixtures have +EC=1,
+        // their unit present, +A1=0, no reference, army without +20F8.
+        const auto v = Mover();
+        Require(v[pp::MechMemberTicks] == 8 && v[pp::Mech61C] == 8 && v[pp::Mech63C440] == 8 && v[pp::Mech639200] == 8 &&
+                v[pp::MechFatigueFrozen] == 8 && !v[pp::MechF0] && !v[pp::MechRefHeading],
+                "mech census over 4 parked men x 2 seams; +370 frozen while parked");
+    }
     pp::Stop();
 
     label = "site 13: determinism across record addresses"; ++cases;
@@ -494,6 +544,29 @@ static void MoverCase() {
     pp::Stage(Addr(second.manager.data())); pp::Move();
     pp::Stage(Addr(second.manager.data())); pp::Move();
     Require(Mover()[pp::MoverHashChain] == chainFirst, "same chained hash after the same three stages");
+    pp::Stop();
+
+    label = "production stats: gates and seam without per-man diagnostics; serial out of range refused"; ++cases;
+    static MoverWorld third;
+    third.Init();
+    Put(third.men[3].data(), 0x2c, U(0x100000)); // beyond the parked bitset
+    Put(third.manager.data(), 0x260, U(3));       // site-6 worklist: the parked three (the fixture cannot run a native brain)
+    pp::Binding b = Bind(false); b.units = pp::kMaxUnits;
+    Require(pp::Start(b), "start in production-stats mode");
+    ResetFp();
+    pp::Stage(Addr(third.manager.data()));
+    std::array<U, pp::kSelectWords> s{}; pp::SnapshotSelect(s.data());
+    auto w = Words();
+    Require(s[pp::SerialOutOfRange] == 1 && w[pp::MembersParked] == 3 && w[pp::SkippedNativeSteps] == 3,
+            "serial >= 2^20 refused at selection; three parked and skipped");
+    Require(pp::CommonStep(A(third.men[0]), Caller()) && !pp::CommonStep(A(third.men[3]), Caller()),
+            "gate: parked member gated, out-of-range serial forwarded");
+    pp::Move();
+    w = Words();
+    const auto v = Mover();
+    Require(!w[pp::CommonCalls] && !w[pp::DispatchSamples] && !w[pp::CommonMemberCalls] && !v[pp::MoverStages] &&
+            !v[pp::MechMemberTicks] && !v[pp::MoverStatsMode] && !w[pp::Faults],
+            "no per-call counters, sampling, hash pass or mech census");
     pp::Stop();
 }
 

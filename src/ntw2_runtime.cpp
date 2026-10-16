@@ -2340,7 +2340,8 @@ void SampleMemoryStorage() {
     memoryWords[NTW2_MEM_LOD_BYTES]=lodBytes;
     memoryWords[NTW2_MEM_BALLISTICS_BYTES]=records ? sizeof(bal_record)*kProjectileCapacity : 0;
     memoryWords[NTW2_MEM_OTHER_BYTES]=(formation.state ? formation.state[NFR_S_STORAGE_BYTES] : 0)+
-        (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0);
+        (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0)+
+        ntw2_puppet::StorageBytes(); // retained puppet activation storage (allocated once, kept for the process)
     ULONGLONG total=0;
     for(U i=NTW2_MEM_LOCO_BYTES;i<=NTW2_MEM_OTHER_BYTES;++i) total+=memoryWords[i];
     memoryWords[NTW2_MEM_TOTAL_BYTES]=total>UINT32_MAX ? UINT32_MAX : static_cast<U>(total);
@@ -2414,7 +2415,12 @@ bool StartModules() {
             (mask&NTW2_AI_CENSUS) ? &ntw2_ai_census::OwnerCalls : nullptr,(mask&NTW2_AI_ASYNC2) ? 1u : 0u};
         if (!ntw2_army_unit::Start(binding)) { RecordError(ModuleError,NTW2_ARMY_UNIT_SHADOW); return false; }
     }
-    if ((mask & NTW2_PUPPET) && !ntw2_puppet::Start({imageBase,config.puppet_units,&tickOwner,&epochMask,NTW2_PUPPET})) {
+    // The probe's activation storage is allocated once and retained for the process: budget it before the first
+    // allocation (VA floor policy) and report it in memory other_bytes.
+    if ((mask & NTW2_PUPPET) && !ntw2_puppet::StorageBytes() && !VirtualBudget(ntw2_puppet::RequiredStorageBytes()))
+        return false;
+    if ((mask & NTW2_PUPPET) && !ntw2_puppet::Start({imageBase,config.puppet_units&NTW2_PUPPET_UNIT_MASK,&tickOwner,&epochMask,
+                                                     NTW2_PUPPET,(config.puppet_units&NTW2_PUPPET_STATS_OFF)==0})) {
         RecordError(ModuleError,NTW2_PUPPET); return false;
     }
     if (mask & NTW2_COLLIDE) {
@@ -3125,7 +3131,8 @@ static U StartImpl(void* raw) {
         // The army unit shadow observes the cloned ARMY_UPDATE stage, reached only through a routed tick.
         ((next.enabled_mask&NTW2_ARMY_UNIT_SHADOW) && !(next.enabled_mask&kRouted)) ||
         // The puppet probe owns site 6 alone (BRAIN2/brain flags) and the class step slot (BRAIN profiling slots).
-        next.puppet_units>NTW2_PUPPET_MAX_UNITS || ((next.enabled_mask&NTW2_PUPPET)!=0)!=(next.puppet_units!=0) ||
+        (next.puppet_units&~(NTW2_PUPPET_UNIT_MASK|NTW2_PUPPET_STATS_OFF)) || (next.puppet_units&NTW2_PUPPET_UNIT_MASK)>NTW2_PUPPET_MAX_UNITS ||
+        ((next.enabled_mask&NTW2_PUPPET)!=0)!=((next.puppet_units&NTW2_PUPPET_UNIT_MASK)!=0) ||
         ((next.enabled_mask&NTW2_PUPPET) && ((next.enabled_mask&(NTW2_BRAIN2|NTW2_BRAIN)) || next.brain_flags)) ||
         ((next.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) && !next.main_thread_id) || next.profile_site>NTW2_TIMED_SITES) return BadConfig;
     const LONG before=Load(&life);

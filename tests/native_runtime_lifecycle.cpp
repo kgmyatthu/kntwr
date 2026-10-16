@@ -1866,6 +1866,10 @@ int main(int argc,char** argv) {
     config.enabled_mask=NTW2_PUPPET; config.brain_flags=NTW2_BRAIN_UNIT_SHADOW; Check(start(&config)==1,"puppet probe with brain flags refused");
     config.brain_flags=0; config.puppet_units=4;
     Check(start(&config)==2,"valid four-unit puppet configuration passes validation and refuses a foreign main image");
+    config.puppet_units=4|NTW2_PUPPET_STATS_OFF;
+    Check(start(&config)==2,"production-stats puppet configuration passes validation and refuses a foreign main image");
+    config.puppet_units=4|0x10000u; Check(start(&config)==1,"puppet unit word with an unknown bit refused");
+    config.puppet_units=NTW2_PUPPET_STATS_OFF; Check(start(&config)==1,"puppet stats flag without a unit count refused");
     config.puppet_units=0;
     config.enabled_mask=NTW2_BRAIN; config.main_thread_id=1; Check(start(&config)==1,"brain profiling without profile refused"); config.main_thread_id=0;
     config.enabled_mask=NTW2_AI_CTRL; Check(start(&config)==1,"controller offload without ai refused");
@@ -2228,7 +2232,8 @@ int main(int argc,char** argv) {
         Check(ReadState(state,snapshot) && snapshot.puppet_words[0]==5u && snapshot.puppet_words[1]==1u &&
               snapshot.puppet_words[2]==NTW2_PUPPET_MAX_UNITS && !snapshot.puppet_words[6] && !snapshot.puppet_words[38] &&
               snapshot.puppet_divert_words[0]==1u && !snapshot.puppet_divert_words[1] &&
-              snapshot.puppet_mover_words[0]==2u && !snapshot.puppet_mover_words[1] &&
+              snapshot.puppet_mover_words[0]==3u && !snapshot.puppet_mover_words[1] && snapshot.puppet_mover_words[28]==1u &&
+              snapshot.memory_words[NTW2_MEM_OTHER_BYTES]>=4u*1024u*1024u &&
               snapshot.puppet_select_words[0]==1u && snapshot.puppet_select_words[12]==11u,
               "puppet rows: version 5, enabled, all units requested (storage allocated), eleven infantry tables pinned, no stage, common call, divert or mover stage without a tick");
         Check(*At(0x13473d0+8)!=0x670eb0+delta && InRuntime(*At(0x13473d0+8)) && ReadOnly(At(0x13473d0+8)),
