@@ -216,13 +216,22 @@ bool FollowsCall(U address) {
     return offset >= 7 && p[-7] == 0xFF && p[-6] == 0x94 && p[-5] == 0x24;
 }
 
-// First stack word above esp that follows a call, bounded by this thread's committed stack top (TEB StackBase)
-// and 1024 words. Zero when nothing plausible is found (the row then stands on its EIP alone).
-U CallerCandidate(U esp) {
+// Caller of the trapping instruction, bounded by this thread's committed stack [esp, TEB StackBase).
+// Frame first: when EBP is a plausible frame pointer (4-aligned, esp <= ebp, [ebp+4] below the stack top) and
+// [ebp+4] follows a call, that word is the return address of the innermost EBP-framed function: the trapping
+// function itself when it sets up EBP (0x6392C0 does), otherwise the nearest framed ancestor. Only then the
+// first stack word above esp that follows a call (at most 1024 words). The scan alone can return a stale local:
+// run dc-diag1 attributed 1,822,745 0x6395D0 traps to 0x10E83CD, a word left in 0x6392C0's uninitialised
+// locals, while its frame return is 0x53C0E8 (0x53C060). Zero when nothing plausible is found.
+U CallerCandidate(U esp, U ebp) {
     const NT_TIB* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
     const U top = Pointer(tib->StackBase);
     esp &= ~3u;
     if (!esp || top <= esp) return 0;
+    if (!(ebp & 3u) && ebp >= esp && ebp < top && top - ebp >= 8u) {
+        const U ret = *reinterpret_cast<const U*>(static_cast<uintptr_t>(ebp + 4u));
+        if (FollowsCall(ret)) return ret;
+    }
     const U words = (top - esp) / 4 > 1024 ? 1024 : (top - esp) / 4;
     const U* stack = reinterpret_cast<const U*>(static_cast<uintptr_t>(esp));
     for (U i = 0; i < words; ++i)
@@ -292,7 +301,8 @@ LONG HandleFault(EXCEPTION_POINTERS* info, U address, U alloc) {
         return EXCEPTION_CONTINUE_SEARCH;
     } // PAGE_READWRITE: the trap was raised before the page was restored (dispatch was delayed); resume it
     const U threadClass = g_binding.thread_class();
-    RecordRow(Pointer(record->ExceptionAddress), CallerCandidate(static_cast<U>(info->ContextRecord->Esp)),
+    const CONTEXT* context = info->ContextRecord;
+    RecordRow(Pointer(record->ExceptionAddress), CallerCandidate(static_cast<U>(context->Esp), static_cast<U>(context->Ebp)),
               address, record->ExceptionInformation[0] == 1 ? 1u : 0u,
               threadClass < ThreadClasses ? threadClass : ThreadOther);
     return EXCEPTION_CONTINUE_EXECUTION;

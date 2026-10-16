@@ -11,7 +11,7 @@ struct ntw2_clone_set;
 // The array is held PAGE_NOACCESS outside the owner's site-13 window: the window opens after the owned movement
 // preparation, covers the owner's relink replay, native fallbacks and the grid v2 publication (including
 // optional verification), and its close re-derives the layout and re-arms every page. A first-chance vectored
-// handler logs each trapping instruction {EIP, first stack return-address candidate, thread class, tick site},
+// handler logs each trapping instruction {EIP, frame caller, thread class, tick site},
 // restores PAGE_READWRITE for that one page and resumes the same instruction. Data, order and timing-independent
 // outcomes are untouched: the only effect is the trap latency (a page stays open until the next re-arm).
 //
@@ -46,8 +46,10 @@ static_assert(Disarms + 1 == kHeaderWords, "header width");
 // State values.
 enum StateValue : U { StateIdle, StateArmed, StateWindowOpen, StateRefused, StateRetired };
 // Row words (one row per distinct {EIP, caller}). RowEip: preferred-base image VA, or for clone code the original
-// instruction VA (0 for emitted literals) with the raw clone address in RowCloneVa; RowCaller likewise (first
-// stack word that follows a call in the image or clone arena; 0 = none). `Where` packs bits 0..3 EIP module,
+// instruction VA (0 for emitted literals) with the raw clone address in RowCloneVa; RowCaller likewise ([EBP+4]
+// when EBP is a plausible frame and that word follows a call in the image or clone arena: the trapping function's
+// own return when it keeps an EBP frame, else the nearest framed ancestor's; otherwise the first stack word above
+// ESP that follows a call, which can be a stale local; 0 = none). `Where` packs bits 0..3 EIP module,
 // 4..7 caller module, 8..15 thread-class mask (1 << ThreadClass), 16..31 clone id + 1 (0 = not clone code).
 // First/last site = tick site + 1 (0 outside every timed site) | 0x80000000 while a routed tick executes.
 enum RowWord : U { RowEip, RowCaller, RowWhere, RowCloneVa, RowCount, RowWrites, RowFirstSite, RowLastSite };
