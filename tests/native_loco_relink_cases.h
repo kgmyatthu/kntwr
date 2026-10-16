@@ -587,7 +587,7 @@ static void OwnedRelinkCases() {
     {   // class wrapper (barrier + untapped children), native callback (native-vtable barrier) and alternate wrapper (tapped clone fallback)
         Scenario sc = OwnedScenario(24, false);
         for (U i = 0; i < sc.agents.size(); ++i) if (i & 1) sc.agents[i] = OwnedActive(i, true);
-        sc.agents[3].vt = VtClass; sc.agents[12] = Callback(12, 0, 0);
+        sc.agents[3].vt = VtClass; sc.agents[3].ec = 0; sc.agents[3].b688 = 2; sc.agents[12] = Callback(12, 0, 0);
         sc.agents[15].ec = 0; sc.agents[15].b628 = 1; sc.agents[15].b62c = 4;
         OwnedPlan plan;
         for (U i : {0u, 3u, 6u}) sc.agents[i].unit = 1;

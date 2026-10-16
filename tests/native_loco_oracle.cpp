@@ -30,6 +30,7 @@
 #include "native_image_relocation.h"
 #include "ntw2_clones.h"
 #include "native_loco.h"
+#include "native_move_delta.h"
 #include "native_sweep.h"
 #include "native_resolve.h"
 #include "native_env.h"
@@ -1553,12 +1554,13 @@ static void CaptureChecked(GridRegistry& r) {
     if (made) { // a pool dispatcher is bound: the chunk shape of each dispatch is part of the contract
         const bool verified = v2[loco::GridV2VerifyEnabled] != 0;
         EqU("the dispatcher saw exactly the grid's dispatches", U(made), ExpectedGridDispatches(verified));
-        EqU("capture dispatch spans every lane's record chunk", dispatchSizes[sizesBefore], dispatchLanes);
+        const U gridChunks = std::min<U>(32, 3 * dispatchLanes); // three record chunks per participant, at most 32
+        EqU("capture dispatch spans three record chunks per participant", dispatchSizes[sizesBefore], gridChunks);
         const U build = dispatchSizes[sizesBefore + 1];
-        Require(build >= dispatchLanes && build <= 3 * dispatchLanes,
-            "build dispatch is one finish chunk per lane plus at most two row-run tasks per lane");
-        if (loco::ReadGrid()->memberships) Require(build > dispatchLanes, "a populated grid has at least one build task");
-        if (verified) EqU("verification spans every lane's chunk", dispatchSizes[sizesBefore + 2], dispatchLanes);
+        Require(build >= gridChunks && build <= gridChunks + 2 * gridChunks,
+            "build dispatch is one finish chunk per record chunk plus at most two row-run tasks per chunk");
+        if (loco::ReadGrid()->memberships) Require(build > gridChunks, "a populated grid has at least one build task");
+        if (verified) EqU("verification spans every record chunk", dispatchSizes[sizesBefore + 2], gridChunks);
     }
     EqU("one successful grid v2 build", v2[loco::GridV2Builds] - v2Before[loco::GridV2Builds], 1);
     EqU("grid v2 verifier has zero mismatches", v2[loco::GridV2VerifyMismatches] - v2Before[loco::GridV2VerifyMismatches], 0);
@@ -1668,6 +1670,7 @@ static void GridNumericCases() {
 // A deterministic host dispatcher changes chunk execution order, never mover semantics. Each body must operate only on
 // private per-occurrence prefixes; native graphs, service scratch and selector/staging effects stay on the owner.
 static bool reverseChunks, concurrentChunks;
+static bool relinkRun; // the relink apply mutates native chains inside its dispatches: skip the "dispatch body mutates nothing" audit
 struct DispatchGroup {
     HANDLE start, ready; volatile LONG waiting, next;
     U threads, chunks; bool reversed;
@@ -1770,7 +1773,7 @@ static void __stdcall OracleDispatch(U pool, U body, U chunks, void* context) {
         Require(WaitForSingleObject(group.ready, INFINITE) == WAIT_OBJECT_0, "all dispatcher workers reach shared start barrier");
         Require(SetEvent(group.start) != 0, "dispatcher releases real workers together");
         for (HANDLE thread : threads) Require(WaitForSingleObject(thread, INFINITE) == WAIT_OBJECT_0, "real dispatcher worker joined");
-        unchanged();
+        if (!relinkRun) unchanged();
         U executed = 0;
         for (U n = 0; n < threadsUsed; ++n) {
             EqU("worker passed its start barrier", jobs[n].waitResult, WAIT_OBJECT_0);
@@ -1789,7 +1792,7 @@ static void __stdcall OracleDispatch(U pool, U body, U chunks, void* context) {
         DispatchThread job{}; job.group = &group; job.body = body; job.chunk = 0; job.context = context;
         DispatchClaimed(job);
         EqU("inline claims execute every chunk exactly once", job.executed, chunks);
-        unchanged();
+        if (!relinkRun) unchanged();
     }
 }
 static void GridV2Scenario(Scenario& sc, std::vector<U>& primary, std::vector<U>& secondary) {
@@ -1921,14 +1924,18 @@ static void GridSpreadCases() {
 }
 // Exact byte formula of the single grid block (each array padded to 64 bytes), recomputed independently of the module.
 static unsigned long long GridPad(unsigned long long words) { return (words * 4 + 63) & ~63ull; }
-static unsigned long long ExpectedGridBytes(const ntw2_workload::Capacity& c, U chunks) {
+static unsigned long long ExpectedGridBytes(const ntw2_workload::Capacity& c, U participants) {
+    const U chunks = std::min<U>(32, 3 * participants); // the grid carves three record chunks per participant
     U hash = 16; while (hash < c.records + c.records / 2 + 1) hash <<= 1;
     const U rows = std::min(c.cells, c.memberships);
-    // identity 2*(5R+H) | view 12R | committed R | dense C | cellIds Q | offsets Q+1 | occupants M | fill Q |
-    // stripMembers chunks*64 | stripRows chunks*64 | stats chunks*64B
-    return 2 * (5 * GridPad(c.records) + GridPad(hash)) + 12 * GridPad(c.records) + GridPad(c.records) +
+    // identity 2*4R | registry 2*(R+H) | rawSecondary R | view 12R | committed R | dense C | cellIds Q | offsets Q+1 |
+    // occupants M | fill Q | stripMembers chunks*64 | stripRows chunks*64 | bucketSingle+bucketMulti 2*chunks*ceil(R/chunks) |
+    // bucketStart chunks*65 | stats chunks*64B
+    const unsigned long long bucket = (c.records + chunks - 1ull) / chunks;
+    return 2 * (5 * GridPad(c.records) + GridPad(hash)) + GridPad(c.records) + 12 * GridPad(c.records) + GridPad(c.records) +
         GridPad(c.cells) + GridPad(rows) + GridPad(rows + 1ull) + GridPad(c.memberships) + GridPad(rows) +
-        2 * GridPad(static_cast<unsigned long long>(chunks) * 64) + chunks * 64ull;
+        2 * GridPad(static_cast<unsigned long long>(chunks) * 64) + 2 * GridPad(chunks * bucket) +
+        GridPad(static_cast<unsigned long long>(chunks) * 65) + chunks * 64ull;
 }
 static void GridCapacityCases() {
     Scenario sc; std::vector<U> primary, secondary;
@@ -2105,8 +2112,8 @@ static std::vector<U> ParallelStageOnce(const Scenario& sc, U lanes, bool revers
     EqU("Stage captures have no faults", grid[loco::GridFaults], 0);
     EqU("Stage captures have no refusals", grid[loco::GridRefusals], 0);
     Require(dispatchCalls != 0 && dispatchedChunks >= lanes, "configured dispatcher executes even with one lane");
-    Require(dispatchMaxChunks >= lanes && dispatchMaxChunks <= 3 * lanes,
-        "full safe cohort uses every configured lane; only the grid build dispatch may add row-run tasks");
+    Require(dispatchMaxChunks >= lanes && dispatchMaxChunks <= 9 * lanes,
+        "full safe cohort uses every configured lane; only the grid build dispatch (three record chunks per lane plus row-run tasks) may exceed it");
     if (pureWorker) {
         EqU("all pure worker occurrences execute", status[loco::ParallelWorkerEntities], U(sc.list.size()));
         EqU("pure cohort has no owner fallback", status[loco::ParallelOwnerEntities], 0);
@@ -2259,13 +2266,42 @@ static void CheckGridMode(const GridRegistry& registry, bool enabled) {
         for (U i = 1; i < loco::GridWordCount; ++i) EqU("disabled grid performs no import or CSR work", grid[i], 0);
     }
 }
+static void CheckRelinkStage(U mode) {
+    std::array<U, loco::RelinkWordCount> w{}; loco::SampleRelink(w.data());
+    EqU("relink version", w[loco::RelinkVersion], 1); EqU("relink mode", w[loco::RelinkMode], mode);
+    if (!mode) {
+        for (U i = 2; i < loco::RelinkWordCount; ++i) EqU("relink off leaves every counter zero", w[i], 0);
+        Require(loco::ReadMoveDelta() == nullptr, "relink off publishes no delta view");
+        return;
+    }
+    EqU("relink counts the stage", w[loco::RelinkStages], 1);
+    const U ops = w[loco::RelinkOpsUnlink] + w[loco::RelinkOpsInsert];
+    Require(ops != 0 && w[loco::RelinkBatches] != 0, "relink logs and applies batches");
+    EqU("batch histogram partitions the batches", w[loco::RelinkBatchesLe16] + w[loco::RelinkBatchesLe256] + w[loco::RelinkBatchesLe2048] + w[loco::RelinkBatchesGt2048], w[loco::RelinkBatches]);
+    EqU("flush causes partition the batches", w[loco::RelinkFlushFallback] + w[loco::RelinkFlushClassWrapper] + w[loco::RelinkFlushEnd] + w[loco::RelinkFlushOther], w[loco::RelinkBatches]);
+    Require(w[loco::RelinkMaxBatchOps] != 0 && w[loco::RelinkMaxBatchOps] <= ops, "largest batch is bounded by the logged ops");
+    EqU("relink refusals", w[loco::RelinkRefusals], 0); EqU("relink faults", w[loco::RelinkFaults], 0);
+    EqU("relink serial fallbacks", w[loco::RelinkSerialFallbacks], 0);
+    const loco::MoveDeltaView* view = loco::ReadMoveDelta();
+    Require(view != nullptr && view->count == ops && view->epoch == 1, "relink publishes this stage's delta view");
+    if (mode == 1) {
+        EqU("shadow verifies every batch", w[loco::RelinkShadowBatches], w[loco::RelinkBatches]);
+        EqU("shadow cell mismatches", w[loco::RelinkShadowMismatchCells], 0); EqU("shadow node mismatches", w[loco::RelinkShadowMismatchNodes], 0);
+        EqU("shadow attributes no untapped writer", w[loco::RelinkUntappedWriters], 0);
+        EqU("shadow applies nothing live", w[loco::RelinkApplyWallUs], 0);
+    } else {
+        for (U i : {loco::RelinkShadowBatches, loco::RelinkShadowCells, loco::RelinkShadowMismatchCells, loco::RelinkShadowMismatchNodes, loco::RelinkShadowUs})
+            EqU("live mode has no shadow work", w[i], 0);
+    }
+}
 static void CheckOwnedPhase(U count, U lanes, U refused, U validation = 0, bool overflow = false) {
     const auto phase = OwnedPhase(), owned = OwnedStatus();
     EqU("owned phase version", phase[loco::OwnedPhaseVersion], 1);
     EqU("exactly one owned dispatch per Stage", phase[loco::OwnedPhaseDispatches], 1);
     const bool gridDispatches = GridStatus()[loco::GridCaptures] != 0;
-    EqU("one mover dispatch plus the grid publication's separate dispatches", dispatchCalls,
-        1u + (gridDispatches ? GridV2Status()[loco::GridV2Dispatches] : 0u));
+    std::array<U, loco::RelinkWordCount> relinkWords{}; loco::SampleRelink(relinkWords.data());
+    EqU("one mover dispatch plus the grid publication's and relink apply's separate dispatches", dispatchCalls,
+        1u + (gridDispatches ? GridV2Status()[loco::GridV2Dispatches] : 0u) + relinkWords[loco::RelinkDispatches]);
     EqU("phase counts every worklist occurrence", phase[loco::OwnedPhaseListEntities], count);
     const U size = phase[loco::OwnedPhaseChunkSizeLast];
     Require(size >= 32 && size <= 256, "contiguous chunk size stays within the public scheduling bounds");
@@ -2277,7 +2313,11 @@ static void CheckOwnedPhase(U count, U lanes, U refused, U validation = 0, bool 
     U histogram = 0;
     for (U i = loco::OwnedPhaseChunkLe16; i <= loco::OwnedPhaseChunkGt1024; ++i) histogram += phase[i];
     // Chunks claimed by a thread without a participant (overflow) are returned untimed and unprocessed.
-    EqU("chunk histogram partitions every executed chunk", histogram, chunks - phase[loco::OwnedPhaseParticipantOverflow]);
+    if (OwnedDetails()[loco::OwnedDetailQuiet]) { // --loco-quiet reads no clock per chunk: timing words stay zero, counters stay exact
+        EqU("quiet chunk histogram is not measured", histogram, 0);
+        EqU("quiet chunk time sum is not measured", phase[loco::OwnedPhaseChunkTimeSumUs], 0);
+        EqU("quiet chunk time is not measured", owned[loco::OwnedWorkerTimeUs] + owned[loco::OwnedMaxChunkUs], 0);
+    } else EqU("chunk histogram partitions every executed chunk", histogram, chunks - phase[loco::OwnedPhaseParticipantOverflow]);
     Require(phase[loco::OwnedPhaseParticipantsUsed] > 0 && phase[loco::OwnedPhaseParticipantsUsed] <= lanes,
         "participant scratch is bounded by the binding capacity");
     EqU("validation refusals are explicit", phase[loco::OwnedPhaseValidationRefusals], validation);
@@ -2411,6 +2451,7 @@ struct OwnedPlan {
     std::array<bool, kOwnedSlots> owner{}; // only this occurrence stays on the serial owner path
     U foreignTransforms = 0;
     bool quiet = false, grid = false;
+    U relink = 0, relinkMin = 1; // 0 off / 1 shadow / 2 live; parallel-apply threshold in cell operations
     U stagingRefusals = 0, classRefusals = 0, alternateRefusals = 0, unitRefusals = 0;
     std::array<bool, kOwnedSlots> attempted{}; // this occurrence entered private ports before refusing
     std::array<U, loco::OwnedDetailWordCount> details{};
@@ -2486,9 +2527,11 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
     binding.use_grid = binding.verify_grid = plan.grid;
     binding.use_quiet = plan.quiet; binding.use_shadow = plan.quiet; // quiet must override even an explicit shadow request
     binding.dispatch = &OracleDispatch; binding.pool = 0xc0111deu; binding.workers = plan.lanes - 1;
+    binding.use_relink_shadow = plan.relink == 1; binding.use_relink_workers = plan.relink == 2;
     reverseChunks = plan.reversed; dispatchLanes = plan.lanes; dispatchCalls = dispatchedChunks = dispatchMaxChunks = 0;
     concurrentChunks = plan.concurrent;
     Require(loco::Start(binding), "owned-services oracle starts through public binding");
+    loco::SetRelinkMinCellsForTest(plan.relinkMin); relinkRun = plan.relink != 0;
     Require(loco::ActivateOwned(owned.model.p(), FixtureCapacity(owned, n)), "owned arena activates for the Stage's own World.model");
     const auto activated = OwnedLoad();
     EqU("activation ran once", activated[loco::OwnedLoadCalls], 1);
@@ -2519,6 +2562,7 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
     Same(original, owned, "owned services bit-exact native state including private-prefix copyback");
     SameLog(original, owned, "owned owner callback and staging order");
     CheckGridMode(ownedRegistry, plan.grid);
+    CheckRelinkStage(plan.relink); relinkRun = false;
     {
         std::array<U, loco::StorageWordCount> storageAfter{}; loco::SampleStorage(storageAfter.data());
         std::array<U, loco::CatalogStorageWordCount> catalogAfter{}; loco::SampleCatalogStorage(catalogAfter.data());
@@ -2587,6 +2631,17 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
                               loco::OwnedNeedsCapacity, loco::OwnedNeedsDuplicate, loco::OwnedNeedsPending})
         EqU("no unrelated owner refusal", os[w], 0);
     EqU("only genuine class-wrapper occurrences get the class reason", os[loco::OwnedNeedsClassWrapper], plan.classRefusals);
+    {   // class-wrapper census: one observation per refused 0x132BA04 occurrence; the fixture's wrappers have an empty or one-entry child list
+        std::array<U, loco::CwWordCount> cw{}; loco::SampleClassWrapper(cw.data());
+        EqU("census version", cw[loco::CwVersion], 1);
+        EqU("census observes exactly the class-wrapper refusals", cw[loco::CwOccurrences], plan.classRefusals);
+        EqU("census children histogram partitions the occurrences", cw[loco::CwKids0] + cw[loco::CwKids1] + cw[loco::CwKids2Plus] + cw[loco::CwUnreadable], plan.classRefusals);
+        EqU("census aim-state histogram partitions the occurrences", cw[loco::CwState9] + cw[loco::CwState8] + cw[loco::CwStateOther], plan.classRefusals);
+        EqU("census children total", cw[loco::CwChildrenTotal], cw[loco::CwKids1] + 2 * cw[loco::CwKids2Plus]);
+        Require(cw[loco::CwKids2Plus] == 0 && cw[loco::CwVtOverflow] == 0, "fixture wrappers carry at most one child");
+        U byVtable = 0; for (U k = 0; k < 8; ++k) byVtable += cw[loco::CwVtBase + 2 * k + 1];
+        EqU("census child vtable table accounts for every non-null child", byVtable + cw[loco::CwNullChildren], cw[loco::CwChildrenTotal]);
+    }
     EqU("alternate wrapper is not battle or class wrapper", os[loco::OwnedNeedsAlternateWrapper], plan.alternateRefusals);
     EqU("only actual staging or clamp refusals get the staging reason", os[loco::OwnedNeedsStaging], plan.stagingRefusals);
     EqU("env_untested counts exactly the unvalidated environment occurrences", os[loco::OwnedNeedsEnv], plan.envRefusals);
@@ -2855,7 +2910,7 @@ static void OwnedAdmissionCases() {
         currentCase = "owned known class, unknown class, battle and alternate reasons stay distinct";
         Scenario sc = OwnedScenario(24, false);
         for (U i = 0; i < sc.agents.size(); ++i) if (i & 1) sc.agents[i] = OwnedActive(i, true);
-        sc.agents[3].vt = VtClass; // exact 132BA04 route, not an ordinary battle wrapper
+        sc.agents[3].vt = VtClass; sc.agents[3].ec = 0; sc.agents[3].b688 = 2; // exact 132BA04 route with the 0x5F3040 pre-step active: refused (an empty wrapper is admitted)
         sc.agents[12] = Callback(12, 0, 0); // unknown vtable: genuine native stage loop calls its data-slot callback
         sc.agents[15].ec = 0; sc.agents[15].b628 = 1; sc.agents[15].b62c = 4; // native alternate wrapper
         OwnedPlan plan; plan.lanes = lanes; plan.concurrent = lanes > 1; plan.reversed = reversed;
@@ -2887,8 +2942,9 @@ static void OwnedAdmissionCases() {
 
 static void OwnedValidationCases() {
     StageGatherPatch gather;
-    for (bool duplicate : {false, true}) for (U lanes : {1u, 4u, 8u}) for (bool reversed : {false, true})
+    for (U variant : {0u, 1u, 2u}) for (U lanes : {1u, 4u, 8u}) for (bool reversed : {false, true})
         for (bool quiet : {false, true}) {
+        const bool duplicate = variant == 1; // 2: the mutated later entity is an admitted empty class wrapper whose +688 the child callback sets
         currentCase = duplicate ? "owned duplicate across chunk boundaries validates at replay" :
             "owned genuine class child mutates later computed entity before replay";
         Scenario sc = OwnedScenario(96, false);
@@ -2897,6 +2953,7 @@ static void OwnedValidationCases() {
         else {
             sc.agents[0].vt = VtClass; sc.agents[0].classMutate = true; sc.agents[0].arg = staleOrdinal;
             sc.agents[0].unit = sc.agents[staleOrdinal].unit = 1;
+            if (variant == 2) { sc.agents[staleOrdinal].vt = VtClass; classMutateOffset = 0x688; classMutateBits = 2; }
         }
         const U count = U(sc.list.size()), preRefused = duplicate ? 0u : 1u;
         World original(sc), serial(sc), owned(sc);
@@ -2948,7 +3005,7 @@ static void OwnedValidationCases() {
         EqU("all other ordinals still commit", ps[loco::ParallelCommitted], count - preRefused - 1);
         EqU("one stale occurrence has an own validation refusal", os[loco::OwnedNeedsUnit], 1);
         EqU("one actual class wrapper, never its sibling", os[loco::OwnedNeedsClassWrapper], preRefused);
-        EqU("detail counts only actual class wrapper", detail[loco::OwnedDetailClassWrapper], preRefused);
+        EqU("detail counts observed class wrappers (variant 2: the stale class target is observed again natively)", detail[loco::OwnedDetailClassWrapper], preRefused + (variant == 2 ? 1u : 0u));
         for (U w : {loco::OwnedDetailUnitClass, loco::OwnedDetailUnitStaging, loco::OwnedDetailUnitOther})
             EqU("obsolete unit-blocked detail remains zero", detail[w], 0);
         EqU("ordinal-keyed observer is race-free for duplicate identities", ownedBad, 0);
@@ -2967,6 +3024,7 @@ static void OwnedValidationCases() {
             OwnedOrdinals(2, i, i, "validated replay service has absolute ordinal");
         }
         CallStop(); ++cases;
+        classMutateOffset = 0xd4; classMutateBits = 0x40800000u;
     }
 }
 
@@ -3706,9 +3764,73 @@ static void ServiceAbiCases() {
     Require(Services() == retained, "ABI probe Stop retains completed timing");
 }
 
+#include "native_loco_grid_bulk.h"
+#include "native_loco_relink_cases.h"
+#include "native_loco_classwrap_cases.h"
+
+namespace ntw2_loco { void DebugGrid(long long*); } // per-phase chunk CPU accumulators, compiled only into this oracle
+static U gBenchMoving = 100;
+static void __fastcall NullChunk(void*, U) {}
+static void GridBench(U lanes, U stages) {
+    std::printf("grid build bench: realistic fixture, %u participants (workers+caller), %u stages\n", lanes, stages);
+    { // fixed cost of the pool: an empty 2-dispatch build right after an idle gap (workers asleep on their events) vs back to back
+        bulk::g_pool.Start(lanes - 1); LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f);
+        std::vector<double> idle, hot;
+        for (U i = 0; i < 300; ++i) {
+            Sleep(3);
+            QueryPerformanceCounter(&a);
+            bulk::g_pool.Dispatch(Fn(&NullChunk), lanes * 3, nullptr); bulk::g_pool.Dispatch(Fn(&NullChunk), lanes * 3, nullptr);
+            QueryPerformanceCounter(&b); idle.push_back(double(b.QuadPart - a.QuadPart) * 1e6 / double(f.QuadPart));
+        }
+        for (U i = 0; i < 300; ++i) {
+            QueryPerformanceCounter(&a);
+            bulk::g_pool.Dispatch(Fn(&NullChunk), lanes * 3, nullptr); bulk::g_pool.Dispatch(Fn(&NullChunk), lanes * 3, nullptr);
+            QueryPerformanceCounter(&b); hot.push_back(double(b.QuadPart - a.QuadPart) * 1e6 / double(f.QuadPart));
+        }
+        bulk::g_pool.Shutdown();
+        std::sort(idle.begin(), idle.end()); std::sort(hot.begin(), hot.end());
+        std::printf("  empty 2-dispatch build: after a 3 ms idle gap p50 %.1f p90 %.1f us; back to back p50 %.1f us\n",
+            idle[idle.size() / 2], idle[idle.size() * 9 / 10], hot[hot.size() / 2]);
+    }
+    for (const bool cold : {false, true}) for (const bool incremental : {false, true}) {
+        bulk::Config cfg;
+        bulk::World world(cfg);
+        long long dbg[8]; ntw2_loco::DebugGrid(dbg);
+        const bulk::PhaseRow r = bulk::Bench(world, lanes, incremental, stages, 8, gBenchMoving, cold);
+        ntw2_loco::DebugGrid(dbg);
+        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+        std::printf("  %-4s %-11s registry %7.1f  capture %7.1f  plan %7.1f  build %7.1f  total %7.1f us  (call %7.1f)  full=%u inc=%u changed=%u reuse=%u\n",
+            cold ? "cold" : "warm", incremental ? "incremental" : "full", r.registry, r.capture, r.plan, r.build, r.total, r.call,
+            r.full, r.incremental, r.changed, r.reuses);
+        std::printf("       chunk cpu us/stage: capture records %.0f, committed map %.0f, strip scan %.0f, scatter %.0f\n",
+            dbg[0] * 1e6 / f.QuadPart / (stages + 8), dbg[1] * 1e6 / f.QuadPart / (stages + 8), dbg[2] * 1e6 / f.QuadPart / (stages + 8), dbg[3] * 1e6 / f.QuadPart / (stages + 8));
+    }
+}
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 3) { std::fprintf(stderr, "usage: native_loco_oracle Napoleon.exe [--owned-restart]\n"); return 2; }
+    if (argc < 2 || argc > 6) { std::fprintf(stderr, "usage: native_loco_oracle Napoleon.exe [--owned-restart | --movement-cases | --grid-bench [lanes [stages [moving%]]] | --relink-bench [lanes [movers]]]\n"); return 2; }
     Map(argv[1]); InstallHostSlots();
+    if (argc >= 3 && !std::strcmp(argv[2], "--relink-bench")) {
+        const U lanes = argc >= 4 ? static_cast<U>(std::atoi(argv[3])) : 9u, movers = argc >= 5 ? static_cast<U>(std::atoi(argv[4])) : 32768u;
+        for (const bool clustered : {true, false}) for (const U perBatch : {4096u, 32768u}) for (const U minCells : {2048u, 1u << 30})
+            relinkcase::BenchFixture(lanes, movers, 40, clustered, perBatch, minCells);
+        return 0;
+    }
+    if (argc == 3 && !std::strcmp(argv[2], "--grid-cases")) { // the multi-stage bulk grid equality cases alone
+        bulk::GridSequenceCases(); bulk::GridRealisticEquality();
+        std::printf("PASS bulk grid cases=%u checks=%u\n", cases, checks);
+        return 0;
+    }
+    if (argc >= 3 && !std::strcmp(argv[2], "--grid-bench")) {
+        if (argc >= 6) gBenchMoving = static_cast<U>(std::atoi(argv[5]));
+        GridBench(argc >= 4 ? static_cast<U>(std::atoi(argv[3])) : 9u, argc >= 5 ? static_cast<U>(std::atoi(argv[4])) : 200u);
+        return 0;
+    }
+    if (argc == 3 && !std::strcmp(argv[2], "--movement-cases")) { // slices B/C only (relink apply, class-wrapper admission) plus the owned admission/validation suites they extend
+        relinkcase::RelinkCases(); relinkcase::RelinkStubAbiCase(); relinkcase::OwnedRelinkCases();
+        classwrap::ClassWrapperCases(); OwnedServiceCases(); OwnedAdmissionCases(); OwnedValidationCases(); OwnedParticipantOverflowCases(); OwnedFaultCases(); OwnedActivationCases();
+        std::printf("PASS movement cases=%u checks=%u\n", cases, checks);
+        return 0;
+    }
     if (argc == 3) {
         Require(!std::strcmp(argv[2], "--owned-restart"), "known oracle selection");
         OwnedCombinedRestartCase();
@@ -3736,6 +3858,9 @@ int main(int argc, char** argv) {
     OwnedServiceCases(); OwnedAdmissionCases(); OwnedValidationCases(); OwnedParticipantOverflowCases(); OwnedFaultCases(); OwnedActivationCases();
     OwnedCapacityStorageCases(); OwnedFootprintLayoutCases(); OwnedFootprintMutationCases();
     OwnedCombinedRestartCase();
+    relinkcase::RelinkCases(); relinkcase::RelinkStubAbiCase(); relinkcase::OwnedRelinkCases();
+    bulk::GridSequenceCases(); bulk::GridRealisticEquality();
+    classwrap::ClassWrapperCases();
     std::printf("PASS native loco oracle cases=%u checks=%u allocations=%zu frees=%zu\n", cases, checks, g_allocs.size(), g_frees.size());
     return 0;
 }

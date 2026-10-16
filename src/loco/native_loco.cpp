@@ -16,6 +16,8 @@
 #include "native_sweep.h"
 #include "native_resolve.h"
 #include "native_env.h"
+#include "native_move_delta.h"
+#include "native_relink.h"
 
 static_assert(sizeof(void*) == 4, "native locomotion is a Win32 x86 adapter");
 
@@ -68,40 +70,65 @@ constexpr U kParallelRun = 256, kParallelChunks = 32, kPrivateBytes = 0x1DC;
 // are split into at most kGridStrips equal strips; a strip is the unit of ownership of both the per-chunk membership
 // accounting (dispatch 1) and the cell scan/scatter (dispatch 2). Cells carry bit 31 while they hold a build tally.
 constexpr U kGridStrips = 64, kGridMaxTasks = 2 * kParallelChunks, kGridTag = 0x80000000u, kNoSlot = ~0u;
-U g_gridWords[GridWordCount], g_gridV2Words[GridV2WordCount], g_parallelWords[ParallelWordCount];
+U g_gridWords[GridWordCount], g_gridV2Words[GridV2WordCount], g_gridBuildWords[GridBuildWordCount], g_parallelWords[ParallelWordCount];
+LONGLONG g_gridBuildTicks[4]; // registry, capture wall, plan, build wall: owner QPC ticks summed over successful builds
 // Cross-epoch identity (the only per-record state the NEXT capture reads from the previous one). Double buffered
 // and flipped; everything else in the published view is single-buffered and rewritten in place, because a view
 // is invalid from Stage entry / CaptureGrid entry onward.
 struct GridIdentity {
-    U count, occupied, memberships, epoch;
+    U count, occupied, memberships, epoch, reg; // reg: index of the registry buffer pair (record array + hash) this identity uses
     U *record, *serial, *incarnation, *active, *inserted, *hash;
 };
 struct alignas(64) GridChunkStat {
     U committed, fromRecord, births, reused, deactivations, removals;
-    U birthBase, removed;
+    U birthBase, removed, multis, changed, tallied;
 };
+// Everything besides the record bytes themselves that a published rectangle and a native cell address depend on. An
+// incremental build requires it to equal the previous publication's, rounding control included.
+struct GridGeometry { U shift, origin, maximum, nativeCells, model, scaleBits, bumpBits, mxcsr, cw; };
 struct GridStore {
     ntw2_workload::Capacity cap;
     U chunks, hashSize, rowCap, slotMask;
     unsigned char* base;
     size_t bytes, allocBytes;
     GridIdentity id[2];
+    U current; // index of the identity holding the last publication
+    // Registry buffers: record array + identity hash in two pairs. Each identity points into one pair. A build whose primary
+    // and secondary registry arrays are word-identical to the last publication's (regValid) shares that pair, so the
+    // serial hash construction and every identity lookup disappear; a changed registry builds into the other pair.
+    U *regRecord[2], *regHash[2], *rawSecondary;
+    U regPrimary, regSecondary;
+    bool regValid;
     U *team, *flags, *nodeType, *left, *right, *top, *bottom;
     float *x, *z, *y, *extent, *radius;
     // dense: published cell -> row+1; during a build the same words hold the bit-31 tagged membership tally.
     // fill: per-row scatter cursor. stripMembers/stripRows: chunk-major [chunks][kGridStrips] build accounting.
     U *committed, *dense, *cellIds, *offsets, *occupants, *fill, *stripMembers, *stripRows;
+    // Dispatch-1 output for dispatch 2: per record chunk, the inserted records that sit in exactly one z strip ordered by
+    // strip (bucketSingle, strip k = [bucketStart[k], bucketStart[k+1])) and the records that span several strips
+    // (bucketMulti; bucketCap words each per chunk, count in the chunk's stats). Both ascend by record slot.
+    U *bucketSingle, *bucketMulti, *bucketStart, bucketCap;
     GridChunkStat* stats;
+    // Incremental state (arrays carved only with grid_incremental): cnt = members per native cell of the published CSR (the
+    // dense map cannot carry it: it must hold row+1); sig* = the +A8/+B0/+5C inputs of the build that last wrote each
+    // record's rectangle; totals = members/rows per z strip of the publication. incValid: all of it, the published rects
+    // and the dense map describe the same publication, so the next build may patch instead of recount.
+    U *cnt, *sigNodes, *sigCap, *sigBump;
+    U totalMembers[kGridStrips], totalRows[kGridStrips];
+    GridGeometry geometry;
+    bool incremental, incValid;
+    U hold, holdLevel; // full builds still to run after an incremental build whose change share was too high; backoff level
+    // Dense-map invariant: every word outside a live strip is zero. Dirty = a build started and never completed, so
+    // the map may hold residual tallies anywhere and the next build clears all of it before counting.
+    bool denseDirty;
+    bool stripLive[kGridStrips];
+    U liveStripHeight, liveShift; // geometry the live strips were published under
 };
-GridStore g_gridStore;
+GridStore g_gridStore, g_gridShadowStore; // the shadow store (diagnostic full rebuild) is only allocated with grid_incremental+verify
 GridStore* g_grid; // null until ActivateOwned allocates the block
+GridStore* g_gridShadow;
 U g_gridModel;
-U g_gridCurrent, g_incarnation, g_storageBytes;
-// Dense-map invariant: every word outside a live strip is zero. Dirty = a build started and never completed, so
-// the map may hold residual tallies anywhere and the next build clears all of it before counting.
-bool g_gridDenseDirty;
-bool g_gridStripLive[kGridStrips];
-U g_gridLiveStripHeight, g_gridLiveShift; // geometry the live strips were published under
+U g_incarnation, g_storageBytes;
 U g_storageWords[StorageWordCount]; // cached allocation breakdown; first eight words sum to g_storageBytes
 U g_catalogStorage[CatalogStorageWordCount]; // cached catalog geometry breakdown; first five sum to StorageCatalog
 static_assert(CatalogStorageWordCount == ntw2_resolve::CatalogStorageWordCount, "catalog breakdown width");
@@ -205,7 +232,7 @@ static_assert(OutputsProtected(), "every committed dword is guarded or rewritten
 static_assert(WrapperGroupsDisjoint(), "wrapper-only outputs never overlap the common outputs");
 struct OwnedSlot {
     U entity, services, inputPredicate;
-    unsigned char reason, detail, serviceCount, active, wrapper, readsPredicate, inputLatch, resultLatches[2], readsLinkByte, inputLinkByte, spare;
+    unsigned char reason, detail, serviceCount, active, wrapper, readsPredicate, inputLatch, resultLatches[2], readsLinkByte, inputLinkByte, classWrapper;
     unsigned char guard[kGuardBytes];
     unsigned char output[kOutputBytes + kWrapperBytes];
 };
@@ -296,6 +323,10 @@ struct OwnedParticipant {
     OwnedCurrent current{};
     LONGLONG maximum = 0;
     ULONGLONG cpu100ns = 0, cpuAtMaximum100ns = 0;
+    // Per-dispatch chunk accounting, written only by the thread that acquired this participant and folded by PrepareOwned after
+    // the join (no locked operation per chunk). Timing/CPU/histogram are measured only outside --loco-quiet.
+    U computed = 0, refused = 0, chunks = 0, inlineChunks = 0, chunkTimeUs = 0, histogram[8] = {};
+    bool isOwner = false;
     // Private receiver. Bytes outside the copied prefix/latches/+67C are never read by the closed closure and stay zero.
     alignas(64) unsigned char work[kOwnedBytes]{};
 };
@@ -317,8 +348,7 @@ struct OwnedArena {
     U failureReason = OwnedNeedsUnit;
     unsigned short cw = 0;
     bool valid = false;
-    volatile LONG epoch = 0, nextParticipant = 0, overflow = 0, computed = 0, refused = 0, chunkTimeUs = 0;
-    volatile LONG histogram[kOwnedHistogram] = {};
+    volatile LONG epoch = 0, nextParticipant = 0, overflow = 0;
 };
 static_assert(sizeof(OwnedSlot) == kOwnedSlotBytes, "published movement slot width");
 OwnedArena* g_owned;
@@ -346,7 +376,7 @@ struct ParallelJob { U count, chunks, owner, mxcsr; unsigned short cw; };
 enum GridPhase : U { GridPhaseCapture, GridPhaseBuild, GridPhaseVerify };
 // Contiguous run of active strips owned by one build task: it scans those strips' cells, assigns rows and
 // membership offsets from the exact bases the owner computed, and scatters the records that touch them.
-struct GridTask { U first, last, rowBase, rowEnd, memberBase, memberEnd, zLo, zHi; };
+struct GridTask { U first, last, rowBase, rowEnd, memberBase, memberEnd; };
 // One normal build = exactly two dispatches, with only owner work in between:
 //   1. capture (record chunks): snapshot, identity, node validation, bounds, per-cell tally, per-chunk strip totals,
 //      committed-ordinal -> slot mapping;
@@ -362,9 +392,13 @@ struct GridJob {
     U phase, chunks, tasks, members, rows, incarnationBase, committedCount;
     U shift, origin, maximum, cells, nativeCells, mxcsr, stripHeight, strips, activeStrips;
     float scale, bump;
+    U stable, stripBits; // stable: registry shared with the previous publication; stripBits: log2(stripHeight), 32 if not a power of two
+    CoverGeometry geometry;
+    U incremental, shadow; // incremental: patch the previous publication's counts; shadow: diagnostic rebuild, no global accounting
     unsigned short cw;
     volatile LONG failure, mismatches, unsupported, nativeMembers;
-    U active[kGridStrips], stripRows[kGridStrips];
+    LONGLONG wallTicks[3]; // owner QPC wall of each dispatch kind (capture, build, verify)
+    U active[kGridStrips], stripRows[kGridStrips], stripMembers[kGridStrips];
     GridTask task[kGridMaxTasks];
 };
 
@@ -382,18 +416,8 @@ inline U Microseconds(LONGLONG ticks) {
 }
 
 inline float Float(U address) { return *reinterpret_cast<const float*>(static_cast<uintptr_t>(address)); }
-inline float GridAdd(float a, float b) { return _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(a), _mm_set_ss(b))); }
-inline float GridSub(float a, float b) { return _mm_cvtss_f32(_mm_sub_ss(_mm_set_ss(a), _mm_set_ss(b))); }
-U GridCoordinate(float value, const GridJob& job) {
-    float scaled = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(value), _mm_set_ss(job.scale))), half = -0.5f;
-    int rounded;
-    __asm { fld scaled }
-    __asm { fadd st(0), st(0) }
-    __asm { fadd half }
-    __asm { fistp rounded }
-    const U coordinate = static_cast<U>(rounded >> 1) + job.origin;
-    return coordinate < job.maximum ? coordinate : job.maximum;
-}
+inline U GridStripOf(const GridJob& job, U z) { return job.stripBits < 32 ? z >> job.stripBits : z / job.stripHeight; }
+inline bool SameWords(const void* a, const void* b, U words) { return !words || !memcmp(a, b, static_cast<size_t>(words) * sizeof(U)); }
 void Prefault(void* base, size_t bytes);
 // Hash capacity: power of two, at most 2/3 loaded at full record capacity.
 U HashSizeFor(U records) { U size = 16; while (size < records + records / 2 + 1) size <<= 1; return size; }
@@ -404,9 +428,9 @@ bool ValidCapacity(const ntw2_workload::Capacity& c) {
         c.records <= kMaxRecords && c.cells <= kMaxCells && c.memberships <= kMaxMembers;
 }
 // Carves (or, with base==null, only sizes) the single grid block. Each array is padded to 64 bytes.
-// words: identity 2*(5R+H) | view 12R | committed R | dense C | cellIds Q | offsets Q+1 | occupants M | fill Q |
-// stripMembers chunks*64 | stripRows chunks*64 | stats chunks*64B, with
-// R=records, H=HashSizeFor(R), Q=min(cells,memberships), M=memberships, C=cells.
+// words: identity 2*4R | registry 2*(R+H) | rawSecondary R | view 12R | committed R | dense C | cellIds Q | offsets Q+1 |
+// occupants M | fill Q | stripMembers chunks*64 | stripRows chunks*64 | buckets 2*chunks*ceil(R/chunks) + chunks*65 |
+// stats chunks*64B, with R=records, H=HashSizeFor(R), Q=min(cells,memberships), M=memberships, C=cells.
 struct GridCarve {
     unsigned char* base;
     unsigned long long offset;
@@ -416,15 +440,17 @@ struct GridCarve {
         return p;
     }
 };
-unsigned long long CarveGrid(const ntw2_workload::Capacity& c, U chunks, GridStore& s, unsigned char* base) {
+unsigned long long CarveGrid(const ntw2_workload::Capacity& c, U chunks, GridStore& s, unsigned char* base, bool incremental) {
     GridCarve m = {base, 0};
     const U R = c.records, H = HashSizeFor(R), C = c.cells, M = c.memberships, Q = (std::min)(C, M);
     s.cap = c; s.chunks = chunks; s.hashSize = H; s.rowCap = Q;
     s.slotMask = (1u << BitsFor(R + 1)) - 1; // identity hash entries carry slot+1 in the low bits and a hash tag above
     for (GridIdentity& id : s.id) {
-        id.record = m.Take<U>(R); id.serial = m.Take<U>(R); id.incarnation = m.Take<U>(R);
-        id.active = m.Take<U>(R); id.inserted = m.Take<U>(R); id.hash = m.Take<U>(H);
+        id.serial = m.Take<U>(R); id.incarnation = m.Take<U>(R); id.active = m.Take<U>(R); id.inserted = m.Take<U>(R);
     }
+    for (U k = 0; k < 2; ++k) { s.regRecord[k] = m.Take<U>(R); s.regHash[k] = m.Take<U>(H); }
+    s.rawSecondary = m.Take<U>(R);
+    for (U k = 0; k < 2; ++k) { s.id[k].record = s.regRecord[k]; s.id[k].hash = s.regHash[k]; s.id[k].reg = k; }
     s.team = m.Take<U>(R); s.flags = m.Take<U>(R); s.nodeType = m.Take<U>(R);
     s.left = m.Take<U>(R); s.right = m.Take<U>(R); s.top = m.Take<U>(R); s.bottom = m.Take<U>(R);
     s.x = m.Take<float>(R); s.z = m.Take<float>(R); s.y = m.Take<float>(R); s.extent = m.Take<float>(R); s.radius = m.Take<float>(R);
@@ -433,46 +459,66 @@ unsigned long long CarveGrid(const ntw2_workload::Capacity& c, U chunks, GridSto
     s.occupants = m.Take<U>(M); s.fill = m.Take<U>(Q);
     s.stripMembers = m.Take<U>(static_cast<unsigned long long>(chunks) * kGridStrips);
     s.stripRows = m.Take<U>(static_cast<unsigned long long>(chunks) * kGridStrips);
+    s.bucketCap = (R + chunks - 1) / chunks;
+    s.bucketSingle = m.Take<U>(static_cast<unsigned long long>(chunks) * s.bucketCap);
+    s.bucketMulti = m.Take<U>(static_cast<unsigned long long>(chunks) * s.bucketCap);
+    s.bucketStart = m.Take<U>(static_cast<unsigned long long>(chunks) * (kGridStrips + 1));
     s.stats = m.Take<GridChunkStat>(chunks);
+    s.incremental = incremental;
+    if (incremental) { s.cnt = m.Take<U>(C); s.sigNodes = m.Take<U>(R); s.sigCap = m.Take<U>(R); s.sigBump = m.Take<U>(R); }
     return m.offset;
 }
-bool AllocateGrid(const ntw2_workload::Capacity& c) {
-    const U chunks = (std::min)(kParallelChunks, (std::max)(1u, g_binding.workers + 1));
+// Reserves, carves and prefaults one store (page-rounded single block).
+bool AllocateStore(GridStore& store, const ntw2_workload::Capacity& c, U chunks, bool incremental) {
     GridStore plan = {};
-    const unsigned long long bytes = CarveGrid(c, chunks, plan, nullptr);
+    const unsigned long long bytes = CarveGrid(c, chunks, plan, nullptr, incremental);
     if (bytes > 0x7FFFFFFFull) return false;
     const unsigned long long allocation = (bytes + 4095) & ~4095ull;
     unsigned char* const base = static_cast<unsigned char*>(
         VirtualAlloc(nullptr, static_cast<SIZE_T>(allocation), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!base) return false;
-    g_gridStore = GridStore{};
-    CarveGrid(c, chunks, g_gridStore, base);
-    g_gridStore.base = base; g_gridStore.bytes = static_cast<size_t>(bytes);
-    g_gridStore.allocBytes = static_cast<size_t>(allocation);
+    store = GridStore{};
+    CarveGrid(c, chunks, store, base, incremental);
+    store.base = base; store.bytes = static_cast<size_t>(bytes);
+    store.allocBytes = static_cast<size_t>(allocation);
     Prefault(base, static_cast<size_t>(allocation)); // every page, before hook publication
-    g_grid = &g_gridStore;
-    g_gridCurrent = 0; g_gridDenseDirty = false; g_gridLiveStripHeight = g_gridLiveShift = 0;
-    memset(g_gridStripLive, 0, sizeof(g_gridStripLive));
-    g_gridWords[GridBytes] = static_cast<U>(bytes);
     return true;
 }
 void ReleaseGrid() {
     if (g_gridStore.base) VirtualFree(g_gridStore.base, 0, MEM_RELEASE);
-    g_gridStore = GridStore{};
-    g_grid = nullptr;
+    if (g_gridShadowStore.base) VirtualFree(g_gridShadowStore.base, 0, MEM_RELEASE);
+    g_gridStore = GridStore{}; g_gridShadowStore = GridStore{};
+    g_grid = g_gridShadow = nullptr;
+}
+// Record chunks of the grid dispatches: several per participant, claimed dynamically, so a participant that is slow (shared
+// core, descheduled, cold lines) does not decide the wall time of the whole dispatch.
+constexpr U kGridChunksPerParticipant = 3;
+U GridChunkCount() { return (std::min)(kParallelChunks, (std::max)(1u, g_binding.workers + 1) * kGridChunksPerParticipant); }
+bool AllocateGrid(const ntw2_workload::Capacity& c) {
+    const U chunks = GridChunkCount();
+    if (!AllocateStore(g_gridStore, c, chunks, g_binding.grid_incremental)) return false;
+    // --loco-grid-incremental with verification keeps a second, non-incremental store that every stage rebuilds in full.
+    if (g_binding.grid_incremental && g_binding.verify_grid && !AllocateStore(g_gridShadowStore, c, chunks, false)) {
+        ReleaseGrid(); return false;
+    }
+    g_grid = &g_gridStore; g_gridShadow = g_gridShadowStore.base ? &g_gridShadowStore : nullptr;
+    g_gridWords[GridBytes] = static_cast<U>(g_gridStore.bytes);
+    return true;
 }
 bool GridCovers(const ntw2_workload::Capacity& c) {
     const ntw2_workload::Capacity& a = g_gridStore.cap;
     return c.primary <= a.primary && c.records <= a.records && c.cells <= a.cells && c.memberships <= a.memberships;
 }
 U SaturatedWord(unsigned long long value) { return value > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<U>(value); }
+size_t RelinkStorageBytes(); // relink op log + shadow mirror, accounted with the grid block
 // Every owned allocation, retained capacities included, split into the cached breakdown. Called once per
 // activation event, never per tick. The first eight words sum to the returned total (barring saturation).
 U ComputeStorage() {
     unsigned long long movement = 0, grid = 0, scene = 0, catalog = 0, participants = 0, sweep = 0, resolve = 0, env = 0;
     memset(g_storageWords, 0, sizeof(g_storageWords)); memset(g_catalogStorage, 0, sizeof(g_catalogStorage));
     if (g_workers) participants += sizeof(WorkerArena);
-    if (g_grid) grid = g_gridStore.allocBytes;
+    if (g_grid) grid = g_gridStore.allocBytes + g_gridShadowStore.allocBytes;
+    grid += RelinkStorageBytes();
     if (g_owned) {
         const OwnedArena& arena = *g_owned;
         participants += sizeof(OwnedArena);
@@ -541,6 +587,22 @@ inline bool GridTally(U& word) {
         current = seen;
     }
 }
+// Software prefetch for dispatch 1. Records are scattered heap objects, so their lines (pose/serial/flags, +A8..+B3) and
+// node blocks are the dominant misses of a capture; the registry order is known, so the lines are requested a few
+// records ahead (record lines far ahead, the node block, whose address lives in the record, closer).
+constexpr U kGridPrefetchFar = 8, kGridPrefetchNear = 4;
+inline void GridPrefetchRecord(const GridJob& job, U record) {
+    if (!record) return;
+    const char* const p = static_cast<const char*>(P(record));
+    _mm_prefetch(p + 0x2C, _MM_HINT_T0); _mm_prefetch(p + 0x5C, _MM_HINT_T0);
+    _mm_prefetch(p + 0xA8, _MM_HINT_T0); _mm_prefetch(p + 0xB3, _MM_HINT_T0);
+    if (!job.stable) _mm_prefetch(reinterpret_cast<const char*>(job.old->hash + (GridHash(record) & (job.store->hashSize - 1))), _MM_HINT_T0);
+}
+inline void GridPrefetchNodes(U record) {
+    if (!record) return;
+    const char* const nodes = static_cast<const char*>(P(D(record + 0xA8)));
+    _mm_prefetch(nodes, _MM_HINT_T0); _mm_prefetch(nodes + 0x40, _MM_HINT_T0); _mm_prefetch(nodes + 0x6C, _MM_HINT_T0);
+}
 // Dispatch 1 (record chunks): snapshot, identity, node validation, bounds, per-cell tally, per-chunk strip totals.
 void GridCaptureRecord(GridJob& job, U i, U chunk) {
     GridStore& s = *job.store;
@@ -553,7 +615,7 @@ void GridCaptureRecord(GridJob& job, U i, U chunk) {
         s.x[i] = s.y[i] = s.z[i] = s.extent[i] = s.radius[i] = 0; return; }
     b.serial[i] = D(record + 0x2C); s.team[i] = D(record + 0x44); s.flags[i] = D(record + 0x38);
     b.active[i] = B(record + 0x30); b.inserted[i] = D(record + 0xAC);
-    const U previous = GridSlot(s, old, record);
+    const U previous = job.stable ? i : GridSlot(s, old, record); // a shared registry keeps every record at its slot
     if (previous < old.count && old.serial[previous] == b.serial[i]) {
         b.incarnation[i] = old.incarnation[previous];
         stat.deactivations += old.active[previous] && !b.active[i];
@@ -568,16 +630,17 @@ void GridCaptureRecord(GridJob& job, U i, U chunk) {
     memcpy(&s.z[i], pose + 8, sizeof(float)); memcpy(&s.extent[i], pose + 12, sizeof(float));
     memcpy(&s.radius[i], pose + 16, sizeof(float));
     if (!b.inserted[i]) return; // AC, not activity/A1, owns grid absence.
-    const U nodes = D(record + 0xA8);
-    const float radius = B(record + 0x5C) == 1 ? GridAdd(s.radius[i], job.bump) : s.radius[i];
-    const U left = GridCoordinate(GridSub(s.x[i], radius), job), right = GridCoordinate(GridAdd(s.x[i], radius), job);
-    const U top = GridCoordinate(GridSub(s.z[i], radius), job), bottom = GridCoordinate(GridAdd(radius, s.z[i]), job);
-    if (!nodes || left > right || top > bottom || b.inserted[i] > D(record + 0xB0) ||
+    const U nodes = D(record + 0xA8), cap = D(record + 0xB0);
+    const bool bump = B(record + 0x5C) == 1;
+    const CoverRect rect = CoverRecord(s.x[i], s.z[i], s.radius[i], bump, job.geometry);
+    const U left = rect.left, right = rect.right, top = rect.top, bottom = rect.bottom;
+    if (!nodes || left > right || top > bottom || b.inserted[i] > cap ||
         static_cast<unsigned long long>(right - left + 1) * (bottom - top + 1) != b.inserted[i]) {
         GridMismatch(job); return;
     }
     s.left[i] = left; s.right[i] = right; s.top[i] = top; s.bottom[i] = bottom;
     s.nodeType[i] = D(nodes);
+    if (s.sigNodes) { s.sigNodes[i] = nodes; s.sigCap[i] = cap; s.sigBump[i] = bump; } // inputs of this rectangle
     U* const stripMembers = s.stripMembers + static_cast<size_t>(chunk) * kGridStrips;
     U* const stripRows = s.stripRows + static_cast<size_t>(chunk) * kGridStrips;
     U n = 0;
@@ -591,15 +654,146 @@ void GridCaptureRecord(GridJob& job, U i, U chunk) {
             }
             fresh += GridTally(s.dense[cell]);
         }
-        const U strip = z / job.stripHeight;
+        const U strip = GridStripOf(job, z);
         stripMembers[strip] += right - left + 1; stripRows[strip] += fresh;
     }
 }
+struct GridRect { U left, right, top, bottom; };
+// Incremental tally: adds d (+1/-1) to the member count of every cell of `r` that is not inside `other` (the other half of a
+// rectangle change applies the opposite sign there, so shared cells need no traffic). The count before the atomic add says
+// whether the cell appeared (0 -> 1, a new row) or disappeared (1 -> 0). Summed over any interleaving those events are
+// exactly [count after > 0] - [count before > 0] per cell (counts never go negative: every removal belongs to a record that
+// was a member), so the per-strip row and member deltas are schedule independent.
+void GridDeltaRect(const GridJob& job, GridStore& s, U chunk, const GridRect& r, const GridRect* other, LONG d) {
+    U* const members = s.stripMembers + static_cast<size_t>(chunk) * kGridStrips;
+    U* const rows = s.stripRows + static_cast<size_t>(chunk) * kGridStrips;
+    for (U z = r.top; z <= r.bottom; ++z) {
+        const bool shared = other && z >= other->top && z <= other->bottom;
+        LONG moved = 0, events = 0;
+        for (U x = r.left; x <= r.right; ++x) {
+            if (shared && x >= other->left && x <= other->right) { x = other->right; continue; }
+            const LONG before = _InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&s.cnt[(z << job.shift) + x]), d);
+            moved += d; events += d > 0 ? (before == 0) : -(before == 1);
+        }
+        const U strip = GridStripOf(job, z);
+        members[strip] += static_cast<U>(moved); rows[strip] += static_cast<U>(events);
+    }
+}
+inline void GridStoreChanged(U& word, U value) { if (word != value) word = value; }
+inline void GridStoreBitsChanged(float& word, U bits) { U current; memcpy(&current, &word, sizeof(U)); if (current != bits) memcpy(&word, &bits, sizeof(U)); }
+// Dispatch 1, incremental form (registry shared with the previous publication, same geometry): every record is re-read, but
+// only a record whose rectangle inputs changed pays for coverage, node validation and the delta tally. A record whose
+// coverage inputs (identity, +AC, x/z/radius, +5C, +A8, +B0) equal the ones its rectangle was built from keeps rectangle,
+// node type and memberships: the node chain is a function of those inputs (a mismatch refuses the full build as well).
+void GridCaptureRecordDelta(GridJob& job, U i, U chunk) {
+    GridStore& s = *job.store;
+    GridIdentity& b = *job.next;
+    const GridIdentity& old = *job.old;
+    GridChunkStat& stat = s.stats[chunk];
+    const U record = b.record[i];
+    if (!record) { b.serial[i] = b.incarnation[i] = b.active[i] = b.inserted[i] = 0; return; } // slot was empty in both publications
+    const U serial = D(record + 0x2C), inserted = D(record + 0xAC), oldInserted = old.inserted[i];
+    const uint8_t activity = B(record + 0x30);
+    b.serial[i] = serial; b.active[i] = activity; b.inserted[i] = inserted;
+    GridStoreChanged(s.team[i], D(record + 0x44)); GridStoreChanged(s.flags[i], D(record + 0x38));
+    const bool sameIdentity = old.serial[i] == serial;
+    if (sameIdentity) {
+        b.incarnation[i] = old.incarnation[i];
+        stat.deactivations += old.active[i] && !activity;
+        stat.removals += oldInserted && !inserted;
+    } else { b.incarnation[i] = 0; ++stat.births; ++stat.reused; } // the slot held this record before: an address reuse
+    U pose[5], was[3];
+    memcpy(pose, P(record + 0x48), sizeof(pose)); // x, y, z, extent, radius
+    memcpy(&was[0], &s.x[i], 4); memcpy(&was[1], &s.z[i], 4); memcpy(&was[2], &s.radius[i], 4);
+    // Single-buffered snapshot arrays are only written where the value moved: lines nobody changed stay clean and shared.
+    GridStoreBitsChanged(s.x[i], pose[0]); GridStoreBitsChanged(s.y[i], pose[1]); GridStoreBitsChanged(s.z[i], pose[2]);
+    GridStoreBitsChanged(s.extent[i], pose[3]); GridStoreBitsChanged(s.radius[i], pose[4]);
+    const U nodes = D(record + 0xA8), cap = D(record + 0xB0);
+    const bool bump = B(record + 0x5C) == 1;
+    if (!inserted) { // AC, not activity/A1, owns grid absence
+        if (oldInserted) {
+            const GridRect prior = {s.left[i], s.right[i], s.top[i], s.bottom[i]};
+            GridDeltaRect(job, s, chunk, prior, nullptr, -1);
+            s.left[i] = s.right[i] = s.top[i] = s.bottom[i] = s.nodeType[i] = 0;
+            ++stat.changed; ++stat.tallied;
+        }
+        return;
+    }
+    if (sameIdentity && inserted == oldInserted && pose[0] == was[0] && pose[2] == was[1] && pose[4] == was[2] &&
+        bump == (s.sigBump[i] != 0) && nodes == s.sigNodes[i] && cap == s.sigCap[i]) return;
+    ++stat.changed;
+    const CoverRect rect = CoverRecord(s.x[i], s.z[i], s.radius[i], bump, job.geometry);
+    const U left = rect.left, right = rect.right, top = rect.top, bottom = rect.bottom;
+    if (!nodes || left > right || top > bottom || inserted > cap ||
+        static_cast<unsigned long long>(right - left + 1) * (bottom - top + 1) != inserted) {
+        GridMismatch(job); return;
+    }
+    U n = 0;
+    for (U z = top; z <= bottom; ++z) for (U x = left; x <= right; ++x, ++n) {
+        const U node = nodes + n * 0x1C, cell = (z << job.shift) + x;
+        if (D(node) != 8 || D(node + 4) != serial || D(node + 8) != record + 0x30 ||
+            D(node + 12) != record || D(node + 24) != job.nativeCells + 4 * cell) {
+            _InterlockedIncrement(&job.unsupported); GridMismatch(job); return;
+        }
+    }
+    const GridRect fresh = {left, right, top, bottom};
+    if (oldInserted) {
+        const GridRect prior = {s.left[i], s.right[i], s.top[i], s.bottom[i]};
+        if (prior.left != left || prior.right != right || prior.top != top || prior.bottom != bottom) {
+            GridDeltaRect(job, s, chunk, prior, &fresh, -1); GridDeltaRect(job, s, chunk, fresh, &prior, 1); ++stat.tallied;
+        }
+    } else { GridDeltaRect(job, s, chunk, fresh, nullptr, 1); ++stat.tallied; }
+    s.left[i] = left; s.right[i] = right; s.top[i] = top; s.bottom[i] = bottom;
+    s.nodeType[i] = D(nodes);
+    s.sigNodes[i] = nodes; s.sigCap[i] = cap; s.sigBump[i] = bump;
+}
+// Dispatch 1, end of a record chunk: the chunk's inserted records bucketed by the z strip they sit in, ascending by record
+// slot inside a bucket; records that span several strips go to the chunk's multi list. One entry per record per list, so
+// the fixed per-chunk capacity (the chunk's record range) can never overflow.
+void GridBucketChunk(GridJob& job, U chunk, U begin, U end) {
+    GridStore& s = *job.store;
+    const GridIdentity& b = *job.next;
+    U* const start = s.bucketStart + static_cast<size_t>(chunk) * (kGridStrips + 1);
+    U* const singles = s.bucketSingle + static_cast<size_t>(chunk) * s.bucketCap;
+    U* const multis = s.bucketMulti + static_cast<size_t>(chunk) * s.bucketCap;
+    U cursor[kGridStrips + 1];
+    memset(start, 0, sizeof(cursor));
+    U multiCount = 0;
+    for (U i = begin; i < end; ++i) {
+        if (!b.inserted[i]) continue;
+        const U first = GridStripOf(job, s.top[i]);
+        if (first == GridStripOf(job, s.bottom[i])) ++start[first + 1]; else multis[multiCount++] = i;
+    }
+    for (U k = 0; k < kGridStrips; ++k) start[k + 1] += start[k];
+    memcpy(cursor, start, sizeof(cursor));
+    for (U i = begin; i < end; ++i) {
+        if (!b.inserted[i]) continue;
+        const U first = GridStripOf(job, s.top[i]);
+        if (first == GridStripOf(job, s.bottom[i])) singles[cursor[first]++] = i;
+    }
+    s.stats[chunk].multis = multiCount;
+}
+#ifdef NTW2_LOCO_ORACLE // bench-only per-chunk CPU accounting for the oracle's --grid-bench; compiled out of the runtime
+LONGLONG g_dbg[8];
+#define GRID_PROF_MARK(v) const LONGLONG v = Now()
+#define GRID_PROF_ADD(slot, since) InterlockedExchangeAdd64(&g_dbg[slot], Now() - (since))
+#else
+#define GRID_PROF_MARK(v)
+#define GRID_PROF_ADD(slot, since)
+#endif
 void GridCapturePhase(GridJob& job, U chunk) {
     GridStore& s = *job.store;
+    const GridIdentity& b = *job.next;
     U begin, end;
-    GridRange(job.next->count, job.chunks, chunk, begin, end);
-    for (U i = begin; i < end && !job.failure; ++i) GridCaptureRecord(job, i, chunk);
+    GRID_PROF_MARK(p0);
+    GridRange(b.count, job.chunks, chunk, begin, end);
+    for (U i = begin; i < end && !job.failure; ++i) {
+        if (!job.incremental && i + kGridPrefetchNear < end) GridPrefetchNodes(b.record[i + kGridPrefetchNear]); // nodes are only read by a recompute
+        if (i + kGridPrefetchFar < end) GridPrefetchRecord(job, b.record[i + kGridPrefetchFar]);
+        if (job.incremental) GridCaptureRecordDelta(job, i, chunk); else GridCaptureRecord(job, i, chunk);
+    }
+    if (!job.failure) GridBucketChunk(job, chunk, begin, end);
+    GRID_PROF_ADD(0, p0); GRID_PROF_MARK(p1);
     // Committed ordinals -> registry slots, split by worklist range. The registry hash is complete and read-only
     // during this dispatch; s.committed is read only by the build dispatch's finish chunks, after the join.
     if (job.committedCount) {
@@ -611,6 +805,7 @@ void GridCapturePhase(GridJob& job, U chunk) {
             if (slot < job.next->count) GridRaiseCommitted(s.committed[slot], ordinal + 1);
         }
     }
+    GRID_PROF_ADD(1, p1);
 }
 // Dispatch 2, one task per run of active strips. Scan the run's cells in ascending order, turning each tallied cell
 // into a row (consecutive offsets from the owner's exact bases) and zeroing stale entries of the previous publication;
@@ -620,11 +815,30 @@ void GridBuildTask(GridJob& job, U task) {
     GridStore& s = *job.store;
     const GridTask& t = job.task[task];
     const __m128i zero = _mm_setzero_si128();
+    GRID_PROF_MARK(q0);
     U row = t.rowBase, position = t.memberBase;
     for (U a = t.first; a < t.last; ++a) {
         const U firstRow = job.active[a] * job.stripHeight;
         const U begin = firstRow << job.shift;
         const U end = (std::min)((std::min)(firstRow + job.stripHeight, job.maximum + 1) << job.shift, job.cells);
+        if (job.incremental) { // counts are persistent (cnt); dense only gets the new row numbers and loses emptied cells
+            for (U cell = begin; cell < end;) {
+                if (cell + 4 <= end &&
+                    _mm_movemask_epi8(_mm_and_si128(
+                        _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(s.cnt + cell)), zero),
+                        _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(s.dense + cell)), zero))) == 0xFFFF) {
+                    cell += 4; continue;
+                }
+                const U count = s.cnt[cell];
+                if (count) {
+                    if (row >= t.rowEnd || position + count > t.memberEnd) { GridFail(job); return; }
+                    s.cellIds[row] = cell; s.offsets[row] = position; s.fill[row] = position;
+                    s.dense[cell] = row + 1; ++row; position += count;
+                } else if (s.dense[cell]) s.dense[cell] = 0;
+                ++cell;
+            }
+            continue;
+        }
         for (U cell = begin; cell < end;) {
             if (cell + 4 <= end &&
                 _mm_movemask_epi8(_mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(s.dense + cell)), zero)) == 0xFFFF) {
@@ -636,35 +850,56 @@ void GridBuildTask(GridJob& job, U task) {
                 if (row >= t.rowEnd || position + count > t.memberEnd) { GridFail(job); return; }
                 s.cellIds[row] = cell; s.offsets[row] = position; s.fill[row] = position;
                 s.dense[cell] = row + 1; ++row; position += count;
-            } else if (value) s.dense[cell] = 0;
+                if (s.cnt) s.cnt[cell] = count; // an incremental store keeps the counts for the next build
+            } else if (value) { s.dense[cell] = 0; if (s.cnt) s.cnt[cell] = 0; }
             ++cell;
         }
     }
+    GRID_PROF_ADD(2, q0); GRID_PROF_MARK(q1);
     if (row != t.rowEnd || position != t.memberEnd) { GridFail(job); return; }
-    const GridIdentity& b = *job.next;
-    for (U i = 0; i < b.count; ++i) {
-        const U top = s.top[i], bottom = s.bottom[i];
-        if (bottom < t.zLo || top > t.zHi || !b.inserted[i]) continue;
-        const U last = (std::min)(bottom, t.zHi);
-        for (U z = (std::max)(top, t.zLo); z <= last; ++z) for (U x = s.left[i]; x <= s.right[i]; ++x) {
-            const U r = s.dense[(z << job.shift) + x] - 1;
-            if (r < t.rowBase || r >= t.rowEnd) { GridFail(job); return; }
-            const U to = s.fill[r]++;
-            if (to >= t.memberEnd) { GridFail(job); return; }
-            s.occupants[to] = i;
+    const U cap = s.bucketCap;
+    for (U a = t.first; a < t.last; ++a) {
+        const U strip = job.active[a], zLo = strip * job.stripHeight;
+        const U zHi = (std::min)(zLo + job.stripHeight, job.maximum + 1) - 1;
+        for (U c = 0; c < job.chunks; ++c) { // chunks ascend by record slot, and so do both lists inside a chunk
+            const U* const start = s.bucketStart + static_cast<size_t>(c) * (kGridStrips + 1);
+            const U* single = s.bucketSingle + static_cast<size_t>(c) * cap + start[strip];
+            const U* const singleEnd = s.bucketSingle + static_cast<size_t>(c) * cap + start[strip + 1];
+            const U* multi = s.bucketMulti + static_cast<size_t>(c) * cap;
+            const U* const multiEnd = multi + s.stats[c].multis;
+            for (;;) {
+                while (multi != multiEnd && (s.bottom[*multi] < zLo || s.top[*multi] > zHi)) ++multi;
+                U i;
+                if (single != singleEnd && (multi == multiEnd || *single < *multi)) i = *single++;
+                else if (multi != multiEnd) i = *multi++;
+                else break;
+                const U last = (std::min)(s.bottom[i], zHi);
+                for (U z = (std::max)(s.top[i], zLo); z <= last; ++z) for (U x = s.left[i]; x <= s.right[i]; ++x) {
+                    const U r = s.dense[(z << job.shift) + x] - 1;
+                    if (r < t.rowBase || r >= t.rowEnd) { GridFail(job); return; }
+                    const U to = s.fill[r]++;
+                    if (to >= t.memberEnd) { GridFail(job); return; }
+                    s.occupants[to] = i;
+                }
+            }
         }
     }
+    GRID_PROF_ADD(3, q1);
 }
 // Owner step between the dispatches: per-chunk strip totals -> exact membership and row totals -> active strips (new
 // members or stale rows of the previous publication) -> weight-balanced tasks, each with exact row/offset bases.
 // O(chunks * strips) words. False = capacity refusal or inconsistent totals, before anything is published.
 bool GridPlan(GridJob& job) {
     const GridStore& s = *job.store;
-    unsigned long long stripMembers[kGridStrips] = {}, members = 0, rows = 0;
+    long long members = 0, rows = 0;
     for (U k = 0; k < job.strips; ++k) {
-        unsigned long long m = 0, r = 0;
-        for (U c = 0; c < job.chunks; ++c) { m += s.stripMembers[c * kGridStrips + k]; r += s.stripRows[c * kGridStrips + k]; }
-        stripMembers[k] = m; job.stripRows[k] = static_cast<U>(r); members += m; rows += r;
+        // An incremental build's chunk tables are signed deltas on top of the previous publication's strip totals.
+        long long m = job.incremental ? s.totalMembers[k] : 0, r = job.incremental ? s.totalRows[k] : 0;
+        for (U c = 0; c < job.chunks; ++c) {
+            m += static_cast<LONG>(s.stripMembers[c * kGridStrips + k]); r += static_cast<LONG>(s.stripRows[c * kGridStrips + k]);
+        }
+        if (m < 0 || r < 0) return false;
+        job.stripMembers[k] = static_cast<U>(m); job.stripRows[k] = static_cast<U>(r); members += m; rows += r;
     }
     if (members > s.cap.memberships || rows > s.rowCap) return false;
     job.members = static_cast<U>(members); job.rows = static_cast<U>(rows);
@@ -672,8 +907,8 @@ bool GridPlan(GridJob& job) {
     unsigned long long cumulative[kGridStrips + 1], weight = 0;
     U count = 0;
     for (U k = 0; k < job.strips; ++k) {
-        if (!stripMembers[k] && !g_gridStripLive[k]) continue;
-        job.active[count] = k; cumulative[count++] = weight; weight += stripMembers[k] + scanWeight;
+        if (!job.stripMembers[k] && !s.stripLive[k]) continue;
+        job.active[count] = k; cumulative[count++] = weight; weight += job.stripMembers[k] + scanWeight;
     }
     cumulative[count] = weight;
     const U tasks = (std::min)(count, (std::min)(kGridMaxTasks, 2 * job.chunks));
@@ -690,10 +925,8 @@ bool GridPlan(GridJob& job) {
     for (U g = 0; g < tasks; ++g) {
         GridTask& t = job.task[g];
         t.first = cut[g]; t.last = cut[g + 1]; t.rowBase = rowBase; t.memberBase = memberBase;
-        for (U a = t.first; a < t.last; ++a) { rowBase += job.stripRows[job.active[a]]; memberBase += static_cast<U>(stripMembers[job.active[a]]); }
+        for (U a = t.first; a < t.last; ++a) { rowBase += job.stripRows[job.active[a]]; memberBase += job.stripMembers[job.active[a]]; }
         t.rowEnd = rowBase; t.memberEnd = memberBase;
-        t.zLo = job.active[t.first] * job.stripHeight;
-        t.zHi = (std::min)((job.active[t.last - 1] + 1) * job.stripHeight, job.maximum + 1) - 1;
     }
     job.tasks = tasks; job.activeStrips = count;
     return true;
@@ -728,6 +961,7 @@ void GridFinishPhase(GridJob& job, U chunk) {
     GridRange(old.count, job.chunks, chunk, begin, end);
     U removed = 0;
     for (U i = begin; i < end; ++i) if (old.record[i]) {
+        if (job.stable) { removed += b.serial[i] != old.serial[i]; continue; } // same slot, same record
         const U slot = GridSlot(s, b, old.record[i]);
         removed += slot == kNoSlot || b.serial[slot] != old.serial[i];
     }
@@ -787,35 +1021,20 @@ void __fastcall GridChunk(void* context, U chunk) {
 }
 void GridDispatch(GridJob& job, U phase, U count) {
     job.phase = phase;
-    ++g_gridV2Words[GridV2Dispatches];
+    if (!job.shadow) { ++g_gridV2Words[GridV2Dispatches]; ++g_gridBuildWords[GridBuildDispatches]; }
+    const LONGLONG start = Now();
     if (g_binding.dispatch) g_binding.dispatch(g_binding.pool, Address(reinterpret_cast<void*>(&GridChunk)), count, &job);
     else for (U i = 0; i < count; ++i) GridChunk(&job, i);
+    job.wallTicks[phase] += Now() - start;
 }
-bool CaptureGridImpl(U manager) {
-    GridStore& s = *g_grid;
-    GridIdentity& old = s.id[g_gridCurrent];
-    GridIdentity& next = s.id[g_gridCurrent ^ 1];
-    const LONGLONG captureStart = Now();
-    GridJob job = {}; job.store = &s; job.next = &next; job.old = &old;
-    const U root = D(manager), model = root ? D(root + 8) : 0, grid = model ? D(model + 0xA4) : 0;
-    if (!grid || model != g_gridModel) return false;
-    job.shift = D(grid + 8); job.origin = D(grid + 0x10); job.maximum = D(grid + 0x14);
-    if (job.shift > 20 || job.maximum >= (1u << job.shift)) return false;
-    const unsigned long long cells = (static_cast<unsigned long long>(job.maximum) << job.shift) + job.maximum + 1;
-    if (cells > s.cap.cells) return false;
-    job.cells = static_cast<U>(cells); job.nativeCells = D(grid); job.scale = Float(grid + 0x24);
-    job.bump = Float(V(0x1318038)); job.mxcsr = _mm_getcsr(); unsigned short cw;
-    __asm { fnstcw cw }
-    job.cw = cw; job.chunks = s.chunks;
-    const U primary = D(manager + 0x24C), secondary = D(manager + 0x278);
-    // Fixed capacities: an oversized registry refuses here, before any build step or game write.
-    if (primary > s.cap.primary || secondary > s.cap.records) return false;
-    next.count = next.memberships = next.occupied = 0; next.epoch = old.epoch + 1;
+// Serial identity pass for a changed registry: primary slots keep their registry index (null holes included), unique
+// secondary records follow. Fills the next identity's record array and open-addressed hash. False = refusal.
+bool GridRegistryPass(GridStore& s, GridIdentity& next, U primaryBase, U primary, U secondaryBase, U secondary) {
     memset(next.hash, 0, static_cast<size_t>(s.hashSize) * sizeof(U));
     const U hashMask = s.hashSize - 1, tagMask = ~s.slotMask;
     U* const hash = next.hash;
     for (U domain = 0; domain < 2; ++domain) {
-        const U count = domain ? secondary : primary, records = D(manager + (domain ? 0x27C : 0x250));
+        const U count = domain ? secondary : primary, records = domain ? secondaryBase : primaryBase;
         for (U n = 0; n < count; ++n) {
             if (n + 8 < count) {
                 const U ahead = D(records + (n + 8) * 4);
@@ -842,24 +1061,82 @@ bool CaptureGridImpl(U manager) {
             hash[h] = (product & tagMask) | (i + 1);
         }
     }
+    return true;
+}
+enum GridFallback : U { FallbackNone, FallbackFirst, FallbackRegistry, FallbackGeometry, FallbackShare };
+// Break-even of the incremental build (percent of records whose cell rectangle changed in one stage); calibrated with the
+// realistic fixture of the oracle (--grid-bench). Above it the next build or builds run in full, with exponential backoff.
+constexpr U kGridIncrementalMaxPercent = 35;
+struct GridBuildReport { U births, removed, reused, deactivations, removals, committed, fromRecord, changed, tallied; };
+// One build of `s`. shadow = diagnostic full rebuild into the shadow store: no process-wide accounting, no registry
+// sharing, never incremental. False = refusal or failed build (nothing published); `view` is written only on success.
+bool GridBuild(GridStore& s, U manager, bool shadow, U incarnationBase, GridBuildReport& report, GridView& view) {
+    GridIdentity& old = s.id[s.current];
+    GridIdentity& next = s.id[s.current ^ 1];
+    const LONGLONG captureStart = Now();
+    GridJob job = {}; job.store = &s; job.next = &next; job.old = &old; job.shadow = shadow;
+    const U root = D(manager), model = root ? D(root + 8) : 0, grid = model ? D(model + 0xA4) : 0;
+    if (!grid || model != g_gridModel) return false;
+    job.shift = D(grid + 8); job.origin = D(grid + 0x10); job.maximum = D(grid + 0x14);
+    if (job.shift > 20 || job.maximum >= (1u << job.shift)) return false;
+    const unsigned long long cells = (static_cast<unsigned long long>(job.maximum) << job.shift) + job.maximum + 1;
+    if (cells > s.cap.cells) return false;
+    job.cells = static_cast<U>(cells); job.nativeCells = D(grid); job.scale = Float(grid + 0x24);
+    job.bump = Float(V(0x1318038)); job.mxcsr = _mm_getcsr(); unsigned short cw;
+    __asm { fnstcw cw }
+    job.cw = cw; job.chunks = s.chunks;
+    job.geometry = {job.scale, job.bump, job.origin, job.maximum};
+    GridGeometry geometry = {job.shift, job.origin, job.maximum, job.nativeCells, model, 0, 0, job.mxcsr & 0xFFC0u, job.cw};
+    memcpy(&geometry.scaleBits, &job.scale, sizeof(U)); memcpy(&geometry.bumpBits, &job.bump, sizeof(U));
+    const U primary = D(manager + 0x24C), secondary = D(manager + 0x278);
+    // Fixed capacities: an oversized registry refuses here, before any build step or game write.
+    if (primary > s.cap.primary || secondary > s.cap.records) return false;
+    next.count = next.memberships = next.occupied = 0; next.epoch = old.epoch + 1;
+    const U primaryBase = D(manager + 0x250), secondaryBase = D(manager + 0x27C);
+    job.stable = !shadow && s.regValid && primary == s.regPrimary && secondary == s.regSecondary &&
+        SameWords(P(primaryBase), old.record, primary) && SameWords(P(secondaryBase), s.rawSecondary, secondary);
+    if (job.stable) { // word-identical registries: identical record array and hash, every record keeps its slot
+        next.reg = old.reg; next.record = old.record; next.hash = old.hash; next.count = old.count;
+        memset(s.committed, 0, static_cast<size_t>(next.count) * sizeof(U));
+    } else {
+        s.regValid = false; // restored only by a completed publication
+        next.reg = old.reg ^ 1; next.record = s.regRecord[next.reg]; next.hash = s.regHash[next.reg];
+        s.regPrimary = primary; s.regSecondary = secondary;
+        if (secondary) memcpy(s.rawSecondary, P(secondaryBase), static_cast<size_t>(secondary) * sizeof(U));
+        if (!GridRegistryPass(s, next, primaryBase, primary, secondaryBase, secondary)) return false;
+    }
+    const LONGLONG registryEnd = Now();
     job.committedCount = g_stage && g_gridCommittedReady && g_owned && g_owned->count <= g_owned->slotCapacity ? g_owned->count : 0;
-    job.incarnationBase = g_incarnation;
+    job.incarnationBase = incarnationBase;
     job.stripHeight = (job.maximum + 1 + kGridStrips - 1) / kGridStrips;
     job.strips = (job.maximum + job.stripHeight) / job.stripHeight;
+    { unsigned long bit; job.stripBits = (job.stripHeight & (job.stripHeight - 1)) == 0 && _BitScanForward(&bit, job.stripHeight) ? bit : 32u; }
+    // Incremental or full: the patch needs the previous publication's counts, rectangles and dense map to be intact, the same
+    // registry slots, the same geometry and rounding, and a recent change share below the break-even.
+    U reason = FallbackNone;
+    if (s.incremental && !shadow) {
+        if (!s.incValid) reason = FallbackFirst;
+        else if (!job.stable) reason = FallbackRegistry;
+        else if (memcmp(&geometry, &s.geometry, sizeof(geometry)) != 0) reason = FallbackGeometry;
+        else if (s.hold) { --s.hold; reason = FallbackShare; }
+        job.incremental = reason == FallbackNone;
+    }
+    s.incValid = false; // restored only by a completed publication
     // Dense-map invariant: words outside the previous publication's live strips are zero. An interrupted build or a
     // different strip geometry voids it, so the map is cleared whole (rare; never on the normal path).
     bool anyLive = false;
-    for (const bool live : g_gridStripLive) anyLive |= live;
-    if (g_gridDenseDirty || (anyLive && (g_gridLiveStripHeight != job.stripHeight || g_gridLiveShift != job.shift))) {
+    for (const bool live : s.stripLive) anyLive |= live;
+    if (s.denseDirty || (anyLive && (s.liveStripHeight != job.stripHeight || s.liveShift != job.shift))) {
         memset(s.dense, 0, static_cast<size_t>(s.cap.cells) * sizeof(U));
-        memset(g_gridStripLive, 0, sizeof(g_gridStripLive));
+        if (s.cnt) memset(s.cnt, 0, static_cast<size_t>(s.cap.cells) * sizeof(U));
+        memset(s.stripLive, 0, sizeof(s.stripLive));
     }
-    g_gridDenseDirty = true; // from here the map holds tallies; only a completed publication clears this
+    s.denseDirty = true; // from here the map holds tallies; only a completed publication clears this
     memset(s.stats, 0, static_cast<size_t>(job.chunks) * sizeof(GridChunkStat));
     memset(s.stripMembers, 0, static_cast<size_t>(job.chunks) * kGridStrips * sizeof(U));
     memset(s.stripRows, 0, static_cast<size_t>(job.chunks) * kGridStrips * sizeof(U));
     const U captureUs = Microseconds(Now() - captureStart);
-    g_gridWords[GridCaptureUs] += captureUs; g_parallelWords[ParallelCaptureUs] += captureUs;
+    if (!shadow) { g_gridWords[GridCaptureUs] += captureUs; g_parallelWords[ParallelCaptureUs] += captureUs; }
     LONGLONG verifyTicks = 0;
     GridDispatch(job, GridPhaseCapture, job.chunks);
     if (!job.failure) {
@@ -872,7 +1149,7 @@ bool CaptureGridImpl(U manager) {
             if (!job.failure) { s.offsets[job.rows] = job.members; next.occupied = job.rows; }
         }
     }
-    if (!job.failure && g_binding.verify_grid) {
+    if (!job.failure && !shadow && g_binding.verify_grid) {
         const LONGLONG verifyStart = Now();
         GridDispatch(job, GridPhaseVerify, job.chunks);
         verifyTicks = Now() - verifyStart;
@@ -880,42 +1157,97 @@ bool CaptureGridImpl(U manager) {
     }
     // Normal build time is everything the owner spends from entry to the published view (serial registry/identity
     // construction and strip planning included); only the optional verification dispatch is excluded.
-    const U buildUs = Microseconds(Now() - captureStart - verifyTicks);
-    g_gridV2Words[GridV2BuildUs] += buildUs;
-    g_gridV2Words[GridV2MaxBuildUs] = (std::max)(g_gridV2Words[GridV2MaxBuildUs], buildUs);
-    g_gridV2Words[GridV2VerifyUs] += Microseconds(verifyTicks);
-    const U csrUs = buildUs > captureUs ? buildUs - captureUs : 0; // dispatches plus the owner step between them
-    g_gridWords[GridCsrUs] += csrUs; g_parallelWords[ParallelCsrUs] += csrUs;
-    g_gridWords[GridMismatches] += static_cast<U>(job.mismatches);
-    g_gridWords[GridUnsupported] += static_cast<U>(job.unsupported);
-    g_gridV2Words[GridV2VerifyMismatches] += static_cast<U>(job.mismatches);
-    U births = 0, removed = 0;
+    const LONGLONG buildTicks = Now() - captureStart - verifyTicks;
+    const U buildUs = Microseconds(buildTicks);
+    report = {};
     for (U c = 0; c < job.chunks; ++c) {
         const GridChunkStat& stat = s.stats[c];
-        g_gridV2Words[GridV2CommittedRecords] += stat.committed; g_gridV2Words[GridV2RecordReads] += stat.fromRecord;
-        g_gridWords[GridBirths] += stat.births; g_gridWords[GridReused] += stat.reused;
-        g_gridWords[GridDeactivations] += stat.deactivations; g_gridWords[GridMembershipRemovals] += stat.removals;
-        births += stat.births; removed += stat.removed;
+        report.committed += stat.committed; report.fromRecord += stat.fromRecord; report.births += stat.births;
+        report.reused += stat.reused; report.deactivations += stat.deactivations; report.removals += stat.removals;
+        report.removed += stat.removed; report.changed += stat.changed; report.tallied += stat.tallied;
+    }
+    if (!shadow) {
+        g_gridV2Words[GridV2BuildUs] += buildUs;
+        g_gridV2Words[GridV2MaxBuildUs] = (std::max)(g_gridV2Words[GridV2MaxBuildUs], buildUs);
+        g_gridV2Words[GridV2VerifyUs] += Microseconds(verifyTicks);
+        const U csrUs = buildUs > captureUs ? buildUs - captureUs : 0; // dispatches plus the owner step between them
+        g_gridWords[GridCsrUs] += csrUs; g_parallelWords[ParallelCsrUs] += csrUs;
+        g_gridWords[GridMismatches] += static_cast<U>(job.mismatches);
+        g_gridWords[GridUnsupported] += static_cast<U>(job.unsupported);
+        g_gridV2Words[GridV2VerifyMismatches] += static_cast<U>(job.mismatches);
+        g_gridV2Words[GridV2CommittedRecords] += report.committed; g_gridV2Words[GridV2RecordReads] += report.fromRecord;
+        g_gridWords[GridBirths] += report.births; g_gridWords[GridReused] += report.reused;
+        g_gridWords[GridDeactivations] += report.deactivations; g_gridWords[GridMembershipRemovals] += report.removals;
     }
     if (job.failure) return false;
-    g_gridDenseDirty = false; g_gridLiveStripHeight = job.stripHeight; g_gridLiveShift = job.shift;
-    for (U k = 0; k < kGridStrips; ++k) g_gridStripLive[k] = k < job.strips && job.stripRows[k] != 0;
-    g_incarnation += births; // numbers are consumed only by a publication that actually happens
-    g_gridWords[GridRemovals] += removed;
-    ++g_gridWords[GridCaptures]; g_gridWords[GridRecords] += next.count;
-    g_gridWords[GridPrimary] += primary; g_gridWords[GridSecondary] += next.count - primary;
-    g_gridWords[GridMemberships] += next.memberships; g_gridWords[GridCells] += next.occupied;
-    g_gridWords[GridMaxRecords] = (std::max)(g_gridWords[GridMaxRecords], next.count);
-    g_gridWords[GridMaxMemberships] = (std::max)(g_gridWords[GridMaxMemberships], next.memberships);
-    ++g_gridV2Words[GridV2Builds]; g_gridV2Words[GridV2Records] += next.count;
-    g_gridV2Words[GridV2Memberships] += next.memberships; g_gridV2Words[GridV2Epoch] = next.epoch;
-    g_gridWords[GridEpoch] = next.epoch; g_gridCurrent ^= 1;
-    g_gridView = {g_generation, next.epoch, next.count, next.occupied, next.memberships,
+    s.regValid = true;
+    s.denseDirty = false; s.liveStripHeight = job.stripHeight; s.liveShift = job.shift;
+    for (U k = 0; k < kGridStrips; ++k) s.stripLive[k] = k < job.strips && job.stripRows[k] != 0;
+    if (s.incremental) { // the next build may patch: counts, rectangles, totals and geometry all describe this publication
+        memcpy(s.totalMembers, job.stripMembers, sizeof(s.totalMembers)); memcpy(s.totalRows, job.stripRows, sizeof(s.totalRows));
+        s.geometry = geometry; s.incValid = true;
+        if (job.incremental) {
+            if (static_cast<unsigned long long>(report.tallied) * 100 > static_cast<unsigned long long>(kGridIncrementalMaxPercent) * next.count) {
+                s.holdLevel = (std::min)(s.holdLevel + 1, 4u); s.hold = (1u << s.holdLevel) - 1;
+            } else s.holdLevel = s.hold = 0;
+        }
+    }
+    if (!shadow) {
+        g_gridBuildWords[GridBuildRegistryReuses] += job.stable;
+        g_gridBuildTicks[0] += registryEnd - captureStart; g_gridBuildTicks[1] += job.wallTicks[GridPhaseCapture];
+        g_gridBuildTicks[3] += job.wallTicks[GridPhaseBuild];
+        g_gridBuildTicks[2] += buildTicks - (registryEnd - captureStart) - job.wallTicks[GridPhaseCapture] - job.wallTicks[GridPhaseBuild];
+        if (job.incremental) { ++g_gridBuildWords[GridBuildIncremental]; g_gridBuildWords[GridBuildChanged] += report.tallied; }
+        else {
+            ++g_gridBuildWords[GridBuildFull];
+            if (s.incremental) { ++g_gridBuildWords[GridBuildFallbacks]; g_gridBuildWords[GridBuildFallbackReason] = reason; }
+        }
+        g_incarnation += report.births; // numbers are consumed only by a publication that actually happens
+        g_gridWords[GridRemovals] += report.removed;
+        ++g_gridWords[GridCaptures]; g_gridWords[GridRecords] += next.count;
+        g_gridWords[GridPrimary] += primary; g_gridWords[GridSecondary] += next.count - primary;
+        g_gridWords[GridMemberships] += next.memberships; g_gridWords[GridCells] += next.occupied;
+        g_gridWords[GridMaxRecords] = (std::max)(g_gridWords[GridMaxRecords], next.count);
+        g_gridWords[GridMaxMemberships] = (std::max)(g_gridWords[GridMaxMemberships], next.memberships);
+        ++g_gridV2Words[GridV2Builds]; g_gridV2Words[GridV2Records] += next.count;
+        g_gridV2Words[GridV2Memberships] += next.memberships; g_gridV2Words[GridV2Epoch] = next.epoch;
+        g_gridWords[GridEpoch] = next.epoch;
+    }
+    s.current ^= 1;
+    view = {g_generation, next.epoch, next.count, next.occupied, next.memberships,
         next.record, next.serial, next.incarnation, s.team, s.flags,
         s.x, s.z, s.y, s.extent, s.radius, s.left, s.right, s.top, s.bottom,
         next.inserted, s.cellIds, s.offsets, s.occupants, next.active,
-        manager, model, D(model + 0x58), primary, secondary, D(manager + 0x250), D(manager + 0x27C),
+        manager, model, D(model + 0x58), primary, secondary, primaryBase, secondaryBase,
         grid, job.nativeCells, job.cells, job.shift, job.origin, job.maximum, job.scale, s.dense, s.nodeType};
+    return true;
+}
+// Bit-for-bit comparison of two publications (identity, snapshot, rectangles, node types, CSR and the direct-address map).
+// The epoch is a build counter, not derived data: a refused shadow rebuild leaves it one behind the primary's.
+bool GridViewsEqual(const GridView& a, const GridView& b) {
+    if (a.count != b.count || a.cells != b.cells || a.memberships != b.memberships || a.cell_count != b.cell_count) return false;
+    const auto same = [](const void* x, const void* y, U words) { return !words || !memcmp(x, y, static_cast<size_t>(words) * sizeof(U)); };
+    const U n = a.count;
+    return same(a.record, b.record, n) && same(a.serial, b.serial, n) && same(a.incarnation, b.incarnation, n) &&
+        same(a.team, b.team, n) && same(a.flags, b.flags, n) && same(a.x, b.x, n) && same(a.z, b.z, n) && same(a.y, b.y, n) &&
+        same(a.extent, b.extent, n) && same(a.radius, b.radius, n) && same(a.left, b.left, n) && same(a.right, b.right, n) &&
+        same(a.top, b.top, n) && same(a.bottom, b.bottom, n) && same(a.inserted, b.inserted, n) && same(a.active, b.active, n) &&
+        same(a.node_type, b.node_type, n) && same(a.cell_ids, b.cell_ids, a.cells) && same(a.offsets, b.offsets, a.cells + 1) &&
+        same(a.occupants, b.occupants, a.memberships) && same(a.cell_dense, b.cell_dense, a.cell_count);
+}
+bool CaptureGridImpl(U manager) {
+    GridStore& s = *g_grid;
+    const U incarnationBase = g_incarnation;
+    GridBuildReport report;
+    if (!GridBuild(s, manager, false, incarnationBase, report, g_gridView)) return false;
+    if (g_gridShadow) { // --loco-grid-incremental --loco-grid-verify: the full build of the same state must be identical
+        GridBuildReport expected; GridView shadowView = {};
+        const bool same = GridBuild(*g_gridShadow, manager, true, incarnationBase, expected, shadowView) &&
+            GridViewsEqual(g_gridView, shadowView) && report.births == expected.births && report.removed == expected.removed &&
+            report.reused == expected.reused && report.deactivations == expected.deactivations && report.removals == expected.removals &&
+            report.committed == expected.committed && report.fromRecord == expected.fromRecord;
+        ++g_gridBuildWords[GridBuildShadowCompares]; g_gridBuildWords[GridBuildShadowMismatches] += !same;
+    }
     return true;
 }
 
@@ -1195,9 +1527,172 @@ LOCO_RECORDING_GATE(RecordResolveGate, 5, ResolveGate)
 LOCO_RECORDING_GATE(RecordHeightOwnerGate, 6, HeightOwnerGate)
 LOCO_RECORDING_GATE(RecordWrapperQueryGate, 7, WrapperQueryGate)
 #undef LOCO_RECORDING_GATE
+// ---- Relink apply (RelinkApply, MovementSlices Contract 3) ------------------------------------------------------------
+// Owner-side op log of the site-13 soft-grid relink services 0x811ED0 / 0x7EFA80 and their cell-partitioned apply
+// (native_move_delta.*, native_relink.*). Mode 1 (shadow): the native services still run; every batch is also applied to a
+// private mirror by the same kernel and compared. Mode 2 (live): the log replaces the native calls and a batch is applied
+// by the pool at its flush barrier. The owner-list services 0x811D50 / 0x7EFDD0 stay serial in place (RelinkProbation.md).
+enum RelinkCause : U { RelinkCauseFallback, RelinkCauseClassWrapper, RelinkCauseEnd, RelinkCauseOther };
+constexpr U kRelinkBatchRecords = 4096;     // record-table capacity of one batch (128 KiB, L2 resident)
+constexpr U kRelinkParallelMinCells = 2048; // below this many cell operations a batch is applied by the owner, same kernel
+constexpr U kRelinkMirrorWords = 1u << 19;
+MoveLog g_moveLog;
+RelinkMirror g_relinkMirror;
+RelinkDispatcher g_relinkDispatcher;
+U g_relinkWords[RelinkWordCount];
+U g_relinkMode, g_relinkNative[2], g_relinkSeq, g_relinkMinCells = kRelinkParallelMinCells;
+bool g_relinkWindow;  // the stage replay loop is open for logging
+bool g_relinkLogging; // the code running right now is a logged occurrence (tapped selector/move clone fallback)
+unsigned long long RelinkPlanBytes(const ntw2_workload::Capacity& c, U mode) {
+    if (!mode) return 0;
+    unsigned long long bytes = 3ull * c.records * sizeof(MoveOp) + 8ull * c.memberships + (2ull * kRelinkBatchRecords + 1024) * sizeof(MoveRecordState);
+    if (mode == 1) bytes += 24ull * kRelinkMirrorWords;
+    return bytes;
+}
+size_t RelinkStorageBytes() { return g_moveLog.blockBytes + g_relinkMirror.blockBytes; }
+bool AllocateRelink(const ntw2_workload::Capacity& c) {
+    if (g_moveLog.block) return true;
+    if (!MoveLogInit(g_moveLog, c.records, c.memberships, kRelinkBatchRecords, V(0x1318038))) return false;
+    if (g_relinkMode == 1 && !RelinkMirrorInit(g_relinkMirror, kRelinkMirrorWords)) { MoveLogFree(g_moveLog); return false; }
+    return true;
+}
+void ReleaseRelink() {
+    g_relinkWindow = g_relinkLogging = false;
+    MoveLogFree(g_moveLog); RelinkMirrorFree(g_relinkMirror);
+    if (g_relinkMode) { g_serviceTargets[UnlinkGrid] = V(0x811ED0); g_serviceTargets[InsertGrid] = V(0x7EFA80); }
+}
+
+// Applies (live) or verifies (shadow) the open batch, then opens the next one. `cause` is a flush barrier reason.
+void RelinkFlush(U cause) {
+    if (!g_relinkWindow) return;
+    MoveLog& log = g_moveLog;
+    const U ops = MoveLogBatchOps(log);
+    if (!ops) return;
+    ++g_relinkWords[RelinkFlushFallback + cause];
+    ++g_relinkWords[RelinkBatches];
+    ++g_relinkWords[RelinkBatchesLe16 + (ops <= 16 ? 0 : ops <= 256 ? 1 : ops <= 2048 ? 2 : 3)];
+    if (g_relinkWords[RelinkMaxBatchOps] < ops) g_relinkWords[RelinkMaxBatchOps] = ops;
+    RelinkApplyStats stats = {};
+    const LONGLONG start = Now();
+    if (g_relinkMode == 2) {
+        RelinkApplyLive(log, &g_relinkDispatcher, g_relinkMinCells, stats);
+        g_relinkWords[RelinkApplyWallUs] += Microseconds(Now() - start);
+    } else {
+        RelinkShadowResult result = {};
+        RelinkMirrorApply(g_relinkMirror, log, &g_relinkDispatcher, g_relinkMinCells, stats, result);
+        ++g_relinkWords[RelinkShadowBatches]; g_relinkWords[RelinkShadowCells] += result.cells;
+        g_relinkWords[RelinkShadowMismatchCells] += result.mismatchCells;
+        g_relinkWords[RelinkShadowMismatchNodes] += result.mismatchNodes;
+        g_relinkWords[RelinkRefusals] += result.refused;
+        if (result.mismatchCells || result.mismatchNodes) {
+            ++g_relinkWords[RelinkUntappedWriters];
+            g_relinkWords[RelinkLastMismatchCell] = result.lastCell; g_relinkWords[RelinkLastMismatchRecord] = result.lastRecord;
+        }
+        g_relinkWords[RelinkShadowUs] += Microseconds(Now() - start);
+        RelinkMirrorReset(g_relinkMirror, log);
+    }
+    g_relinkWords[RelinkDispatches] += stats.dispatches; g_relinkWords[RelinkPartitions] += stats.partitions;
+    g_relinkWords[RelinkApplyCpuUs] += stats.cpuUs;
+    g_relinkWords[RelinkRefusals] += stats.anomalies; g_relinkWords[RelinkFaults] += stats.faults;
+    MoveLogCloseBatch(log);
+}
+// A barrier before code that may touch the chains without being logged (untapped native writer or reader).
+void RelinkBarrier(U cause) {
+    if (!g_relinkWindow) return;
+    g_moveLog.complete = 0;
+    RelinkFlush(cause);
+}
+// True: the occurrence is fully accounted for (logged, or a no-op the native service skips too) and the native service
+// must NOT run. False: the caller runs the native service (shadow mode, or a serial fallback after a flush).
+bool RelinkLog(MoveOpKind kind, U record, U ordinal, MoveOpSource source) {
+    const bool live = g_relinkMode == 2;
+    const bool sample = !(++g_relinkSeq & 15);
+    const LONGLONG start = sample ? Now() : 0;
+    ExtractResult result = ExtractMoveOp(g_moveLog, record, ordinal, kind, source, live);
+    if (result == ExtractBatchFull) { RelinkFlush(RelinkCauseOther); result = ExtractMoveOp(g_moveLog, record, ordinal, kind, source, live); }
+    bool skipNative = live;
+    if (result == ExtractLogged) {
+        ++g_relinkWords[kind == MoveUnlinkGrid ? RelinkOpsUnlink : RelinkOpsInsert];
+        if (!live) RelinkMirrorTouch(g_relinkMirror, g_moveLog, g_moveLog.count - 1);
+    } else if (result != ExtractNoop) {
+        RelinkFlush(RelinkCauseOther);
+        ++g_relinkWords[RelinkSerialFallbacks]; g_moveLog.complete = 0;
+        skipNative = false;
+    }
+    if (sample) g_relinkWords[RelinkLogUs] += Microseconds(Now() - start) * 16;
+    return skipNative;
+}
+// Stage entry (after PrepareOwned) / exit of the replay loop.
+void RelinkBeginStage() {
+    if (!g_relinkMode || !g_moveLog.block) return;
+    MoveLogBeginStage(g_moveLog, g_words[Calls]);
+    if (g_relinkMode == 1) RelinkMirrorReset(g_relinkMirror, g_moveLog);
+    ++g_relinkWords[RelinkStages];
+    g_relinkWindow = true; g_relinkLogging = false;
+}
+void RelinkEndStage() {
+    if (!g_relinkWindow) return;
+    RelinkFlush(RelinkCauseEnd);
+    g_relinkWords[RelinkCollapsed] += g_moveLog.collapsed;
+    MoveLogPublish(g_moveLog);
+    g_relinkWindow = g_relinkLogging = false;
+}
+// Exception unwind: leave no deferred op behind (memory must match the +AC values already written).
+void RelinkAbortStage() {
+    if (!g_relinkWindow) return;
+    __try { RelinkFlush(RelinkCauseEnd); } __except(EXCEPTION_EXECUTE_HANDLER) { ++g_relinkWords[RelinkFaults]; }
+    g_relinkWindow = g_relinkLogging = false;
+}
+// Gate target for 0x811ED0 / 0x7EFA80 (kind 0 / 1) on the owner. 1 = handled, 0 = run the native service.
+U __stdcall RelinkGate(U kind, U receiver) {
+    if (!g_relinkWindow) return 0;
+    if (!g_relinkLogging) { g_moveLog.complete = 0; RelinkFlush(RelinkCauseOther); return 0; }
+    return RelinkLog(kind ? MoveInsertGrid : MoveUnlinkGrid, receiver, g_stageOrdinal, MoveFromClone) ? 1 : 0;
+}
+// thiscall stubs installed over g_serviceTargets[UnlinkGrid/InsertGrid] while relink is on. They preserve every integer
+// register and XMM0-7 (the callers were compiled against the register footprint of the real service) and execute no x87.
+#define LOCO_RELINK_STUB(name, kind, native) \
+    __declspec(naked) void name() { \
+        __asm pushfd \
+        __asm pushad \
+        __asm mov ebp, esp \
+        __asm sub esp, 128 \
+        __asm movups xmmword ptr [esp], xmm0 \
+        __asm movups xmmword ptr [esp + 16], xmm1 \
+        __asm movups xmmword ptr [esp + 32], xmm2 \
+        __asm movups xmmword ptr [esp + 48], xmm3 \
+        __asm movups xmmword ptr [esp + 64], xmm4 \
+        __asm movups xmmword ptr [esp + 80], xmm5 \
+        __asm movups xmmword ptr [esp + 96], xmm6 \
+        __asm movups xmmword ptr [esp + 112], xmm7 \
+        __asm push dword ptr [ebp + 24] \
+        __asm push kind \
+        __asm call RelinkGate \
+        __asm mov dword ptr [ebp + 28], eax \
+        __asm movups xmm0, xmmword ptr [esp] \
+        __asm movups xmm1, xmmword ptr [esp + 16] \
+        __asm movups xmm2, xmmword ptr [esp + 32] \
+        __asm movups xmm3, xmmword ptr [esp + 48] \
+        __asm movups xmm4, xmmword ptr [esp + 64] \
+        __asm movups xmm5, xmmword ptr [esp + 80] \
+        __asm movups xmm6, xmmword ptr [esp + 96] \
+        __asm movups xmm7, xmmword ptr [esp + 112] \
+        __asm mov esp, ebp \
+        __asm popad \
+        __asm popfd \
+        __asm test eax, eax \
+        __asm jnz name##Handled \
+        __asm jmp dword ptr [g_relinkNative + native * 4] \
+        __asm name##Handled: \
+        __asm ret \
+    }
+LOCO_RELINK_STUB(RelinkUnlinkStub, 0, 0)
+LOCO_RELINK_STUB(RelinkInsertStub, 1, 1)
+#undef LOCO_RELINK_STUB
 
 void StagingExit();
 void __stdcall BeginStaging(U*) {
+    if (g_relinkLogging) { g_relinkLogging = false; RelinkBarrier(RelinkCauseOther); } // staging gather/commit may touch chains untapped
     g_stagingActive = !g_quiet && g_stage && g_binding.use_parallel;
     if (g_stagingActive) g_stagingStart = Now();
 }
@@ -1630,7 +2125,9 @@ bool CreateOwned() {
 // Worker-side classification: reads only this entity's own cache lines plus static class/context state.
 U OwnedReason(U a, U& classIndex) {
     if (!Candidate(D(a), &classIndex) || !g_owned->classRoute[classIndex]) return OwnedNeedsUnit;
-    if (D(a) == V(0x132BA04)) return OwnedNeedsClassWrapper;
+    // 0x5B2CA0 with no pre-step (+688 == 0, 0x5F3040 not entered) and an empty child array (+66C == 0) is exactly its 0x62A290 selector
+    // call (prologue/epilogue have no other effect): admitted. Pre-step and children (foreign-writing child virtuals, aim arm) stay refused.
+    if (D(a) == V(0x132BA04) && (D(a + 0x688) || D(a + 0x66C))) return OwnedNeedsClassWrapper;
     if (B(a + 0xEC) != 1 && D(a + 0x628) && D(a + 0x62C) == 4) return OwnedNeedsAlternateWrapper;
     if (D(a + 0x18)) return OwnedNeedsPending;
     if (D(a + 0x170)) return OwnedNeedsForeignTransform;
@@ -1670,7 +2167,7 @@ bool OwnedRunEntity(OwnedArena& arena, OwnedParticipant& participant, U index) {
         slot.reason = static_cast<unsigned char>(reason); slot.detail = 0;
         arena.states[index] = OwnedRefused; return true;
     }
-    slot.active = B(a + 0xA1) != 0; slot.wrapper = B(a + 0xEC) == 1;
+    slot.active = B(a + 0xA1) != 0; slot.wrapper = B(a + 0xEC) == 1; slot.classWrapper = D(a) == V(0x132BA04);
     // The private receiver keeps the whole prefix; the slot keeps only the audited live-in guard footprint.
     const unsigned char* const live = static_cast<const unsigned char*>(P(a));
     unsigned char* const work = participant.work;
@@ -1736,6 +2233,9 @@ void __fastcall OwnedChunk(void* context, U chunk) {
             acquired.third[1] = acquired.third[2] = acquired.third[3] = 0;
             acquired.maximum = 0;
             acquired.cpu100ns = acquired.cpuAtMaximum100ns = 0;
+            acquired.computed = acquired.refused = acquired.chunks = acquired.inlineChunks = acquired.chunkTimeUs = 0;
+            memset(acquired.histogram, 0, sizeof(acquired.histogram));
+            acquired.isOwner = GetCurrentThreadId() == arena.owner;
             g_ownedParticipant = &acquired;
         }
     }
@@ -1748,8 +2248,9 @@ void __fastcall OwnedChunk(void* context, U chunk) {
     __asm { fnstcw savedCw }
     g_ownedOccurrence = &participant->current;
     U computed = 0, refused = 0;
-    const LONGLONG start = Now();
-    const ULONGLONG cpuStart = ThreadCpu100ns();
+    const bool timed = !g_quiet; // clock reads and GetThreadTimes cost ~1 us each: never per chunk under --loco-quiet
+    const LONGLONG start = timed ? Now() : 0;
+    const ULONGLONG cpuStart = timed ? ThreadCpu100ns() : 0;
     __try {
         // Full controls, not just rounding: FTZ, DAZ and x87 precision all participate in the native arithmetic.
         _mm_setcsr(arena.mxcsr);
@@ -1781,21 +2282,20 @@ void __fastcall OwnedChunk(void* context, U chunk) {
         __asm { fldcw savedCw }
         _mm_setcsr(savedCsr);
     }
+    participant->computed += computed; participant->refused += refused;
+    ++(participant->isOwner ? participant->inlineChunks : participant->chunks);
+    if (!timed) return;
     const LONGLONG ticks = Now() - start;
     const ULONGLONG cpuEnd = ThreadCpu100ns();
     const ULONGLONG cpu = cpuStart && cpuEnd >= cpuStart ? cpuEnd - cpuStart : 0;
     participant->cpu100ns += cpu;
     const U us = Microseconds(ticks);
-    _InterlockedExchangeAdd(&arena.chunkTimeUs, static_cast<LONG>(us));
-    _InterlockedExchangeAdd(&arena.computed, static_cast<LONG>(computed));
-    _InterlockedExchangeAdd(&arena.refused, static_cast<LONG>(refused));
-    _InterlockedIncrement(&arena.histogram[us <= 16 ? 0 : us <= 32 ? 1 : us <= 64 ? 2 : us <= 128 ? 3 :
-        us <= 256 ? 4 : us <= 512 ? 5 : us <= 1024 ? 6 : 7]);
+    participant->chunkTimeUs += us;
+    ++participant->histogram[us <= 16 ? 0 : us <= 32 ? 1 : us <= 64 ? 2 : us <= 128 ? 3 :
+        us <= 256 ? 4 : us <= 512 ? 5 : us <= 1024 ? 6 : 7];
     if (ticks > participant->maximum) {
         participant->maximum = ticks; participant->cpuAtMaximum100ns = cpu;
     }
-    _InterlockedIncrement(reinterpret_cast<volatile LONG*>(&g_parallelWords[
-        GetCurrentThreadId() == arena.owner ? ParallelInlineChunks : ParallelChunks]));
 }
 // Activation only: full scene/catalog construction and participant scratch preparation.
 struct OwnedCapture {
@@ -1928,8 +2428,6 @@ void PrepareOwned(U manager) {
     size = (std::max)(kOwnedChunkMin, (std::min)(kOwnedChunkMax, (size + 7) & ~7u));
     arena.chunkSize = size; arena.chunks = (arena.count + size - 1) / size;
     arena.epoch = ++g_ownedEpochCounter; arena.nextParticipant = 0; arena.overflow = 0;
-    arena.computed = arena.refused = arena.chunkTimeUs = 0;
-    for (auto& bucket : arena.histogram) bucket = 0;
     const LONGLONG identityStart = Now();
     // Already activated: PrepareScene performs only fixed-size identity/header checks.
     const bool ready = ntw2_sweep::PrepareScene(arena.scene, model, g_delta, g_generation);
@@ -1966,11 +2464,18 @@ void PrepareOwned(U manager) {
     g_ownedPhase[OwnedPhaseChunkSizeLast] = arena.chunkSize;
     g_ownedPhase[OwnedPhaseMaxChunkEntities] = (std::max)(g_ownedPhase[OwnedPhaseMaxChunkEntities],
         (std::min)(arena.chunkSize, arena.count));
-    for (U b = 0; b < kOwnedHistogram; ++b) g_ownedPhase[OwnedPhaseChunkLe16 + b] += static_cast<U>(arena.histogram[b]);
-    g_ownedWords[OwnedWorkerTimeUs] += static_cast<U>(arena.chunkTimeUs);
-    g_ownedPhase[OwnedPhaseChunkTimeSumUs] += static_cast<U>(arena.chunkTimeUs);
-    g_ownedPhase[OwnedPhaseComputed] += static_cast<U>(arena.computed);
-    g_ownedPhase[OwnedPhaseWorkerRefused] += static_cast<U>(arena.refused);
+    // Fold the per-participant chunk accounting (acquired participants only; the rest were reset or never ran).
+    U computed = 0, refused = 0, chunkTimeUs = 0;
+    for (U i = 0; i < (std::min)(participants, static_cast<U>(arena.nextParticipant)); ++i) {
+        const OwnedParticipant& p = *arena.participants[i];
+        computed += p.computed; refused += p.refused; chunkTimeUs += p.chunkTimeUs;
+        g_parallelWords[ParallelChunks] += p.chunks; g_parallelWords[ParallelInlineChunks] += p.inlineChunks;
+        for (U b = 0; b < kOwnedHistogram; ++b) g_ownedPhase[OwnedPhaseChunkLe16 + b] += p.histogram[b];
+    }
+    g_ownedWords[OwnedWorkerTimeUs] += chunkTimeUs;
+    g_ownedPhase[OwnedPhaseChunkTimeSumUs] += chunkTimeUs;
+    g_ownedPhase[OwnedPhaseComputed] += computed;
+    g_ownedPhase[OwnedPhaseWorkerRefused] += refused;
     g_ownedPhase[OwnedPhaseParticipantOverflow] += static_cast<U>(arena.overflow);
     g_ownedPhase[OwnedPhaseParticipantsUsed] += (std::min)(participants, static_cast<U>(arena.nextParticipant));
     for (U i = 0; i < participants; ++i) {
@@ -1997,6 +2502,31 @@ void CountCommitted(const OwnedSlot& slot) {
 void InvalidateOwned(OwnedArena& arena, U cursor) {
     arena.valid = false; arena.failureReason = OwnedNeedsUnit; ++g_parallelWords[ParallelInvalidated];
     if (B(D(cursor) + 0x30) == 1) ++g_ownedWords[OwnedNeedsUnit];
+}
+// Class-wrapper census (CwWord): what the refused 0x132BA04 occurrences look like at the moment the owner replays them.
+U g_cwWords[CwWordCount];
+void CensusClassWrapper(U a) {
+    __try {
+        ++g_cwWords[CwOccurrences];
+        const U pre = D(a + 0x688), count = D(a + 0x66C), list = D(a + 0x670), state = D(a + 0x224);
+        if (pre) ++g_cwWords[CwPreStep];
+        ++g_cwWords[state == 9 ? CwState9 : state == 8 ? CwState8 : CwStateOther];
+        if (count > 4096) { ++g_cwWords[CwUnreadable]; return; }
+        ++g_cwWords[count == 0 ? CwKids0 : count == 1 ? CwKids1 : CwKids2Plus];
+        if (count > g_cwWords[CwKidsMax]) g_cwWords[CwKidsMax] = count;
+        if (!pre && !count) ++g_cwWords[CwEmpty];
+        if (!pre && count) ++g_cwWords[CwWithKidsNoPre];
+        g_cwWords[CwChildrenTotal] += count;
+        for (U i = 0; i < count; ++i) {
+            const U child = D(list + 4 * i);
+            if (!child) { ++g_cwWords[CwNullChildren]; continue; }
+            const U vt = D(child);
+            U k = 0;
+            while (k < 8 && g_cwWords[CwVtBase + 2 * k] && g_cwWords[CwVtBase + 2 * k] != vt) ++k;
+            if (k == 8) { ++g_cwWords[CwVtOverflow]; continue; }
+            g_cwWords[CwVtBase + 2 * k] = vt; ++g_cwWords[CwVtBase + 2 * k + 1];
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { ++g_cwWords[CwUnreadable]; }
 }
 bool CommitOwned(U manager, U cursor) {
     if (!g_owned || g_parallelWords[ParallelSticky]) return false;
@@ -2027,6 +2557,7 @@ bool CommitOwned(U manager, U cursor) {
     }
     if (state == OwnedRefused) {
         ++g_ownedWords[slot.reason];
+        if (slot.reason == OwnedNeedsClassWrapper) CensusClassWrapper(slot.entity);
         if (slot.detail) ++g_ownedDetails[slot.detail];
         return false;
     }
@@ -2036,7 +2567,8 @@ bool CommitOwned(U manager, U cursor) {
     const unsigned char* const live = static_cast<const unsigned char*>(P(slot.entity));
     // An earlier fallback/replay may have changed this very receiver (duplicate occurrence, class-wrapper children
     // callbacks...): the speculative result is stale, so this one entity runs natively at its ordinal.
-    if (!OwnedGuardMatches(slot, live)) {
+    // +66C/+688 lie beyond the copied prefix: a class wrapper admitted as empty must still be empty when its result is replayed.
+    if (!OwnedGuardMatches(slot, live) || (slot.classWrapper && (Raw<U>(live + 0x66C) | Raw<U>(live + 0x688)))) {
         ++g_ownedWords[OwnedNeedsUnit]; ++g_ownedWords[OwnedDuplicateRefusals];
         ++g_ownedPhase[OwnedPhaseValidationRefusals]; ++g_parallelWords[ParallelInvalidated];
         return false;
@@ -2056,7 +2588,10 @@ bool CommitOwned(U manager, U cursor) {
 #endif
         if (!g_quiet) RecordService(service, slot.entity + (service == WrapperQuery ? 0xF4 : 0));
         if (service < Sweep) {
-            Call(g_serviceTargets[service], slot.entity);
+            if (g_relinkWindow && (service == UnlinkGrid || service == InsertGrid)) {
+                if (!RelinkLog(service == UnlinkGrid ? MoveUnlinkGrid : MoveInsertGrid, slot.entity, index, MoveFromWorker))
+                    Call(g_relinkNative[service == UnlinkGrid ? 0 : 1], slot.entity);
+            } else Call(g_serviceTargets[service], slot.entity);
             ++g_ownedWords[OwnedReplayUnlinkGrid + service];
         }
         ++g_parallelWords[ParallelReplayedServices];
@@ -2119,6 +2654,9 @@ bool Start(const Binding& binding) {
     if (binding.use_shadow && !binding.use_clone) return false;
     if (binding.use_owned_services && !binding.use_parallel) return false;
     if (binding.use_quiet && !binding.use_owned_services) return false;
+    if (binding.use_relink_shadow && binding.use_relink_workers) return false;
+    if ((binding.use_relink_shadow || binding.use_relink_workers) &&
+        (!binding.use_owned_services || !(binding.use_grid || binding.verify_grid))) return false;
     g_grid = nullptr; g_gridModel = 0; g_storageBytes = 0;
     memset(g_storageWords, 0, sizeof(g_storageWords)); memset(g_catalogStorage, 0, sizeof(g_catalogStorage));
     g_workers = nullptr;
@@ -2127,13 +2665,16 @@ bool Start(const Binding& binding) {
         g_workers = static_cast<WorkerArena*>(VirtualAlloc(nullptr, sizeof(WorkerArena), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!g_workers) return false;
     }
-    g_gridCurrent = g_incarnation = 0; g_gridValid = false;
+    g_incarnation = 0; g_gridValid = false;
     memset(&g_gridView, 0, sizeof(g_gridView));
     memset(g_gridWords, 0, sizeof(g_gridWords));
     memset(g_gridV2Words, 0, sizeof(g_gridV2Words));
     g_gridV2Words[GridV2Version] = 2;
     g_gridV2Words[GridV2Enabled] = binding.use_grid || binding.verify_grid;
     g_gridV2Words[GridV2VerifyEnabled] = binding.verify_grid;
+    memset(g_gridBuildWords, 0, sizeof(g_gridBuildWords)); memset(g_gridBuildTicks, 0, sizeof(g_gridBuildTicks));
+    g_gridBuildWords[GridBuildVersion] = 1;
+    g_gridBuildWords[GridBuildMode] = binding.grid_incremental && (binding.use_grid || binding.verify_grid) ? 1u : 0u;
     memset(g_parallelWords, 0, sizeof(g_parallelWords));
     memset(g_ownedWords, 0, sizeof(g_ownedWords));
     g_ownedWords[OwnedVersion] = 1;
@@ -2154,6 +2695,14 @@ bool Start(const Binding& binding) {
     g_parallelWords[ParallelEnabled] = binding.use_parallel ? 1 : 0;
     g_binding = binding;
     g_binding.use_grid = binding.use_grid || binding.verify_grid;
+    g_binding.grid_incremental = binding.grid_incremental && g_binding.use_grid;
+    memset(g_relinkWords, 0, sizeof(g_relinkWords));
+    memset(g_cwWords, 0, sizeof(g_cwWords)); g_cwWords[CwVersion] = 1;
+    g_relinkMode = binding.use_relink_workers ? 2u : binding.use_relink_shadow ? 1u : 0u;
+    g_relinkWords[RelinkVersion] = 1; g_relinkWords[RelinkMode] = g_relinkMode;
+    g_relinkDispatcher = {binding.dispatch, binding.pool, binding.workers};
+    g_relinkWindow = g_relinkLogging = false; g_relinkSeq = 0; g_relinkMinCells = kRelinkParallelMinCells;
+    g_relinkNative[0] = V(0x811ED0); g_relinkNative[1] = V(0x7EFA80);
     memset(g_words, 0, sizeof(g_words));
     memset(g_gateWords, 0, sizeof(g_gateWords));
     g_gateWords[GateVersion] = 1;
@@ -2187,9 +2736,14 @@ bool Start(const Binding& binding) {
         ntw2_sweep::Stop(); ntw2_resolve::Stop(); ntw2_env::Stop();
         DestroyOwned();
         ReleaseGrid();
+        ReleaseRelink();
         if (g_workers) VirtualFree(g_workers, 0, MEM_RELEASE);
         g_workers = nullptr;
         g_shadowEnabled = false; return false;
+    }
+    if (g_relinkMode) { // the grid link services go through the op-log stubs; CommitOwned and the gates use g_relinkNative for the real ones
+        g_serviceTargets[UnlinkGrid] = Address(reinterpret_cast<void*>(&RelinkUnlinkStub));
+        g_serviceTargets[InsertGrid] = Address(reinterpret_cast<void*>(&RelinkInsertStub));
     }
     g_started = true;
     g_storageBytes = ComputeStorage();
@@ -2215,6 +2769,10 @@ bool ActivateOwned(void* model, const ntw2_workload::Capacity& capacity) {
         } else if (!GridCovers(capacity)) {
             g_ownedLoad[OwnedLoadFailureReason] = ActivationBadCapacity; return false;
         }
+    }
+    if (g_relinkMode && !AllocateRelink(g_gridStore.cap)) {
+        g_ownedLoad[OwnedLoadFailureReason] = ActivationGridAllocation;
+        g_storageBytes = ComputeStorage(); return false;
     }
     if (!g_owned) { g_storageBytes = ComputeStorage(); return true; } // grid-only mode does not prepare sweep/environment scenes
     OwnedArena& arena = *g_owned;
@@ -2279,6 +2837,7 @@ void Stop() {
     DestroyOwned();
     g_gridValid = false; g_gridModel = 0;
     ReleaseGrid();
+    ReleaseRelink();
     if (g_workers) VirtualFree(g_workers, 0, MEM_RELEASE);
     g_workers = nullptr;
     g_storageBytes = 0; memset(g_storageWords, 0, sizeof(g_storageWords)); memset(g_catalogStorage, 0, sizeof(g_catalogStorage));
@@ -2332,6 +2891,7 @@ U __fastcall Stage(void* manager) {
         PrepareOwned(m);
         if (g_binding.grid_window) g_binding.grid_window(manager, 1); // probation: owner's relink window opens
         const LONGLONG replayStart = g_binding.use_owned_services ? Now() : 0;
+        if (g_relinkMode) RelinkBeginStage();
         while (cursor != end) {
             const U parallel = g_binding.use_owned_services ? (CommitOwned(m, cursor) ? 1u : 0u) : ParallelRun(m, cursor, end);
             if (parallel) {
@@ -2364,8 +2924,11 @@ U __fastcall Stage(void* manager) {
                     ++g_runDepth;
                     ResetServiceTrace();
                     const U frameBase = g_serviceDepth;
+                    // The class wrapper's children are updated through untapped native virtuals: flush first, its gates run natively.
+                    if (g_relinkWindow) { if (D(a) == V(0x132BA04)) RelinkBarrier(RelinkCauseClassWrapper); else g_relinkLogging = true; }
                     __try { Call(D(a) == V(0x132BA04) ? g_binding.class_wrap_clone : g_binding.selector_clone, a); }
                     __finally {
+                        g_relinkLogging = false;
                         if (!g_quiet) {
                             elapsed = Now() - start;
                             RecordCloneTime(elapsed);
@@ -2376,6 +2939,7 @@ U __fastcall Stage(void* manager) {
                     }
                 } else {
                     ++g_words[Native];
+                    if (g_relinkWindow) RelinkBarrier(RelinkCauseFallback);
                     Call(D(D(a) + 0x10), a);
                     if (!g_quiet) elapsed = Now() - start;
                 }
@@ -2398,6 +2962,7 @@ U __fastcall Stage(void* manager) {
             cursor += 4;
             end = D(m + 0x264) + 4 * D(m + 0x260);
         }
+        if (g_relinkWindow) RelinkEndStage();
         if (g_binding.use_owned_services) {
             const U replayUs = Microseconds(Now() - replayStart);
             g_ownedWords[OwnedReplayUs] += replayUs;
@@ -2406,6 +2971,7 @@ U __fastcall Stage(void* manager) {
         }
         if (g_binding.use_grid) CaptureGrid(manager); // one end-of-site-13 publication for following collision
     } __finally {
+        if (g_relinkWindow) RelinkAbortStage();
         // Probation: the owner's relink window closes after replay and grid publication; this re-arms the heads.
         if (g_binding.grid_window) g_binding.grid_window(manager, 0);
         const U us = Microseconds(Now() - dispatchStart);
@@ -2424,7 +2990,16 @@ void Sample(U words[WordCount]) { memcpy(words, g_words, sizeof(g_words)); }
 void SampleGates(U words[GateWordCount]) { memcpy(words, g_gateWords, sizeof(g_gateWords)); }
 void SampleGrid(U words[GridWordCount]) { memcpy(words, g_gridWords, sizeof(g_gridWords)); }
 void SampleGridV2(U words[GridV2WordCount]) { memcpy(words, g_gridV2Words, sizeof(g_gridV2Words)); }
+void SampleGridBuild(U words[GridBuildWordCount]) {
+    memcpy(words, g_gridBuildWords, sizeof(g_gridBuildWords));
+    for (U phase = 0; phase < 4; ++phase) words[GridBuildRegistryUs + phase] = Microseconds(g_gridBuildTicks[phase]);
+}
+#ifdef NTW2_LOCO_ORACLE
+void DebugGrid(long long* out) { for (int i = 0; i < 8; ++i) { out[i] = g_dbg[i]; g_dbg[i] = 0; } }
+#endif
 void SampleParallel(U words[ParallelWordCount]) { memcpy(words, g_parallelWords, sizeof(g_parallelWords)); }
+void SampleRelink(U words[RelinkWordCount]) { memcpy(words, g_relinkWords, sizeof(g_relinkWords)); }
+void SampleClassWrapper(U words[CwWordCount]) { memcpy(words, g_cwWords, sizeof(g_cwWords)); }
 void SampleOwned(U words[OwnedWordCount]) { memcpy(words, g_ownedWords, sizeof(g_ownedWords)); }
 void SampleOwnedDetails(U words[OwnedDetailWordCount]) { memcpy(words, g_ownedDetails, sizeof(g_ownedDetails)); }
 void SampleOwnedPhase(U words[OwnedPhaseWordCount]) { memcpy(words, g_ownedPhase, sizeof(g_ownedPhase)); }
@@ -2437,9 +3012,14 @@ U EstimateActivationBytes(const ntw2_workload::Capacity& capacity) {
     unsigned long long total = 0;
     if (g_binding.use_grid && !g_grid) {
         GridStore plan = {};
-        const U chunks = (std::min)(kParallelChunks, (std::max)(1u, g_binding.workers + 1));
-        total += (CarveGrid(capacity, chunks, plan, nullptr) + 4095) & ~4095ull;
+        const U chunks = GridChunkCount();
+        total += (CarveGrid(capacity, chunks, plan, nullptr, g_binding.grid_incremental) + 4095) & ~4095ull;
+        if (g_binding.grid_incremental && g_binding.verify_grid) { // the shadow store of the verification is a plain full store
+            GridStore shadowPlan = {};
+            total += (CarveGrid(capacity, chunks, shadowPlan, nullptr, false) + 4095) & ~4095ull;
+        }
     }
+    if (g_relinkMode && !g_moveLog.block) total += RelinkPlanBytes(capacity, g_relinkMode);
     if (g_owned && !g_owned->activated) {
         total += static_cast<unsigned long long>(capacity.primary) * (sizeof(OwnedSlot) + sizeof(U) + 1);
         for (U i = 0; i < g_owned->participantsCount; ++i)
@@ -2506,6 +3086,11 @@ OwnedLayoutForTest OwnedLayout() {
     return {static_cast<U>(sizeof(OwnedSlot)), kGuardBytes, kOutputBytes, kWrapperBytes,
         static_cast<U>(kGuardSpanCount), static_cast<U>(kOutputSpanCount), static_cast<U>(kWrapperSpanCount), static_cast<U>(kAlwaysWrittenCount),
         kGuardSpans, kOutputSpans, kWrapperSpans, kAlwaysWritten};
+}
+void SetRelinkMinCellsForTest(U cells) { g_relinkMinCells = cells; }
+U RelinkStubForTest(U insert) { return g_serviceTargets[insert ? InsertGrid : UnlinkGrid]; }
+void RelinkWindowForTest(bool open) {
+    if (open) { RelinkBeginStage(); g_relinkLogging = g_relinkWindow; } else RelinkEndStage();
 }
 OwnedServiceObserverForTest SetOwnedServiceObserverForTest(OwnedServiceObserverForTest observer) {
     if (g_stage || g_runDepth || g_parallelInFlight) return g_ownedObserver;

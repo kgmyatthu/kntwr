@@ -96,6 +96,46 @@
     "verify_mismatches", "verify_us", "dispatches", "committed_records", "record_reads", \
     "refusals", "faults", "epoch"
 
+// Grid build row (MovementSlices Contract 2, appended after grid v2): phase timers are owner-QPC microsecond sums over
+// every successful build. `registry_us` is the serial identity/hash pass that runs on the owner before dispatch 1;
+// `capture_wall_us`/`build_wall_us` bracket dispatches 1 and 2; `plan_us` is everything the owner does between them.
+// `registry_reuses` (word 15) counts builds whose registry arrays were byte-identical to the previous build, so the
+// record/hash tables were reused instead of rebuilt.
+#define NTW2_LOCO_GRID_BUILD_LABELS \
+    "version", "mode", "full_builds", "incremental_builds", "changed_records", \
+    "delta_hint_records", "registry_us", "capture_wall_us", "plan_us", "build_wall_us", \
+    "full_fallbacks", "last_fallback_reason", "shadow_compares", "shadow_mismatches", "dispatches", "registry_reuses"
+
+// Relink row (MovementSlices Contract 2/3, appended after grid build): the site-13 soft-grid relink op log and apply.
+// mode 0 off / 1 shadow / 2 live. `batches` counts applied batches with at least one op; flush_* count every flush
+// (barrier) by cause: native-vtable fallback (untapped), class-wrapper clone fallback (not provably chain-free), end of
+// replay loop / unwind, anything else (gate outside a logged occurrence, staging gate, batch capacity, serial fallback).
+// log_us is a 1-in-16 sampled owner estimate (x16); apply_wall_us is the owner wall of every apply (serial and pool),
+// apply_cpu_us the summed pool task time; shadow_us the owner time of the mirror apply + compare. `refusals` counts
+// batches/ops that could not be verified or whose kernels saw a broken chain invariant; `untapped_writers` counts
+// grid mismatches shadow mode attributes to writers outside the log. Words 28-31 histogram the applied batch sizes.
+#define NTW2_LOCO_RELINK_LABELS \
+    "version", "mode", "stages", "ops_unlink", "ops_insert", \
+    "collapsed", "batches", "flush_fallback", "flush_class_wrapper", "flush_end", \
+    "flush_other", "max_batch_ops", "log_us", "apply_wall_us", "apply_cpu_us", \
+    "dispatches", "partitions_used", "shadow_batches", "shadow_cells", "shadow_mismatch_cells", \
+    "shadow_mismatch_nodes", "shadow_us", "serial_fallbacks", "refusals", "faults", \
+    "last_mismatch_cell", "last_mismatch_record", "untapped_writers", \
+    "batches_le16", "batches_le256", "batches_le2048", "batches_gt2048"
+
+// Class-wrapper census (slice C step 0, owner-side, always on with owned services): observed at CommitOwned for every
+// occurrence the workers refused as needs_class_wrapper (receiver 0x132BA04, wrapper 0x5B2CA0). Pre-step = D(+0x688) != 0
+// (0x5F3040 runs), children = D(+0x66C) entries of the array at D(+0x670), state = D(+0x224) (9 = aim arm, 8 = skipped
+// child). empty_closure = no pre-step and no children; with_children_no_pre_step = candidates for a replayed child family.
+// vt<N>/count<N> are the first eight distinct child vtable addresses (child object word 0) and their child counts;
+// vtable_overflow counts children of further vtables. Counters cumulative per run.
+#define NTW2_LOCO_CW_LABELS \
+    "version", "occurrences", "pre_step_nonzero", "children_0", "children_1", "children_2plus", \
+    "children_max", "state_9", "state_8", "state_other", "empty_closure", "with_children_no_pre_step", \
+    "children_total", "null_children", "vtable_overflow", "unreadable", \
+    "vt0", "count0", "vt1", "count1", "vt2", "count2", "vt3", "count3", \
+    "vt4", "count4", "vt5", "count5", "vt6", "count6", "vt7", "count7"
+
 #ifdef __cplusplus
 #include "native_owned_grid.h"
 namespace ntw2_loco {
@@ -212,6 +252,26 @@ enum GridV2Word : uint32_t {
     GridV2Records, GridV2Memberships, GridV2VerifyMismatches, GridV2VerifyUs, GridV2Dispatches,
     GridV2CommittedRecords, GridV2RecordReads, GridV2Refusals, GridV2Faults, GridV2Epoch, GridV2WordCount
 };
+enum GridBuildWord : uint32_t {
+    GridBuildVersion, GridBuildMode, GridBuildFull, GridBuildIncremental, GridBuildChanged,
+    GridBuildDeltaHint, GridBuildRegistryUs, GridBuildCaptureWallUs, GridBuildPlanUs, GridBuildWallUs,
+    GridBuildFallbacks, GridBuildFallbackReason, GridBuildShadowCompares, GridBuildShadowMismatches, GridBuildDispatches,
+    GridBuildRegistryReuses, GridBuildWordCount
+};
+enum RelinkWord : uint32_t {
+    RelinkVersion, RelinkMode, RelinkStages, RelinkOpsUnlink, RelinkOpsInsert,
+    RelinkCollapsed, RelinkBatches, RelinkFlushFallback, RelinkFlushClassWrapper, RelinkFlushEnd,
+    RelinkFlushOther, RelinkMaxBatchOps, RelinkLogUs, RelinkApplyWallUs, RelinkApplyCpuUs,
+    RelinkDispatches, RelinkPartitions, RelinkShadowBatches, RelinkShadowCells, RelinkShadowMismatchCells,
+    RelinkShadowMismatchNodes, RelinkShadowUs, RelinkSerialFallbacks, RelinkRefusals, RelinkFaults,
+    RelinkLastMismatchCell, RelinkLastMismatchRecord, RelinkUntappedWriters,
+    RelinkBatchesLe16, RelinkBatchesLe256, RelinkBatchesLe2048, RelinkBatchesGt2048, RelinkWordCount
+};
+enum CwWord : uint32_t {
+    CwVersion, CwOccurrences, CwPreStep, CwKids0, CwKids1, CwKids2Plus,
+    CwKidsMax, CwState9, CwState8, CwStateOther, CwEmpty, CwWithKidsNoPre,
+    CwChildrenTotal, CwNullChildren, CwVtOverflow, CwUnreadable, CwVtBase, CwWordCount = CwVtBase + 16
+};
 struct Binding {
     uint32_t image_delta;
     uint32_t wrap_clone;
@@ -230,12 +290,20 @@ struct Binding {
     // Stage C publication after site-13 replay; verification alone also enables it.
     bool use_grid;
     bool verify_grid;
+    // Incremental grid build (requires use_grid): unchanged records keep their previous publication; every stage falls back
+    // to the full build on a first build, geometry change, dirty map, capacity breach or large change set. With
+    // verify_grid the full build also runs into a shadow store and every published array is compared (GridBuildShadow*).
+    bool grid_incremental;
     // Synchronous owner-boundary handoff for live scene capture only. Null means
     // the caller already owns a quiescent model (standalone mapped-image oracles).
     bool (*capture_at_tick)(void (*capture)(void*), void* context);
     // Optional grid-probation relink window (ntw2_grid_probation::Window): the runtime opens the owner's native
     // relink window after PrepareOwned and closes it in Stage's finally (after grid publication). Null = disabled.
     void (__cdecl *grid_window)(void* manager, uint32_t open);
+    // Cell-partitioned relink apply (requires use_owned_services and use_grid; exclusive with each other). Shadow: the native serial
+    // services still run and a private mirror verifies the parallel apply; workers: the pool applies the logged batches.
+    bool use_relink_shadow;
+    bool use_relink_workers;
 };
 // Bind before clone emission. Scratch headers have stable addresses across starts.
 void Bind(uint32_t image_delta, uint32_t* bindings);
@@ -250,6 +318,9 @@ void SampleGates(uint32_t words[GateWordCount]);
 void SampleServices(uint32_t words[ServiceWordCount]);
 void SampleGrid(uint32_t words[GridWordCount]);
 void SampleGridV2(uint32_t words[GridV2WordCount]);
+void SampleGridBuild(uint32_t words[GridBuildWordCount]);
+void SampleRelink(uint32_t words[RelinkWordCount]);
+void SampleClassWrapper(uint32_t words[CwWordCount]);
 void SampleParallel(uint32_t words[ParallelWordCount]);
 void SampleOwned(uint32_t words[OwnedWordCount]);
 void SampleOwnedDetails(uint32_t words[OwnedDetailWordCount]);
@@ -309,6 +380,11 @@ OwnedLayoutForTest OwnedLayout();
 enum OwnedTestPhase { OwnedTestSerial, OwnedTestPort, OwnedTestReplay };
 using OwnedServiceObserverForTest = void (*)(uint32_t original, Service service, uint32_t ordinal, OwnedTestPhase phase);
 OwnedServiceObserverForTest SetOwnedServiceObserverForTest(OwnedServiceObserverForTest observer);
+// Relink seams: the parallel-apply threshold (cell operations) of this run; the op-log service stub address (what
+// g_serviceTargets holds while relink is on); opening/closing the logging window outside Stage (close flushes and publishes).
+void SetRelinkMinCellsForTest(uint32_t cells);
+uint32_t RelinkStubForTest(uint32_t insert);
+void RelinkWindowForTest(bool open);
 #endif
 static_assert(WordCount == 48, "Stage 1 status is append-only");
 static_assert(GateWordCount == 48, "independent gate diagnostics are append-only");
@@ -320,5 +396,7 @@ static_assert(OwnedPhaseWordCount == 32, "owned phase diagnostics are a separate
 static_assert(OwnedLoadWordCount == 16, "owned activation diagnostics are a separate append-only tail");
 static_assert(StorageWordCount == 11, "storage breakdown is the published memory-row tail");
 static_assert(GridV2WordCount == 16, "Stage C diagnostics are a separate append-only tail");
+static_assert(RelinkWordCount == 32, "relink diagnostics are a separate append-only tail");
+static_assert(CwWordCount == 32, "class-wrapper census is a separate append-only tail");
 } // namespace ntw2_loco
 #endif
