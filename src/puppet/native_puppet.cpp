@@ -4,6 +4,7 @@
 #include <intrin.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 namespace ntw2_puppet {
 namespace {
@@ -12,6 +13,10 @@ constexpr const char* kLabels[] = { NTW2_PUPPET_WORD_LABELS };
 static_assert(sizeof(kLabels) / sizeof(kLabels[0]) == kWords, "one label per puppet status word");
 constexpr const char* kDivertLabels[] = { NTW2_PUPPET_DIVERT_LABELS };
 static_assert(sizeof(kDivertLabels) / sizeof(kDivertLabels[0]) == kDivertWords, "one label per divert word");
+constexpr const char* kMoverLabels[] = { NTW2_PUPPET_MOVER_LABELS };
+static_assert(sizeof(kMoverLabels) / sizeof(kMoverLabels[0]) == kMoverWords, "one label per mover word");
+constexpr const char* kSelectLabels[] = { NTW2_PUPPET_SELECT_LABELS };
+static_assert(sizeof(kSelectLabels) / sizeof(kSelectLabels[0]) == kSelectWords, "one label per select word");
 
 // Approved-image preferred VAs (SHA-256 13fcab62...).
 constexpr U kClassTable = 0x1333714, kWaitTable = 0x1334028, kCrewNode = 0x133AE34;
@@ -21,24 +26,34 @@ constexpr U kArtilleryStep = 0x6F4660, kCavalryStep = 0x602EB0;
 constexpr U kSlotNodeTable = 0x13472A4; // node constructed at A+2D4 by 0x7E3D50 from the 0x581513 slot descriptor
 // +628 controller tables (0x662E90 stores the registering receiver): slot 0 returns the receiver / returns null.
 constexpr U kControllerSelf = 0x1334250, kControllerNull = 0x1334218;
-// Storage: rows (serial-keyed open addressing, load <= 1/2), unit handles, and the examined-unit set of one selection.
+constexpr U kIntentWriter = 0x80B080; // thiscall(A, const float xz[2], heading word): +D4/+D8/+DC/+E0/+18C/+148 if +18==0
+// Engine constants of the point-move contract 0x67A050 (heading words: 65536 per turn).
+constexpr float kDt = 0.1f;                     // native tick, 0x131A7B0
+constexpr float kHeadingPerRadian = 10430.378f; // 0x1325DAC
+constexpr float kMaxTurnPerTick = 3.1101768f;   // 0x1335A34, cap of turn*dt in 0x67A050
+// Storage: rows (serial-keyed open addressing, load <= 1/2), unit handles, the examined-unit set of one selection, and
+// the parked bit per registry serial.
 constexpr U kHash = 2 * kMaxRows, kUnitHash = 2 * kMaxUnits, kMaxExamined = 4096, kSeenHash = 2 * kMaxExamined;
+constexpr U kSerialBits = 1u << 20;
 constexpr U kNone = ~0u, kMaxArmies = kPuppetNoArmy, kNoArmy = kPuppetNoArmy;
 static_assert(!(kHash & (kHash - 1)) && !(kUnitHash & (kUnitHash - 1)) && !(kSeenHash & (kSeenHash - 1)), "power-of-two hashes");
 
 enum State : U { Free, Ignored, Pending, Parked, Native, Gone };
 enum Kind : U { Admit, Repark, HandTransfer, HandIneligible, DivertRepark, DivertHandback };
+enum Event : U { EvAdmit = 1, EvRepark, EvHandback, EvDepart, EvDivertBegin, EvDivertEnd };
 // ax/az: position at admission (or at the end of the last divert); px/pz: position at the previous motion sample.
 // divert: a +628 controller holds the member since divertStage (its site-6 step runs the original).
 struct Row { U entity, serial, unit, generation, state, seen, foreign, commonStage, divert, divertStage; float ax, az, px, pz; };
 // handle/vtable/ordinal/generation/active identify the unit; members/handed/army/x/z are its published identity row.
 struct Unit { U handle, vtable, ordinal, generation, active, members, handed, army, x, z; };
 struct Action { U row, kind; };
-struct Storage { Row rows[kMaxRows]; U hash[kHash]; Action actions[kMaxRows]; };
+struct Storage { Row rows[kMaxRows]; U hash[kHash]; Action actions[kMaxRows]; U parked[kSerialBits / 32]; };
 
 U g_delta, g_requested, g_classVt, g_waitVt, g_crewVt, g_stage, g_generation, g_unitCount, g_rowCount, g_actionCount;
 bool g_started, g_selected, g_disabled;
-U g_words[kWords], g_motion[kMotionWords], g_divert[kDivertWords], g_divertsThisStage;
+U g_words[kWords], g_motion[kMotionWords], g_divert[kDivertWords], g_mover[kMoverWords], g_select[kSelectWords];
+U g_divertsThisStage, g_eventHash, g_moverStage, g_tables[kInfantryTableCount], g_tableCount, g_topCount;
+U* g_parked;
 Unit g_units[kMaxUnits];
 U g_unitHash[kUnitHash], g_seenHash[kSeenHash];
 Storage* g_store; // activation storage, allocated by the first Start and kept for the process lifetime
@@ -46,7 +61,7 @@ Row* g_rows;
 U* g_hash;
 Action* g_actions;
 LONGLONG g_adapterTicks, g_frequency, g_qpc0;
-unsigned long long g_tsc0, g_dispatchCycles, g_divertTargetSum, g_divertDurationSum;
+unsigned long long g_tsc0, g_dispatchCycles, g_divertTargetSum, g_divertDurationSum, g_moverUsTotal;
 U g_sampleSeq, g_epochBit, g_slotVt;
 const volatile long* g_tickOwner;
 const volatile U* g_epochMask;
@@ -55,7 +70,14 @@ inline U D(U a) { return *reinterpret_cast<const volatile U*>(static_cast<uintpt
 inline U B(U a) { return *reinterpret_cast<const volatile uint8_t*>(static_cast<uintptr_t>(a)); }
 inline void W8(U a, U v) { *reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(a)) = static_cast<uint8_t>(v); }
 inline void W32(U a, U v) { *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(a)) = v; }
+inline void W16(U a, U v) { *reinterpret_cast<volatile uint16_t*>(static_cast<uintptr_t>(a)) = static_cast<uint16_t>(v); }
+inline void WF(U a, float v) { *reinterpret_cast<volatile float*>(static_cast<uintptr_t>(a)) = v; }
+inline U H(U a) { return *reinterpret_cast<const volatile uint16_t*>(static_cast<uintptr_t>(a)); }
 inline float F(U a) { return *reinterpret_cast<const volatile float*>(static_cast<uintptr_t>(a)); }
+inline U Bits(float v) { U u; memcpy(&u, &v, 4); return u; }
+// The engine's signed heading word: 0x8000 reads as +32768 (0x67A41C..0x67A4C4).
+inline int S16(U w) { w &= 0xFFFF; return w == 0x8000 ? 32768 : static_cast<int16_t>(w); }
+inline U Fnv(U h, U w) { return (h ^ w) * 16777619u; }
 inline bool Finite(float v) { return v - v == 0.0f; }
 inline U Centimetres(float dx, float dz) { return static_cast<U>(sqrtf(dx * dx + dz * dz) * 100.0f + 0.5f); }
 inline U V(U va) { return va + g_delta; }
@@ -103,25 +125,35 @@ bool FirstSight(U handle) {
     }
 }
 void RecordFault(U code) { ++g_words[Faults]; g_words[LastFault] = code; }
-
-// Hot path (every site-6 occurrence and every class common step): class table, unit-handle hash, serial row.
-Row* MemberRow(U a) {
-    if (D(a) != g_classVt) return nullptr;
-    const U ui = UnitIndex(D(a + 0x1F0));
-    if (ui == kNone || !g_units[ui].active) return nullptr;
-    Row* r = Find(D(a + 0x2C));
-    return r && r->entity == a && r->unit == ui ? r : nullptr;
+bool IsInfantry(U table) {
+    for (U i = 0; i < g_tableCount; ++i) if (g_tables[i] == table) return true;
+    return false;
+}
+// Parked bit per registry serial: set exactly while the serial's row is Parked (SetState is the only state writer
+// that enters or leaves Parked).
+inline bool ParkedBit(U serial) { return serial < kSerialBits && (g_parked[serial >> 5] >> (serial & 31) & 1); }
+void SetState(Row& r, U state) {
+    if (r.serial < kSerialBits) {
+        const U mask = 1u << (r.serial & 31);
+        if (state == Parked) g_parked[r.serial >> 5] |= mask;
+        else if (r.state == Parked) g_parked[r.serial >> 5] &= ~mask;
+    }
+    r.state = state;
 }
 bool Current(const Row& r) { return r.state == Parked && r.generation == g_units[r.unit].generation; }
+// Hot path (every site-6 occurrence and every admitted-table common step): one +2C load and one bitset load; a set
+// bit confirms the serial's row is parked for this very record.
 Row* ParkedRow(U a) {
-    Row* r = MemberRow(a);
-    return r && Current(*r) ? r : nullptr;
+    const U serial = D(a + 0x2C);
+    if (!ParkedBit(serial)) return nullptr;
+    Row* r = Find(serial);
+    return r && r->entity == a && Current(*r) ? r : nullptr;
 }
 bool WaitNode(U a) { return B(a + 0x2C4) == 1 && D(a + 0x22C) == g_waitVt && D(a + 0x230) == a; }
 // Probe policy: no combat, target, charge, crew, rout or divert-controller (+628) state. Admission additionally starts
 // with no active request sequence (+390); a repark may cancel one through begin's native stop transaction.
 bool Eligible(U a, U unit, bool admission) {
-    if (B(a + 0x30) != 1 || D(a) != g_classVt || D(a + 0x1F0) != unit) return false;
+    if (B(a + 0x30) != 1 || !IsInfantry(D(a)) || D(a + 0x1F0) != unit) return false;
     if (D(a + 0x628) || D(a + 0x18) || D(a + 0x1EC) || D(a + 0x4E8) || D(a + 0x66C)) return false;
     const U activity = D(a + 0x1B8), order = D(a + 0x1D8);
     if (D(a + 0x224) == 9 || activity == 0xD || activity == 0x4B || D(a + 0x220) == 2 || order == 0x3C || order == 0x3D)
@@ -130,7 +162,11 @@ bool Eligible(U a, U unit, bool admission) {
     return !admission || !D(a + 0x390);
 }
 void Act(U row, U kind) { g_actions[g_actionCount++] = {row, kind}; }
-void HandBack(Row& r) { r.state = Native; r.divert = 0; ++g_words[Handbacks]; ++g_units[r.unit].handed; }
+// Ordered event chain of the determinism hash: (stage, serial, event) in the owner's order.
+void Log(const Row& r, U event) { g_eventHash = Fnv(Fnv(Fnv(g_eventHash, g_stage), r.serial), event); ++g_mover[MoverEvents]; }
+void HandBack(Row& r) {
+    SetState(r, Native); r.divert = 0; ++g_words[Handbacks]; ++g_units[r.unit].handed; Log(r, EvHandback);
+}
 void Rebase(Row& r) { r.ax = r.px = F(r.entity + 0x48); r.az = r.pz = F(r.entity + 0x50); }
 
 // Stage buckets of the divert histogram: 1, 2-3, 4-7, ..., 1024-2047, >= 2048.
@@ -138,7 +174,7 @@ U DivertBucket(U stage) { U b = 0; while (b + 1 < kDivertBuckets && (stage >> (b
 // A +628 registration seen on a parked member (seam or site-6 occurrence): the event record and its histograms.
 void DivertBegin(Row& r) {
     const U a = r.entity, controller = D(a + 0x628), kind = D(a + 0x62C);
-    r.divert = 1; r.divertStage = g_stage;
+    r.divert = 1; r.divertStage = g_stage; Log(r, EvDivertBegin);
     U* d = g_divert;
     ++d[DivertEvents]; ++g_divertsThisStage;
     ++d[DivertKind + (kind < kDivertKinds - 1 ? kind : kDivertKinds - 1)];
@@ -163,7 +199,7 @@ void DivertBegin(Row& r) {
 // position; resume skipping with the surviving wait node, else repark or hand back in Apply.
 void DivertEnd(Row& r, U index, U unit) {
     U* d = g_divert;
-    r.divert = 0; ++d[DivertReleased];
+    r.divert = 0; ++d[DivertReleased]; Log(r, EvDivertEnd);
     const U duration = g_stage - r.divertStage;
     g_divertDurationSum += duration; if (duration > d[DivertDurationMax]) d[DivertDurationMax] = duration;
     d[DivertDurationMean] = static_cast<U>(g_divertDurationSum / d[DivertReleased]);
@@ -179,22 +215,42 @@ void ClosePeakWindow() {
     g_divertsThisStage = 0;
 }
 
+// Rejected unit: count its majority member class table (preferred VA) among the first kTopTables distinct tables.
+void RecordRejectedTable(U list, U n) {
+    U best = 0, bestCount = 0;
+    for (U i = 0; i < n; ++i) {
+        const U t = D(list + 4 * i) ? D(D(list + 4 * i)) : 0;
+        U c = 0;
+        for (U j = 0; j < n; ++j) if (D(list + 4 * j) && D(D(list + 4 * j)) == t) ++c;
+        if (c > bestCount) { best = t; bestCount = c; }
+    }
+    if (!bestCount) return;
+    const U va = best - g_delta;
+    U* top = g_select + TopTables;
+    for (U k = 0; k < g_topCount; ++k) if (top[2 * k] == va) { ++top[2 * k + 1]; return; }
+    if (g_topCount == kTopTables) { ++g_select[TopOther]; return; }
+    top[2 * g_topCount] = va; top[2 * g_topCount + 1] = 1; ++g_topCount;
+}
+bool Admissible(U m, U unit) {
+    return IsInfantry(D(m)) && D(m + 0x1F0) == unit && !D(m + 0x66C) && !(B(m + 0x2C4) == 1 && D(m + 0x22C) == g_crewVt);
+}
 bool QualifyUnit(U unit, U ordinal, U army) {
     const U n = D(unit + 0x2CC), list = D(unit + 0x2D0), attached = D(unit + 0x1F4);
-    if (!n || n > kMaxUnitMembers || !list || (attached && D(attached + 0x10))) return false;
-    U infantry = 0;
-    for (U i = 0; i < n; ++i) {
+    U* s = g_select;
+    if (!n || n > kMaxUnitMembers || !list) { ++s[RejectMemberCount]; return false; }
+    U admissible = 0, reason = 0;
+    for (U i = 0; i < n && !reason; ++i) {
         const U m = D(list + 4 * i);
-        if (!m) return false;
-        const U table = D(m), step = D(table + 0xC) - g_delta;
-        if (step == kArtilleryStep || step == kCavalryStep || D(m + 0x66C) ||
-            (B(m + 0x2C4) == 1 && D(m + 0x22C) == g_crewVt)) return false;
-        if (table == g_classVt) {
-            if (D(m + 0x1F0) != unit) return false;
-            ++infantry;
-        }
+        if (!m) { reason = RejectNullMember; break; }
+        const U step = D(D(m) + 0xC) - g_delta;
+        if (step == kArtilleryStep) reason = RejectArtillery;
+        else if (step == kCavalryStep) reason = RejectCavalry;
+        else admissible += Admissible(m, unit);
     }
-    if (infantry * 2 <= n || g_rowCount + n > kMaxRows) return false;
+    if (!reason && !admissible) reason = RejectNoInfantry;
+    if (!reason && g_rowCount + n > kMaxRows) reason = RejectCapacity;
+    if (reason) { ++s[reason]; if (reason != RejectNullMember) RecordRejectedTable(list, n); return false; }
+    if (attached && D(attached + 0x10)) ++s[UnitsAttached]; // attached records are never touched
     const U ui = g_unitCount++;
     g_units[ui] = {unit, D(unit), ordinal, ++g_generation, 1, 0, 0, army, 0, 0};
     AddUnitIndex(unit, ui);
@@ -202,10 +258,16 @@ bool QualifyUnit(U unit, U ordinal, U army) {
     for (U i = 0; i < n; ++i) {
         const U m = D(list + 4 * i), serial = D(m + 0x2C);
         if (Find(serial)) continue; // duplicate list entry
-        const bool selected = D(m) == g_classVt;
+        const bool selected = Admissible(m, unit);
         if (Row* r = AddRow(m, serial, ui, selected ? Pending : Ignored)) r->seen = 0; // classified by this stage's import
         ++g_words[selected ? MembersSelected : MembersRejected];
-        if (!selected) continue;
+        if (!selected) {
+            if (!IsInfantry(D(m))) ++s[MemberOtherClass];
+            else if (D(m + 0x1F0) != unit) ++s[MemberBacklink];
+            else ++s[MemberCrew];
+            continue;
+        }
+        if (D(m) != g_classVt) ++s[MemberAltTable];
         ++g_units[ui].members;
         if (first) { first = false; g_units[ui].x = D(m + 0x48); g_units[ui].z = D(m + 0x50); } // start position
     }
@@ -216,10 +278,15 @@ void Select(U manager) {
     const U count = D(manager + 0x24C), data = D(manager + 0x250);
     if (!count || !data) return;
     memset(g_seenHash, 0, sizeof(g_seenHash));
-    U seenCount = 0, armies[kMaxArmies], armyCount = 0;
-    for (U i = 0; i < count && g_unitCount < g_requested && seenCount < kMaxExamined; ++i) {
+    // One pass's diagnostics (a pass is retried every 64 stages while nothing qualified).
+    for (U w = RejectMemberCount; w < RegistryInfantry; ++w) if (w != TablesPinned) g_select[w] = 0;
+    g_topCount = 0;
+    U seenCount = 0, armies[kMaxArmies], armyCount = 0, infantry = 0;
+    for (U i = 0; i < count; ++i) {
         const U a = D(data + 4 * i);
-        if (!a || D(a) != g_classVt) continue;
+        if (!a || !IsInfantry(D(a))) continue;
+        ++infantry;
+        if (g_unitCount >= g_requested || seenCount >= kMaxExamined) continue;
         const U unit = D(a + 0x1F0), army = D(a + 0x1F8);
         U k = 0;
         while (k < armyCount && armies[k] != army) ++k;
@@ -228,6 +295,7 @@ void Select(U manager) {
         ++seenCount; ++g_words[UnitsExamined];
         if (!QualifyUnit(unit, seenCount - 1, army ? (k < kMaxArmies ? k : kNoArmy) : kNoArmy)) ++g_words[UnitsRejected];
     }
+    g_select[RegistryInfantry] = infantry;
     if (g_unitCount) g_selected = true;
 }
 bool SelectGuarded(U manager) {
@@ -241,13 +309,13 @@ void Retire(U ui) {
         Row& r = g_rows[i];
         if (r.unit != ui) continue;
         if (r.state == Parked) HandBack(r);
-        else if (r.state == Pending) r.state = Gone;
+        else if (r.state == Pending) SetState(r, Gone);
     }
 }
 void Depart(Row& r) {
     if (r.state != Parked && r.state != Pending) return;
     if (r.divert) { r.divert = 0; ++g_divert[DivertDeparted]; }
-    r.state = Gone; ++g_words[DepartedMembers]; ++g_words[DeathsImported];
+    SetState(r, Gone); ++g_words[DepartedMembers]; ++g_words[DeathsImported]; Log(r, EvDepart);
 }
 // Reads only, plus divert bookkeeping: classifies the live member lists into g_actions; native transactions run
 // afterwards in Apply.
@@ -350,10 +418,10 @@ void Apply() {
             bool stopped = false;
             if (!Install(r.entity, stopped)) { RecordFault(FaultInstall); HandBack(r); continue; }
             ++g_words[stopped ? InstallStopped : InstallQuiet];
-            if (kind == Admit) ++g_words[MembersAdmitted];
-            else ++g_words[Reparks];
+            if (kind == Admit) { ++g_words[MembersAdmitted]; Log(r, EvAdmit); }
+            else { ++g_words[Reparks]; Log(r, EvRepark); }
             if (kind == DivertRepark) ++g_divert[DivertReparked];
-            r.state = Parked; r.foreign = 0; r.generation = g_units[r.unit].generation;
+            SetState(r, Parked); r.foreign = 0; r.generation = g_units[r.unit].generation;
             if (kind != Repark) Rebase(r);
             continue;
         }
@@ -427,6 +495,7 @@ bool Start(const Binding& binding) {
         g_store = static_cast<Storage*>(VirtualAlloc(nullptr, sizeof(Storage), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!g_store) return false;
         g_rows = g_store->rows; g_hash = g_store->hash; g_actions = g_store->actions; // zero-filled by the allocator
+        g_parked = g_store->parked;
     }
     g_tickOwner = binding.tick_owner; g_epochMask = binding.epoch_mask; g_epochBit = binding.epoch_bit;
     g_delta = binding.image_base - 0x400000;
@@ -434,6 +503,16 @@ bool Start(const Binding& binding) {
     // Pin the class and node contracts this module relies on; +08 is pinned by the runtime's slot swap.
     if (D(g_classVt + 0xC) != V(kBrainStep) || D(g_classVt + 0x134) != V(kWaitInstall) ||
         D(g_waitVt + 4) != V(kWaitBegin) || D(g_waitVt + 8) != V(kWaitStep)) return false;
+    // Alternative infantry tables: admitted only when every slot this module and the native paths rely on is
+    // identical to 0x1333714's.
+    static const U kPinnedSlots[] = {0x08, 0x0C, 0x130, 0x134, 0x188, 0x1A4, 0x1A8, 0x108, 0xB8, 0xFC};
+    g_tableCount = 0;
+    for (U t : kInfantryTables) {
+        bool same = true;
+        for (U slot : kPinnedSlots) same = same && D(V(t) + slot) == D(g_classVt + slot);
+        if (same) g_tables[g_tableCount++] = V(t);
+    }
+    g_select[TablesPinned] = g_tableCount;
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_frequency = f.QuadPart ? f.QuadPart : 1;
     g_requested = binding.units;
     g_words[UnitsRequested] = binding.units;
@@ -453,11 +532,15 @@ void Reset() {
     g_started = g_selected = g_disabled = false;
     g_stage = g_generation = g_unitCount = g_actionCount = 0;
     g_adapterTicks = 0; g_dispatchCycles = 0; g_sampleSeq = 0;
-    g_divertTargetSum = g_divertDurationSum = 0;
+    g_divertTargetSum = g_divertDurationSum = g_moverUsTotal = 0; g_eventHash = 2166136261u; g_moverStage = 0;
     memset(g_words, 0, sizeof(g_words)); memset(g_units, 0, sizeof(g_units)); memset(g_motion, 0, sizeof(g_motion));
-    memset(g_divert, 0, sizeof(g_divert)); memset(g_unitHash, 0, sizeof(g_unitHash));
+    memset(g_divert, 0, sizeof(g_divert)); memset(g_mover, 0, sizeof(g_mover)); memset(g_unitHash, 0, sizeof(g_unitHash));
+    memset(g_select, 0, sizeof(g_select)); g_topCount = 0;
     g_divertsThisStage = 0;
-    if (g_store) { memset(g_rows, 0, g_rowCount * sizeof(Row)); memset(g_hash, 0, sizeof(g_store->hash)); }
+    if (g_store) {
+        memset(g_rows, 0, g_rowCount * sizeof(Row)); memset(g_hash, 0, sizeof(g_store->hash));
+        memset(g_parked, 0, sizeof(g_store->parked));
+    }
     g_rowCount = 0;
 }
 bool Started() { return g_started; }
@@ -541,19 +624,15 @@ bool CommonStep(U a, U ret) {
     const unsigned long long t0 = sample ? __rdtsc() : 0;
     bool gated = false;
     if (sample) g_words[CommonCallerVa] = ret - g_delta;
-    if (!g_disabled && g_unitCount) {
-        if (Row* r = MemberRow(a)) {
+    if (!g_disabled) {
+        if (Row* r = ParkedRow(a)) { // a clear parked bit ends here after two loads
             ++g_words[CommonMemberCalls]; g_words[MemberCallerVa] = ret - g_delta;
-            if (r->state == Parked) {
-                r->commonStage = g_stage;
-                if (Current(*r) && D(a + 0x628)) ++g_divert[DivertCommonForwarded]; // controller branch: native step
-                else if (Current(*r) && WaitNode(a)) gated = true;
-                else {
-                    ++g_words[CommonParkedForwarded];
-                    if (Current(*r) && !r->foreign) {
-                        r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenCommon];
-                    }
-                }
+            r->commonStage = g_stage;
+            if (D(a + 0x628)) ++g_divert[DivertCommonForwarded]; // controller branch: native step
+            else if (WaitNode(a)) gated = true;
+            else {
+                ++g_words[CommonParkedForwarded];
+                if (!r->foreign) { r->foreign = 1; ++g_words[ExternalNodesSeen]; ++g_words[ExternalSeenCommon]; }
             }
         }
     }
@@ -577,5 +656,85 @@ void SnapshotMotion(U* words) {
 void SnapshotDivert(U* words) {
     memcpy(words, g_divert, sizeof(g_divert));
     words[DivertVersion] = kDivertVersion;
+}
+void SnapshotMover(U* words) {
+    memcpy(words, g_mover, sizeof(g_mover));
+    words[MoverVersion] = kMoverVersion;
+}
+void SnapshotSelect(U* words) {
+    memcpy(words, g_select, sizeof(g_select));
+    words[SelectVersion] = kSelectVersion;
+}
+
+bool PointMove(U a, float tx, float tz, U targetHeading, float cap, float accel, float turnRate) {
+    // 0x67A272..0x67A283: the point-move branch drops the action row and its marker word.
+    W32(a + 0x444, 0); W16(a + 0x458, 0);
+    // 0x67A326..0x67A3DC: step toward the target from the position plus pending intent, bounded by the speed state.
+    const float x = F(a + 0x48), z = F(a + 0x50);
+    float dx = tx - (F(a + 0xD4) + x), dz = tz - (F(a + 0xDC) + z);
+    const float dist = sqrtf(dx * dx + dz * dz);
+    const float speed = accel * kDt + F(a + 0x194);
+    float step = speed;
+    WF(a + 0x194, speed);
+    if (0.0f > speed) { WF(a + 0x194, 0.0f); step = 0.0f; } // 0x67A3A5..0x67A3AF: stopped, zero step
+    else if (speed > cap) { WF(a + 0x194, cap); step = cap; }
+    step *= kDt;
+    if (dist > step) { const float f = step / dist; dz *= f; dx *= f; }
+    // 0x67A3DC..0x67A4DB: heading toward targetHeading, limited by min(turn*dt, 3.11 rad) in heading words.
+    float turn = turnRate * kDt;
+    turn = turn < kMaxTurnPerTick ? turn : kMaxTurnPerTick;
+    turn *= kHeadingPerRadian;
+    const int maxTurn = _mm_cvt_ss2si(_mm_set_ss(turn)); // fistp, round to nearest
+    const U current = H(a + 0x64);
+    const int diff = S16(targetHeading - current), low = S16(static_cast<U>(-maxTurn)), high = S16(static_cast<U>(maxTurn));
+    const U delta = diff < low ? static_cast<U>(-maxTurn) : (high < diff ? static_cast<U>(maxTurn) : static_cast<U>(diff));
+    const float target[2] = {dx + x, dz + z};
+    const bool written = !D(a + 0x18);
+    reinterpret_cast<void (__thiscall*)(U, const float*, U)>(static_cast<uintptr_t>(V(kIntentWriter)))(
+        a, target, (delta + current) & 0xFFFF);
+    W8(a + 0xD0, 0); // 0x67A4E5: the point move owns its speed bound (no 0x7F08F0 overspeed clamp)
+    return written;
+}
+
+void Move() {
+    if (!g_started || g_disabled || !g_stage) return;
+    const LONGLONG begin = Now();
+    U* m = g_mover;
+    ++g_moverStage; ++m[MoverStages];
+    U hash = Fnv(Fnv(2166136261u, g_stage), g_eventHash), parked = 0, diverted = 0, waiting = 0, waitingMax = 0;
+    unsigned long long waitingSum = 0;
+    __try {
+        for (U i = 0; i < g_rowCount; ++i) {
+            const Row& r = g_rows[i];
+            if (!Current(r) || r.seen != g_stage) continue;
+            const U a = r.entity;
+            ++parked; diverted += r.divert;
+            // Delivered slot node (0x6529B0 -> 0x7E3D50), holder enabled, not begun (node+10 = A+2E4): the engine
+            // wants this man to walk to A+2F4/A+2FC.
+            if (!r.divert && D(a + 0x2D4) == g_slotVt && B(a + 0x35B) == 1 && !B(a + 0x2E4)) {
+                const float dx = F(a + 0x2F4) - F(a + 0x48), dz = F(a + 0x2FC) - F(a + 0x50);
+                if (Finite(dx) && Finite(dz)) {
+                    const U cm = Centimetres(dx, dz);
+                    ++waiting; waitingSum += cm; if (cm > waitingMax) waitingMax = cm;
+                }
+            }
+            hash = Fnv(Fnv(hash, r.serial), r.divert);
+            hash = Fnv(Fnv(Fnv(hash, D(a + 0x48)), D(a + 0x4C)), D(a + 0x50));
+            hash = Fnv(Fnv(Fnv(hash, H(a + 0x64)), D(a + 0xD4)), D(a + 0xDC));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Disable(FaultMoveRead);
+    }
+    m[MoverParkedHashed] = parked; m[MoverDiverted] = diverted;
+    m[MoverSlotWaiting] = waiting; m[MoverSlotWaitingTicks] += waiting;
+    m[MoverSlotWaitingMeanCm] = waiting ? static_cast<U>(waitingSum / waiting) : 0; m[MoverSlotWaitingMaxCm] = waitingMax;
+    m[MoverHashLast] = hash; m[MoverHashChain] = Fnv(m[MoverHashChain], hash);
+    if (g_moverStage == 64) m[MoverHashS64] = m[MoverHashChain];
+    else if (g_moverStage == 256) m[MoverHashS256] = m[MoverHashChain];
+    else if (g_moverStage == 1024) m[MoverHashS1024] = m[MoverHashChain];
+    else if (g_moverStage == 4096) m[MoverHashS4096] = m[MoverHashChain];
+    const U us = static_cast<U>((Now() - begin) * 1000000 / g_frequency);
+    m[MoverUsLast] = us; if (us > m[MoverUsMax]) m[MoverUsMax] = us;
+    g_moverUsTotal += us; m[MoverUsTotal] = static_cast<U>(g_moverUsTotal);
 }
 } // namespace ntw2_puppet

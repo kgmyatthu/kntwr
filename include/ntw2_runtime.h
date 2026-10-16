@@ -39,6 +39,8 @@ extern "C" {
 #define NTW2_PUPPET_MAX_UNITS 2048u /* unit capacity; puppet_units == NTW2_PUPPET_MAX_UNITS is --puppet-probe all */
 #define NTW2_PUPPET_ROW_UNITS 4u    /* units with an identity row in puppet_words (words 40..55) */
 #define NTW2_PUPPET_DIVERT_WORDS 32u /* puppet_divert_words; layout src/puppet/native_puppet.h (DivertWord), labels NTW2_PUPPET_DIVERT_LABELS */
+#define NTW2_PUPPET_MOVER_WORDS 32u /* puppet_mover_words; layout src/puppet/native_puppet.h (MoverWord), labels NTW2_PUPPET_MOVER_LABELS */
+#define NTW2_PUPPET_SELECT_WORDS 32u /* puppet_select_words; layout src/puppet/native_puppet.h (SelectWord), labels NTW2_PUPPET_SELECT_LABELS */
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
 #define NTW2_LOCO_SHADOW 0x4u /* Owner-thread sweep/resolve oracle; requires LOCO_CLONE. */
@@ -784,6 +786,14 @@ typedef struct ntw2_status {
        last target, native controller-branch steps, release outcomes (resumed/reparked/handed back). Layout and labels in
        src/puppet/native_puppet.h (DivertWord, NTW2_PUPPET_DIVERT_LABELS). Tick-owner writer. */
     uint32_t puppet_divert_words[NTW2_PUPPET_DIVERT_WORDS];
+    /* NTW2_PUPPET stage 2 machinery (appended after puppet_divert_words): site-13 determinism hash chain with fixed
+       checkpoints, parked/diverted members hashed, parked men holding a delivered unbegun slot (slot_waiting) and the
+       hash cost. Layout and labels in src/puppet/native_puppet.h (MoverWord, NTW2_PUPPET_MOVER_LABELS). Tick-owner writer. */
+    uint32_t puppet_mover_words[NTW2_PUPPET_MOVER_WORDS];
+    /* NTW2_PUPPET selection diagnostics (appended after puppet_mover_words): unit rejection reasons, member refusals,
+       pinned infantry tables, top rejected majority class tables. Layout and labels in src/puppet/native_puppet.h
+       (SelectWord, NTW2_PUPPET_SELECT_LABELS). Tick-owner writer. */
+    uint32_t puppet_select_words[NTW2_PUPPET_SELECT_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1192,8 +1202,12 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after puppet_words");
 static_assert(offsetof(ntw2_status,puppet_motion_words) + NTW2_PUPPET_MOTION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_divert_words) &&
               NTW2_PUPPET_MOTION_WORDS == 32u, "puppet motion row appends after army_b0_words");
-static_assert(offsetof(ntw2_status,puppet_divert_words) + NTW2_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,puppet_divert_words) + NTW2_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_mover_words) &&
               NTW2_PUPPET_DIVERT_WORDS == 32u, "puppet divert row appends after puppet_motion_words");
+static_assert(offsetof(ntw2_status,puppet_mover_words) + NTW2_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_select_words) &&
+              NTW2_PUPPET_MOVER_WORDS == 32u, "puppet mover row appends after puppet_divert_words");
+static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_PUPPET_SELECT_WORDS == 32u, "puppet select row appends after puppet_mover_words");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

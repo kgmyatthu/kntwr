@@ -15,6 +15,7 @@
 #include <xmmintrin.h>
 #include <array>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -385,6 +386,161 @@ static void AllUnitsCase() {
     Require(Words()[pp::StopHandbacks] == 12, "stop hands back every member");
 }
 
+// ---- Stage 2 ---------------------------------------------------------------------------------------------------
+// PointMove versus the engine's own point-move branch 0x67A050 (vt+1A8, kind 0, battle-active) on byte copies: the
+// controller block carries the same target/heading/cap/accel/turn and the soldier's current labels, so the native
+// branch's writes are exactly the puppet step's (+444/+458 drop, +194 speed state, 0x80B080 intent, +D0).
+struct MoveParams { float x, z, d4, dc, speed; U heading; float tx, tz; U targetHeading; float cap, accel, turn; bool pending; };
+static void PointMoveCase(const char* name, const MoveParams& p) {
+    label = name; ++cases;
+    Soldier ours, native;
+    InitSoldier(ours, 1, 0);
+    Put(ours.data(), 0xec, B(1)); Put(ours.data(), 0xd0, B(1));
+    Put(ours.data(), 0x48, p.x); Put(ours.data(), 0x4c, 3.0f); Put(ours.data(), 0x50, p.z);
+    Put(ours.data(), 0xd4, p.d4); Put(ours.data(), 0xdc, p.dc); Put(ours.data(), 0x194, p.speed);
+    Put(ours.data(), 0x64, static_cast<uint16_t>(p.heading));
+    Put(ours.data(), 0x1b8, U(9)); Put(ours.data(), 0x1bc, U(5)); Put(ours.data(), 0x1c0, U(7));
+    Put(ours.data(), 0x444, Addr(target.data())); Put(ours.data(), 0x458, static_cast<uint16_t>(0x0101));
+    if (p.pending) Put(ours.data(), 0x18, Addr(target.data()));
+    Put(ours.data(), 0x628, Addr(controllerNull.data())); Put(ours.data(), 0x62c, U(0)); Put(ours.data(), 0x630, U(9));
+    Put(ours.data(), 0x634, U(5)); Put(ours.data(), 0x638, U(7)); Put(ours.data(), 0x63c, p.tx); Put(ours.data(), 0x640, 0.0f);
+    Put(ours.data(), 0x644, p.tz); Put(ours.data(), 0x648, static_cast<uint16_t>(p.targetHeading));
+    Put(ours.data(), 0x64c, p.cap); Put(ours.data(), 0x650, p.accel); Put(ours.data(), 0x654, p.turn);
+    Put(ours.data(), 0x658, U(0x10000));
+    native = ours; Put(native.data(), 0x228, A(native));
+    B out = 0xcc;
+    ResetFp();
+    reinterpret_cast<void (__thiscall*)(U, U)>(Addr(At(0x67a050)))(A(native), Addr(&out));
+    ResetFp();
+    const bool written = pp::PointMove(A(ours), p.tx, p.tz, p.targetHeading, p.cap, p.accel, p.turn);
+    Require(written == !p.pending && out == 0, "intent written exactly when nothing is pending; native branch returned +65D");
+    for (U i = 0; i < 0x700; ++i) {
+        if (i >= 0x228 && i < 0x22c) continue; // holder self pointer
+        if (ours[i] != native[i]) { std::fprintf(stderr, "offset +%03X ours %02X native %02X\n", i, ours[i], native[i]); Fail("puppet step bytes equal 0x67A050 kind 0"); }
+    }
+    Require(!Get<U>(ours.data(), 0x444) && !Get<uint16_t>(ours.data(), 0x458) && !ours[0xd0], "presentation and clamp writes");
+    Require(ours[0x18c] == (p.pending ? 0 : 1), "direct-move flag +18C set by the native writer");
+}
+static void PointMoveCases() {
+    PointMoveCase("point move: far target, turn-limited heading", {10, 20, 0, 0, 1.0f, 0, 30, 25, 0x2000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move: target inside one step", {10, 20, 0, 0, 1.0f, 0x100, 10.05f, 20.02f, 0x80, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move: speed above cap, pending intent", {-4, 7, 0.1f, -0.05f, 5.0f, 0xf000, -9, 3, 0x1000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move: negative speed state", {1, 1, 0, 0, 0.5f, 0x4000, 5, 5, 0x3000, 2.0f, -30.0f, 3.0f, false});
+    PointMoveCase("point move: half-turn heading word 0x8000", {0, 0, 0, 0, 0.0f, 0x1000, 0, 3, 0x9000, 2.0f, 4.0f, 3.0f, false});
+    PointMoveCase("point move: turn rate above the 3.11 rad cap", {0, 0, 0, 0, 0.0f, 0xc000, 3, 0, 0x2000, 2.0f, 4.0f, 40.0f, false});
+    PointMoveCase("point move: pending request refuses the intent", {2, 2, 0, 0, 1.0f, 0, 6, 6, 0x2000, 2.0f, 4.0f, 3.0f, true});
+}
+
+// Site 13 machinery on a parked unit: no intent is written (no owned motion policy), parked men holding a delivered,
+// unbegun slot are counted, and two worlds at different addresses produce the same determinism hash chain.
+struct MoverWorld {
+    std::array<B, 0xe00> unit{};
+    Soldier men[4];
+    std::array<U, 4> list{}, registry{};
+    std::array<B, 0x300> manager{};
+    std::array<B, 0x40> army{};
+    void Init() {
+        Put(unit.data(), 0, U(0x0b1e55ed));
+        for (U k = 0; k < 4; ++k) {
+            Soldier& s = men[k];
+            InitSoldier(s, 700 + k, Addr(unit.data())); Put(s.data(), 0x1f8, Addr(army.data()));
+            Put(s.data(), 0x48, 50.0f + 2.0f * k); Put(s.data(), 0x4c, 1.0f); Put(s.data(), 0x50, -10.0f); Warm(s);
+            Put(s.data(), 0xec, B(1)); Put(s.data(), 0x58, 0.5f); Put(s.data(), 0x1b8, U(9));
+            list[k] = A(s); registry[k] = A(s);
+        }
+        Put(unit.data(), 0x2cc, U(4)); Put(unit.data(), 0x2d0, Addr(list.data()));
+        Put(manager.data(), 0x24c, U(4)); Put(manager.data(), 0x250, Addr(registry.data()));
+        Put(manager.data(), 0x260, U(4)); Put(manager.data(), 0x264, Addr(registry.data()));
+    }
+    void Slot(U k, float x, float z, U heading) { // what 0x6529B0 -> 0x7E3D50 leaves on the man
+        Soldier& s = men[k];
+        Put(s.data(), 0x2d4, Addr(At(0x13472a4))); s[0x35b] = 1;
+        Put(s.data(), 0x2f4, x); Put(s.data(), 0x2f8, 1.0f); Put(s.data(), 0x2fc, z); Put(s.data(), 0x318, static_cast<uint16_t>(heading));
+    }
+};
+static std::array<U, pp::kMoverWords> Mover() { std::array<U, pp::kMoverWords> m{}; pp::SnapshotMover(m.data()); return m; }
+static std::array<U, pp::kMoverWords> RunMoverWorld(MoverWorld& w) {
+    w.Init();
+    pp::Binding b = Bind(); b.units = pp::kMaxUnits;
+    Require(pp::Start(b), "start the mover world");
+    ResetFp();
+    pp::Stage(Addr(w.manager.data()));
+    Require(Words()[pp::MembersParked] == 4, "four parked members");
+    w.Slot(0, 50.0f, -5.0f, 0);          // delivered 5 m ahead, unbegun
+    w.Slot(1, 52.0f, -10.0f, 0);         // delivered on his position
+    w.Slot(2, 54.0f, -6.0f, 0); w.men[2][0x2e4] = 1; // begun slot node (native watcher ran): not waiting
+    pp::Move();
+    return Mover();
+}
+static void MoverCase() {
+    label = "site 13: slot-waiting census, no intent"; ++cases;
+    static MoverWorld first, second;
+    const auto m = RunMoverWorld(first);
+    Require(m[pp::MoverVersion] == 2 && m[pp::MoverStages] == 1 && m[pp::MoverParkedHashed] == 4 && !m[pp::MoverDiverted] &&
+            m[pp::MoverSlotWaiting] == 2 && m[pp::MoverSlotWaitingMaxCm] == 500 && m[pp::MoverSlotWaitingMeanCm] == 250,
+            "two parked men hold a delivered unbegun slot (5 m and 0 m)");
+    for (const Soldier& s : first.men)
+        Require(!s[0x18c] && !Get<U>(s.data(), 0xd4) && !Get<U>(s.data(), 0xdc), "no intent written for parked men");
+    pp::Stage(Addr(first.manager.data())); pp::Move();
+    pp::Stage(Addr(first.manager.data())); pp::Move();
+    const U chainFirst = Mover()[pp::MoverHashChain];
+    Require(Mover()[pp::MoverSlotWaitingTicks] == 6 && !Words()[pp::Faults], "slot-waiting member-ticks accumulate");
+    pp::Stop();
+
+    label = "site 13: determinism across record addresses"; ++cases;
+    const auto c = RunMoverWorld(second);
+    Require(m[pp::MoverHashLast] == c[pp::MoverHashLast] && m[pp::MoverHashChain] == c[pp::MoverHashChain] &&
+            m[pp::MoverHashLast] != 0, "same state hash for the same world at different addresses");
+    pp::Stage(Addr(second.manager.data())); pp::Move();
+    pp::Stage(Addr(second.manager.data())); pp::Move();
+    Require(Mover()[pp::MoverHashChain] == chainFirst, "same chained hash after the same three stages");
+    pp::Stop();
+}
+
+// Relaxed qualification: an alternative infantry table member and an attached-entry unit are admitted, a crew member
+// stays native, an artillery unit is rejected with its reason and majority table.
+static void SelectionCase() {
+    label = "selection: reasons, alternative table, crew, attached"; ++cases;
+    static std::array<B, 0xe00> unit{}, guns{};
+    static std::array<B, 0x20> attachedList{};
+    static Soldier men[3], gunners[2];
+    static std::array<U, 3> list{};
+    static std::array<U, 2> gunList{};
+    static std::array<U, 5> registry{};
+    static std::array<B, 0x300> manager{};
+    Put(unit.data(), 0, U(0x0b1e55ed)); Put(guns.data(), 0, U(0x0b1e55ed));
+    for (U k = 0; k < 3; ++k) {
+        InitSoldier(men[k], 900 + k, Addr(unit.data())); Warm(men[k]); list[k] = A(men[k]); registry[k] = A(men[k]);
+    }
+    Put(men[1].data(), 0, Addr(At(0x13473d0)));          // alternative infantry table
+    Put(men[2].data(), 0x66c, U(1));                       // crew list: stays native
+    Put(attachedList.data(), 0x10, U(1)); Put(unit.data(), 0x1f4, Addr(attachedList.data()));
+    Put(unit.data(), 0x2cc, U(3)); Put(unit.data(), 0x2d0, Addr(list.data()));
+    for (U k = 0; k < 2; ++k) {
+        InitSoldier(gunners[k], 950 + k, Addr(guns.data())); gunList[k] = A(gunners[k]);
+    }
+    Put(gunners[1].data(), 0, Addr(At(0x13394c0)));
+    Put(guns.data(), 0x2cc, U(2)); Put(guns.data(), 0x2d0, Addr(gunList.data()));
+    registry[3] = A(gunners[0]); registry[4] = A(gunners[1]);
+    Put(manager.data(), 0x24c, U(5)); Put(manager.data(), 0x250, Addr(registry.data()));
+    Put(manager.data(), 0x260, U(2)); Put(manager.data(), 0x264, Addr(registry.data())); // the parked two only
+    pp::Binding b = Bind(); b.units = pp::kMaxUnits;
+    Require(pp::Start(b), "start");
+    ResetFp();
+    pp::Stage(Addr(manager.data()));
+    std::array<U, pp::kSelectWords> s{}; pp::SnapshotSelect(s.data());
+    const auto v = Words();
+    Require(s[pp::SelectVersion] == 1 && s[pp::TablesPinned] == 11 && s[pp::RejectArtillery] == 1 &&
+            s[pp::UnitsAttached] == 1 && s[pp::MemberCrew] == 1 && s[pp::MemberAltTable] == 1 &&
+            s[pp::RegistryInfantry] == 4 && s[pp::TopTables] == 0x1333714 && s[pp::TopTables + 1] == 1,
+            "artillery unit rejected (majority 0x1333714 by first maximum), attached unit admitted, crew refused");
+    Require(v[pp::UnitsSelected] == 1 && v[pp::UnitsRejected] == 1 && v[pp::MembersAdmitted] == 2 &&
+            v[pp::MembersParked] == 2 && v[pp::SkippedNativeSteps] == 2, "two admitted (one on the alternative table)");
+    Require(!pp::CommonStep(A(men[2]), Caller()) && Words()[pp::CommonMemberCalls] == 0,
+            "a refused crew member is not a parked member at the common-step gate");
+    pp::Stop();
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_puppet_oracle <approved Napoleon.exe>\n"); return 2; }
     ResetFp(); Map(argv[1]); ownerTid = static_cast<long>(GetCurrentThreadId());
@@ -412,6 +568,9 @@ int main(int argc, char** argv) {
     InstallCase("repark over a done wait node", true, 0.0f, false, true);
     StageCase();
     AllUnitsCase();
+    PointMoveCases();
+    SelectionCase();
+    MoverCase();
     std::printf("native_puppet_oracle: %u cases, %u checks passed\n", cases, checks);
     return 0;
 }
