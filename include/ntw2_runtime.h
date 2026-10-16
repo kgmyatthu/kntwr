@@ -85,8 +85,15 @@ extern "C" {
 #define NTW2_BRAIN_FINALIZER_SHADOW 0x20u /* --brain-finalizer-shadow: owner-only private-copy rerun of proved 0x819770 calls, bit-exact compare; implies gated census. Words: brain2_unknown_site_words witness 21..23 (native_brain2.h). */
 #define NTW2_BRAIN_QUIET 0x40u /* --brain-quiet: the performance configuration of NTW2_BRAIN_PARALLEL (required). Owner-run occurrences execute the ORIGINAL step (no serial gated census clone, no per-service bookkeeping, no first-unresolved histograms, no QPC per service); workers keep their classification gates and the guarded commit; guard misses are counted without block checksums. Excludes NTW2_BRAIN_CENSUS, TIMING and every shadow flag. Phase telemetry: brain_worker_phase_words. */
 #define NTW2_BRAIN_UNIT_SHADOW 0x80u /* --brain-unit-shadow: per-unit brain Stage A, shadow only. Before the unchanged site-6 loop, pool workers compute one UnitDecision per unit from unit-level inputs (no writes); after each soldier's native step the owner compares the fields it decided against its unit's decision. Requires BRAIN2; excludes NTW2_BRAIN_PARALLEL/QUIET. Words: brain_unit_words, src/brain2/native_unit_brain.h. */
-#define NTW2_BRAIN_S0 0x100u /* --brain-s0: diagnostics-only S0 attribution timer (analysis/native-unit-compromise-plan.md 5.3). Each occurrence's step runs through the BRAIN_S0 clone family whose candidate decision calls (target, drivers, node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue selector, timer/providers) reach counting gates; deterministic 1/64 occurrences are timed with serialized RDTSCP (gate overhead calibrated at start and subtracted). Native work runs exactly once, unchanged; no game-state write. Requires BRAIN2; excludes every other NTW2_BRAIN_* flag and NTW2_PUPPET. Words: brain_s0_words, src/brain2/native_brain_s0.h. */
-#define NTW2_BRAIN_FLAGS_VALID 0x1ffu
+#define NTW2_BRAIN_S0 0x100u /* --brain-s0: diagnostics-only S0 attribution timer (analysis/native-unit-compromise-plan.md 5.3). Each occurrence's step runs through the BRAIN_S0 clone family whose candidate decision calls (target, drivers, node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue selector, timer/providers) reach counting gates; deterministic 1/64 occurrences are timed with serialized RDTSCP (gate overhead calibrated at start and subtracted). Native work runs exactly once, unchanged; no game-state write (unless combined with the unit bits 0x200..0x4000, whose applies the S0 gates then route to and time). Requires BRAIN2; excludes every other NTW2_BRAIN_* flag except those unit bits, and NTW2_PUPPET. Words: brain_s0_words, src/brain2/native_brain_s0.h. */
+#define NTW2_BRAIN_UNIT_FATIGUE 0x200u /* --brain-unit-fatigue: S4 per-unit fatigue pair (src/brain2/native_unit_fatigue.h); the NTW2_BIND_U_FATIGUE gate applies the unit's (acc, level) to A+370/+374 of admitted units instead of running 0x670F40. Unit bits require BRAIN2; exclude CENSUS/TIMING/NODE/FIRE/FINALIZER shadows, PARALLEL, QUIET, UNIT_SHADOW and NTW2_PUPPET; combine with each other and with NTW2_BRAIN_S0. Words: brain_unit_policy_words (header 0..31, fatigue 32..127). */
+#define NTW2_BRAIN_UNIT_FATIGUE_SHADOW 0x400u /* --brain-unit-fatigue-shadow (sets 0x200|0x400): the unit pair is decided and compared with the native pair of every admitted man; native results stay. */
+#define NTW2_BRAIN_UNIT_POSTURE 0x800u /* --brain-unit-posture: S2b per-unit posture (src/brain2/native_unit_posture_engage.h). */
+#define NTW2_BRAIN_UNIT_POSTURE_SHADOW 0x1000u /* --brain-unit-posture-shadow (sets 0x800|0x1000). */
+#define NTW2_BRAIN_UNIT_ENGAGE 0x2000u /* --brain-unit-engage: S1c/S3 engage + fire latches, S1a/S2a lookups (src/brain2/native_unit_posture_engage.h). */
+#define NTW2_BRAIN_UNIT_ENGAGE_SHADOW 0x4000u /* --brain-unit-engage-shadow (sets 0x2000|0x4000). */
+#define NTW2_BRAIN_FLAGS_VALID 0x7fffu
+#define NTW2_BRAIN_UNIT_POLICY_WORDS 256u /* brain_unit_policy_words: shared header 0..31 (ntw2_unit_policy), fatigue 32..127 (NTW2_UNIT_FATIGUE_LABELS), posture/engage 128..255 (NTW2_UNIT_POSTURE_ENGAGE_LABELS) */
 #define NTW2_BRAIN_UNIT_WORDS 176u
 #define NTW2_BRAIN_WORKER_WORDS 144u
 #define NTW2_BRAIN_WORKER_PHASE_WORDS 40u
@@ -879,6 +886,11 @@ typedef struct ntw2_status {
        13 shadow_mismatches, 14 dispatches (pool dispatches of the primary builds, native verification included), 15 registry_reuses (builds that shared the previous record
        array and hash). Tick-owner writer; reset at Start, retained after stop; all zero without the loco feature. */
     uint32_t loco_grid_build_words[NTW2_LOCO_GRID_BUILD_WORDS];
+    /* Per-unit brain slices (appended after loco_grid_build_words; --brain-unit-*): words 0..31 the shared admission/routing header
+       (src/brain2/native_unit_policy.h NTW2_UNIT_POLICY_HEADER_LABELS), 32..127 the fatigue half (src/brain2/native_unit_fatigue.h
+       NTW2_UNIT_FATIGUE_LABELS), 128..255 the posture/engage half (src/brain2/native_unit_posture_engage.h
+       NTW2_UNIT_POSTURE_ENGAGE_LABELS). Tick-owner writer; reset at activation, retained after stop; all zero without a unit flag. */
+    uint32_t brain_unit_policy_words[NTW2_BRAIN_UNIT_POLICY_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1268,7 +1280,7 @@ static_assert(offsetof(ntw2_status,node_words) + NTW2_NODE_WORDS * sizeof(uint32
               offsetof(ntw2_status,brain_unit_words) + NTW2_BRAIN_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,collide_contact_words) &&
               NTW2_AI_ASYNC2 == 0x20000u && (NTW2_VALID_MASK & NTW2_AI_ASYNC2) && !(NTW2_ALL & NTW2_AI_ASYNC2) &&
               NTW2_BRAIN_PARALLEL == 0x10u && NTW2_BRAIN_FINALIZER_SHADOW == 0x20u && NTW2_BRAIN_QUIET == 0x40u &&
-              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_S0 == 0x100u && NTW2_BRAIN_FLAGS_VALID == 0x1ffu &&
+              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_S0 == 0x100u && NTW2_BRAIN_FLAGS_VALID == 0x7fffu &&
               NTW2_BRAIN_UNIT_WORDS == 176u,
               "class shadow and target rows append after the existing fire commit ABI");
 static_assert(offsetof(ntw2_status,collide_contact_words) + NTW2_COLLIDE_CONTACT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,grid_probation_words) &&
@@ -1305,9 +1317,14 @@ static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WOR
 static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_cw_words) &&
               offsetof(ntw2_status,loco_cw_words) + NTW2_LOCO_CW_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_grid_build_words) && NTW2_LOCO_CW_WORDS == 32u &&
               NTW2_LOCO_RELINK_WORDS == 32u && NTW2_LOCO_RELINK_SHADOW == 0x200u && NTW2_LOCO_RELINK_WORKERS == 0x400u, "loco_relink row appends after ai_ctrl_reuse_words");
-static_assert(offsetof(ntw2_status,loco_grid_build_words) + NTW2_LOCO_GRID_BUILD_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,loco_grid_build_words) + NTW2_LOCO_GRID_BUILD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_unit_policy_words) &&
               NTW2_LOCO_GRID_BUILD_WORDS == 16u && NTW2_LOCO_GRID_INCREMENTAL == 0x100u &&
               (NTW2_LOCO_FLAGS_VALID & NTW2_LOCO_GRID_INCREMENTAL) != 0, "loco_grid_build row appends after loco_cw_words");
+static_assert(offsetof(ntw2_status,brain_unit_policy_words) + NTW2_BRAIN_UNIT_POLICY_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_BRAIN_UNIT_POLICY_WORDS == 256u && NTW2_BRAIN_UNIT_FATIGUE == 0x200u && NTW2_BRAIN_UNIT_FATIGUE_SHADOW == 0x400u &&
+              NTW2_BRAIN_UNIT_POSTURE == 0x800u && NTW2_BRAIN_UNIT_POSTURE_SHADOW == 0x1000u && NTW2_BRAIN_UNIT_ENGAGE == 0x2000u &&
+              NTW2_BRAIN_UNIT_ENGAGE_SHADOW == 0x4000u && (NTW2_BRAIN_FLAGS_VALID & 0x7e00u) == 0x7e00u,
+              "brain_unit_policy row appends after loco_grid_build_words; unit flags 0x200..0x4000 are valid brain flags");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

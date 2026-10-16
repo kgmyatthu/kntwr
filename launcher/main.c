@@ -41,6 +41,10 @@
 #include "brain2/native_brain_workers.h"
 #include "brain2/native_unit_brain.h"
 #include "brain2/native_brain_s0.h"
+#include "brain2/native_unit_policy.h"
+#include "brain2/native_unit_fatigue.h"
+#include "brain2/native_unit_posture_engage.h"
+#include "brain2/native_unit_posture_engage.h"
 #include "army/native_army_unit.h"
 #include "puppet/native_puppet.h"
 #include "collision/native_contact.h"
@@ -179,6 +183,12 @@ typedef struct Options {
     BOOL brain_quiet;        /* --brain-quiet: performance mode of --brain-parallel; owner runs the original step, no census/QPC bookkeeping. */
     BOOL brain_unit_shadow;  /* --brain-unit-shadow: per-unit brain Stage A; UnitDecision vs each soldier's native step, shadow only. */
     BOOL brain_s0;           /* --brain-s0: S0 attribution timer (BRAIN_S0 clone family, 1/64 RDTSCP strata); diagnostics only. */
+    BOOL brain_unit_fatigue;        /* --brain-unit-fatigue: S4 per-unit fatigue pair, live (NTW2_BRAIN_UNIT_FATIGUE). */
+    BOOL brain_unit_fatigue_shadow; /* --brain-unit-fatigue-shadow: same decision, native results stay, divergence tables (sets both bits). */
+    BOOL brain_unit_posture;        /* --brain-unit-posture: S2b per-unit posture, live. */
+    BOOL brain_unit_posture_shadow; /* --brain-unit-posture-shadow. */
+    BOOL brain_unit_engage;         /* --brain-unit-engage: S1c/S3 engage + fire latches, S1a/S2a lookups, live. */
+    BOOL brain_unit_engage_shadow;  /* --brain-unit-engage-shadow. */
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -192,6 +202,8 @@ typedef struct Options {
     BOOL grid_probation;     /* --grid-probation: native cell-head trap detector; requires --loco-grid (or verify), not ballistic */
     BOOL loco_relink_shadow; /* --loco-relink-shadow: parallel relink apply verified on a private mirror; requires --loco-owned-services and --loco-grid */
     BOOL loco_relink_workers;/* --loco-relink-workers: live cell-partitioned relink apply on the pool; exclusive with shadow */
+    BOOL loco_cw_shadow;     /* --loco-cw-shadow: class-wrapper phase 2 computed on workers, native wrapper still runs and is compared; requires --loco-owned-services */
+    BOOL loco_cw_workers;    /* --loco-cw-workers: class-wrapper phase 2 live (owner replays child relocations natively); exclusive with shadow */
     uint32_t puppet_units;   /* --puppet-probe N|all: NTW2_PUPPET, N = 1..NTW2_PUPPET_MAX_UNITS ordinary foot-infantry units; all = NTW2_PUPPET_MAX_UNITS (ntw2_config::puppet_units) */
     uint32_t puppet_stats;   /* --puppet-stats 0|1 (default 1): 0 sets NTW2_PUPPET_STATS_OFF (production-stats mode) */
     BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (ntw2_config::ai_deferred) */
@@ -202,8 +214,6 @@ typedef struct Options {
     uint32_t inject_timeout_s;
     BOOL activate;
     BOOL validate_only;
-    BOOL loco_cw_shadow;     /* --loco-cw-shadow: class-wrapper phase 2 computed on workers, native wrapper still runs and is compared; requires --loco-owned-services */
-    BOOL loco_cw_workers;    /* --loco-cw-workers: class-wrapper phase 2 live (owner replays child relocations natively); exclusive with shadow */
     BOOL focus;
     BOOL exit_game_after_observe;
 } Options;
@@ -1394,6 +1404,129 @@ static void print_brain_s0(const uint32_t *w)
         L"658DEF/658DFB in driver_658C50; 660180/660230 have no step call site; animation select 66B7E0/66B990 "
         L"(fsm.vt+40/+44) in posture_10FC370; 64DE80 internals; other node classes' order calls\n");
 }
+/* --brain-unit-* (src/brain2/native_unit_policy.h header words 0..31 of brain_unit_policy_words; the fatigue half, words
+   32..127, is src/brain2/native_unit_fatigue.h). */
+static const char *unit_mode_name(uint32_t modes, unsigned mechanic)
+{
+    static const char *const names[] = { "off", "shadow", "live", "?" };
+    return names[(modes >> (2u * mechanic)) & 3u];
+}
+static void print_unit_policy(const uint32_t *w)
+{
+    const double stages = w[2] ? (double)w[2] : 1.0, occ = (double)w[16] + (double)w[17];
+    if (!w[1]) return;
+    say(L"  brain unit policy (shared admission v%lu; fatigue %hs, posture %hs, engage %hs): stages=%lu, units selected=%lu rejected=%lu, "
+        L"members selected=%lu refused (officers/crew/foreign) %lu\n", (unsigned long)w[0], unit_mode_name(w[1], 0),
+        unit_mode_name(w[1], 1), unit_mode_name(w[1], 2), (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4],
+        (unsigned long)w[5], (unsigned long)w[6]);
+    say(L"    units admitted last stage fatigue/posture/engage = %lu/%lu/%lu; unit-stages admitted %lu/%lu/%lu, refused %lu/%lu/%lu; "
+        L"drains %lu/%lu/%lu\n", (unsigned long)w[7], (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
+        (unsigned long)w[11], (unsigned long)w[12], (unsigned long)w[13], (unsigned long)w[14], (unsigned long)w[15],
+        (unsigned long)w[18], (unsigned long)w[19], (unsigned long)w[20]);
+    say(L"    occurrences: unit-routed %lu, native %lu (%.1f%% routed); out-of-worklist members last stage %lu; generation bumps %lu "
+        L"(members joined %lu, departed %lu), units retired %lu, selection passes %lu; faults %lu (last %lu)\n",
+        (unsigned long)w[16], (unsigned long)w[17], occ > 0.0 ? 100.0 * w[16] / occ : 0.0, (unsigned long)w[26],
+        (unsigned long)w[27], (unsigned long)w[30], (unsigned long)w[31], (unsigned long)w[28], (unsigned long)w[29],
+        (unsigned long)w[21], (unsigned long)w[22]);
+    say(L"    seam us per stage: last %lu max %lu mean %.1f (BeginStage + EndStage; QPC once per seam, never per man)\n",
+        (unsigned long)w[23], (unsigned long)w[24], (double)w[25] / stages);
+}
+static void print_unit_fatigue(const uint32_t *f, const uint32_t *h)
+{
+    static const char *const labels[] = { NTW2_UNIT_FATIGUE_LABELS };
+    static const char *const classes[] = { "0 base+env", "1 stat3D0", "2 stat4F0", "3 melee", "4 stat1F0", "5 node20/6D0",
+                                           "6 stat250", "7 stat2B0", "8 row-path", "9 stat370", "10 none", "other" };
+    static const char *const dacc[] = { "0", "1", "2-3", "4-7", "8-15", "16-63", "64-255", ">=256" };
+    const double stages = h[2] ? (double)h[2] : 1.0;
+    unsigned i;
+    if (!f[1]) return;
+    say(L"  brain unit fatigue (S4 v%lu, %hs): one (acc, level) pair per unit generation, advanced once per stage; units admitted last "
+        L"stage %lu refused %lu, admitted unit-stages %lu\n", (unsigned long)f[0], f[1] == 1 ? "shadow" : "live",
+        (unsigned long)f[2], (unsigned long)f[4], (unsigned long)f[3]);
+    say(L"    refused unit-stages by reason:");
+    for (i = 0; i < 10; ++i) say(L" %hs=%lu", labels[5 + i] + 7, (unsigned long)f[5 + i]);
+    say(L"\n    advances=%lu applies=%lu out_of_worklist_writes=%lu inits=%lu (generation inits %lu) resets=%lu drains=%lu retires=%lu "
+        L"publish_skipped=%lu contract_misses=%lu faults=%lu (last %lu)\n", (unsigned long)f[21], (unsigned long)f[22],
+        (unsigned long)f[23], (unsigned long)f[24], (unsigned long)f[36], (unsigned long)f[25], (unsigned long)f[26],
+        (unsigned long)f[27], (unsigned long)f[35], (unsigned long)f[37], (unsigned long)f[28], (unsigned long)f[29]);
+    say(L"    decide us per stage: last %lu max %lu mean %.1f; end us: last %lu mean %.1f\n", (unsigned long)f[30],
+        (unsigned long)f[31], (double)f[32] / stages, (unsigned long)f[33], (double)f[34] / stages);
+    say(L"    last unit %lu: acc %ld level %lu class %lu rate %ld\n", (unsigned long)f[94], (long)(int32_t)f[89],
+        (unsigned long)f[90], (unsigned long)f[91], (long)(int32_t)f[92]);
+    if (f[1] != 1) return;
+    if (!f[40]) { say(L"    shadow: no admitted man observed yet\n"); return; }
+    say(L"    shadow (unit pair vs the man's native pair after his native step; heterogeneous divergence is the approved deviation): "
+        L"men=%lu acc equal %.2f%% level equal %.2f%% both equal %.2f%%\n", (unsigned long)f[40], 100.0 * f[41] / f[40],
+        100.0 * f[43] / f[40], 100.0 * f[45] / f[40]);
+    say(L"    |acc diff| buckets:");
+    for (i = 0; i < 8; ++i) say(L" %hs:%lu", dacc[i], (unsigned long)f[46 + i]);
+    say(L"\n    level diff (unit - native) -5..+5:");
+    for (i = 0; i < 11; ++i) say(L" %lu", (unsigned long)f[54 + i]);
+    say(L"\n    by the man's NATIVE activity class (men / differing):");
+    for (i = 0; i < 12; ++i) if (f[65 + 2 * i]) say(L" [%hs %lu/%lu]", classes[i], (unsigned long)f[65 + 2 * i], (unsigned long)f[66 + 2 * i]);
+    say(L"\n");
+}
+/* Posture / engage half (words 128..255 of brain_unit_policy_words; src/brain2/native_unit_posture_engage.h, labels
+   NTW2_UNIT_POSTURE_ENGAGE_LABELS): p = the half, h = the shared header words (modes). */
+static void print_unit_posture_engage(const uint32_t *p, const uint32_t *h)
+{
+    static const char *const act[] = { "A idle", "B", "C", "D", "E" };
+    static const char *const phase[] = { "0", "6", "7", "9", "other" };
+    const double stages = h[2] ? (double)h[2] : 1.0;
+    unsigned i;
+    if (!p[1] && !p[2]) return;
+    say(L"  brain unit posture/engage (v%lu; posture %hs, engage %hs): stages=%lu\n", (unsigned long)p[0], p[1] == 2 ? "live" : p[1] == 1 ? "shadow" : "off",
+        p[2] == 2 ? "live" : p[2] == 1 ? "shadow" : "off", (unsigned long)p[3]);
+    if (p[1]) {
+        say(L"    posture decide: units %lu, admitted last stage %lu, admitted unit-stages %lu, refused %lu (no unit %lu, fsm %lu, state %lu, "
+            L"active B..E %lu); unit-stages by unit FSM activity A/B/C/D/E = %lu/%lu/%lu/%lu/%lu\n", (unsigned long)p[4], (unsigned long)p[5],
+            (unsigned long)p[6], (unsigned long)p[7], (unsigned long)p[8], (unsigned long)p[9], (unsigned long)p[10], (unsigned long)p[11],
+            (unsigned long)p[12], (unsigned long)p[13], (unsigned long)p[14], (unsigned long)p[15], (unsigned long)p[16]);
+        say(L"    posture admission over members (idle units only): checked %lu, refused moving %lu; member causes (unit-stages) state %lu, "
+            L"sequencer request %lu, fsm request fields %lu\n", (unsigned long)p[122], (unsigned long)p[121], (unsigned long)p[123],
+            (unsigned long)p[124], (unsigned long)p[125]);
+        say(L"    posture apply (men): applied %lu = transitions %lu + update-only %lu; null state %lu; native fallback state %lu table %lu "
+            L"(drains %lu); iteration-budget stops %lu\n", (unsigned long)p[17], (unsigned long)p[18], (unsigned long)p[19],
+            (unsigned long)p[20], (unsigned long)p[21], (unsigned long)p[22], (unsigned long)p[23], (unsigned long)p[24]);
+        if (p[1] == 1) {
+            say(L"    posture shadow (native end-of-stage state vs the unit target; idle units only): men %lu agree %lu disagree %lu null %lu other %lu, "
+                L"not run this stage %lu; top (native -> unit) pairs (13 = null state):", (unsigned long)p[25], (unsigned long)p[26],
+                (unsigned long)p[27], (unsigned long)p[29], (unsigned long)p[30], (unsigned long)p[28]);
+            for (i = 0; i < 6u; ++i) if (p[34 + 3 * i]) say(L" %lu->%lu:%lu", (unsigned long)p[32 + 3 * i], (unsigned long)p[33 + 3 * i], (unsigned long)p[34 + 3 * i]);
+            say(L"\n    posture histogram of stepped members (every selected unit; evidence for a B..E mapping): members %lu, by unit command speed "
+                L"none/1/2/other %lu/%lu/%lu/%lu\n", (unsigned long)p[50], (unsigned long)p[51], (unsigned long)p[52], (unsigned long)p[53], (unsigned long)p[54]);
+            say(L"      modal native state (members) by unit activity:");
+            for (i = 0; i < 5u; ++i) say(L" [%hs %lu x%lu]", act[i], (unsigned long)p[55 + 2 * i], (unsigned long)p[56 + 2 * i]);
+            say(L"\n      modal native state by (activity, command speed 1|2):");
+            for (i = 0; i < 4u; ++i)
+                say(L" [%hs s1 %lu x%lu | s2 %lu x%lu]", act[1 + i], (unsigned long)p[65 + 4 * i], (unsigned long)p[66 + 4 * i],
+                    (unsigned long)p[67 + 4 * i], (unsigned long)p[68 + 4 * i]);
+            say(L"\n");
+        }
+    }
+    if (p[2]) {
+        say(L"    engage decide: units %lu, admitted last stage %lu, admitted unit-stages %lu, refused %lu (no unit %lu, read fault %lu); "
+            L"frozen D9D on/off units %lu/%lu\n", (unsigned long)p[81], (unsigned long)p[82], (unsigned long)p[83], (unsigned long)p[84],
+            (unsigned long)p[85], (unsigned long)p[86], (unsigned long)p[87], (unsigned long)p[88]);
+        say(L"    engage apply: frozen-D9D branch taken %lu, alternate driver reached %lu (drains %lu); lookups served %lu, native %lu "
+            L"(unit-stages evaluated predicate %lu arrival %lu modifier %lu)\n", (unsigned long)p[89], (unsigned long)p[90], (unsigned long)p[91],
+            (unsigned long)p[96], (unsigned long)p[92], (unsigned long)p[93], (unsigned long)p[94], (unsigned long)p[95]);
+        if (p[2] == 1) {
+            say(L"    engage shadow (native end-of-stage vs the unit decision): admitted men %lu; own phase", (unsigned long)p[97]);
+            for (i = 0; i < 5u; ++i) say(L" %hs=%lu", phase[i], (unsigned long)p[98 + i]);
+            say(L"; phase 6 native/unit on %lu native/unit off %lu native off/unit on %lu; +F1 1/0 %lu/%lu; +619 1/0 %lu/%lu\n",
+                (unsigned long)p[103], (unsigned long)p[104], (unsigned long)p[105], (unsigned long)p[106], (unsigned long)p[107],
+                (unsigned long)p[108], (unsigned long)p[109]);
+            say(L"    freeze validation (admitted unit-stages checked %lu): stale predicate %lu, arrival %lu, modifier %lu, D9D %lu\n",
+                (unsigned long)p[120], (unsigned long)p[116], (unsigned long)p[117], (unsigned long)p[118], (unsigned long)p[119]);
+            say(L"    order/stance uniformity (units with stepped members %lu): order uniform %lu mixed %lu, stance uniform %lu mixed %lu; "
+                L"unfolded (native order/stance) admitted units %lu\n", (unsigned long)p[110], (unsigned long)p[111], (unsigned long)p[112],
+                (unsigned long)p[113], (unsigned long)p[114], (unsigned long)p[115]);
+        }
+    }
+    if (p[127]) say(L"    posture/engage faults: %lu\n", (unsigned long)p[127]);
+    (void)stages;
+}
 /* Army Stage B0 qualification (native_army_unit.h B0 comment, analysis/native-army-stage-b-plan.md sections 6, 7, 9).
    Refusal buckets are mutually exclusive whole-occurrence costs (unreadable, alloc_list, FSM transition, recorder not
    replayable, other refused, completable). Section 6 inputs: a = alloc_list + unreadable, t = FSM transition,
@@ -1796,6 +1929,9 @@ static void print_module_words(const ntw2_status *s)
             }
             print_unit_brain(s->brain_unit_words);
             print_brain_s0(s->brain_s0_words);
+            print_unit_policy(s->brain_unit_policy_words);
+            print_unit_fatigue(s->brain_unit_policy_words + 32, s->brain_unit_policy_words);
+            print_unit_posture_engage(s->brain_unit_policy_words + 128, s->brain_unit_policy_words);
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
@@ -2901,7 +3037,26 @@ static void sb_brain2(Sb *b, const Run *r)
                       "\"excl_cal_ms\": %.6f, \"incl_ms\": %.6f, \"incl_stat_ms\": %.6f, \"share\": %.6f}", k ? ", " : "",
                    rows[k], x->calls, x->sampled, x->excl_ms, x->excl_stat, x->excl_cal, x->incl_ms, x->incl_stat, x->share);
         }
-        sb_fmt(b, "}}, \"unknown_site_words\": [");
+        {
+            static const char *const policy_labels[] = { NTW2_UNIT_POLICY_HEADER_LABELS };
+            static const char *const fatigue_labels[] = { NTW2_UNIT_FATIGUE_LABELS };
+            static const char *const posture_labels[] = { NTW2_UNIT_POSTURE_ENGAGE_LABELS };
+            const uint32_t *u = r->last.brain_unit_policy_words;
+            sb_fmt(b, "}}, \"requested_unit_fatigue\": %s, \"requested_unit_fatigue_shadow\": %s, \"requested_unit_posture\": %s, "
+                      "\"requested_unit_posture_shadow\": %s, \"requested_unit_engage\": %s, \"requested_unit_engage_shadow\": %s, "
+                      "\"unit_policy_words\": [",
+                   r->opt.brain_unit_fatigue ? "true" : "false", r->opt.brain_unit_fatigue_shadow ? "true" : "false",
+                   r->opt.brain_unit_posture ? "true" : "false", r->opt.brain_unit_posture_shadow ? "true" : "false",
+                   r->opt.brain_unit_engage ? "true" : "false", r->opt.brain_unit_engage_shadow ? "true" : "false");
+            for (k = 0; k < NTW2_BRAIN_UNIT_POLICY_WORDS; ++k) sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)u[k]);
+            sb_fmt(b, "], \"unit_policy\": {");
+            for (k = 0; k < 32; ++k) sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", policy_labels[k], (unsigned long)u[k]);
+            sb_fmt(b, "}, \"unit_fatigue\": {");
+            for (k = 0; k < 96; ++k) sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", fatigue_labels[k], (unsigned long)u[32 + k]);
+            sb_fmt(b, "}, \"unit_posture_engage\": {");
+            for (k = 0; k < 128; ++k) sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", posture_labels[k], (unsigned long)u[128 + k]);
+            sb_fmt(b, "}, \"unknown_site_words\": [");
+        }
     }
     for (i = 0; i < NTW2_BRAIN2_UNKNOWN_SITE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain2_unknown_site_words[i]);
@@ -3833,7 +3988,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
                         NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u + NTW2_PUPPET_WORDS * 64u +
                         NTW2_ARMY_B0_WORDS * 64u + NTW2_PUPPET_MOTION_WORDS * 64u + NTW2_BRAIN_S0_WORDS * 16u +
-                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + 4096u];
+                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + NTW2_BRAIN_UNIT_POLICY_WORDS * 48u + 8192u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -3912,6 +4067,12 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
     sb_fmt(&b, "  \"brain_s0\": %s,\n", r->opt.brain_s0 ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_fatigue\": %s,\n", r->opt.brain_unit_fatigue ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_fatigue_shadow\": %s,\n", r->opt.brain_unit_fatigue_shadow ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_posture\": %s,\n", r->opt.brain_unit_posture ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_posture_shadow\": %s,\n", r->opt.brain_unit_posture_shadow ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_engage\": %s,\n", r->opt.brain_unit_engage ? "true" : "false");
+    sb_fmt(&b, "  \"brain_unit_engage_shadow\": %s,\n", r->opt.brain_unit_engage_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
     sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & NTW2_ARMY_UNIT_SHADOW) ? "true" : "false");
@@ -4601,7 +4762,13 @@ static int install_runtime(Run *r)
                          (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
-                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u);
+                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
+                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
+                         (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |
+                         (r->opt.brain_unit_posture_shadow ? NTW2_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? NTW2_BRAIN_UNIT_ENGAGE : 0u) |
+                         (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
@@ -5078,10 +5245,18 @@ static void usage(void)
         L"  --brain-unit-shadow   requires brain2; excludes --brain-parallel/--brain-quiet: per-unit brain Stage A, shadow only. Before\n"
         L"                        the unchanged site-6 loop pool workers decide every unit from unit-level inputs; after each\n"
         L"                        soldier's native step its decided fields are compared with its unit's decision (brain_unit_words)\n"
-        L"  --brain-s0            requires brain2; excludes every other --brain-* option and puppet: S0 attribution timer. Each\n"
+        L"  --brain-s0            requires brain2; excludes every other --brain-* option except --brain-unit-* and puppet: S0 attribution timer. Each\n"
         L"                        step runs the BRAIN_S0 clone family (identical code, counting gates around target, drivers,\n"
         L"                        node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue, timers);\n"
         L"                        1/64 deterministic occurrences timed with RDTSCP, calibrated gate cost subtracted (brain_s0_words)\n"
+        L"  --brain-unit-fatigue  requires brain2; excludes --brain-census/timing/parallel/quiet/unit-shadow, the brain shadows and puppet;\n"
+        L"                        combines with the other --brain-unit-* options and --brain-s0: S4 per-unit fatigue. One (acc, level) pair\n"
+        L"                        per unit generation, initialised from the native unit means and advanced once per stage from the unit's\n"
+        L"                        activity (units at rest only; every other unit stays native); admitted men receive the pair instead of\n"
+        L"                        running 0x670F40 (brain_unit_policy_words: shared header 0..31, fatigue 32..127)\n"
+        L"  --brain-unit-fatigue-shadow  same decision, native fatigue stays; per-man native-vs-unit divergence tables (sets --brain-unit-fatigue)\n"
+        L"  --brain-unit-posture, --brain-unit-posture-shadow  S2b per-unit posture (live / shadow; words 128..255)\n"
+        L"  --brain-unit-engage, --brain-unit-engage-shadow    S1c/S3 engage + fire latches and S1a/S2a lookups (live / shadow; words 128..255)\n"
         L"  --collide-contact-shadow  requires collide: contact callbacks are planned on pool workers from stage-entry state and each\n"
         L"                        plan is compared with the original callback the owner still runs (collide.contact)\n"
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
@@ -5104,6 +5279,11 @@ static void usage(void)
         L"                        effect; loco_relink_words, receipt loco.relink); exclusive with --loco-relink-workers\n"
         L"  --loco-relink-workers same requirements: live parallel relink apply; the op log replaces the native grid services, batches are applied\n"
         L"                        on the pool at flush barriers with bit-identical chain order\n"
+        L"  --loco-cw-shadow      requires loco + --loco-owned-services: class wrappers 0x132BA04 whose children are all World agents run on\n"
+        L"                        workers with proxy children; the owner still runs them natively and compares (zero gameplay effect;\n"
+        L"                        loco_cw_words cw_*); exclusive with --loco-cw-workers\n"
+        L"  --loco-cw-workers     same requirements: live; the worker result is committed and each child relocation is replayed\n"
+        L"                        through native 0x80BAC0 on the owner in worklist order\n"
         L"  --grid-probation      requires loco + --loco-grid (not ballistic): native cell-head array PAGE_NOACCESS outside the\n"
         L"                        owner's site-13 relink window; every trapping reader is logged (EIP/caller/thread/site),\n"
         L"                        its page restored and resumed (grid_probation_words, receipt loco.grid_probation)\n"
@@ -5250,6 +5430,12 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--brain-quiet")) o->brain_quiet = TRUE;
         else if (!wcscmp(name, L"--brain-unit-shadow")) o->brain_unit_shadow = TRUE;
         else if (!wcscmp(name, L"--brain-s0")) o->brain_s0 = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-fatigue")) o->brain_unit_fatigue = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-fatigue-shadow")) o->brain_unit_fatigue = o->brain_unit_fatigue_shadow = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-posture")) o->brain_unit_posture = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-posture-shadow")) o->brain_unit_posture = o->brain_unit_posture_shadow = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-engage")) o->brain_unit_engage = TRUE;
+        else if (!wcscmp(name, L"--brain-unit-engage-shadow")) o->brain_unit_engage = o->brain_unit_engage_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl-census")) o->ai_ctrl_flags |= NTW2_AI_CTRL_CENSUS;
         else if (!wcscmp(name, L"--ai-ctrl-histogram")) o->ai_ctrl_flags |= NTW2_AI_CTRL_HISTOGRAM;
         else if (!wcscmp(name, L"--ai-ctrl-geometry")) o->ai_ctrl_flags |= NTW2_AI_CTRL_GEOMETRY;
@@ -5263,6 +5449,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--grid-probation")) o->grid_probation = TRUE;
         else if (!wcscmp(name, L"--loco-relink-shadow")) o->loco_relink_shadow = TRUE;
         else if (!wcscmp(name, L"--loco-relink-workers")) o->loco_relink_workers = TRUE;
+        else if (!wcscmp(name, L"--loco-cw-shadow")) o->loco_cw_shadow = TRUE;
+        else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
         else if (!wcscmp(name, L"--loco-shadow")) o->loco_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= NTW2_AI_CTRL;
         else if (!wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
@@ -5318,11 +5506,6 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             if (!parse_uint(val, 5, 3600, &o->inject_timeout_s)) { errsay(L"--inject-timeout must be 5..3600.\n"); return -1; }
         } else {
             errsay(L"unknown option \"%ls\".\n", name);
-        L"  --loco-cw-shadow      requires loco + --loco-owned-services: class wrappers 0x132BA04 whose children are all World agents run on\n"
-        L"                        workers with proxy children; the owner still runs them natively and compares (zero gameplay effect;\n"
-        L"                        loco_cw_words cw_*); exclusive with --loco-cw-workers\n"
-        L"  --loco-cw-workers     same requirements: live; the worker result is committed and each child relocation is replayed\n"
-        L"                        through native 0x80BAC0 on the owner in worklist order\n"
             return -1;
         }
 #undef NEEDVAL
@@ -5390,6 +5573,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow, --brain-s0 and brain shadow options require --features brain2.\n");
         return -1;
     }
+    if ((o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage) && !(o->mask & NTW2_BRAIN2)) {
+        errsay(L"--brain-unit-* options require --features brain2.\n");
+        return -1;
+    }
+    if ((o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage) &&
+        (o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow ||
+         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow)) {
+        errsay(L"--brain-unit-* options own the serial site-6 occurrence call: they exclude --brain-census, --brain-timing, "
+               L"--brain-parallel, --brain-quiet, --brain-unit-shadow and the brain shadow options (they combine with each other and --brain-s0).\n");
+        return -1;
+    }
     if (o->brain_parallel && ((!o->brain_census && !o->brain_quiet) || o->workers == 0)) {
         errsay(L"--brain-parallel requires --brain-census or --brain-quiet and at least one worker (--workers).\n");
         return -1;
@@ -5405,7 +5599,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if (o->brain_s0 && (o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow ||
                         o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet || o->brain_unit_shadow)) {
-        errsay(L"--brain-s0 owns the site-6 occurrence call and excludes every other --brain-* option.\n");
+        errsay(L"--brain-s0 owns the site-6 occurrence call and excludes every other --brain-* option except the --brain-unit-* options.\n");
         return -1;
     }
     if ((o->mask & NTW2_PUPPET) && !o->puppet_units) {
@@ -5414,7 +5608,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & NTW2_PUPPET) && ((o->mask & (NTW2_BRAIN2 | NTW2_BRAIN)) || o->brain_census || o->brain_timing ||
         o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet ||
-        o->brain_unit_shadow || o->brain_s0)) {
+        o->brain_unit_shadow || o->brain_s0 || o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage)) {
         errsay(L"--puppet-probe is the sole owner of site 6 and the infantry step slot: it excludes brain2, brain and every --brain-* option.\n");
         return -1;
     }
@@ -5464,6 +5658,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--loco-relink-shadow and --loco-relink-workers require --features loco, --loco-owned-services and --loco-grid (or --loco-grid-verify).\n");
         return -1;
     }
+    if (o->loco_cw_shadow && o->loco_cw_workers) {
+        errsay(L"--loco-cw-shadow and --loco-cw-workers are exclusive.\n");
+        return -1;
+    }
+    if ((o->loco_cw_shadow || o->loco_cw_workers) && (!(o->mask & NTW2_LOCO) || !o->loco_owned)) {
+        errsay(L"--loco-cw-shadow and --loco-cw-workers require --features loco and --loco-owned-services.\n");
+        return -1;
+    }
     if (o->grid_probation && (!(o->mask & NTW2_LOCO) || !o->loco_grid || (o->mask & NTW2_BALLISTICS))) {
         errsay(L"--grid-probation requires --features loco with --loco-grid (or --loco-grid-verify) and is refused with ballistic "
                L"(its query cache walks the native cell heads itself).\n");
@@ -5497,8 +5699,6 @@ static BOOL choose_game_dir(Run *r)
             errsay(L"game directory \"%ls\" does not exist.\n", r->opt.game);
             return FALSE;
         }
-        else if (!wcscmp(name, L"--loco-cw-shadow")) o->loco_cw_shadow = TRUE;
-        else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
         return TRUE;
     }
     if (!g_in_con) {
@@ -5547,7 +5747,13 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
-                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u);
+                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
+                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
+                         (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |
+                         (r->opt.brain_unit_posture_shadow ? NTW2_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? NTW2_BRAIN_UNIT_ENGAGE : 0u) |
+                         (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
@@ -5607,11 +5813,3 @@ int wmain(int argc, wchar_t **argv)
     default: return finish(r, code, L"runtime status unavailable");
     }
 }
-    if (o->loco_cw_shadow && o->loco_cw_workers) {
-        errsay(L"--loco-cw-shadow and --loco-cw-workers are exclusive.\n");
-        return -1;
-    }
-    if ((o->loco_cw_shadow || o->loco_cw_workers) && (!(o->mask & NTW2_LOCO) || !o->loco_owned)) {
-        errsay(L"--loco-cw-shadow and --loco-cw-workers require --features loco and --loco-owned-services.\n");
-        return -1;
-    }

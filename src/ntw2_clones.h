@@ -134,6 +134,22 @@ enum ntw2_binding {
        geometry gates (src/ntw2_ai_ctrl_geometry.h). */
     NTW2_BIND_AI_CTRL_REFRESH, NTW2_BIND_AI_CTRL_SCORER, NTW2_BIND_AI_CTRL_BATCH_ASSIGN, NTW2_BIND_AI_CTRL_BATCH_EXIT,
     NTW2_BIND_AI_CTRL_HISTOGRAM, NTW2_BIND_AI_CTRL_IDENTITY, NTW2_BIND_AI_CTRL_POINT_DISTANCE,
+    /* Per-unit brain slices (appended; src/brain2/native_unit_policy.h, native_unit_fatigue.h). U_FATIGUE replaces the virtual
+       call `call [eax+108]` of 66D43D in the BRAIN_U core (the `mov ecx,edi` before it stays): ECX = A, no stack argument,
+       plain RET, every register except EAX/ECX/EDX, EFLAGS-independent, x87 empty before and after: applies the unit's
+       fatigue pair to A+370/+374 when ntw2_unit_policy::g_occ admits A, else runs [[A]+108] natively. U_OCC is the DATA
+       binding &ntw2_unit_policy::g_occ read by the BRAIN_U clones' inline asm (fixed field offsets). */
+    NTW2_BIND_U_FATIGUE, NTW2_BIND_U_OCC,
+    /* Per-unit posture / engage (src/brain2/native_unit_posture_engage.h). U_POSTURE replaces `call 10FC370` at 819A01
+       (ECX = A+F4, plain RET, AL). U_EVP / U_ENGAGE_CNT are DATA bindings: the pointer to the occurrence's engage-values block
+       and the gate counters read/written by the BRAIN_U_DRIVER inline gates. U_DRIVER_ALT 66D402 -> 64DE80 (ECX = A, plain RET).
+       U_UNIT_MODIFIER 6544DB -> 649520 (ECX = A, EAX, plain RET), U_ORDER_PREDICATE -> 64F8F0 (ECX = A, AL), U_UNIT_ARRIVAL
+       -> 57E1F0 (ECX = U, x87 ST0 float): each serves the unit's frozen value for an admitted Engage occurrence, else forwards
+       the original. U_NODE_BEGIN / U_NODE_STEP replace the driver's `mov ecx,edi; call [eax+4]` / `[eax+8]` runs (EAX = node
+       vtable, EDI = node): known node classes enter their BRAIN_U_* clone, any other target runs the original. */
+    NTW2_BIND_U_POSTURE, NTW2_BIND_U_EVP, NTW2_BIND_U_ENGAGE_CNT, NTW2_BIND_U_DRIVER_ALT, NTW2_BIND_U_UNIT_MODIFIER,
+    NTW2_BIND_U_ORDER_PREDICATE, NTW2_BIND_U_UNIT_ARRIVAL, NTW2_BIND_U_NODE_BEGIN, NTW2_BIND_U_NODE_STEP,
+    NTW2_BIND_U_PHASE6, NTW2_BIND_U_PHASE7, /* 658FDE / 6590FC own-phase stores (+ the next kept instruction): EDX only, plain RET */
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -258,6 +274,18 @@ enum ntw2_clone_id {
     /* --ai-ctrl-* family (appended): rebuild 7492F0 (its four 749090 calls -> ASSIGN), assignment loop 749090 (batch hooks, scorer
        gate) and the node scorer 7B1270 (histogram/identity/distance gates). Entered through the AI_CONTROLLER clone's rebuild gate. */
     NTW2_CLONE_AI_CTRL_REBUILD, NTW2_CLONE_AI_CTRL_ASSIGN, NTW2_CLONE_AI_CTRL_SCORER,
+    /* Per-unit brain slices (appended): the 66CE00 core whose 66D43B fatigue call runs NTW2_BIND_U_FATIGUE and whose driver
+       call runs the unit driver family; entered by ntw2_unit_policy::RunOccurrence for occurrences with a live unit mask. */
+    NTW2_CLONE_BRAIN_U,          /* 66CE00..66D6BC + rebased two-entry switch table */
+    /* Per-unit posture / engage clones (generator unit_policy_configs). BRAIN_U_DRIVER: 658C50 with the inline engage/fire
+       latch gates and node begin/step dispatch, finalizer virtual -> BRAIN_U_FINALIZE; BRAIN_U_FINALIZE: 6543D0 + four rebased
+       tables, 649520 -> U_UNIT_MODIFIER, 819770 -> BRAIN_U_PATH; BRAIN_U_PATH: 819770..81A0B5 with 10FC370 -> U_POSTURE;
+       BRAIN_US_DRIVER: the driver gates with the --brain-s0 node/finalize gates; node classes with 64F8F0/57E1F0 served by
+       the unit's frozen lookups. */
+    NTW2_CLONE_BRAIN_U_DRIVER, NTW2_CLONE_BRAIN_U_FINALIZE, NTW2_CLONE_BRAIN_U_PATH, NTW2_CLONE_BRAIN_US_DRIVER,
+    NTW2_CLONE_BRAIN_U_HOT_BEGIN, NTW2_CLONE_BRAIN_U_HOT_STEP, NTW2_CLONE_BRAIN_U_IDLE_STEP,
+    NTW2_CLONE_BRAIN_U_ACTION_BEGIN, NTW2_CLONE_BRAIN_U_ACTION_STEP,
+    NTW2_CLONE_BRAIN_U_RELATED_BEGIN, NTW2_CLONE_BRAIN_U_RELATED_STEP,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and
@@ -333,7 +361,7 @@ uint32_t ntw2_build_clones(uint32_t image_base, const uint32_t bindings[NTW2_BIN
 /* Duplicate the already validated private MOVE/WRAP pair for one pool participant, plus (class_wrap != 0) the validated
    LOCO_CLASS_WRAP clone whose LOCO_SELECT call is retargeted to the host `select` (thiscall, receiver only).
    Rewrites metadata-described fixups only, including private scratch bindings;
-   never reads or modifies executable image text. The unpublished pair may be
+   never reads or modifies executable image text. The unpublished set may be
    released once dispatch has joined (no external code pointer is published). */
 uint32_t ntw2_build_loco_participant(uint32_t wrap, uint32_t move, uint32_t class_wrap, uint32_t select,
     const uint32_t bindings[NTW2_BIND_COUNT], ntw2_clone_set* out);

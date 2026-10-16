@@ -269,6 +269,7 @@ ntw2_harness(native_brain2_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_move_node.cpp"
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
           "${NTW2_SRC}/brain2/native_brain_s0.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_brain_workers_oracle STD 20 FP strict
   SOURCES native_brain_workers_oracle.cpp "${NTW2_SRC}/brain2/native_brain_workers.cpp"
@@ -300,7 +301,7 @@ ntw2_note_registered(ntw2_army_unit_oracle)
 # Puppet probe stage 1: mapped-image wait-node install transaction vs the native watcher-install path, gated common
 # step vs 0x670EB0, and the stage membership/handback contract on fixture records.
 ntw2_harness(native_puppet_oracle STD 20 FP strict
-  SOURCES native_puppet_oracle.cpp "${NTW2_SRC}/puppet/native_puppet.cpp"
+  SOURCES native_puppet_oracle.cpp "${NTW2_SRC}/puppet/native_puppet.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
   INCLUDES "${NTW2_SRC}" LIBS bcrypt)
 ntw2_harness(native_node_oracle STD 20 FP strict
   SOURCES native_node_oracle.cpp "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
@@ -315,7 +316,18 @@ ntw2_harness(native_move_node_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
           "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_brain_s0.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
+# Per-unit posture / engage: the BRAIN_U_* clones and gates against the mapped originals (private relocated image).
+ntw2_harness(native_unit_posture_engage_oracle STD 20 FP strict
+  SOURCES native_unit_posture_engage_oracle.cpp "${NTW2_SRC}/brain2/native_unit_posture_engage.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
+# Per-unit fatigue (S4): the ported 670F40 arithmetic against the mapped original, unit model, gate ABI, provider through the
+# shared module on a manager/registry fixture.
+ntw2_harness(native_unit_fatigue_oracle STD 20 FP strict
+  SOURCES native_unit_fatigue_oracle.cpp "${NTW2_SRC}/brain2/native_unit_fatigue.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_fire_oracle STD 20 FP strict
   SOURCES native_fire_oracle.cpp "${NTW2_SRC}/brain2/native_fire.cpp"
@@ -431,6 +443,12 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_move_node_oracle COMMAND native_move_node_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_move_node_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 300)
   ntw2_note_registered(ntw2_move_node_oracle)
+  add_test(NAME ntw2_unit_posture_engage_oracle COMMAND native_unit_posture_engage_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_unit_posture_engage_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 600)
+  ntw2_note_registered(ntw2_unit_posture_engage_oracle)
+  add_test(NAME ntw2_unit_fatigue_oracle COMMAND native_unit_fatigue_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_unit_fatigue_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 300)
+  ntw2_note_registered(ntw2_unit_fatigue_oracle)
   add_test(NAME ntw2_fire_oracle COMMAND native_fire_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_fire_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 300)
   ntw2_note_registered(ntw2_fire_oracle)

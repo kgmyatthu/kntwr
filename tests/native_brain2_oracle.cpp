@@ -2271,7 +2271,7 @@ static void S0Fixtures(World& world) {
     currentCase = "S0 clone family executes each original exactly once";
     S0Start(0);
     brain::Configure(false, false); brain::Reset(); brain::SetOccurrenceRunner(&kS0Runner); brain::BeginDispatch();
-    s0::BeginStage();
+    s0::BeginStage(0);
     std::vector<World> worldBefore(1), worldExpected(1);
     U count = 0;
     for (const Spec& spec : kRunSpecs) {
@@ -2316,7 +2316,7 @@ static void S0Fixtures(World& world) {
     for (S0Words& run : runs) {
         S0Start(s0::kDefaultShift);
         for (U stage = 0; stage < 4; ++stage) {
-            s0::BeginStage();
+            s0::BeginStage(0);
             for (U i = 0; i < 64; ++i) {
                 Fixture fixture; fixture.Init(world, kRunSpecs[i % 5], 500 + i);
                 observations = nullptr; std::vector<Observed> ignored; observations = &ignored;

@@ -1,5 +1,6 @@
 // Puppet survival probe (native_puppet.h). Owner thread only; native transactions are the engine's own code.
 #include "native_puppet.h"
+#include "native_unit_select.h"
 #include <windows.h>
 #include <intrin.h>
 #include <string.h>
@@ -19,10 +20,9 @@ constexpr const char* kSelectLabels[] = { NTW2_PUPPET_SELECT_LABELS };
 static_assert(sizeof(kSelectLabels) / sizeof(kSelectLabels[0]) == kSelectWords, "one label per select word");
 
 // Approved-image preferred VAs (SHA-256 13fcab62...).
-constexpr U kClassTable = 0x1333714, kWaitTable = 0x1334028, kCrewNode = 0x133AE34;
+constexpr U kWaitTable = 0x1334028;
 constexpr U kWaitInstall = 0x650600, kWaitBegin = 0x665E30, kWaitStep = 0x66DCF0, kCommonStep = 0x670EB0;
-constexpr U kBrainStep = 0x66CE00, kTerrain = 0x81AC80, kActivity = 0x663730;
-constexpr U kArtilleryStep = 0x6F4660, kCavalryStep = 0x602EB0;
+constexpr U kTerrain = 0x81AC80, kActivity = 0x663730;
 constexpr U kSlotNodeTable = 0x13472A4; // node constructed at A+2D4 by 0x7E3D50 from the 0x581513 slot descriptor
 // +628 controller tables (0x662E90 stores the registering receiver): slot 0 returns the receiver / returns null.
 constexpr U kControllerSelf = 0x1334250, kControllerNull = 0x1334218;
@@ -33,10 +33,14 @@ constexpr float kHeadingPerRadian = 10430.378f; // 0x1325DAC
 constexpr float kMaxTurnPerTick = 3.1101768f;   // 0x1335A34, cap of turn*dt in 0x67A050
 // Storage: rows (serial-keyed open addressing, load <= 1/2), unit handles, the examined-unit set of one selection, and
 // the parked bit per registry serial.
-constexpr U kHash = 2 * kMaxRows, kUnitHash = 2 * kMaxUnits, kMaxExamined = 4096, kSeenHash = 2 * kMaxExamined;
-constexpr U kSerialBits = 1u << 20;
-constexpr U kNone = ~0u, kMaxArmies = kPuppetNoArmy, kNoArmy = kPuppetNoArmy;
-static_assert(!(kHash & (kHash - 1)) && !(kUnitHash & (kUnitHash - 1)) && !(kSeenHash & (kSeenHash - 1)), "power-of-two hashes");
+constexpr U kHash = 2 * kMaxRows, kUnitHash = 2 * kMaxUnits;
+constexpr U kSerialBits = ntw2_unit_select::kSerialBits;
+constexpr U kNone = ~0u, kNoArmy = ntw2_unit_select::kNoArmy;
+static_assert(ntw2_unit_select::kNoArmy == kPuppetNoArmy && ntw2_unit_select::RejectMemberCount == RejectMemberCount &&
+              ntw2_unit_select::RejectNullMember == RejectNullMember && ntw2_unit_select::RejectArtillery == RejectArtillery &&
+              ntw2_unit_select::RejectCavalry == RejectCavalry && ntw2_unit_select::RejectNoInfantry == RejectNoInfantry,
+              "puppet select words index the shared reject reasons");
+static_assert(!(kHash & (kHash - 1)) && !(kUnitHash & (kUnitHash - 1)), "power-of-two hashes");
 
 enum State : U { Free, Ignored, Pending, Parked, Native, Gone };
 enum Kind : U { Admit, Repark, HandTransfer, HandIneligible, DivertRepark, DivertHandback };
@@ -51,14 +55,15 @@ struct Unit { U handle, vtable, ordinal, generation, active, members, handed, ar
 struct Action { U row, kind; };
 struct Storage { Row rows[kMaxRows]; U hash[kHash]; Action actions[kMaxRows]; U parked[kSerialBits / 32]; };
 
-U g_delta, g_requested, g_classVt, g_waitVt, g_crewVt, g_stage, g_generation, g_unitCount, g_rowCount, g_actionCount;
+U g_delta, g_requested, g_waitVt, g_stage, g_generation, g_unitCount, g_rowCount, g_actionCount;
 bool g_started, g_selected, g_disabled, g_stats;
 U g_parkedCount, g_pendingCount; // maintained by SetState (Publish is O(row units))
 U g_words[kWords], g_motion[kMotionWords], g_divert[kDivertWords], g_mover[kMoverWords], g_select[kSelectWords];
-U g_divertsThisStage, g_eventHash, g_moverStage, g_tables[kInfantryTableCount], g_tableCount, g_topCount;
+U g_divertsThisStage, g_eventHash, g_moverStage, g_topCount;
+ntw2_unit_select::Rules g_rules; // the shared infantry-table pin and admissibility rules
 U* g_parked;
 Unit g_units[kMaxUnits];
-U g_unitHash[kUnitHash], g_seenHash[kSeenHash];
+U g_unitHash[kUnitHash];
 Storage* g_store; // activation storage, allocated by the first Start and kept for the process lifetime
 Row* g_rows;
 U* g_hash;
@@ -87,8 +92,7 @@ inline U V(U va) { return va + g_delta; }
 inline void Call(U target, U self) { reinterpret_cast<void (__thiscall*)(U)>(static_cast<uintptr_t>(target))(self); }
 LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 
-// Multiplicative hash folded so aligned pointers (zero low bits) still spread over the low slot bits.
-U HashSlot(U key, U mask) { const U h = key * 2654435761u; return (h ^ (h >> 15)) & mask; }
+using ntw2_unit_select::HashSlot;
 Row* Find(U serial) {
     for (U slot = HashSlot(serial, kHash - 1), n = 0; n < kHash; ++n, slot = (slot + 1) & (kHash - 1)) {
         const U index = g_hash[slot];
@@ -122,18 +126,7 @@ void AddUnitIndex(U handle, U ui) {
     while (g_unitHash[slot]) slot = (slot + 1) & (kUnitHash - 1);
     g_unitHash[slot] = ui + 1;
 }
-// Examined set of one selection pass; false when the handle was already examined.
-bool FirstSight(U handle) {
-    for (U slot = HashSlot(handle, kSeenHash - 1);; slot = (slot + 1) & (kSeenHash - 1)) {
-        if (!g_seenHash[slot]) { g_seenHash[slot] = handle; return true; }
-        if (g_seenHash[slot] == handle) return false;
-    }
-}
 void RecordFault(U code) { ++g_words[Faults]; g_words[LastFault] = code; }
-bool IsInfantry(U table) {
-    for (U i = 0; i < g_tableCount; ++i) if (g_tables[i] == table) return true;
-    return false;
-}
 // Parked bit per registry serial: set exactly while the serial's row is Parked (SetState is the only state writer
 // that enters or leaves Parked).
 inline bool ParkedBit(U serial) { return serial < kSerialBits && (g_parked[serial >> 5] >> (serial & 31) & 1); }
@@ -169,12 +162,12 @@ bool WaitNode(U a) { return B(a + 0x2C4) == 1 && D(a + 0x22C) == g_waitVt && D(a
 // Probe policy: no combat, target, charge, crew, rout or divert-controller (+628) state. Admission additionally starts
 // with no active request sequence (+390); a repark may cancel one through begin's native stop transaction.
 bool Eligible(U a, U unit, bool admission) {
-    if (B(a + 0x30) != 1 || !IsInfantry(D(a)) || D(a + 0x1F0) != unit) return false;
+    if (B(a + 0x30) != 1 || !g_rules.IsInfantry(D(a)) || D(a + 0x1F0) != unit) return false;
     if (D(a + 0x628) || D(a + 0x18) || D(a + 0x1EC) || D(a + 0x4E8) || D(a + 0x66C)) return false;
     const U activity = D(a + 0x1B8), order = D(a + 0x1D8);
     if (D(a + 0x224) == 9 || activity == 0xD || activity == 0x4B || D(a + 0x220) == 2 || order == 0x3C || order == 0x3D)
         return false;
-    if (B(a + 0x2C4) == 1 && D(a + 0x22C) == g_crewVt) return false;
+    if (B(a + 0x2C4) == 1 && D(a + 0x22C) == g_rules.crewVt) return false;
     return !admission || !D(a + 0x390);
 }
 void Act(U row, U kind) { g_actions[g_actionCount++] = {row, kind}; }
@@ -248,26 +241,14 @@ void RecordRejectedTable(U list, U n) {
     if (g_topCount == kTopTables) { ++g_select[TopOther]; return; }
     top[2 * g_topCount] = va; top[2 * g_topCount + 1] = 1; ++g_topCount;
 }
-bool Admissible(U m, U unit) {
-    return IsInfantry(D(m)) && D(m + 0x1F0) == unit && !D(m + 0x66C) && !(B(m + 0x2C4) == 1 && D(m + 0x22C) == g_crewVt) &&
-           D(m + 0x2C) < kSerialBits; // the gates' parked bit covers serials < 2^20 only
-}
 bool QualifyUnit(U unit, U ordinal, U army) {
-    const U n = D(unit + 0x2CC), list = D(unit + 0x2D0), attached = D(unit + 0x1F4);
+    U n, list, admissible;
     U* s = g_select;
-    if (!n || n > kMaxUnitMembers || !list) { ++s[RejectMemberCount]; return false; }
-    U admissible = 0, reason = 0;
-    for (U i = 0; i < n && !reason; ++i) {
-        const U m = D(list + 4 * i);
-        if (!m) { reason = RejectNullMember; break; }
-        const U step = D(D(m) + 0xC) - g_delta;
-        if (step == kArtilleryStep) reason = RejectArtillery;
-        else if (step == kCavalryStep) reason = RejectCavalry;
-        else admissible += Admissible(m, unit);
-    }
-    if (!reason && !admissible) reason = RejectNoInfantry;
+    U reason = g_rules.Qualify(unit, n, list, admissible);
+    if (reason == RejectMemberCount) { ++s[RejectMemberCount]; return false; }
     if (!reason && g_rowCount + n > kMaxRows) reason = RejectCapacity;
     if (reason) { ++s[reason]; if (reason != RejectNullMember) RecordRejectedTable(list, n); return false; }
+    const U attached = D(unit + 0x1F4);
     if (attached && D(attached + 0x10)) ++s[UnitsAttached]; // attached records are never touched
     const U ui = g_unitCount++;
     g_units[ui] = {unit, D(unit), ordinal, ++g_generation, 1, 0, 0, army, 0, 0};
@@ -276,45 +257,37 @@ bool QualifyUnit(U unit, U ordinal, U army) {
     for (U i = 0; i < n; ++i) {
         const U m = D(list + 4 * i), serial = D(m + 0x2C);
         if (Find(serial)) continue; // duplicate list entry
-        const bool selected = Admissible(m, unit);
+        const ntw2_unit_select::MemberClass cls = g_rules.Classify(m, unit);
+        const bool selected = cls == ntw2_unit_select::MemberSelected;
         if (Row* r = AddRow(m, serial, ui, selected ? Pending : Ignored)) r->seen = 0; // classified by this stage's import
         ++g_words[selected ? MembersSelected : MembersRejected];
         if (!selected) {
-            if (!IsInfantry(D(m))) ++s[MemberOtherClass];
-            else if (D(m + 0x1F0) != unit) ++s[MemberBacklink];
-            else if (serial >= kSerialBits) ++s[SerialOutOfRange];
+            if (cls == ntw2_unit_select::MemberOtherClass) ++s[MemberOtherClass];
+            else if (cls == ntw2_unit_select::MemberBacklink) ++s[MemberBacklink];
+            else if (cls == ntw2_unit_select::MemberSerialOutOfRange) ++s[SerialOutOfRange];
             else ++s[MemberCrew];
             continue;
         }
-        if (D(m) != g_classVt) ++s[MemberAltTable];
+        if (D(m) != g_rules.classVt) ++s[MemberAltTable];
         ++g_units[ui].members;
         if (first) { first = false; g_units[ui].x = D(m + 0x48); g_units[ui].z = D(m + 0x50); } // start position
     }
     ++g_words[UnitsSelected];
     return true;
 }
+bool Accept(void*, U unit, U ordinal, U army) {
+    ++g_words[UnitsExamined];
+    if (QualifyUnit(unit, ordinal, army)) return true;
+    ++g_words[UnitsRejected];
+    return false;
+}
 void Select(U manager) {
     const U count = D(manager + 0x24C), data = D(manager + 0x250);
     if (!count || !data) return;
-    memset(g_seenHash, 0, sizeof(g_seenHash));
     // One pass's diagnostics (a pass is retried every 64 stages while nothing qualified).
     for (U w = RejectMemberCount; w < RegistryInfantry; ++w) if (w != TablesPinned) g_select[w] = 0;
     g_topCount = 0;
-    U seenCount = 0, armies[kMaxArmies], armyCount = 0, infantry = 0;
-    for (U i = 0; i < count; ++i) {
-        const U a = D(data + 4 * i);
-        if (!a || !IsInfantry(D(a))) continue;
-        ++infantry;
-        if (g_unitCount >= g_requested || seenCount >= kMaxExamined) continue;
-        const U unit = D(a + 0x1F0), army = D(a + 0x1F8);
-        U k = 0;
-        while (k < armyCount && armies[k] != army) ++k;
-        if (army && k == armyCount && armyCount < kMaxArmies) armies[armyCount++] = army;
-        if (!unit || !FirstSight(unit)) continue;
-        ++seenCount; ++g_words[UnitsExamined];
-        if (!QualifyUnit(unit, seenCount - 1, army ? (k < kMaxArmies ? k : kNoArmy) : kNoArmy)) ++g_words[UnitsRejected];
-    }
-    g_select[RegistryInfantry] = infantry;
+    g_select[RegistryInfantry] = ntw2_unit_select::Scan(g_rules, manager, &Accept, nullptr, g_requested);
     if (g_unitCount) g_selected = true;
 }
 bool SelectGuarded(U manager) {
@@ -343,7 +316,7 @@ void Import() {
         Unit& u = g_units[ui];
         if (!u.active) continue;
         const U n = D(u.handle + 0x2CC), list = D(u.handle + 0x2D0);
-        if (D(u.handle) != u.vtable || n > kMaxUnitMembers || (n && !list)) { Retire(ui); continue; }
+        if (D(u.handle) != u.vtable || n > ntw2_unit_select::kMaxUnitMembers || (n && !list)) { Retire(ui); continue; }
         for (U i = 0; i < n; ++i) {
             const U a = D(list + 4 * i);
             if (!a) continue;
@@ -524,20 +497,12 @@ bool Start(const Binding& binding) {
     }
     g_tickOwner = binding.tick_owner; g_epochMask = binding.epoch_mask; g_epochBit = binding.epoch_bit;
     g_delta = binding.image_base - 0x400000;
-    g_classVt = V(kClassTable); g_waitVt = V(kWaitTable); g_crewVt = V(kCrewNode); g_slotVt = V(kSlotNodeTable);
-    // Pin the class and node contracts this module relies on; +08 is pinned by the runtime's slot swap.
-    if (D(g_classVt + 0xC) != V(kBrainStep) || D(g_classVt + 0x134) != V(kWaitInstall) ||
-        D(g_waitVt + 4) != V(kWaitBegin) || D(g_waitVt + 8) != V(kWaitStep)) return false;
-    // Alternative infantry tables: admitted only when every slot this module and the native paths rely on is
-    // identical to 0x1333714's.
-    static const U kPinnedSlots[] = {0x08, 0x0C, 0x130, 0x134, 0x188, 0x1A4, 0x1A8, 0x108, 0xB8, 0xFC};
-    g_tableCount = 0;
-    for (U t : kInfantryTables) {
-        bool same = true;
-        for (U slot : kPinnedSlots) same = same && D(V(t) + slot) == D(g_classVt + slot);
-        if (same) g_tables[g_tableCount++] = V(t);
-    }
-    g_select[TablesPinned] = g_tableCount;
+    if (!g_rules.Pin(binding.image_base)) return false;
+    g_waitVt = V(kWaitTable); g_slotVt = V(kSlotNodeTable);
+    // Pin the node contracts this module relies on; +08 is pinned by the runtime's slot swap.
+    if (D(g_rules.classVt + 0x134) != V(kWaitInstall) || D(g_waitVt + 4) != V(kWaitBegin) || D(g_waitVt + 8) != V(kWaitStep))
+        return false;
+    g_select[TablesPinned] = g_rules.tableCount;
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_frequency = f.QuadPart ? f.QuadPart : 1;
     g_requested = binding.units;
     g_words[UnitsRequested] = binding.units;

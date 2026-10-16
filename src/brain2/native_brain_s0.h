@@ -91,12 +91,17 @@ static_assert(RowReserved + 1 == kRowWords, "row word labels");
 bool Bind(U imageBase, U* bindings);
 // Owner thread, before the first stage: verifies the CPU (state 2 on refusal), that every BRAIN_S0 clone exists (state 3),
 // routes the gates into the family and calibrates. `sampleShift` 0..16 (0 times every occurrence: oracle use).
-bool Start(const U* cloneEntries, U sampleShift = kDefaultShift);
+// `units` (--brain-unit-*, ntw2_unit_policy): the runner also drives the unit seams (BeginStage/EndStage, Begin/EndOccurrence)
+// and the selector (fatigue), driver (engage) and posture gates route occurrences whose live unit mask admits them to the unit
+// applies: `bindings` = the table the clone set was built with (NTW2_BIND_U_FATIGUE, NTW2_BIND_U_POSTURE; a zero entry keeps its
+// route native), the engage route is the clone NTW2_CLONE_BRAIN_US_DRIVER. The unsampled cost of an unrouted occurrence is two
+// loads on the routed gates only.
+bool Start(const U* cloneEntries, U sampleShift = kDefaultShift, const U* bindings = nullptr, bool units = false);
 void Stop();   // routing retained (immutable clones), sampling off; counters retained for the final snapshot
 void Reset();  // counters/calibration to zero (activation)
 void Snapshot(U* words /*[kWords]*/);
 // ntw2_brain2::OccurrenceRunner entries (owner thread, inside ntw2_brain2::RunWorklist).
-void BeginStage();
+void BeginStage(U manager);
 void EndStage();
 // Runs the occurrence's +0C step exactly once. `brainClass` is ntw2_brain2::Class of `original` (vt+0C).
 void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries);

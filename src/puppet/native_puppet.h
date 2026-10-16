@@ -10,7 +10,7 @@
 //
 // Selection (once, first site-6 stage with a nonempty primary registry G+24C/+250; retried every 64 stages while
 // nothing qualified): units in first-appearance order over the registry (deterministic for a replay; never pointer
-// order) of records whose class table is an admitted infantry table (kInfantryTables). A unit qualifies when it has
+// order) of records whose class table is an admitted infantry table (ntw2_unit_select::kInfantryTables). A unit qualifies when it has
 // 1..512 non-null members (U+2CC/+2D0), no artillery (+0C 0x6F4660) or cavalry (+0C 0x602EB0) member and at least one
 // admissible member: an admitted infantry table, unit backlink +1F0 == the unit, no crew list (+66C) and no enabled
 // crew node 0x133AE34. Admissible members are selected; every other member (officer/ensign classes, crew, foreign
@@ -178,7 +178,7 @@
 //   member_*        refused members of admitted units: crew (+66C or enabled crew node 0x133AE34), backlink +1F0 not
 //                   the unit, other class table (officers/ensigns/...), admitted on an alternative infantry table;
 //   serial_out_of_range  refused members whose registry serial +2C is >= 2^20 (beyond the gates' parked bitset);
-//   tables_pinned   infantry class tables admitted at Start (kInfantryTables whose slots equal 0x1333714's);
+//   tables_pinned   infantry class tables admitted at Start (ntw2_unit_select::kInfantryTables whose slots equal 0x1333714's);
 //   top_table_k / top_count_k (k < 8): the majority member class table (preferred VA) of rejected units and how many
 //                   rejected units had it, in first-seen order; top_other: rejected units beyond eight distinct tables.
 #define NTW2_PUPPET_SELECT_LABELS \
@@ -191,16 +191,11 @@
 namespace ntw2_puppet {
 using U = uint32_t;
 // kMaxUnits / kRowUnits equal NTW2_PUPPET_MAX_UNITS / NTW2_PUPPET_ROW_UNITS (asserted by the runtime).
-constexpr U kVersion = 5, kWords = 64, kMaxUnits = 2048, kRowUnits = 4, kMaxUnitMembers = 512, kMaxRows = 65536,
-            kSampleMask = 63;
+constexpr U kVersion = 5, kWords = 64, kMaxUnits = 2048, kRowUnits = 4, kMaxRows = 65536, kSampleMask = 63;
 constexpr U kPuppetNoArmy = NTW2_PUPPET_NO_ARMY;
-// Infantry class tables of the 13-table family (native-loco-consumer-seams.md 3.1) whose slots +08/+0C/+130/+134/
-// +188/+1A4/+1A8/+108/+B8/+FC equal 0x1333714's on the approved image (verified at Start; a mismatching table is
-// dropped). 0x132B7D8 (+0C thunk 0x6F50F0) and 0x132BA04 (+0C wrapper 0x602EB0) are not admitted. The runtime gates
-// slot +08 of every listed table.
-constexpr U kInfantryTableCount = 11;
-constexpr U kInfantryTables[kInfantryTableCount] = {0x1333714, 0x13473D0, 0x13475E4, 0x13477F8, 0x13479B4, 0x1347B70,
-                                                   0x1347D2C, 0x1347EE8, 0x13480A4, 0x1348260, 0x134841C};
+// The infantry class tables, member admissibility and unit qualification are the shared rules of
+// src/puppet/native_unit_select.h (ntw2_unit_select::kInfantryTables, Rules). The runtime gates slot +08 of every
+// pinned table.
 enum Word : U {
     Version, Enabled, UnitsRequested, UnitsSelected, UnitsRejected, UnitsExamined, Stages, CommonCallerVa,
     MembersSelected, MembersRejected, MembersAdmitted, MembersParked, MembersPending, AdmissionRefusals,

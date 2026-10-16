@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include "native_brain_s0.h"
+#include "native_unit_policy.h"
 #include "ntw2_clones.h"
 static_assert(sizeof(void*) == 4, "the S0 gates are Win32 x86 naked forwarding thunks");
 namespace ntw2_brain_s0 {
@@ -35,6 +36,12 @@ U g_row, g_jmp;             // gate -> S0Sampled hand-off (no gate runs in betwe
 U g_depth, g_maxDepth, g_overflow, g_exit, g_lastD, g_lastExcl;
 Frame g_frames[kDepth];
 Occ g_occ[kSlots];
+// Unit-policy routing (--brain-unit-*; src/brain2/native_unit_policy.h). g_umask = the LIVE mechanic mask of the current
+// occurrence (0 outside units / non-members); the routed gates index flag-free 8-entry tables by it, so the unsampled cost
+// of an unrouted occurrence is two loads on the routed gates only.
+U g_umask, g_save, g_unitFatigue, g_nativeFatigue, g_usDriver, g_uPosture;
+bool g_unitMode;
+U g_routeDriver[8], g_routePosture[8];
 
 #define S0_RDTSCP __asm _emit 0x0F __asm _emit 0x01 __asm _emit 0xF9
 #define S0_LFENCE __asm _emit 0x0F __asm _emit 0xAE __asm _emit 0xE8
@@ -197,6 +204,11 @@ no_parent:
         JMP \
     }
 #define S0_NONE
+// Routed variants: destination = table[g_umask] (flag-free: loads/stores only; EAX preserved through g_save).
+#define S0_LOAD_ROUTED(tab) __asm mov ecx, dword ptr [g_umask] __asm mov ecx, dword ptr [tab + ecx * 4]
+#define S0_JMP_ROUTED(tab) __asm mov dword ptr [g_save], eax __asm mov eax, dword ptr [g_umask] \
+    __asm mov eax, dword ptr [tab + eax * 4] __asm mov dword ptr [g_jmp], eax __asm mov eax, dword ptr [g_save] \
+    __asm jmp dword ptr [g_jmp]
 #define S0_LOAD_STATIC(k) __asm mov ecx, dword ptr [g_static + 4 * (k)]
 #define S0_JMP_STATIC(k) __asm jmp dword ptr [g_static + 4 * (k)]
 // Row literals (asm immediates); checked against Row below.
@@ -227,7 +239,7 @@ static_assert(GTarget == 0 && GDriver == 1 && GDriverAlt == 2 && GTimer == 3 && 
               GOrderAdjust == 6 && GOrderPredicate == 7 && GUnitArrival == 8 && GUnitModifier == 9 && GStance == 10 &&
               GPath == 11 && GPosture == 12 && GCalibOuter == 13 && GCalibInner == 14, "static gate literals");
 S0_STATIC_GATE(GateTarget, S0R_TARGET, 0, S0_NONE, S0_LOAD_STATIC(0), S0_JMP_STATIC(0))
-S0_STATIC_GATE(GateDriver, S0R_DRIVER, 0, S0_NONE, S0_LOAD_STATIC(1), S0_JMP_STATIC(1))
+S0_STATIC_GATE(GateDriver, S0R_DRIVER, 0, S0_NONE, S0_LOAD_ROUTED(g_routeDriver), S0_JMP_ROUTED(g_routeDriver))
 S0_STATIC_GATE(GateDriverAlt, S0R_DRIVER_ALT, 0, S0_NONE, S0_LOAD_STATIC(2), S0_JMP_STATIC(2))
 S0_STATIC_GATE(GateTimer, S0R_TIMER, 0, S0_NONE, S0_LOAD_STATIC(3), S0_JMP_STATIC(3))
 S0_STATIC_GATE(GateOrderFinal, S0R_ORDER_FINAL, 1, S0_NONE, S0_LOAD_STATIC(4), S0_JMP_STATIC(4))
@@ -238,7 +250,7 @@ S0_STATIC_GATE(GateUnitArrival, S0R_UNIT_ARRIVAL, 0, S0_NONE, S0_LOAD_STATIC(8),
 S0_STATIC_GATE(GateUnitModifier, S0R_UNIT_MODIFIER, 0, S0_NONE, S0_LOAD_STATIC(9), S0_JMP_STATIC(9))
 S0_STATIC_GATE(GateStance, S0R_STANCE, 0, S0_NONE, S0_LOAD_STATIC(10), S0_JMP_STATIC(10))
 S0_STATIC_GATE(GatePath, S0R_PATH, 0, S0_NONE, S0_LOAD_STATIC(11), S0_JMP_STATIC(11))
-S0_STATIC_GATE(GatePosture, S0R_POSTURE, 0, S0_NONE, S0_LOAD_STATIC(12), S0_JMP_STATIC(12))
+S0_STATIC_GATE(GatePosture, S0R_POSTURE, 0, S0_NONE, S0_LOAD_ROUTED(g_routePosture), S0_JMP_ROUTED(g_routePosture))
 S0_STATIC_GATE(GateCalibOuter, S0R_CALIB_OUTER, 0, S0_NONE, S0_LOAD_STATIC(13), S0_JMP_STATIC(13))
 S0_STATIC_GATE(GateCalibInner, S0R_CALIB_INNER, 0, S0_NONE, S0_LOAD_STATIC(14), S0_JMP_STATIC(14))
 // Macro arguments must not contain top-level commas: every operand list goes through a named helper macro.
@@ -254,6 +266,16 @@ S0_STATIC_GATE(GatePostureNext, S0R_POSTURE_NEXT, 0, S0_PRE_NEXT, S0_LOAD_NEXT, 
 #define S0_JMP_EAX __asm jmp eax
 S0_STATIC_GATE(GateProvider0, S0R_TIMER_PROVIDER, 0, S0_PRE_PROVIDER0, S0_LOAD_EAX, S0_JMP_EAX)
 S0_STATIC_GATE(GateProvider1, S0R_TIMER_PROVIDER, 0, S0_PRE_PROVIDER1, S0_LOAD_EAX, S0_JMP_EAX)
+// Destination of the selector dispatch for the native fatigue target 670F40 when units are on: the admitted occurrence enters
+// the unit gate (NTW2_BIND_U_FATIGUE, ECX = A) so the S0 fatigue row times the unit apply in place of the native body; every
+// other occurrence runs the native 670F40. Reached through S0Sampled/the pass path with the original registers (ECX = A).
+__declspec(naked) void S0FatigueRoute() {
+    __asm test dword ptr [g_umask], 1
+    __asm jz native
+    __asm jmp dword ptr [g_unitFatigue]
+native:
+    __asm jmp dword ptr [g_nativeFatigue]
+}
 
 // Virtual-call gate: PUSHT pushes the actual target; the table maps it to (row, destination), unknown targets keep
 // their own address on the gate's miss row. Flag-free on the unsampled path.
@@ -364,6 +386,14 @@ void SetDispatch(U gate, U target, U row, U destination) {
     g_neg[index] = 0u - target; g_hitRow[index] = row; g_repl[index] = destination;
 }
 // Static and dispatch tables forwarding to the originals (Bind) or into the family (Start).
+// The unit-routed gates' 8-entry tables (index = live mechanic mask of the occurrence): masks with the Engage / Posture bit go
+// to the unit driver clone / unit posture gate when those exist, everything else to the S0 destination of the gate.
+void RefreshRoutes() {
+    for (U m = 0; m < 8; ++m) {
+        g_routeDriver[m] = (m & 4) && g_usDriver ? g_usDriver : g_static[GDriver];
+        g_routePosture[m] = (m & 2) && g_uPosture ? g_uPosture : g_static[GPosture];
+    }
+}
 bool Route(const U* entries) {
     for (U k = 0; k < StaticGateCount; ++k) {
         U target = kStaticGates[k].va ? V(kStaticGates[k].va) : Fn(&EmptyStub);
@@ -371,12 +401,15 @@ bool Route(const U* entries) {
         if (entries && kRoutedClone[k] != ~0u) target = entries[kRoutedClone[k]];
         g_static[k] = target;
     }
+    RefreshRoutes();
     std::memset(g_neg, 0, sizeof(g_neg));
     for (U g = 0; g < DispatchGateCount; ++g) g_miss[g] = kMissRow[g];
     for (const DispatchSpec& d : kDispatch) {
         const U index = d.gate * 256 + ((d.va >> 8) & 0xFF);
         if (g_neg[index]) return false; // byte collision: the table would misroute
-        SetDispatch(d.gate, V(d.va), d.row, entries && d.clone != ~0u ? entries[d.clone] : V(d.va));
+        U destination = entries && d.clone != ~0u ? entries[d.clone] : V(d.va);
+        if (g_unitMode && d.gate == DSelector && d.va == 0x670F40) destination = Fn(&S0FatigueRoute);
+        SetDispatch(d.gate, V(d.va), d.row, destination);
     }
     SetDispatch(DCalib, Fn(&EmptyStub), kCalibInner, Fn(&EmptyStub));
     return true;
@@ -545,13 +578,20 @@ bool Bind(U imageBase, U* bindings) {
     bindings[NTW2_BIND_S0_TIMER_PROVIDER1] = Fn(&GateProvider1);
     return g_bound && Route(nullptr);
 }
-bool Start(const U* cloneEntries, U sampleShift) {
+bool Start(const U* cloneEntries, U sampleShift, const U* bindings, bool units) {
     g_configured = 1; g_started = 0; g_shift = sampleShift > 16 ? 16 : sampleShift;
+    g_unitMode = false; g_umask = 0; g_usDriver = g_uPosture = g_unitFatigue = 0; g_nativeFatigue = V(0x670F40);
     if (!CpuSupported()) { g_state = 2; return false; }
     if (!g_bound || !cloneEntries) { g_state = 3; return false; }
     for (U id = NTW2_CLONE_BRAIN_S0; id <= NTW2_CLONE_BRAIN_S0_RELATED_STEP; ++id)
         if (!cloneEntries[id]) { g_state = 3; return false; }
     std::memcpy(g_entries, cloneEntries, sizeof(g_entries));
+    if (units) {  // routes to the unit applies; an absent target keeps its route native
+        g_unitMode = true;
+        g_unitFatigue = bindings && bindings[NTW2_BIND_U_FATIGUE] ? bindings[NTW2_BIND_U_FATIGUE] : g_nativeFatigue;
+        g_uPosture = bindings ? bindings[NTW2_BIND_U_POSTURE] : 0;
+        g_usDriver = cloneEntries[NTW2_CLONE_BRAIN_US_DRIVER];
+    }
     if (!Route(g_entries)) { g_state = 3; return false; }
     Calibrate();
     g_state = 1; g_started = 1;
@@ -568,10 +608,10 @@ void Reset() {
     g_qpcFirst = g_qpcLast = 0;
     g_calTscKhz = g_floorX16 = g_floorSpreadX16 = g_nestX16 = g_nestSpreadX16 = g_rootX16 = g_rootSpreadX16 = 0;
     g_passX16 = g_dispatchX16 = g_occurrenceX16 = 0;
-    g_depth = g_maxDepth = g_overflow = g_mode = 0;
+    g_depth = g_maxDepth = g_overflow = g_mode = 0; g_umask = 0;
     g_configured = g_state = g_started = 0;
 }
-void BeginStage() {
+void BeginStage(U manager) {
     ++g_stage;
     g_lastUnit = 0; g_lastSlot = ~0u; g_unitCount = 0; g_nullMembers = g_otherMembers = 0;
     g_stageStart = Tsc();
@@ -579,8 +619,10 @@ void BeginStage() {
         LARGE_INTEGER q; QueryPerformanceCounter(&q);
         g_tscFirst = g_stageStart; g_qpcFirst = q.QuadPart;
     }
+    if (g_unitMode) ntw2_unit_policy::BeginStage(manager); // the unit seam is site-6 time
 }
 void EndStage() {
+    if (g_unitMode) ntw2_unit_policy::EndStage();
     const U64 end = Tsc();
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     g_site6 += end - g_stageStart; g_tscLast = end; g_qpcLast = q.QuadPart; ++g_stages;
@@ -590,8 +632,8 @@ void EndStage() {
         g_calls[r] = 0;
     }
 }
-void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries) {
-    (void)cloneEntries; // the family was captured (and verified complete) at Start
+// One occurrence's step exactly once (the original or its BRAIN_S0 clone), timed when the stratum selects it.
+void RunStep(U entity, U brainClass, U original) {
     ++g_occurrences;
     const bool core = brainClass <= 1, wrapper = brainClass == 2 || brainClass == 3;
     const U row = core ? StepCore : wrapper ? StepWrapper : StepOther;
@@ -610,9 +652,25 @@ void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries) {
     ++g_sampledOccurrences;
     TimedRoot(row, entry, entity);
 }
+void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries) {
+    (void)cloneEntries; // the family was captured (and verified complete) at Start
+    if (!g_unitMode) { RunStep(entity, brainClass, original); return; }
+    // Unit policy: the occurrence's live mask routes the selector/driver/posture gates of the S0 clone (g_umask); the
+    // observe/end hooks of the providers run after the step.
+    const bool member = brainClass == 0 && original == V(0x66CE00);
+    g_umask = member ? ntw2_unit_policy::BeginOccurrence(entity) & 7 : 0;
+    bool completed = false;
+    __try {
+        RunStep(entity, brainClass, original);
+        completed = true;
+    } __finally {
+        g_umask = 0;
+        if (member) { if (completed) ntw2_unit_policy::EndOccurrence(); else ntw2_unit_policy::AbandonOccurrence(); }
+    }
+}
 bool OverrideGateTarget(U binding, U target) {
     for (U k = 0; k < StaticGateCount; ++k)
-        if (kStaticGates[k].binding == binding && binding != NTW2_BIND_COUNT) { g_static[k] = target; return true; }
+        if (kStaticGates[k].binding == binding && binding != NTW2_BIND_COUNT) { g_static[k] = target; RefreshRoutes(); return true; }
     return false;
 }
 uint64_t RunTimedRoot(U row, U entry, U receiver) {

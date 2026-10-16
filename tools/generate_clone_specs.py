@@ -1182,6 +1182,40 @@ def brain_s0_configs():
     return configs
 
 
+# --brain-unit-* (per-unit brain slices, src/brain2/native_unit_policy.h): BRAIN_U is the 66CE00 core of occurrences whose unit
+# admits a live mechanic. It differs from the original in exactly the routed calls: the fatigue virtual call 66D43D
+# (`mov ecx,edi` stays, `call [eax+108]` -> `call rel32 U_FATIGUE` + one NOP: the gate applies the unit pair or runs
+# [[A]+108] natively) and, once the posture/engage family exists, the driver calls 66D3F9 (-> Clone BRAIN_U_DRIVER) and
+# 66D402 (-> Bind U_DRIVER_ALT). Target acquisition 66D3B1 and the timer 66D4FD stay the original calls.
+# UnitPosture fills UNIT_CORE_SITE_CALLS = {0x66D3F9: Clone('BRAIN_U_DRIVER'), 0x66D402: Bind('U_DRIVER_ALT')}.
+UNIT_CORE_SITE_CALLS = {}
+U_CORE_DRIVER_SITES = {0x66D3F9: 0x658C50, 0x66D402: 0x64DE80}
+# Original callees reachable (untouched) from the BRAIN_U family: the S0 set plus the unrouted acquisition/timer/driver calls.
+U_ORIGINAL_OK = S0_ORIGINAL_OK | {0x6718F0, 0x602E00, 0x658C50, 0x64DE80}
+
+
+def unit_core_configs():
+    return [
+        dict(clone='BRAIN_U', source='BRAIN', site_calls=dict(UNIT_CORE_SITE_CALLS),
+             call_rewrites={0x66D43B: (S0_SELECTOR_RUN, Bind('U_FATIGUE'), 2)},
+             indirect_ok={BRAIN_TABLE_JMP}, abs_expected=1,
+             abs_retarget=lambda value, site: (Clone('BRAIN_U', BRAIN_TABLE_VA - 0x66CE00)
+                                               if value == BRAIN_TABLE_VA and site == BRAIN_TABLE_JMP + 3 else None),
+             indirect_calls=BRAIN_INDIRECT_CALLS | {0x66D433},
+             expect_rets={0x66CE66: b'\xc3', 0x66D6AE: b'\xc3', 0x66D6BB: b'\xc3'}),
+    ]
+
+
+def unit_core_expectations():
+    """(external call targets kept original, census) of BRAIN_U: S0's BRAIN_S0 minus nothing, plus the sites S0 gated."""
+    calls = set(S0_EXPECT_CALLS['BRAIN_S0']) | {0x6718F0, 0x602E00}
+    sites = 34 + 2   # S0's 34 ungated external call sites + the acquisition (66D3B1) and timer (66D4FD) calls
+    for site, callee in U_CORE_DRIVER_SITES.items():
+        if site not in UNIT_CORE_SITE_CALLS:
+            calls.add(callee); sites += 1
+    return calls, (578, 16, sites, 0)
+
+
 # The ONE original callee each direct-call gate forwards (mirrored by src/brain2/native_brain_s0.cpp kStaticGates): a gate
 # site whose original call targets anything else would forward the wrong function, so every site is pinned here.
 S0_GATE_CALLEE = {'S0_TARGET': 0x6718F0, 'S0_DRIVER': 0x658C50, 'S0_DRIVER_ALT': 0x64DE80, 'S0_TIMER': 0x602E00,
@@ -1245,6 +1279,128 @@ def s0_finalize_abs_retarget(value, site):
             return Clone('BRAIN_S0_FINALIZE', offset)
         offset += next(s[2] - s[1] for s in SOURCES if s[0] == table)
     return None
+
+
+# ---- per-unit posture / engage family (src/brain2/native_unit_posture_engage.h, analysis/checkpoints/UnitPostureEngage.md) ----
+# BRAIN_U_DRIVER / BRAIN_US_DRIVER are the 658C50 driver with inline gates at the engage-phase stores 658C62 / 658FDE / 6590FC,
+# the fire-latch stores 658DEF (+F1) / 658DFB (+619) and the per-man unit flag read 658FB8. Every gate reads the occurrence's
+# engage-values block through the data binding U_EVP (set once at the entry from g_occ: the admitted unit's slot, else the
+# native block), so a non-admitted occurrence stores exactly the native constants. EDX (and EAX where noted) are the only
+# registers used; every original store is replaced by a same-length NOP and its gate is inserted before it.
+# Entry:  edx = g_occ.entity; if (edx == A && g_occ.mask & 4) edx = g_occ.slot[Engage] else edx = native block; U_EVP = edx.
+U_OCC = lambda off: Fix('abs', Bind('U_OCC', off))
+U_EVP = Fix('abs', Bind('U_EVP'))
+U_CNT = lambda off: Fix('abs', Bind('U_ENGAGE_CNT', off))
+NOP7 = bytes.fromhex('0f1f8000000000')
+NOP10 = bytes.fromhex('0f1f840000000000' '6690')
+U_ENTRY_GATE = [b'\x8b\x15', U_OCC(0), b'\x3b\xd1', b'\x75\x11', b'\xf6\x05', U_OCC(8), b'\x04', b'\x74\x08',
+                b'\x8b\x15', U_OCC(24), b'\xeb\x06', b'\x8b\x15', U_CNT(60), b'\x89\x15', U_EVP]
+U_PHASE_GATE = lambda ev: [b'\xa1', U_EVP, b'\x8b\x00', b'\x89\x86\x24\x02\x00\x00'] if ev is None else \
+    [b'\x8b\x15', U_EVP, b'\x8b\x52' + bytes([ev]), b'\x89\x96\x24\x02\x00\x00']
+U_LATCH_GATE = lambda byte_off, and_off, or_off: [b'\xa1', U_EVP, b'\x8a\x96' + u32(byte_off), b'\x22\x50' + bytes([and_off]),
+                                                   b'\x0a\x50' + bytes([or_off]), b'\x88\x96' + u32(byte_off)]
+U_D9D_GATE = [b'\x8b\x15', U_EVP, b'\x83\x7a\x0c\x00', b'\x74\x0f', b'\xff\x05', U_CNT(24), b'\x80\x7a\x10\x00', b'\xe9',
+              Fix('rel', SrcRef(0x658FBF))]
+U_DRIVER_ORIG = {   # site: (original instruction bytes, replacement)
+    0x658C62: bytes.fromhex('c7862402000000000000'), 0x658DEF: bytes.fromhex('c686f100000001'),
+    0x658DFB: bytes.fromhex('c6861906000001'), 0x658FDE: bytes.fromhex('c7862402000006000000'),
+    0x6590FC: bytes.fromhex('c7862402000007000000')}
+U_DRIVER_INSERTS = {0x658C50: U_ENTRY_GATE, 0x658C62: U_PHASE_GATE(None), 0x658DEF: U_LATCH_GATE(0xF1, 0x14, 0x18),
+                    0x658DFB: U_LATCH_GATE(0x619, 0x1C, 0x20), 0x658FB8: U_D9D_GATE}
+U_DRIVER_PATCHES = {0x658C62: (U_DRIVER_ORIG[0x658C62], NOP10), 0x658DEF: (U_DRIVER_ORIG[0x658DEF], NOP7),
+                    0x658DFB: (U_DRIVER_ORIG[0x658DFB], NOP7)}
+# 658FDE / 6590FC: the branch distances around them leave no room for an inline gate. The store (plus the next instruction,
+# kept verbatim) becomes `call rel32 U_PHASEn` + 5 NOPs: the stub stores the occurrence's phase value (EDX only, plain RET;
+# ESI = A, the stack is untouched).
+U_PHASE6_RUN = U_DRIVER_ORIG[0x658FDE] + bytes.fromhex('c78424ac0000002a000000')
+U_PHASE7_RUN = U_DRIVER_ORIG[0x6590FC] + bytes.fromhex('5e')
+U_DRIVER_RUNS = {0x658FDE: (U_PHASE6_RUN, [b'\xe8', Fix('rel', Bind('U_PHASE6')), b'\x90' * 5, U_PHASE6_RUN[10:]]),
+                 0x6590FC: (U_PHASE7_RUN, [b'\xe8', Fix('rel', Bind('U_PHASE7')), b'\x90' * 5, U_PHASE7_RUN[10:]])}
+U_NODE_BEGIN_RUN, U_NODE_STEP_RUN = S0_NODE_BEGIN_RUN, S0_NODE_STEP_RUN
+U_NODE_SOURCES = {'BRAIN_U_HOT_BEGIN': 'BRAIN_S0_HOT_BEGIN', 'BRAIN_U_HOT_STEP': 'BRAIN_S0_HOT_STEP',
+                   'BRAIN_U_IDLE_STEP': 'BRAIN_S0_IDLE_STEP', 'BRAIN_U_ACTION_BEGIN': 'BRAIN_S0_ACTION_BEGIN',
+                   'BRAIN_U_ACTION_STEP': 'BRAIN_S0_ACTION_STEP', 'BRAIN_U_RELATED_BEGIN': 'BRAIN_S0_RELATED_BEGIN',
+                   'BRAIN_U_RELATED_STEP': 'BRAIN_S0_RELATED_STEP'}
+# Node-class sites whose callee is a pure function of the unit (served from the unit's frozen lookups): 64F8F0 -> U_ORDER_PREDICATE,
+# 57E1F0 -> U_UNIT_ARRIVAL. The order/adjust/stance calls (662E70 / 66AE10 / 662E50) stay the original calls (reported gap).
+U_NODE_LOOKUPS = {0x64F8F0: 'U_ORDER_PREDICATE', 0x57E1F0: 'U_UNIT_ARRIVAL'}
+
+
+def u_node_sites(s0_name):
+    """{site: Bind} of the served lookups and the list of S0-gated sites that revert to plain original calls."""
+    served, reverted = {}, []
+    for site, (callee, _binding) in S0_NODE_GATES[s0_name].items():
+        if callee in U_NODE_LOOKUPS:
+            served[site] = Bind(U_NODE_LOOKUPS[callee])
+        else:
+            reverted.append(callee)
+    reverted += [0x662E70] * len(S0_ORDER_NODE_SITES.get(s0_name, ()))
+    return served, reverted
+
+
+def u_finalize_abs_retarget(value, site):
+    offset = 0x654750 - 0x6543D0
+    for table, jump in S0_FINALIZE_TABLES:
+        va = next(s[1] for s in SOURCES if s[0] == table)
+        if value == va:
+            if site != jump + 3:
+                fail(f'BRAIN_U_FINALIZE: table {table} referenced at {site:#x}')
+            return Clone('BRAIN_U_FINALIZE', offset)
+        offset += next(s[2] - s[1] for s in SOURCES if s[0] == table)
+    return None
+
+
+U_DRIVER_INDIRECT = {0x658DD7, 0x658E69, 0x658EBB, 0x658FF3, 0x659008, 0x65901E, 0x659090, 0x6590D8}
+
+
+def unit_policy_configs():
+    def rets(*sites, ret=b'\xc3'):
+        return {s: ret for s in sites}
+    driver = dict(source='MOVEORDER', inserts=dict(U_DRIVER_INSERTS), insn_patches=dict(U_DRIVER_PATCHES),
+                  run_rewrites=dict(U_DRIVER_RUNS),
+                  expect_rets=rets(0x65910D, 0x659122, ret=RET(4)))
+    configs = [
+        dict(driver, clone='BRAIN_U_DRIVER',
+             call_rewrites={0x658F6E: (U_NODE_BEGIN_RUN, Bind('U_NODE_BEGIN')), 0x658F7F: (U_NODE_STEP_RUN, Bind('U_NODE_STEP')),
+                            0x658F99: (S0_FINALIZE_RUN, Clone('BRAIN_U_FINALIZE'), 2)},
+             indirect_calls=set(U_DRIVER_INDIRECT)),
+        dict(driver, clone='BRAIN_US_DRIVER',
+             call_rewrites={0x658F6E: (S0_NODE_BEGIN_RUN, Bind('S0_NODE_BEGIN')), 0x658F7F: (S0_NODE_STEP_RUN, Bind('S0_NODE_STEP')),
+                            0x658F99: (S0_FINALIZE_RUN, Bind('S0_FINALIZE'), 2)},
+             indirect_calls=set(U_DRIVER_INDIRECT)),
+        dict(clone='BRAIN_U_FINALIZE', source='BRAIN_W_FINALIZE',
+             site_calls={0x6544DB: Bind('U_UNIT_MODIFIER'), 0x654513: Clone('BRAIN_U_PATH')},
+             indirect_ok={jump for _, jump in S0_FINALIZE_TABLES}, abs_expected=len(S0_FINALIZE_TABLES),
+             abs_retarget=u_finalize_abs_retarget, indirect_calls=set(),
+             expect_rets=rets(0x654575, 0x65459C, 0x6545D4, 0x6545E1, *range(0x654600, 0x654635, 0xD),
+                              *range(0x654657, 0x654735, 0xD))),
+        dict(clone='BRAIN_U_PATH', source='S0_PATH', site_calls={0x819A01: Bind('U_POSTURE')},
+             indirect_calls={0x8198AE, 0x819920, 0x819F96}, expect_rets=rets(0x8197A9, 0x819F85, 0x81A068, 0x81A0B4)),
+    ]
+    for name, s0_name in U_NODE_SOURCES.items():
+        served, _ = u_node_sites(s0_name)
+        configs.append(dict(clone=name, source=S0_NODE_SOURCES[s0_name], site_calls=served,
+                            indirect_calls=S0_NODE_INDIRECT[s0_name], expect_rets=rets(*S0_NODE_RETS[s0_name])))
+    return configs
+
+
+def unit_policy_expectations():
+    calls = {'BRAIN_U_DRIVER': set(S0_EXPECT_CALLS['BRAIN_S0_MOVEORDER']),
+             'BRAIN_US_DRIVER': set(S0_EXPECT_CALLS['BRAIN_S0_MOVEORDER']),
+             'BRAIN_U_FINALIZE': set(S0_EXPECT_CALLS['BRAIN_S0_FINALIZE']) | {0x6631A0},
+             'BRAIN_U_PATH': set(S0_EXPECT_CALLS['BRAIN_S0_PATH'])}
+    census = {'BRAIN_U_DRIVER': (282, 1, 17, 0), 'BRAIN_US_DRIVER': (282, 1, 17, 0),
+              'BRAIN_U_FINALIZE': (243, 6, 9, 1), 'BRAIN_U_PATH': (523, 29, 5, 0)}
+    for name, s0_name in U_NODE_SOURCES.items():
+        _, reverted = u_node_sites(s0_name)
+        base = S0_EXPECT_CENSUS[s0_name]
+        calls[name] = set(S0_EXPECT_CALLS[s0_name]) | set(reverted)
+        census[name] = (base[0], base[1], base[2] + len(reverted), base[3])
+    return calls, census
+
+
+UNIT_CORE_SITE_CALLS.update({0x66D3F9: Clone('BRAIN_U_DRIVER'), 0x66D402: Bind('U_DRIVER_ALT')})
+U_ORIGINAL_OK |= {0x66AE10, 0x662E70, 0x662E50, 0x6631A0}
 
 
 AICTRL_CALLS = (
@@ -2181,6 +2337,8 @@ def clone_configs():
         *node_projection_configs(),
         *ai2_configs(),
         *brain_s0_configs(),
+        *unit_core_configs(),
+        *unit_policy_configs(),
         *ai_ctrl_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
@@ -2244,6 +2402,9 @@ EXPECT_CALLS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CALLS[entry]
                      for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CALLS})
 EXPECT_CALLS.update(AI2_EXPECT_CALLS)
 EXPECT_CALLS.update(S0_EXPECT_CALLS)
+EXPECT_CALLS['BRAIN_U'], _U_CORE_CENSUS = unit_core_expectations()
+_U_POLICY_CALLS, _U_POLICY_CENSUS = unit_policy_expectations()
+EXPECT_CALLS.update(_U_POLICY_CALLS)
 EXPECT_JUMPS = {'FORM_COMMAND': {0x58123C, 0x581286}, 'AI_POSITION_UPDATE': {0x6D3E30}, 'AI_CONTROLLER': {0x7C8F70},
                 'AI2_POSITION_UPDATE': {0x6D3E30}, 'BRAIN_S0_5FCEB0': {0x5B9720}, 'BRAIN_S0_FINALIZE': {0x444B60}}
 # (decoded instructions, HIGHLOW relocations, external call sites kept original, external jump sites). QUERY matches the
@@ -2273,6 +2434,9 @@ EXPECT_CENSUS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CENSUS[entry]
                       for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CENSUS})
 EXPECT_CENSUS.update(AI2_EXPECT_CENSUS)
 EXPECT_CENSUS.update(S0_EXPECT_CENSUS)
+EXPECT_CENSUS['BRAIN_U'] = _U_CORE_CENSUS
+EXPECT_CENSUS.update(_U_POLICY_CENSUS)
+EXPECT_JUMPS['BRAIN_U_FINALIZE'] = {0x444B60}
 
 
 # ============================================================================================ generation
@@ -2812,6 +2976,16 @@ def build_all(image, header_path):
     append_table(image, registry, manager, MANAGER_TABLE_CFG)
     append_table(image, registry, plans['BRAIN'], BRAIN_TABLE_CFG)
     append_table(image, registry, plans['BRAIN_S0'], dict(BRAIN_TABLE_CFG, clone='BRAIN_S0_TABLE', target_clone='BRAIN_S0'))
+    append_table(image, registry, plans['BRAIN_U'], dict(BRAIN_TABLE_CFG, clone='BRAIN_U_TABLE', target_clone='BRAIN_U'))
+    ufinalize = plans['BRAIN_U_FINALIZE']
+    ufinalize.forward_tables = []
+    for table_name, jump in S0_FINALIZE_TABLES:
+        table = registry.by_name[table_name]
+        entries = struct.unpack(f'<{table["size"] // 4}I', image.read(table['va'], table['size']))
+        offset = ufinalize.size
+        append_table(image, registry, ufinalize, dict(clone=table_name, source=table_name, target_clone='BRAIN_U_FINALIZE',
+                                                      expected_entries=entries, offset=offset, jump=jump))
+        ufinalize.forward_tables.append((offset, entries, jump))
     finalize = plans['BRAIN_S0_FINALIZE']
     finalize.forward_tables = []
     for table_name, jump in S0_FINALIZE_TABLES:
@@ -2889,7 +3063,8 @@ def build_all(image, header_path):
     for plan in plans.values():
         for target in list(plan.external_calls) + list(plan.external_jumps):
             for lo, hi, owner in clone_spans:
-                if lo <= target < hi and not (plan.name.startswith('BRAIN_S0') and target in S0_ORIGINAL_OK):
+                if lo <= target < hi and not (plan.name.startswith('BRAIN_S0') and target in S0_ORIGINAL_OK) and \
+                        not (plan.name.startswith('BRAIN_U') and target in U_ORIGINAL_OK):
                     fail(f'{plan.name}: untouched call/jump to {target:#x} inside cloned original {owner}')
         if plan.source is not None and plan.source['code']:
             for r in image.span_relocs(plan.source['va'], plan.source['size']):

@@ -1689,7 +1689,7 @@ void RunWorklist(U manager, const U* cloneEntries) {
     const StageObserver* const observer = g_observer;
     if (observer) observer->begin(manager);
     const OccurrenceRunner* const runner = g_censusEnabled ? nullptr : g_runner;
-    if (runner) runner->begin();
+    if (runner) runner->begin(manager);
     U cursor = *reinterpret_cast<volatile U*>(manager + 0x264);
     U end = cursor + 4 * *reinterpret_cast<volatile U*>(manager + 0x260);
     while (cursor != end) {
