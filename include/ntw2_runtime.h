@@ -52,7 +52,10 @@ extern "C" {
 #define NTW2_LOCO_GRID 0x20u /* Optional owned soldier grid v2 published at site-13 exit (launcher --loco-grid); requires NTW2_LOCO. Default off; combined COLLIDE borrows the published view without rebuilding. */
 #define NTW2_LOCO_GRID_VERIFY 0x40u /* Launcher --loco-grid-verify: implies GRID and enables owner-side grid verification; requires NTW2_LOCO. */
 #define NTW2_LOCO_GRID_PROBATION 0x80u /* ntw2_config::loco_flags bit (launcher --grid-probation): relink-retirement detector. Requires NTW2_LOCO and NTW2_LOCO_GRID (or GRID_VERIFY); refused with NTW2_BALLISTICS (its query cache walks the heads in runtime code). Native chains stay dual-written; the model+A4 cell-head array is PAGE_NOACCESS outside the owner site-13 relink window; a first-chance vectored handler logs the trapping instruction/caller/thread/site, restores the page and resumes. Words: grid_probation_words, src/loco/native_grid_probation.h. */
-#define NTW2_LOCO_FLAGS_VALID (NTW2_LOCO_CLONE | NTW2_LOCO_PARALLEL | NTW2_LOCO_SHADOW | NTW2_LOCO_OWNED_SERVICES | NTW2_LOCO_QUIET | NTW2_LOCO_GRID | NTW2_LOCO_GRID_VERIFY | NTW2_LOCO_GRID_PROBATION)
+#define NTW2_LOCO_RELINK_SHADOW 0x200u /* ntw2_config::loco_flags bit (launcher --loco-relink-shadow): cell-partitioned relink apply in shadow. The native serial 0x811ED0/0x7EFA80 services still run; every site-13 batch is also applied by the parallel kernel to a private mirror and compared (loco_relink_words). Requires NTW2_LOCO_OWNED_SERVICES and NTW2_LOCO_GRID (or GRID_VERIFY); exclusive with NTW2_LOCO_RELINK_WORKERS; Zero gameplay effect. */
+#define NTW2_LOCO_RELINK_WORKERS 0x400u /* ntw2_config::loco_flags bit (launcher --loco-relink-workers): live cell-partitioned relink apply. The op log replaces the native grid services; each batch is applied by the pool at its flush barrier with bit-identical chain order. Same requirements as NTW2_LOCO_RELINK_SHADOW; exclusive with it. */
+#define NTW2_LOCO_GRID_INCREMENTAL 0x100u /* ntw2_config::loco_flags bit (launcher --loco-grid-incremental): patch the owned grid v2 instead of rebuilding it from scratch. Requires NTW2_LOCO and NTW2_LOCO_GRID (or GRID_VERIFY). Every record is re-read; only records whose cell-rectangle inputs changed pay for coverage, node validation and the per-cell delta tally, and the CSR is rebuilt from persistent per-cell counts. Falls back to the full build on the first build, a registry change, a geometry or rounding change, after a refused build, and (with backoff) when more than 35% of the records changed rectangle. Published arrays are bit-identical to the full build. With NTW2_LOCO_GRID_VERIFY every stage also runs a full rebuild into a shadow store and memcmp's every published array (loco_grid_build_words shadow_compares / shadow_mismatches); costs one grid block of extra memory and two extra, uncounted dispatches per stage. Words: loco_grid_build_words. */
+#define NTW2_LOCO_FLAGS_VALID (NTW2_LOCO_CLONE | NTW2_LOCO_PARALLEL | NTW2_LOCO_SHADOW | NTW2_LOCO_OWNED_SERVICES | NTW2_LOCO_QUIET | NTW2_LOCO_GRID | NTW2_LOCO_GRID_VERIFY | NTW2_LOCO_GRID_PROBATION | NTW2_LOCO_GRID_INCREMENTAL | NTW2_LOCO_RELINK_SHADOW | NTW2_LOCO_RELINK_WORKERS)
 /* Brain profiling geometry (see ntw2_status::brain_words). Families, in entry-site order 46..50:
    0 slot +0x0C = 0x66CE00 (11 vtables), 1 = 0x6F50F0 thunk (1), 2 = 0x6F4660 wrapper (6), 3 = 0x602EB0 wrapper (1), 4 = 0x5FCEB0 wrapper (4). */
 #define NTW2_BRAIN_FAMILIES 5u
@@ -118,6 +121,9 @@ extern "C" {
 #define NTW2_LOCO_OWNED_PHASE_WORDS 32u
 #define NTW2_LOCO_OWNED_LOAD_WORDS 16u
 #define NTW2_LOCO_GRID_V2_WORDS 16u
+#define NTW2_LOCO_RELINK_WORDS 32u /* loco_relink_words; labels NTW2_LOCO_RELINK_LABELS in src/loco/native_loco.h */
+#define NTW2_LOCO_CW_WORDS 32u /* loco_cw_words; labels NTW2_LOCO_CW_LABELS in src/loco/native_loco.h */
+#define NTW2_LOCO_GRID_BUILD_WORDS 16u /* loco_grid_build_words; labels NTW2_LOCO_GRID_BUILD_LABELS in src/loco/native_loco.h */
 #define NTW2_COLLIDE_SOURCE_WORDS 4u
 #define NTW2_COLLIDE_CONTACT_WORDS 48u /* collide_contact_words; labels/layout NTW2_COLLIDE_CONTACT_WORD_LABELS in src/collision/native_contact.h */
 #define NTW2_COLLIDE_CONTACT_SHADOW 0x1u /* ntw2_config::collide_flags (launcher --collide-contact-shadow): plan every solver contact callback on pool workers from stage-entry state and compare each plan with the original callback the owner still runs. Requires NTW2_COLLIDE; excludes NTW2_COLLIDE_CONTACT_WORKERS. */
@@ -250,6 +256,22 @@ enum ntw2_memory_word {
     "consume_hash", "last_consume_tick", "spanned_max", "slices_max", "outstanding", \
     NTW2_AI_DEFERRED_BUCKET_LABELS("spanned"), NTW2_AI_DEFERRED_BUCKET_LABELS("slices"), "slices_over_2ms", \
     "slices_over_4ms", "reserved62", "reserved63"
+/* --ai-ctrl-* (ntw2_config::ai_ctrl_flags; src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): reuse of the AI controller's
+   node-scoring inputs inside one stable scoring batch. Flags select the mode; nonzero requires a routed MANAGER tick (PROFILE or a
+   simulation feature) and excludes NTW2_AI_CTRL / NTW2_AI_ASYNC2. CENSUS is shadow-only (native always executes) and excludes
+   HISTOGRAM/GEOMETRY; VERIFY (debug sub-mode) requires HISTOGRAM or GEOMETRY. */
+#define NTW2_AI_CTRL_CENSUS 0x1u    /* --ai-ctrl-census */
+#define NTW2_AI_CTRL_HISTOGRAM 0x2u /* --ai-ctrl-histogram */
+#define NTW2_AI_CTRL_GEOMETRY 0x4u  /* --ai-ctrl-geometry */
+#define NTW2_AI_CTRL_VERIFY 0x8u    /* --ai-ctrl-verify */
+#define NTW2_AI_CTRL_FLAGS_VALID 0xFu
+#define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..31 */
+#define NTW2_AI_CTRL_REUSE_LABELS \
+    "batches", "scorer_calls", "eligible", "hist_calls", "hist_served", "hist_mismatch", "b44_b41_transitions_in_batch", \
+    "hist_repeat_changed", "end_assign", "end_refresh", "end_callback", "end_exit", "max_scorer_calls_batch", \
+    "hist_outside", "hist_first", "flags_latched", \
+    "id_calls", "id_served", "pose_served", "dist_calls", "dist_served", "distinct_RV", "dist_mismatch", "boundary_repeat", \
+    "geo_spare8", "geo_spare9", "geo_spare10", "geo_spare11", "geo_spare12", "geo_spare13", "geo_spare14", "geo_spare15"
 #define NTW2_IMAGE_SHA256 "13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4"
 
 /* The launcher validates the file before launch. The in-process runtime also
@@ -270,6 +292,7 @@ typedef struct ntw2_config {
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
     uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS in bits 0..15 (NTW2_PUPPET_UNIT_MASK), nonzero exactly when NTW2_PUPPET is set; optional flag NTW2_PUPPET_STATS_OFF; other bits refused. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
+    uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -834,6 +857,25 @@ typedef struct ntw2_status {
        think. NTW2_AI_DEFERRED_LABELS order, layout src/ntw2_ai_async2.h (DeferWord). Written by the tick owner and the
        AI worker; a poll is a non-atomic snapshot. All zero without the flag; reset at activation, retained after stop. */
     uint32_t ai_deferred_words[NTW2_AI_DEFERRED_WORDS];
+    /* --ai-ctrl-* reuse telemetry (appended after ai_deferred_words; NTW2_AI_CTRL_REUSE_LABELS): words 0..15 batch/histogram (ntw2_ai_ctrl::Word),
+       words 16..31 geometry (ntw2_ai_ctrl_geometry::FillStatus). Tick-owner writer; reset at activation, retained after stop. */
+    uint32_t ai_ctrl_reuse_words[NTW2_AI_CTRL_REUSE_WORDS];
+    /* LOCO relink apply (--loco-relink-shadow / --loco-relink-workers; appended after ai_ctrl_reuse_words; src/loco/native_loco.h NTW2_LOCO_RELINK_LABELS,
+       RelinkWord): mode 0 off / 1 shadow / 2 live, op/batch/flush-cause counts, owner log and apply times, pool dispatches, shadow mismatch counters.
+       Tick-owner writer; reset at Start, retained after stop; all zero without the loco feature. */
+    uint32_t loco_relink_words[NTW2_LOCO_RELINK_WORDS];
+    /* LOCO class-wrapper census (slice C step 0; appended after loco_relink_words; src/loco/native_loco.h NTW2_LOCO_CW_LABELS, CwWord): shape of the
+       0x132BA04 occurrences the workers refuse as needs_class_wrapper (pre-step, child count histogram, aim state, first child vtables). Owner-side,
+       always on with --loco-owned-services; reset at Start, retained after stop. */
+    uint32_t loco_cw_words[NTW2_LOCO_CW_WORDS];
+    /* LOCO owned-grid build (appended after loco_cw_words; src/loco/native_loco.h NTW2_LOCO_GRID_BUILD_LABELS, GridBuildWord): 0 version, 1 mode (0 full / 1 incremental),
+       2 full_builds, 3 incremental_builds, 4 changed_records (records whose cell rectangle changed, summed over incremental builds), 5 delta_hint_records (always 0: the site-13
+       move delta is never consumed), 6..9 owner-QPC microseconds summed over successful builds: registry_us (serial registry compare/hash pass before dispatch 1),
+       capture_wall_us (dispatch 1), plan_us (everything the owner does between and after the dispatches), build_wall_us (dispatch 2); 10 full_fallbacks (full builds of an
+       incremental run), 11 last_fallback_reason (1 first/after a refused build, 2 registry changed, 3 geometry or rounding changed, 4 change-share backoff), 12 shadow_compares,
+       13 shadow_mismatches, 14 dispatches (pool dispatches of the primary builds, native verification included), 15 registry_reuses (builds that shared the previous record
+       array and hash). Tick-owner writer; reset at Start, retained after stop; all zero without the loco feature. */
+    uint32_t loco_grid_build_words[NTW2_LOCO_GRID_BUILD_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1150,9 +1192,10 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(ntw2_config) == 56 && offsetof(ntw2_config, loco_flags) == 36 &&
+static_assert(sizeof(ntw2_config) == 60 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
-              offsetof(ntw2_config, puppet_units) == 48 && offsetof(ntw2_config, ai_deferred) == 52,
+              offsetof(ntw2_config, puppet_units) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
+              offsetof(ntw2_config, ai_ctrl_flags) == 56,
               "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
 static_assert(offsetof(ntw2_status,ai_slice_budget_words) == offsetof(ntw2_status,ai_ctrl_words) + 16 * sizeof(uint32_t) &&
@@ -1186,7 +1229,7 @@ static_assert(offsetof(ntw2_status,loco_owned_detail_words) + NTW2_LOCO_OWNED_DE
               NTW2_LOCO_OWNED_DETAIL_WORDS == 16u && NTW2_LOCO_QUIET == 0x10u, "owned detail telemetry preserves its shipped layout");
 static_assert(offsetof(ntw2_status,loco_owned_phase_words) + NTW2_LOCO_OWNED_PHASE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_owned_load_words) &&
               offsetof(ntw2_status,loco_owned_load_words) + NTW2_LOCO_OWNED_LOAD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_grid_v2_words) &&
-              NTW2_LOCO_OWNED_PHASE_WORDS == 32u && NTW2_LOCO_OWNED_LOAD_WORDS == 16u && NTW2_LOCO_GRID == 0x20u && NTW2_LOCO_GRID_VERIFY == 0x40u && NTW2_LOCO_GRID_PROBATION == 0x80u && NTW2_LOCO_FLAGS_VALID == 0xffu, "owned phase and load telemetry retain their offsets; grid verification uses flag bit 0x40 and probation bit 0x80");
+              NTW2_LOCO_OWNED_PHASE_WORDS == 32u && NTW2_LOCO_OWNED_LOAD_WORDS == 16u && NTW2_LOCO_GRID == 0x20u && NTW2_LOCO_GRID_VERIFY == 0x40u && NTW2_LOCO_GRID_PROBATION == 0x80u && (NTW2_LOCO_FLAGS_VALID & 0xffu) == 0xffu, "owned phase and load telemetry retain their offsets; grid verification uses flag bit 0x40 and probation bit 0x80");
 static_assert(offsetof(ntw2_status,loco_grid_v2_words) + NTW2_LOCO_GRID_V2_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,collide_source_words) &&
               offsetof(ntw2_status,collide_source_words) + NTW2_COLLIDE_SOURCE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,memory_words) &&
               NTW2_LOCO_GRID_V2_WORDS == 16u && NTW2_COLLIDE_SOURCE_WORDS == 4u, "Stage C rows retain their shipped offsets");
@@ -1252,8 +1295,16 @@ static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WOR
               NTW2_PUPPET_SELECT_WORDS == 32u, "puppet select row appends after puppet_mover_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after puppet_select_words");
-static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
+static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&
+              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0xFu, "ai_ctrl_reuse row appends after ai_deferred_words");
+static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_cw_words) &&
+              offsetof(ntw2_status,loco_cw_words) + NTW2_LOCO_CW_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_grid_build_words) && NTW2_LOCO_CW_WORDS == 32u &&
+              NTW2_LOCO_RELINK_WORDS == 32u && NTW2_LOCO_RELINK_SHADOW == 0x200u && NTW2_LOCO_RELINK_WORKERS == 0x400u, "loco_relink row appends after ai_ctrl_reuse_words");
+static_assert(offsetof(ntw2_status,loco_grid_build_words) + NTW2_LOCO_GRID_BUILD_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_LOCO_GRID_BUILD_WORDS == 16u && NTW2_LOCO_GRID_INCREMENTAL == 0x100u &&
+              (NTW2_LOCO_FLAGS_VALID & NTW2_LOCO_GRID_INCREMENTAL) != 0, "loco_grid_build row appends after loco_cw_words");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

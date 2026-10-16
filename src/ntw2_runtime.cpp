@@ -18,6 +18,8 @@
 #include "ntw2_profile.h"
 #include "ntw2_ai_census.h"
 #include "ntw2_ai_async2.h"
+#include "ntw2_ai_ctrl_batch.h"
+#include "ntw2_ai_ctrl_geometry.h"
 #include "ntw2_guard.h"
 #include "native_workload.h"
 #include "worker/native_worker_dispatch.h"
@@ -2140,6 +2142,14 @@ bool LoadEntries() {
     pathHook=Export("npr_scheduler_hook"); formHook=Export("nfr_manager_hook");
     return pathStorage && pathHook && formHook;
 }
+// --ai-ctrl-*: A half (batch/histogram) and B half (geometry) of the status row; reads module counters only.
+void SnapshotAiCtrl() {
+    volatile U* row=ntw2_state.ai_ctrl_reuse_words;
+    ntw2_ai_ctrl::Snapshot(row);
+    U geometry[ntw2_ai_ctrl_geometry::kStatusWords];
+    ntw2_ai_ctrl_geometry::FillStatus(geometry);
+    for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS-16;++i) row[16+i]=i<ntw2_ai_ctrl_geometry::kStatusWords ? geometry[i] : 0;
+}
 bool clonesCensus; // resident private clones were emitted with reader edge gates (census cannot be added to a resident arena)
 bool BuildClones() {
     if (clones.allocation) {
@@ -2182,6 +2192,7 @@ bool BuildClones() {
     ai2SpatialTarget=V(0x817D20); ai2ControllerTarget=V(0x7C8BD0);
     if (!ntw2_brain2::Bind(imageBase,bindings)) return false; // private scratch is initialized before clone publication
     if (!ntw2_brain_s0::Bind(imageBase,bindings)) return false; // S0 gates forward to the originals until Start routes them
+    if (!ntw2_ai_ctrl::Bind(bindings) || !ntw2_ai_ctrl_geometry::Bind(imageBase,bindings)) return false; // gates are inert until Activate configures them
     ntw2_loco::Bind(delta,bindings); // before ntw2_build_clones: the module owns its clone bindings
     const U siteThunks[NTW2_TIMED_SITES]={
         FnAddress(&SiteCall0), FnAddress(&SiteCall1), FnAddress(&SiteCall2), FnAddress(&SiteCall3),
@@ -2487,6 +2498,9 @@ bool StartModules() {
         binding.use_owned_services=(config.loco_flags&NTW2_LOCO_OWNED_SERVICES)!=0;
         binding.use_grid=(config.loco_flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))!=0;
         binding.verify_grid=(config.loco_flags&NTW2_LOCO_GRID_VERIFY)!=0;
+        binding.grid_incremental=(config.loco_flags&NTW2_LOCO_GRID_INCREMENTAL)!=0;
+        binding.use_relink_shadow=(config.loco_flags&NTW2_LOCO_RELINK_SHADOW)!=0;
+        binding.use_relink_workers=(config.loco_flags&NTW2_LOCO_RELINK_WORKERS)!=0;
         binding.dispatch=&ntw_pool_dispatch;
         binding.pool=Address(&pool);
         binding.workers=config.workers;
@@ -2771,11 +2785,17 @@ void SampleCounters() {
         U locoOwnedPhaseWords[NTW2_LOCO_OWNED_PHASE_WORDS]={};
         U locoOwnedLoadWords[NTW2_LOCO_OWNED_LOAD_WORDS]={};
         U locoGridV2Words[NTW2_LOCO_GRID_V2_WORDS]={};
+        U locoRelinkWords[NTW2_LOCO_RELINK_WORDS]={};
+        U locoCwWords[NTW2_LOCO_CW_WORDS]={};
+        U locoGridBuildWords[NTW2_LOCO_GRID_BUILD_WORDS]={};
+        static_assert(ntw2_loco::GridBuildWordCount==NTW2_LOCO_GRID_BUILD_WORDS, "loco grid build status word contract");
         static_assert(ntw2_loco::WordCount==NTW2_LOCO_WORDS, "loco status word contract");
         static_assert(ntw2_loco::GateWordCount==NTW2_LOCO_GATE_WORDS, "loco all-gates status word contract");
         static_assert(ntw2_loco::ServiceWordCount==NTW2_LOCO_SERVICE_WORDS, "loco service timing status word contract");
         static_assert(ntw2_loco::GridWordCount==NTW2_LOCO_GRID_WORDS, "loco grid status word contract");
         static_assert(ntw2_loco::GridV2WordCount==NTW2_LOCO_GRID_V2_WORDS, "loco grid v2 status word contract");
+        static_assert(ntw2_loco::RelinkWordCount==NTW2_LOCO_RELINK_WORDS, "loco relink status word contract");
+        static_assert(ntw2_loco::CwWordCount==NTW2_LOCO_CW_WORDS, "loco class-wrapper census status word contract");
         static_assert(ntw2_loco::ParallelWordCount==NTW2_LOCO_PARALLEL_WORDS, "loco parallel status word contract");
         static_assert(ntw2_sweep::WordCount==NTW2_SWEEP_WORDS && ntw2_resolve::WordCount==NTW2_RESOLVE_WORDS, "shadow status word contract");
         static_assert(ntw2_env::WordCount==NTW2_ENV_WORDS && NTW2_ENV_TARGET_WORDS==64, "environment shadow status word contract");
@@ -2790,6 +2810,8 @@ void SampleCounters() {
             ntw2_loco::SampleServices(locoServiceWords);
             ntw2_loco::SampleGrid(locoGridWords);
             ntw2_loco::SampleGridV2(locoGridV2Words);
+            ntw2_loco::SampleRelink(locoRelinkWords);
+            ntw2_loco::SampleClassWrapper(locoCwWords);
             ntw2_loco::SampleParallel(locoParallelWords);
             ntw2_sweep::Sample(sweepWords);
             ntw2_resolve::Sample(resolveWords);
@@ -2815,6 +2837,9 @@ void SampleCounters() {
         for (U i=0;i<NTW2_LOCO_OWNED_PHASE_WORDS;++i) ntw2_state.loco_owned_phase_words[i]=locoOwnedPhaseWords[i];
         for (U i=0;i<NTW2_LOCO_OWNED_LOAD_WORDS;++i) ntw2_state.loco_owned_load_words[i]=locoOwnedLoadWords[i];
         for (U i=0;i<NTW2_LOCO_GRID_V2_WORDS;++i) ntw2_state.loco_grid_v2_words[i]=locoGridV2Words[i];
+        for (U i=0;i<NTW2_LOCO_RELINK_WORDS;++i) ntw2_state.loco_relink_words[i]=locoRelinkWords[i];
+        for (U i=0;i<NTW2_LOCO_CW_WORDS;++i) ntw2_state.loco_cw_words[i]=locoCwWords[i];
+        for (U i=0;i<NTW2_LOCO_GRID_BUILD_WORDS;++i) ntw2_state.loco_grid_build_words[i]=locoGridBuildWords[i];
     }
     ntw2_brain2::Snapshot(const_cast<U*>(ntw2_state.brain2_words));
     ntw2_brain2::CensusSnapshot(const_cast<U*>(ntw2_state.brain2_census_words));
@@ -2834,6 +2859,7 @@ void SampleCounters() {
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
+    SnapshotAiCtrl();
     ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
     ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
     ntw2_puppet::SnapshotMover(const_cast<U*>(ntw2_state.puppet_mover_words));
@@ -2927,7 +2953,14 @@ bool Activate(const World& candidate) {
     aiPlannerClone=clones.entries[NTW2_CLONE_PLANNER];
     siteCallees[kPlannerSite]=(config.enabled_mask&NTW2_AI_ASYNC2) ? FnAddress(&Planner2Gate) :
         (config.enabled_mask&NTW2_AI_ASYNC) ? FnAddress(&PlannerGate) : aiPlannerClone;
-    aiControllerOriginal=(config.enabled_mask&NTW2_AI_CENSUS) ? clones.entries[NTW2_CLONE_AI_CONTROLLER] : V(0x7C8BD0);
+    // --ai-ctrl-*: site 33 runs the AI_CONTROLLER clone, whose rebuild gate is retargeted to the AI_CTRL_REBUILD clone (the census
+    // gate keeps counting). Reset -> geometry Configure (registers its retire) precede the first batch.
+    const U aiCtrl=config.ai_ctrl_flags;
+    ntw2_ai_ctrl::Reset(aiCtrl,delta,clones.entries[NTW2_CLONE_AI_CTRL_SCORER]);
+    ntw2_ai_ctrl_geometry::Reset();
+    ntw2_ai_ctrl_geometry::Configure((aiCtrl&NTW2_AI_CTRL_CENSUS)!=0,(aiCtrl&NTW2_AI_CTRL_GEOMETRY)!=0,(aiCtrl&NTW2_AI_CTRL_VERIFY)!=0);
+    ntw2_ai_census::Retarget(6,aiCtrl ? clones.entries[NTW2_CLONE_AI_CTRL_REBUILD] : V(0x7492F0));
+    aiControllerOriginal=((config.enabled_mask&NTW2_AI_CENSUS) || aiCtrl) ? clones.entries[NTW2_CLONE_AI_CONTROLLER] : V(0x7C8BD0);
     siteCallees[33]=(config.enabled_mask&NTW2_AI_CTRL) ? FnAddress(&ControllerGate) :
         (config.enabled_mask&NTW2_AI_ASYNC2) ? FnAddress(&Ai2ControllerGate) : aiControllerOriginal;
     _InterlockedExchange(&ai2Armed,(config.enabled_mask&NTW2_AI_ASYNC2) ? 1 : 0);
@@ -2964,6 +2997,7 @@ bool Activate(const World& candidate) {
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
+    SnapshotAiCtrl();
     ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
     ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
     ntw2_puppet::SnapshotMover(const_cast<U*>(ntw2_state.puppet_mover_words));
@@ -2987,6 +3021,9 @@ bool Activate(const World& candidate) {
         ntw2_loco::SampleServices(const_cast<U*>(ntw2_state.loco_service_words));
         ntw2_loco::SampleGrid(const_cast<U*>(ntw2_state.loco_grid_words));
         ntw2_loco::SampleGridV2(const_cast<U*>(ntw2_state.loco_grid_v2_words));
+        ntw2_loco::SampleRelink(const_cast<U*>(ntw2_state.loco_relink_words));
+        ntw2_loco::SampleClassWrapper(const_cast<U*>(ntw2_state.loco_cw_words));
+        ntw2_loco::SampleGridBuild(const_cast<U*>(ntw2_state.loco_grid_build_words));
         ntw2_loco::SampleParallel(const_cast<U*>(ntw2_state.loco_parallel_words));
         ntw2_sweep::Sample(const_cast<U*>(ntw2_state.sweep_words));
         ntw2_resolve::Sample(const_cast<U*>(ntw2_state.resolve_words));
@@ -3012,6 +3049,9 @@ bool Activate(const World& candidate) {
         for (U i=0;i<NTW2_LOCO_OWNED_PHASE_WORDS;++i) ntw2_state.loco_owned_phase_words[i]=0;
         for (U i=0;i<NTW2_LOCO_OWNED_LOAD_WORDS;++i) ntw2_state.loco_owned_load_words[i]=0;
         for (U i=0;i<NTW2_LOCO_GRID_V2_WORDS;++i) ntw2_state.loco_grid_v2_words[i]=0;
+        for (U i=0;i<NTW2_LOCO_RELINK_WORDS;++i) ntw2_state.loco_relink_words[i]=0;
+        for (U i=0;i<NTW2_LOCO_CW_WORDS;++i) ntw2_state.loco_cw_words[i]=0;
+        for (U i=0;i<NTW2_LOCO_GRID_BUILD_WORDS;++i) ntw2_state.loco_grid_build_words[i]=0;
     }
     for (U i=0;i<16;++i) ntw2_state.ai_ctrl_words[i]=0;
     for (U i=0;i<NTW2_AI_SLICE_BUDGET_WORDS;++i) ntw2_state.ai_slice_budget_words[i]=0;
@@ -3123,6 +3163,7 @@ DWORD WINAPI Monitor(void*) {
     ntw2_ai_async2::Snapshot(ntw2_state.ai_async2_words);
     ntw2_ai_async2::RouteSnapshot(ntw2_state.ai_async2_route_words);
     ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
+    SnapshotAiCtrl();
     StateEnd();
     _InterlockedExchange(&quiesced,clean ? 1 : 0);
     Phase(failure ? NTW2_FAILED : NTW2_STOPPED);
@@ -3154,6 +3195,12 @@ static U StartImpl(void* raw) {
         ((next.loco_flags&(NTW2_LOCO_PARALLEL|NTW2_LOCO_SHADOW)) && !(next.loco_flags&NTW2_LOCO_CLONE)) ||
         ((next.loco_flags&NTW2_LOCO_OWNED_SERVICES) && !(next.loco_flags&NTW2_LOCO_PARALLEL)) ||
         ((next.loco_flags&NTW2_LOCO_QUIET) && !(next.loco_flags&NTW2_LOCO_OWNED_SERVICES)) ||
+        // The relink apply replaces/verifies the owner's grid services in the owned-service replay and needs the grid; shadow and workers are exclusive.
+        ((next.loco_flags&NTW2_LOCO_RELINK_SHADOW) && (next.loco_flags&NTW2_LOCO_RELINK_WORKERS)) ||
+        ((next.loco_flags&(NTW2_LOCO_RELINK_SHADOW|NTW2_LOCO_RELINK_WORKERS)) &&
+         (!(next.loco_flags&NTW2_LOCO_OWNED_SERVICES) || !(next.loco_flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY)))) ||
+        // The incremental grid patches the owned grid v2 and needs it.
+        ((next.loco_flags&NTW2_LOCO_GRID_INCREMENTAL) && !(next.loco_flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))) ||
         ((next.enabled_mask&NTW2_LOCO) && (next.enabled_mask&(NTW2_BRAIN|NTW2_COLLIDE_LOD))) ||
         ((next.enabled_mask&(NTW2_LOCO|NTW2_COLLIDE))==(NTW2_LOCO|NTW2_COLLIDE) &&
          ((next.loco_flags&(NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES))!=(NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES) ||
@@ -3174,6 +3221,12 @@ static U StartImpl(void* raw) {
                               !(next.ai_deferred&NTW2_AI_DEFERRED_BUDGET_MASK))) ||
         // The army unit shadow observes the cloned ARMY_UPDATE stage, reached only through a routed tick.
         ((next.enabled_mask&NTW2_ARMY_UNIT_SHADOW) && !(next.enabled_mask&kRouted)) ||
+        // --ai-ctrl-*: the batch hooks live in the AI_CONTROLLER clone chain behind the routed MANAGER tick, on the tick owner;
+        // CENSUS is shadow-only, VERIFY needs a live feature. The offload / async2 controller gates bypass the clone chain.
+        (next.ai_ctrl_flags&~NTW2_AI_CTRL_FLAGS_VALID) ||
+        (next.ai_ctrl_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&(NTW2_AI_CTRL|NTW2_AI_ASYNC2)) ||
+                                ((next.ai_ctrl_flags&NTW2_AI_CTRL_CENSUS) && (next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))) ||
+                                ((next.ai_ctrl_flags&NTW2_AI_CTRL_VERIFY) && !(next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))))) ||
         // The puppet probe owns site 6 alone (BRAIN2/brain flags) and the class step slot (BRAIN profiling slots).
         (next.puppet_units&~(NTW2_PUPPET_UNIT_MASK|NTW2_PUPPET_STATS_OFF)) || (next.puppet_units&NTW2_PUPPET_UNIT_MASK)>NTW2_PUPPET_MAX_UNITS ||
         ((next.enabled_mask&NTW2_PUPPET)!=0)!=((next.puppet_units&NTW2_PUPPET_UNIT_MASK)!=0) ||
@@ -3200,6 +3253,7 @@ static U StartImpl(void* raw) {
     ntw2_grid_census_reset((config.enabled_mask&NTW2_GRID_CENSUS)!=0); // sampler is stopped; disabled starts publish an all-zero row
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);
     ntw2_ai_async2::Reset(false,delta,&tickOwner,&aiThreadId); // zero row until a generation activates
+    ntw2_ai_ctrl::Reset(0,delta,0); ntw2_ai_ctrl_geometry::Reset(); // zero rows until a generation activates (Activate configures)
     memset(memoryWords,0,sizeof(memoryWords));
     memoryWords[NTW2_MEM_VERSION]=3;
     _InterlockedExchange(&budgetDisabledMask,0); budgetRetired=false;
@@ -3252,6 +3306,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_PUPPET_WORDS;++i) ntw2_state.puppet_words[i]=0;
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_S0_WORDS;++i) ntw2_state.brain_s0_words[i]=0;
+    for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS;++i) ntw2_state.ai_ctrl_reuse_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_DIVERT_WORDS;++i) ntw2_state.puppet_divert_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOVER_WORDS;++i) ntw2_state.puppet_mover_words[i]=0;
@@ -3280,6 +3335,9 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_LOCO_OWNED_PHASE_WORDS;++i) ntw2_state.loco_owned_phase_words[i]=0;
     for (U i=0;i<NTW2_LOCO_OWNED_LOAD_WORDS;++i) ntw2_state.loco_owned_load_words[i]=0;
     for (U i=0;i<NTW2_LOCO_GRID_V2_WORDS;++i) ntw2_state.loco_grid_v2_words[i]=0;
+    for (U i=0;i<NTW2_LOCO_RELINK_WORDS;++i) ntw2_state.loco_relink_words[i]=0;
+    for (U i=0;i<NTW2_LOCO_CW_WORDS;++i) ntw2_state.loco_cw_words[i]=0;
+    for (U i=0;i<NTW2_LOCO_GRID_BUILD_WORDS;++i) ntw2_state.loco_grid_build_words[i]=0;
     for (U i=0;i<16;++i) ntw2_state.ai_ctrl_words[i]=0;
     for (U i=0;i<NTW2_AI_SLICE_BUDGET_WORDS;++i) ntw2_state.ai_slice_budget_words[i]=0;
     for (U i=0;i<8;++i) ntw2_state.ai_park_words[i]=0;

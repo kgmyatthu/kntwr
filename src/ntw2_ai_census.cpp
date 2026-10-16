@@ -120,6 +120,7 @@ void Reset(bool enabled, U imageBase, U imageSize, U delta, U mainThread, volati
 }
 
 void SetController(U entry, U size) { g_controller = entry; g_controllerSize = size; }
+void Retarget(U target, U entry) { if (target < kTargets) g_original[target] = entry; }
 
 void Tick() { if (g_on) InterlockedIncrement(&g_ticks); }
 U OwnerCalls() {

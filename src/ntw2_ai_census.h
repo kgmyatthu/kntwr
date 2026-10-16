@@ -56,6 +56,9 @@ void Reset(bool enabled, U imageBase, U imageSize, U delta, U mainThread, volati
 void SetController(U entry, U size);
 // Address of the naked gate for a target (published by the slot swap or bound as the clone callee).
 U Gate(U target);
+// Redirects what target's gate forwards to (default: the original VA + delta set by Reset). Used by --ai-ctrl-* to send the
+// AI_CONTROLLER clone's rebuild gate (target 6) to the AI_CTRL_REBUILD clone; counting is unchanged.
+void Retarget(U target, U entry);
 void Tick();
 // Planner-mutator gate calls made by the tick owner (class 0), summed over targets; only the owner increments them.
 U OwnerCalls();

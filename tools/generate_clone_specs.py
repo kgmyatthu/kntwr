@@ -1476,6 +1476,11 @@ SOURCES = [
     # so the relocation census never decodes table bytes; the dword table is rebased into the clone, no other byte changes.
     ('AI_CONTROLLER', AI_CONTROLLER_VA, AI_CONTROLLER_END, 'clone'),
     ('AI_CONTROLLER_TABLE', AI_CONTROLLER_TABLE_VA, AI_CONTROLLER_TABLE_END, 'clone-data'),
+    # --ai-ctrl-* reuse family (histogram/geometry reuse inside one node-scoring batch): rebuild 0x7492F0 (ret 4 at 7496D3),
+    # assignment loop 0x749090 (plain ret at 749299) and node scorer 0x7B1270 (ret 8 at 7B1554); int3 padding follows each.
+    ('AI_CTRL_REBUILD', 0x7492F0, 0x7496D6, 'clone'),
+    ('AI_CTRL_ASSIGN', 0x749090, 0x74929A, 'clone'),
+    ('AI_CTRL_SCORER', 0x7B1270, 0x7B1557, 'clone'),
     # Participant-private reference-node projection family 7FD070 -> 81C080 -> 81C050 -> 67A790. Sources are shared by all
     # participant clones. 7FD070 ends at 7FD5A5 (INT3 pad to 7FD5AF; 7FD5B0 is a separate function); the destructor stubs are
     # pinned only as the evidence for host-side teardown: free(data) with 0xFF7EF0 after per-element RET 444B60.
@@ -1934,6 +1939,57 @@ AI2_EXPECT_CENSUS = {
 }
 
 
+# --ai-ctrl-*: the controller's node-scoring batch. Rewrites (all same-length run rewrites or pure inserts; no relocation inside):
+#  749135 `mov eax,[ecx]; call [eax+30]` (node refresh) -> call AI_CTRL_REFRESH (ends/begins the batch around the native refresh)
+#  7491A6 `mov edx,[eax+18]; lea eax,[ebx+68]; push eax; push esi; call edx` (scorer virtual) -> lea/pushes + call AI_CTRL_SCORER
+#  7B1484 / 7B1497..7B14DB: geometry gates owned by AiCtrlGeometry (IDENTITY / POINT_DISTANCE); 7B12BC histogram -> AI_CTRL_HISTOGRAM
+#  inserts: AI_CTRL_BATCH_ASSIGN before `push ecx; mov ecx,eax; call 7CF3F0` (749259), AI_CTRL_BATCH_EXIT at the exit (749284).
+AI_CTRL_REFRESH_RUN = bytes.fromhex('8b01ff5030')
+AI_CTRL_SCORER_RUN = bytes.fromhex('8b5018' '8d4368' '50' '56' 'ffd2')
+AI_CTRL_IDENTITY_RUN = bytes.fromhex('8d7810' '8b02' 'ff10' '8b17' '8bcf' '8bf0' 'ff12')
+AI_CTRL_ASSIGN_SITES = [0x74941C, 0x749548, 0x7495AE, 0x7495B9]
+AI_CTRL_NODE_VTABLE = 0x13429D8
+AI_CTRL_SCORER_SLOT = 0x18
+AI_CTRL_PINS = {
+    0x749135: '8b01ff5030', 0x7491A6: '8b5018' '8d4368' '50' '56' 'ffd2', 0x749259: '51' '8bc8' 'e88f610800',
+    0x749284: '8bcb' 'e875fdffff', 0x749299: 'c3', 0x7496D3: 'c20400', 0x7B127F: '6a01' 'ff750c', 0x7B12BC: 'e8cf8af9ff',
+    0x7B1484: AI_CTRL_IDENTITY_RUN.hex(), 0x7B1554: 'c20800',
+}
+
+
+def ai_ctrl_configs():
+    return [
+        dict(clone='AI_CTRL_REBUILD', source='AI_CTRL_REBUILD',
+             calls={0x749090: (Clone('AI_CTRL_ASSIGN'), 4, AI_CTRL_ASSIGN_SITES)},
+             indirect_calls={0x7493CE, 0x7493D7, 0x749446, 0x749458, 0x749461, 0x749470, 0x749482, 0x7494E2, 0x749508, 0x749573},
+             expect_rets={0x7496D3: RET(4)}),
+        dict(clone='AI_CTRL_ASSIGN', source='AI_CTRL_ASSIGN',
+             run_rewrites={0x749135: (AI_CTRL_REFRESH_RUN, [b'\xe8', Fix('rel', Bind('AI_CTRL_REFRESH'))]),
+                           0x7491A6: (AI_CTRL_SCORER_RUN, [bytes.fromhex('8d436850' '56'), b'\xe8', Fix('rel', Bind('AI_CTRL_SCORER'))])},
+             inserts={0x749259: [b'\xe8', Fix('rel', Bind('AI_CTRL_BATCH_ASSIGN'))],
+                      0x749284: [b'\xe8', Fix('rel', Bind('AI_CTRL_BATCH_EXIT'))]},
+             indirect_calls={0x7490BB, 0x749269}, expect_rets={0x749299: b'\xc3'}),
+        dict(clone='AI_CTRL_SCORER', source='AI_CTRL_SCORER',
+             site_calls={0x7B12BC: Bind('AI_CTRL_HISTOGRAM')},
+             run_rewrites={0x7B1484: (AI_CTRL_IDENTITY_RUN, [b'\xe8', Fix('rel', Bind('AI_CTRL_IDENTITY')), b'\x90' * 10])},
+             region_rewrites={0x7B1497: (0x7B14DB, [b'\xe8', Fix('rel', Bind('AI_CTRL_POINT_DISTANCE'))])},
+             indirect_calls=set(), expect_rets={0x7B1554: RET(8)}),
+    ]
+
+
+def ai_ctrl_extra_checks(image, plans):
+    """Pin every rewritten/inserted site's original bytes, the node class's scorer slot and the four assignment calls."""
+    for va, want in AI_CTRL_PINS.items():
+        if image.read(va, len(want) // 2) != bytes.fromhex(want):
+            fail(f'AI_CTRL: original bytes at {va:#x} changed')
+    if struct.unpack('<I', image.read(AI_CTRL_NODE_VTABLE + AI_CTRL_SCORER_SLOT, 4))[0] != 0x7B1270:
+        fail('AI_CTRL: node vtable 0x13429D8 slot +0x18 is no longer the scorer 0x7B1270')
+    for site in AI_CTRL_ASSIGN_SITES:
+        if image.read(site, 5) != b'\xe8' + u32((0x749090 - site - 5) & 0xFFFFFFFF):
+            fail(f'AI_CTRL: rebuild call at {site:#x} no longer targets 0x749090')
+    if image.read(0x7B14D6, 5) != b'\xe8' + u32((0x76DCD0 - 0x7B14D6 - 5) & 0xFFFFFFFF):
+        fail('AI_CTRL: point-distance region no longer ends with the 0x76DCD0 call')
+
 
 def clone_configs():
     manager_insert = [b'\x52\x8b\xcf\xba', Fix('abs', Bind('BAL_JOB')), b'\xe8', Fix('rel', Bind('BAL_STAGE')), b'\x5a']
@@ -2125,6 +2181,7 @@ def clone_configs():
         *node_projection_configs(),
         *ai2_configs(),
         *brain_s0_configs(),
+        *ai_ctrl_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2179,6 +2236,9 @@ EXPECT_CALLS = {
     'LOCO_SELECT': {0x8057F0, 0x126DF40, 0x7E3980, 0x126E299, 0x126DEF6},
     'LOCO_CLASS_WRAP': {0x5F3040, 0x5BE800, 0x5BE5A0, 0x80E9D0},
     'AI_CONTROLLER': {0x7C8CB0, 0x7C8D80, 0x7C8E20, 0x7C8E40, 0x7CA2B0, 0x7A70C0},
+    'AI_CTRL_REBUILD': {0x444B40, 0x749000, 0x76A430, 0xFF7EF0},
+    'AI_CTRL_ASSIGN': {0x58E5E0, 0x7B47E0, 0x73D5E0, 0x75CFB0, 0x55CBD0, 0x7CDFC0, 0x7C7580, 0x7CF3F0, 0x749000, 0x738050},
+    'AI_CTRL_SCORER': {0x754690, 0x55ABF0, 0x53FBE0, 0x80E9D0, 0x76E7B0},
 }
 EXPECT_CALLS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CALLS[entry]
                      for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CALLS})
@@ -2207,6 +2267,7 @@ EXPECT_CENSUS = {
     'SOFT_ACTIVE': (185, 0, 4, 0), 'COLLIDE_Q': (315, 9, 0, 0),
     'LOCO_WRAP': (193, 9, 1, 0), 'LOCO_MOVE': (656, 55, 4, 0),
     'LOCO_SELECT': (45, 10, 5, 0), 'LOCO_CLASS_WRAP': (116, 4, 4, 0), 'AI_CONTROLLER': (63, 1, 7, 1),
+    'AI_CTRL_REBUILD': (321, 0, 7, 0), 'AI_CTRL_ASSIGN': (165, 0, 11, 0), 'AI_CTRL_SCORER': (206, 3, 5, 0),
 }
 EXPECT_CENSUS.update({f'NODE_PROJ_{entry}_{p}': NODE_EXPECT_CENSUS[entry]
                       for p in range(NODE_PROJ_PARTICIPANTS) for entry in NODE_EXPECT_CENSUS})
@@ -2761,6 +2822,7 @@ def build_all(image, header_path):
                                                      expected_entries=entries, offset=offset, jump=jump))
         finalize.forward_tables.append((offset, entries, jump))
     s0_extra_checks(image)
+    ai_ctrl_extra_checks(image, plans)
     append_table(image, registry, plans['AI_CONTROLLER'], AI_CONTROLLER_TABLE_CFG)
     army_insns = {i.address: i for i, _, _ in plans['ARMY'].instructions}
     if army_insns[0x58037F].bytes != bytes.fromhex('e9fc9afbff'):

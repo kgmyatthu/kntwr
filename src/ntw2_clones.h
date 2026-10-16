@@ -125,6 +125,15 @@ enum ntw2_binding {
     NTW2_BIND_S0_ORDER_NODE, NTW2_BIND_S0_ORDER_ADJUST, NTW2_BIND_S0_ORDER_PREDICATE, NTW2_BIND_S0_UNIT_ARRIVAL,
     NTW2_BIND_S0_UNIT_MODIFIER, NTW2_BIND_S0_STANCE, NTW2_BIND_S0_PATH, NTW2_BIND_S0_POSTURE, NTW2_BIND_S0_POSTURE_NEXT,
     NTW2_BIND_S0_TIMER_PROVIDER0, NTW2_BIND_S0_TIMER_PROVIDER1,
+    /* --ai-ctrl-* (appended; src/ntw2_ai_ctrl_batch.h): the controller's reuse family (clones AI_CTRL_REBUILD/ASSIGN/SCORER).
+       REFRESH 749135 (`mov eax,[ecx]; call [eax+30]`, ECX=N, plain return): ends an open batch, performs the native refresh, begins
+       a batch (P=EBX, N, C=P+68). SCORER 7491A6 (`mov edx,[eax+18]; lea eax,[ebx+68]; push eax; push esi; call edx`; the rewrite
+       keeps lea/pushes, the gate loads the slot itself): exact 7B1270 slot -> scorer clone, any other slot ends the batch and runs
+       native, RET 8. BATCH_ASSIGN: inserted before the 7CF3F0 call, preserves EAX/ECX/EDX. BATCH_EXIT: inserted at the function exit,
+       cdecl void. HISTOGRAM 7B12BC (call 749D90, ECX=out[7], stack C+filter, RET 8). IDENTITY 7B1484 / POINT_DISTANCE 7B1497..7B14DB:
+       geometry gates (src/ntw2_ai_ctrl_geometry.h). */
+    NTW2_BIND_AI_CTRL_REFRESH, NTW2_BIND_AI_CTRL_SCORER, NTW2_BIND_AI_CTRL_BATCH_ASSIGN, NTW2_BIND_AI_CTRL_BATCH_EXIT,
+    NTW2_BIND_AI_CTRL_HISTOGRAM, NTW2_BIND_AI_CTRL_IDENTITY, NTW2_BIND_AI_CTRL_POINT_DISTANCE,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -246,6 +255,9 @@ enum ntw2_clone_id {
     NTW2_CLONE_BRAIN_S0_HOT_BEGIN, NTW2_CLONE_BRAIN_S0_HOT_STEP, NTW2_CLONE_BRAIN_S0_IDLE_STEP,
     NTW2_CLONE_BRAIN_S0_ACTION_BEGIN, NTW2_CLONE_BRAIN_S0_ACTION_STEP,
     NTW2_CLONE_BRAIN_S0_RELATED_BEGIN, NTW2_CLONE_BRAIN_S0_RELATED_STEP, /* node classes: order/stance/lookups gated */
+    /* --ai-ctrl-* family (appended): rebuild 7492F0 (its four 749090 calls -> ASSIGN), assignment loop 749090 (batch hooks, scorer
+       gate) and the node scorer 7B1270 (histogram/identity/distance gates). Entered through the AI_CONTROLLER clone's rebuild gate. */
+    NTW2_CLONE_AI_CTRL_REBUILD, NTW2_CLONE_AI_CTRL_ASSIGN, NTW2_CLONE_AI_CTRL_SCORER,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and
