@@ -191,6 +191,9 @@ typedef struct Options {
     BOOL grid_probation;     /* --grid-probation: native cell-head trap detector; requires --loco-grid (or verify), not ballistic */
     uint32_t puppet_units;   /* --puppet-probe N|all: NTW2_PUPPET, N = 1..NTW2_PUPPET_MAX_UNITS ordinary foot-infantry units; all = NTW2_PUPPET_MAX_UNITS (ntw2_config::puppet_units) */
     uint32_t puppet_stats;   /* --puppet-stats 0|1 (default 1): 0 sets NTW2_PUPPET_STATS_OFF (production-stats mode) */
+    BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (ntw2_config::ai_deferred) */
+    uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
+    uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -1152,6 +1155,7 @@ static const char *const k_brain2_services[NTW2_BRAIN2_CENSUS_WORDS / 8u] = {
 static const char *const k_ai_completion_metrics[NTW2_AI_COMPLETION_WORDS] = { NTW2_AI_COMPLETION_LABELS };
 static const char *const k_ai_async2_metrics[NTW2_AI_ASYNC2_WORDS] = { NTW2_AI_ASYNC2_LABELS };
 static const char *const k_ai_async2_route_metrics[NTW2_AI_ASYNC2_ROUTE_WORDS] = { NTW2_AI_ASYNC2_ROUTE_LABELS };
+static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_AI_DEFERRED_LABELS };
 static double pct(uint32_t part, uint32_t whole) { return whole ? 100.0 * (double)part / (double)whole : 0.0; }
 /* Per-unit brain Stage A agreement table (native_unit_brain.h, version 2). held = this stage's UnitDecision (the
    unit's strict-majority record of the previous stage, valid while the unit-level input signature is unchanged),
@@ -1604,6 +1608,20 @@ static void print_module_words(const ntw2_status *s)
             for (i = 0; i < NTW2_AI_ASYNC2_ROUTE_WORDS; ++i)
                 if (q[i]) say(L"  route.%hs=%lu%ls", k_ai_async2_route_metrics[i], (unsigned long)q[i], (++k % 4) ? L"" : L"\n");
             if (k % 4) say(L"\n");
+            if (s->ai_deferred_words[0]) {
+                const uint32_t *d = s->ai_deferred_words;
+                k = 0;
+                say(L"  ai_deferred v%lu K=%lu B=%lu: admitted=%lu consumed=%lu (on_time=%lu late=%lu) busy_refusals=%lu "
+                    L"abandoned=%lu/%lu slices=%lu budget_hits=%lu slice_max_us=%lu slice_mean_us=%.1f seam_waits=%lu "
+                    L"seam_wait_sum_us=%lu skipped=%lu\n",
+                    (unsigned long)d[0], (unsigned long)d[1], (unsigned long)d[2], (unsigned long)d[3], (unsigned long)d[6],
+                    (unsigned long)d[7], (unsigned long)d[8], (unsigned long)d[4], (unsigned long)d[9], (unsigned long)d[10],
+                    (unsigned long)d[11], (unsigned long)d[12], (unsigned long)d[22], d[11] ? (double)d[23] / d[11] : 0.0,
+                    (unsigned long)d[17], (unsigned long)d[19], (unsigned long)d[13]);
+                for (i = 0; i < NTW2_AI_DEFERRED_WORDS; ++i)
+                    if (d[i]) say(L"  deferred.%hs=%lu%ls", k_ai_deferred_metrics[i], (unsigned long)d[i], (++k % 4) ? L"" : L"\n");
+                if (k % 4) say(L"\n");
+            }
         }
     }
     if (s->requested_mask & NTW2_BRAIN2) {
@@ -3917,6 +3935,14 @@ static BOOL write_receipt(Run *r, int exit_code)
         sb_ratio(&b, r->last.ai_async2_route_words[9], r->last.ai_async2_route_words[4]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_async2\": null,\n");
+    if (r->have_status && r->cfg.ai_deferred) {
+        unsigned defer_index;
+        sb_fmt(&b, "  \"ai_deferred\": {");
+        for (defer_index = 0; defer_index < NTW2_AI_DEFERRED_WORDS; ++defer_index)
+            sb_fmt(&b, "%s\"%s\": %lu", defer_index ? ", " : "", k_ai_deferred_metrics[defer_index],
+                   (unsigned long)r->last.ai_deferred_words[defer_index]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"ai_deferred\": null,\n");
     if (r->have_status) {
         const ntw2_status *s = &r->last;
         sb_put(&b, "  \"last_status\": {\n    \"phase\": ", 32);
@@ -4522,6 +4548,7 @@ static int install_runtime(Run *r)
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
+    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
     {
@@ -5031,6 +5058,12 @@ static void usage(void)
         L"                        before loco: excludes brain2, brain and every --brain-* option\n"
         L"  --puppet-stats 0|1    with --puppet-probe: 1 (default) keeps the per-man diagnostics (motion, mechanics census,\n"
         L"                        site-13 determinism hash, sampled gate cost); 0 is production-stats mode (cheap counters only)\n"
+        L"  --ai-deferred         with ai,ai_async2: deferred sliced thinks. The planner runs through a private node driver in\n"
+        L"                        slices of B costed node calls (generate/child think/whole think; passes free) in the inter-tick\n"
+        L"                        window; the next tick start joins only that slice; a finished think is consumed at the first\n"
+        L"                        tick start >= admission tick + K; a planner with an outstanding think is refused at site 34\n"
+        L"  --ai-deferred-k K     with --ai-deferred: consumption delay in ticks, 1..32 (default 1)\n"
+        L"  --ai-deferred-budget B  with --ai-deferred: costed node calls per slice, 1..65535 (default 2)\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -5110,6 +5143,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->workers = 4;
     o->poll_ms = 100;
     o->puppet_stats = 1;
+    o->ai_deferred_k = NTW2_AI_DEFERRED_DEFAULT_K;
+    o->ai_deferred_budget = NTW2_AI_DEFERRED_DEFAULT_BUDGET;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
     o->activate = TRUE;
@@ -5167,6 +5202,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--workers")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
+        } else if (!wcscmp(name, L"--ai-deferred")) {
+            o->ai_deferred = TRUE;
+        } else if (!wcscmp(name, L"--ai-deferred-k")) {
+            NEEDVAL();
+            if (!parse_uint(val, 1, NTW2_AI_DEFERRED_MAX_K, &o->ai_deferred_k)) { errsay(L"--ai-deferred-k must be 1..%u.\n", NTW2_AI_DEFERRED_MAX_K); return -1; }
+        } else if (!wcscmp(name, L"--ai-deferred-budget")) {
+            NEEDVAL();
+            if (!parse_uint(val, 1, 65535, &o->ai_deferred_budget)) { errsay(L"--ai-deferred-budget must be 1..65535.\n"); return -1; }
         } else if (!wcscmp(name, L"--puppet-stats")) {
             NEEDVAL();
             if (!parse_uint(val, 0, 1, &o->puppet_stats)) { errsay(L"--puppet-stats must be 0 or 1.\n"); return -1; }
@@ -5215,6 +5258,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & NTW2_AI_ASYNC2) && (!(o->mask & NTW2_AI_ASYNC) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_CENSUS)))) {
         errsay(L"ai_async2 requires --features ai and excludes ai_ctrl and ai_census (shared worker, site 33 and slots).\n");
+        return -1;
+    }
+    if (o->ai_deferred && !(o->mask & NTW2_AI_ASYNC2)) {
+        errsay(L"--ai-deferred requires --features ai,ai_async2 (it is a schedule of the ai_async2 machinery; ai_ctrl and ai_census stay excluded).\n");
+        return -1;
+    }
+    if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
+        errsay(L"--ai-deferred-k / --ai-deferred-budget require --ai-deferred.\n");
         return -1;
     }
     if ((o->mask & NTW2_BRAIN) && !(o->mask & NTW2_PROFILE)) {
@@ -5392,6 +5443,7 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
+    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];

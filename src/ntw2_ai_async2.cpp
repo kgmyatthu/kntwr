@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "ntw2_ai_async2.h"
+#include "ntw2_ai_deferred.h"
 
 namespace ntw2_ai_async2 {
 namespace {
@@ -54,6 +55,24 @@ struct Mail { U target, self, count, args[kMaxArgs], result, kind, pin; };
 Mail g_mail;
 __declspec(thread) U t_leaseDepth; // this thread is executing an original under its own lease
 
+// Deferred schedule. Records are absolute-indexed FIFO [dHead, dPublished) published, [dPublished, dTail) staged by the
+// current tick. Tick owner: admission, publish, consumption (dHead) and the Abandoned state, always while no slice is
+// open; AI worker: Begun/Done, slices, inside the open slice. The slice open/close holds g_queueLock like the batch.
+enum RecordState : U { RStaged, RPublished, RBegun, RDone, RAbandoned };
+struct Record { U planner, flag, admitTick, seenTick, slices, lastSlice, state, owed; };
+Record g_records[kMaxQueued];
+volatile LONG g_dHead, g_dPublished, g_dTail, g_sliceOpen;
+bool g_deferred;
+U g_deferK, g_deferB, g_sliceTick, g_sliceSeam; // g_sliceSeam: a slice was opened since the previous seam (tick owner)
+U g_owed[kMaxQueued], g_owedCount;              // planners owed a refused full-walk flag (tick owner)
+volatile LONG g_defer[kDeferWords];
+// AI worker only: the think in progress and its record (kNoRecord: none), the driver counters, the relocated bodies.
+constexpr U kNoRecord = 0xFFFFFFFFu;
+ntw2_ai_deferred::Think g_think;
+ntw2_ai_deferred::Counters g_driver;
+ntw2_ai_deferred::Natives g_natives;
+U g_thinkRecord = kNoRecord, g_dActive;
+
 void Inc(U w) { _InterlockedIncrement(&g_words[w]); }
 void Add(U w, U v) { _InterlockedExchangeAdd(&g_words[w], static_cast<LONG>(v)); }
 void Max(U w, U v) {
@@ -70,6 +89,16 @@ void Hist(U first, U us) {
     U bucket = 0, ceiling = 125;
     while (bucket < kBuckets - 1 && us > ceiling) { ++bucket; ceiling *= 2; }
     Inc(first + bucket);
+}
+void DInc(U w) { _InterlockedIncrement(&g_defer[w]); }
+void DAdd(U w, U v) { _InterlockedExchangeAdd(&g_defer[w], static_cast<LONG>(v)); }
+void DMax(U w, U v) {
+    for (LONG old = g_defer[w]; static_cast<U>(old) < v; old = g_defer[w])
+        if (_InterlockedCompareExchange(&g_defer[w], static_cast<LONG>(v), old) == old) return;
+}
+void DHist(U first, U n) { // 1, 2, 3, 4, 5-8, 9-16, 17-32, >32
+    U bucket = n <= 4 ? (n ? n - 1 : 0) : n <= 8 ? 4 : n <= 16 ? 5 : n <= 32 ? 6 : 7;
+    DInc(first + bucket);
 }
 U Load(volatile LONG* p) { return static_cast<U>(_InterlockedCompareExchange(p, 0, 0)); }
 LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
@@ -137,7 +166,7 @@ U WaitIdle(U kind, bool drained, bool nested) {
         if (r == WAIT_OBJECT_0 + 1) {
             Serve(nested);
             if (!IsTick()) RInc(RMainMarshalWaits);
-            else if (kind == KTickEnd) RInc(RSeamMarshalServes);
+            else if (kind == KTickEnd) { RInc(RSeamMarshalServes); if (g_deferred) DInc(DSeamMarshalServes); }
         }
         else if (r == WAIT_TIMEOUT) { expired = true; Watchdog(); }
         else if (r == WAIT_FAILED) Sleep(1); // fail closed: never treat a wait error as completion
@@ -313,7 +342,119 @@ U Gate(U pin) {
 }
 
 
-bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerThread) {
+namespace {
+// ---- deferred schedule (tick owner unless noted) ---------------------------------------------------------------------
+constexpr U kFnvBasis = 2166136261u, kFnvPrime = 16777619u;
+Record& At(LONG index) { return g_records[static_cast<U>(index) % kMaxQueued]; }
+void Owe(U planner) {
+    for (U i = 0; i < g_owedCount; ++i) if (g_owed[i] == planner) return;
+    if (g_owedCount < kMaxQueued) g_owed[g_owedCount++] = planner;
+}
+// Determinism witness: FNV over (admission tick, consumption seam, slices, outcome) of every retired record.
+void Witness(const Record& r, U outcome) {
+    U h = static_cast<U>(g_defer[DConsumeHash]);
+    const U values[4] = {r.admitTick, g_tick, r.slices, outcome};
+    for (U v : values) h = (h ^ v) * kFnvPrime;
+    g_defer[DConsumeHash] = static_cast<LONG>(h);
+}
+
+U DeferAdmit(U planner, U flag) {
+    const LONG head = g_dHead, tail = g_dTail;
+    for (LONG i = head; i != tail; ++i) {
+        Record& r = At(i);
+        if (r.planner != planner) continue;
+        r.seenTick = g_tick; // presented this tick: the planner is live for the slice this tick opens
+        if (flag & 0xFF) r.owed = 1;
+        DInc(DBusyRefusals);
+        return Busy;
+    }
+    if (static_cast<U>(tail - head) >= kMaxQueued) {
+        if (flag & 0xFF) Owe(planner);
+        DInc(DCapacityRefusals);
+        return Busy;
+    }
+    for (U i = 0; i < g_owedCount; ++i)
+        if (g_owed[i] == planner) { flag |= 1; g_owed[i] = g_owed[--g_owedCount]; DInc(DFlagsCarried); break; }
+    At(tail) = {planner, flag, g_tick, g_tick, 0, 0, RStaged, 0};
+    _InterlockedIncrement(&g_dTail); // full barrier: the record is written before the index that covers it
+    DInc(DAdmitted); RInc(RQueued); RMax(RQueuedMax, static_cast<U>(tail + 1 - head));
+    g_defer[DOutstanding] = tail + 1 - head;
+    return Queued;
+}
+
+// Tick end: publish this tick's admissions, abandon thinks whose planner was not presented this tick (or every
+// unfinished think on stop/fallback), then open one slice when any think is unfinished.
+void DeferPublish() {
+    if (Load(&g_inFlight)) WaitIdle(KTickEnd, true, false); // never two slices: the seam normally joined it already
+    const bool stop = Load(&g_fallback) || Load(&g_closing);
+    const LONG head = g_dHead, published = g_dPublished, tail = g_dTail;
+    bool work = false;
+    for (LONG i = head; i != tail; ++i) {
+        Record& r = At(i);
+        if (r.state == RDone || r.state == RAbandoned) continue;
+        if (stop) { r.state = RAbandoned; DInc(DAbandonedStop); continue; }
+        if (i - published >= 0) r.state = RPublished;
+        else if (r.seenTick != g_tick) { r.state = RAbandoned; DInc(DAbandonedUnseen); continue; }
+        work = true;
+    }
+    _InterlockedExchange(&g_dPublished, tail);
+    if (!work) return;
+    AcquireSRWLockExclusive(&g_queueLock);
+    g_sliceTick = g_tick;
+    _InterlockedExchange(&g_sliceOpen, 1);
+    ResetEvent(g_drained);
+    _InterlockedExchange(&g_inFlight, 1);
+    g_words[WInFlight] = 1;
+    ReleaseSRWLockExclusive(&g_queueLock);
+    g_sliceSeam = 1; g_joinPending = 1;
+    g_dispatchQpc = Now();
+    _InterlockedExchange(&g_measure, 1);
+    RInc(RPublishedBatches); Inc(WDispatches);
+    if (g_wake) SetEvent(g_wake);
+}
+
+// Tick start (after ++g_tick): blocking join of the open slice (bounded by B), then FIFO consumption of the thinks
+// that finished at least K ticks after their admission. Abandoned records retire at the first seam.
+void DeferSeam() {
+    const bool flying = Load(&g_inFlight) != 0;
+    if (flying || g_sliceSeam) {
+        RInc(RSeamPolls);
+        Inc(WKindEntries + static_cast<U>(KTickEnd));
+        if (TakeMeasure()) Overlap(flying);
+    }
+    if (flying) {
+        const U waited = WaitIdle(KTickEnd, true, false);
+        RInc(RSeamStalls); RAdd(RSeamWaitSum, waited); RMax(RSeamWaitMax, waited);
+        g_route[RSeamStallLastTick] = g_tick;
+        if (g_joinPending) JoinSample(waited);
+        DInc(DSeamSliceWaits); DAdd(DSeamWaitSum, waited); DMax(DSeamWaitMax, waited);
+    } else if (g_sliceSeam) {
+        if (g_joinPending) { JoinSample(0); RInc(RSeamCompleteJoins); }
+        DInc(DSeamSliceComplete);
+    }
+    g_sliceSeam = 0;
+    LONG head = g_dHead;
+    while (head != g_dPublished) {
+        Record& r = At(head);
+        if (r.state == RAbandoned) { Witness(r, 2); ++head; continue; }
+        if (r.state != RDone) break;
+        const U spanned = g_tick - r.admitTick;
+        if (spanned < g_deferK) break; // FIFO: later records were admitted no earlier and finished no earlier
+        DInc(DConsumed); DInc(spanned == g_deferK ? DConsumedOnTime : DConsumedLate);
+        DHist(DSpanHist, spanned); DHist(DSliceHist, r.slices);
+        DMax(DSpanMax, spanned); DMax(DSlicesMax, r.slices);
+        Witness(r, 1);
+        g_defer[DLastConsumeTick] = static_cast<LONG>(g_tick);
+        if (r.owed) Owe(r.planner);
+        ++head;
+    }
+    _InterlockedExchange(&g_dHead, head);
+    g_defer[DOutstanding] = g_dTail - head;
+}
+bool Staged() { return g_deferred ? g_dTail != g_dPublished : g_tail != g_published; }
+} // namespace
+
+bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerThread, U deferred) {
     _InterlockedExchange(&g_on, 0);
     if (!g_idle) g_idle = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     if (!g_drained) g_drained = CreateEventW(nullptr, TRUE, TRUE, nullptr);
@@ -323,8 +464,15 @@ bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerTh
     if (!g_qpcFreq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_qpcFreq = f.QuadPart; }
     for (U i = 0; i < kWords; ++i) g_words[i] = 0;
     for (U i = 0; i < kRouteWords; ++i) g_route[i] = 0;
+    for (U i = 0; i < kDeferWords; ++i) g_defer[i] = 0;
     g_inFlight = g_running = g_hold = g_fallback = g_workerAsync = g_measure = g_closing = 0;
     g_head = g_published = g_tail = 0;
+    g_dHead = g_dPublished = g_dTail = g_sliceOpen = 0;
+    g_sliceTick = g_sliceSeam = g_owedCount = 0;
+    g_thinkRecord = kNoRecord; g_dActive = 0; g_driver = {};
+    g_deferred = enabled && deferred != 0;
+    g_deferK = deferred & 0xFFu; g_deferB = (deferred >> 8) & 0xFFFFu;
+    g_natives = {0x7CD010u + delta, 0x7CCF80u + delta, 0x7D7BF0u + delta};
     g_tick = g_joinPending = 0;
     g_dispatchQpc = g_completeQpc = 0;
     SetEvent(g_idle); SetEvent(g_drained); ResetEvent(g_posted); ResetEvent(g_served);
@@ -333,13 +481,16 @@ bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerTh
     if (enabled) {
         g_words[WVersion] = kVersion;
         g_route[RVersion] = kVersion;
-        g_route[RSchedule] = 2; // boundary schedule with a blocking tick-start lifetime join
+        g_route[RSchedule] = g_deferred ? 3 : 2; // 3: deferred sliced thinks, 2: whole calls, blocking start join
         g_words[WSpottingUnresolved] = 1; // main spotting 0x6A94B0 route is not in a cloned source: no gate (see report)
+        if (g_deferred) {
+            g_defer[DVersion] = kDeferVersion; g_defer[DK] = g_deferK; g_defer[DBudget] = g_deferB;
+            g_defer[DConsumeHash] = static_cast<LONG>(kFnvBasis);
+        }
         _InterlockedExchange(&g_on, 1);
     }
     return true;
 }
-
 U Admit(U planner, U flag) {
     const bool fallback = Load(&g_fallback) != 0;
     if (fallback || Load(&g_closing)) { // sticky watchdog fallback, or a stop in progress: the same-call barrier
@@ -348,6 +499,7 @@ U Admit(U planner, U flag) {
         if (fallback) Inc(WFallbackThinks);
         return Synchronous;
     }
+    if (g_deferred) return DeferAdmit(planner, flag);
     if (static_cast<U>(g_tail - Load(&g_head)) >= kMaxQueued) {
         // Deterministic emergency: the FIFO is full by call order. Publish now and drain before accepting more.
         PublishLocked();
@@ -368,10 +520,18 @@ U Admit(U planner, U flag) {
 
 void PublishBatch() {
     if (!Load(&g_on)) return;
-    PublishLocked();
+    if (g_deferred) DeferPublish();
+    else PublishLocked();
 }
 
 void AbortBatch() {
+    if (g_deferred) {
+        const LONG staged = g_dTail - g_dPublished;
+        if (staged <= 0) return;
+        RAdd(RQueued, static_cast<U>(-staged)); DAdd(DAdmitted, static_cast<U>(-staged));
+        _InterlockedExchange(&g_dTail, g_dPublished);
+        return;
+    }
     const LONG staged = g_tail - g_published;
     if (staged <= 0) return;
     RAdd(RQueued, static_cast<U>(-staged));
@@ -381,6 +541,7 @@ void AbortBatch() {
 void TickSeam() {
     if (!Load(&g_on)) return;
     ++g_tick; g_route[RTicks] = g_tick;
+    if (g_deferred) { DeferSeam(); return; }
     if (!g_measure && !Load(&g_inFlight)) return; // nothing published since the previous seam
     RInc(RSeamPolls);
     Inc(WKindEntries + static_cast<U>(KTickEnd));
@@ -440,6 +601,82 @@ void WorkerEnd(U us) {
     SetEvent(g_idle);
 }
 
+bool Deferred() { return g_deferred; }
+
+bool WorkerSlice(void (*enter)(), void (*leave)()) {
+    if (!Load(&g_on) || !g_deferred) return false;
+    // Lease handshake as in WorkerNext: no slice starts under a lease; the release wakes the worker.
+    ResetEvent(g_idle);
+    _InterlockedExchange(&g_running, 1);
+    if (Load(&g_hold)) {
+        _InterlockedExchange(&g_running, 0);
+        SetEvent(g_idle);
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_queueLock);
+    if (!g_sliceOpen) {
+        _InterlockedExchange(&g_running, 0);
+        SetEvent(g_idle);
+        g_words[WInFlight] = 0;
+        _InterlockedExchange(&g_inFlight, 0);
+        SetEvent(g_drained);
+        ReleaseSRWLockExclusive(&g_queueLock);
+        return false;
+    }
+    ReleaseSRWLockExclusive(&g_queueLock);
+    const LONGLONG begin = Now();
+    const U slice = g_sliceTick;
+    const LONG head = g_dHead, end = g_dPublished;
+    LONG i = static_cast<LONG>(g_dActive);
+    if (i - head < 0) i = head; // records before dHead were retired at a seam (abandoned before the worker saw them)
+    U budget = g_deferB;
+    bool blocked = false;
+    enter();
+    _InterlockedExchange(&g_workerAsync, 1); // worker calls of gated slots are marshalled from here on
+    for (; i != end; ++i) {
+        Record& r = At(i);
+        if (r.state == RDone || r.state == RAbandoned) {
+            if (g_thinkRecord == static_cast<U>(i)) g_thinkRecord = kNoRecord;
+            continue;
+        }
+        if (g_thinkRecord != static_cast<U>(i)) {
+            if (!budget) { blocked = true; break; } // its passes would run beyond B: the next slice begins it
+            ntw2_ai_deferred::Begin(g_think, r.planner, r.flag, g_driver);
+            g_thinkRecord = static_cast<U>(i);
+            r.state = RBegun;
+        }
+        if (!r.slices || r.lastSlice != slice) { ++r.slices; r.lastSlice = slice; }
+        if (!ntw2_ai_deferred::Step(g_think, g_natives, budget, g_driver, g_qpcFreq)) { blocked = true; break; }
+        r.state = RDone;
+        g_thinkRecord = kNoRecord;
+    }
+    g_dActive = static_cast<U>(i);
+    _InterlockedExchange(&g_workerAsync, 0);
+    leave();
+    const U us = Micro(begin, Now());
+    // Driver counters: single writer (this thread), published per slice.
+    g_defer[DNodesSkipped] = g_driver.skipped; g_defer[DNodesRelocated] = g_driver.relocated;
+    g_defer[DChildrenSkipped] = g_driver.childSkipped; g_defer[DThinksDropped] = g_driver.thinksDropped;
+    g_defer[DOverflows] = g_driver.overflows; g_defer[DUnitMaxUs] = g_driver.unitMaxUs;
+    for (U k = 0; k < ntw2_ai_deferred::KKinds; ++k) { g_defer[DCalls + k] = g_driver.calls[k]; g_defer[DUs + k] = g_driver.us[k]; }
+    static_assert(ntw2_ai_deferred::KKinds == 6, "six driver kinds in the deferred row");
+    DInc(DSlices); if (blocked) DInc(DBudgetHits);
+    DAdd(DSliceSumUs, us); DMax(DSliceMaxUs, us);
+    if (us > 2000) DInc(DSliceOver2ms);
+    if (us > 4000) DInc(DSliceOver4ms);
+    Add(WThinkSum, us); Max(WThinkMax, us); Hist(WThinkHist, us); Inc(WCompletions); // main row: one sample per slice
+    AcquireSRWLockExclusive(&g_queueLock);
+    g_completeQpc = Now();
+    _InterlockedExchange(&g_sliceOpen, 0);
+    _InterlockedExchange(&g_running, 0);
+    SetEvent(g_idle);
+    g_words[WInFlight] = 0;
+    _InterlockedExchange(&g_inFlight, 0);
+    SetEvent(g_drained);
+    ReleaseSRWLockExclusive(&g_queueLock);
+    return true;
+}
+
 void NoteRoute(bool scratchReady) {
     Inc(WRouteEntries);
     g_words[WScratchReady] = scratchReady ? 1 : 0;
@@ -463,7 +700,7 @@ bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)()) {
     const ULONGLONG begin = GetTickCount64(), grace = begin + graceMs, deadline = begin + timeoutMs;
     for (;;) {
         // Staged calls belong to a tick in progress: its end publishes them and the next tick start joins them.
-        if (!Load(&g_inFlight) && Load(&g_tail) == Load(&g_published)) return true;
+        if (!Load(&g_inFlight) && !Staged()) return true;
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline) return false;
         const bool valid = receiversValid && receiversValid();
@@ -477,7 +714,7 @@ bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)()) {
 }
 
 bool Drain(U timeoutMs) {
-    const bool staged = g_tail != g_published;
+    const bool staged = Staged();
     if (!Load(&g_inFlight)) return !staged;
     const LONGLONG begin = Now();
     const bool ok = WaitForSingleObject(g_drained, timeoutMs) == WAIT_OBJECT_0 && !Load(&g_inFlight);
@@ -492,5 +729,9 @@ void Snapshot(volatile U* out) {
 
 void RouteSnapshot(volatile U* out) {
     for (U i = 0; i < kRouteWords; ++i) out[i] = static_cast<U>(g_route[i]);
+}
+
+void DeferredSnapshot(volatile U* out) {
+    for (U i = 0; i < kDeferWords; ++i) out[i] = static_cast<U>(g_defer[i]);
 }
 }

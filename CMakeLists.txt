@@ -198,7 +198,7 @@ set(NTW2_EXPORTS_RUNTIME_ABI
 # Missing required runtime sources are a configure error, never a skipped module.
 # ---------------------------------------------------------------------------------------------------------------------
 if(NTW2_BUILD_RUNTIME)
-  set(NTW2_RUNTIME_SOURCES src/ntw2_runtime.cpp src/ntw2_clones.cpp src/ntw2_profile.cpp src/ntw2_ai_census.cpp src/ntw2_ai_async2.cpp src/ntw2_walk_memo.cpp
+  set(NTW2_RUNTIME_SOURCES src/ntw2_runtime.cpp src/ntw2_clones.cpp src/ntw2_profile.cpp src/ntw2_ai_census.cpp src/ntw2_ai_async2.cpp src/ntw2_ai_deferred.cpp src/ntw2_walk_memo.cpp
                            src/collision/native_collision_solver.cpp src/collision/native_contact.cpp src/brain2/native_brain2.cpp src/loco/native_loco.cpp src/loco/native_grid_probation.cpp
                            src/brain2/native_node.cpp src/brain2/native_node_projection.cpp src/brain2/native_fire.cpp src/brain2/native_finalizer.cpp
                            src/brain2/native_move_node.cpp src/brain2/native_brain_workers.cpp src/brain2/native_unit_brain.cpp

@@ -997,6 +997,19 @@ void AiRunThink(const AiJob& job) {
 }
 extern volatile LONG ai2Armed; // defined with the AI2 gates below; the worker reads it on every wake
 void Ai2NoteScratch();         // AI worker: private-image witnesses after each async think
+// Deferred slice bracket (AI worker): the same FPU entry state as AiRunThink, the think flag that routes the private
+// walk/observer family, and the private-image witnesses after the slice.
+void Ai2DeferEnter() {
+    const unsigned short control=static_cast<unsigned short>(AiFpuControl());
+    const U csr=_mm_getcsr();
+    __asm {
+        fninit
+        fldcw control
+    }
+    _mm_setcsr(csr);
+    _InterlockedExchange(&aiInThink,1);
+}
+void Ai2DeferLeave() { _InterlockedExchange(&aiInThink,0); Ai2NoteScratch(); }
 DWORD WINAPI AiWorkerMain(void*) {
     aiThreadId=GetCurrentThreadId();
     const U startup=WorkerAllocatorInit(0,kAiAllocatorRow);
@@ -1006,7 +1019,11 @@ DWORD WINAPI AiWorkerMain(void*) {
         if (WaitForSingleObject(aiWake,INFINITE)!=WAIT_OBJECT_0) return GetLastError();
         if (Load(&aiStop)) return 0;
         AiJob job=aiJob; // an async owner may publish the next job as soon as this one is released
-        if (Load(&ai2Armed)) { // NTW2_AI_ASYNC2 boundary schedule: run every published whole call in FIFO order
+        if (Load(&ai2Armed) && ntw2_ai_async2::Deferred()) { // deferred schedule: run the open count-budgeted slice
+            while (ntw2_ai_async2::WorkerSlice(&Ai2DeferEnter,&Ai2DeferLeave)) {}
+            if (!aiPending) { _InterlockedExchange(&aiBusy,0); continue; }
+            job=aiJob; // a watchdog-fallback synchronous job uses the ordinary one-slot path below
+        } else if (Load(&ai2Armed)) { // NTW2_AI_ASYNC2 boundary schedule: run every published whole call in FIFO order
             U planner=0, flag=0;
             while (ntw2_ai_async2::WorkerNext(&planner,&flag)) {
                 AiJob next={planner,V(0x7D99F0),flag,AiFpuControl(),_mm_getcsr(),0,0,AiPlannerAsync};
@@ -1209,7 +1226,7 @@ extern "C" __declspec(noinline) U __stdcall Ai2PlannerGate(U planner, U flag) {
     if (!aiThread || !Epoch(NTW2_AI_ASYNC2)) return 0;
     if (ntw2_ai_async2::Admit(planner,flag)==ntw2_ai_async2::Synchronous)
         return AiPlannerGate(planner,flag); // sticky watchdog fallback: the same-call AI_ASYNC barrier
-    return 1; // queued: a delayed think
+    return 1; // queued (a delayed think) or a deferred-schedule busy refusal: the native call is skipped
 }
 __declspec(naked) void Planner2Gate() {
     __asm {
@@ -1256,6 +1273,8 @@ AI2_JOIN_THUNK(Ai2ControllerGate, 1, ai2ControllerTarget) // site 33: before the
 AI2_JOIN_THUNK(Ai2SpatialGate, 2, ai2SpatialTarget)       // TICK 57DFDF: before the dynamic quadtree update 817D20
 #undef AI2_JOIN_THUNK
 static_assert(ntw2_ai_async2::KController==1 && ntw2_ai_async2::KSpatial==2, "join thunk kinds");
+static_assert(ntw2_ai_async2::kDeferWords==NTW2_AI_DEFERRED_WORDS && ntw2_ai_async2::kWords==NTW2_AI_ASYNC2_WORDS &&
+              ntw2_ai_async2::kRouteWords==NTW2_AI_ASYNC2_ROUTE_WORDS, "ai_async2 rows match the status ABI");
 bool AiStart() {
     if (aiThread) return true;
     if (!aiWake) aiWake=CreateEventW(nullptr,FALSE,FALSE,nullptr);
@@ -2721,6 +2740,7 @@ void SampleCounters() {
     for (U i=0;i<NTW2_AI_COMPLETION_WORDS;++i) ntw2_state.ai_completion_words[i]=aiCompletionWords[i];
     ntw2_ai_async2::Snapshot(ntw2_state.ai_async2_words);
     ntw2_ai_async2::RouteSnapshot(ntw2_state.ai_async2_route_words);
+    ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
     ntw2_state.ai_slice_words[AsParked]=0; // no OS suspension, including while idle
     ntw2_state.ai_slice_words[AsThread]=aiThreadId;
     for (U i=0;i<NTW2_BRAIN_WORDS;++i) ntw2_state.brain_words[i]=brainWords[i];
@@ -3080,7 +3100,7 @@ DWORD WINAPI Monitor(void*) {
         collisionNumericActive=false;
         Brain2Reset();
         AiReset();
-        if (!ntw2_ai_async2::Reset((config.enabled_mask&NTW2_AI_ASYNC2)!=0,delta,&tickOwner,&aiThreadId)) {
+        if (!ntw2_ai_async2::Reset((config.enabled_mask&NTW2_AI_ASYNC2)!=0,delta,&tickOwner,&aiThreadId,config.ai_deferred)) {
             RecordError(ThreadError,GetLastError()); break; // the generation's join events are unavailable
         }
         tickLastStart=0;
@@ -3102,6 +3122,7 @@ DWORD WINAPI Monitor(void*) {
     StateBegin(); // worker joined: final totals
     ntw2_ai_async2::Snapshot(ntw2_state.ai_async2_words);
     ntw2_ai_async2::RouteSnapshot(ntw2_state.ai_async2_route_words);
+    ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
     StateEnd();
     _InterlockedExchange(&quiesced,clean ? 1 : 0);
     Phase(failure ? NTW2_FAILED : NTW2_STOPPED);
@@ -3145,6 +3166,12 @@ static U StartImpl(void* raw) {
         ((next.enabled_mask&NTW2_AI_CENSUS) && !(next.enabled_mask&NTW2_AI_ASYNC)) ||
         // ai_async2 shares the AI worker, site 33 and the delegate slots with ai_ctrl/ai_census.
         ((next.enabled_mask&NTW2_AI_ASYNC2) && (!(next.enabled_mask&NTW2_AI_ASYNC) || (next.enabled_mask&(NTW2_AI_CTRL|NTW2_AI_CENSUS)))) ||
+        // The deferred schedule is an AI_ASYNC2 mode: K in 1..MAX_K, budget B >= 1, no other bits.
+        (next.ai_deferred && (!(next.enabled_mask&NTW2_AI_ASYNC2) ||
+                              (next.ai_deferred&~(NTW2_AI_DEFERRED_K_MASK|NTW2_AI_DEFERRED_BUDGET_MASK)) ||
+                              !(next.ai_deferred&NTW2_AI_DEFERRED_K_MASK) ||
+                              (next.ai_deferred&NTW2_AI_DEFERRED_K_MASK)>NTW2_AI_DEFERRED_MAX_K ||
+                              !(next.ai_deferred&NTW2_AI_DEFERRED_BUDGET_MASK))) ||
         // The army unit shadow observes the cloned ARMY_UPDATE stage, reached only through a routed tick.
         ((next.enabled_mask&NTW2_ARMY_UNIT_SHADOW) && !(next.enabled_mask&kRouted)) ||
         // The puppet probe owns site 6 alone (BRAIN2/brain flags) and the class step slot (BRAIN profiling slots).
@@ -3260,6 +3287,7 @@ static U StartImpl(void* raw) {
     ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,0);
     ntw2_ai_async2::Snapshot(ntw2_state.ai_async2_words);
     ntw2_ai_async2::RouteSnapshot(ntw2_state.ai_async2_route_words);
+    ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
     StateEnd();
     DWORD tid=0;
     HANDLE thread=CreateThread(nullptr,0,Monitor,nullptr,CREATE_SUSPENDED,&tid);

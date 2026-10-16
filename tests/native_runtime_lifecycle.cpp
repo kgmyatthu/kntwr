@@ -53,7 +53,7 @@ static_assert(NTW2_COLLIDE_LOD==0x400u && !(NTW2_ALL&NTW2_COLLIDE_LOD) &&
               (NTW2_VALID_MASK&NTW2_COLLIDE_LOD)==NTW2_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
 static_assert(NTW2_ALL==(NTW2_AI_ASYNC|NTW2_BATCH64|NTW2_VISUAL), "NTW2_ALL is exactly the shipping set batch64,ai,visual");
 static_assert(NTW2_BRAIN_SLOTS==23u && NTW2_BRAIN_FAMILIES==5u && NTW2_BRAIN_SITE_FIRST==46u && NTW2_BRAIN_SITES==49u && NTW2_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS+NTW2_PUPPET_DIVERT_WORDS+NTW2_PUPPET_MOVER_WORDS+NTW2_PUPPET_SELECT_WORDS+NTW2_BRAIN_S0_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0, puppet motion, divert, mover, select and brain S0 words without changing existing words");
+static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS+NTW2_PUPPET_DIVERT_WORDS+NTW2_PUPPET_MOVER_WORDS+NTW2_PUPPET_SELECT_WORDS+NTW2_BRAIN_S0_WORDS+NTW2_AI_DEFERRED_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0, puppet motion, divert, mover, select, brain S0 and ai_deferred words without changing existing words");
 static_assert(NTW2_AI_SLICE_BUDGET_WORDS==8u && offsetof(ntw2_status,ai_slice_budget_words)==offsetof(ntw2_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(ntw2_status,ai_park_words)==offsetof(ntw2_status,ai_slice_budget_words)+NTW2_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(ntw2_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -121,7 +121,8 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,puppet_divert_words)+NTW2_PUPPET_DIVERT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_mover_words) && NTW2_PUPPET_DIVERT_WORDS==32u &&
               offsetof(ntw2_status,puppet_mover_words)+NTW2_PUPPET_MOVER_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_select_words) && NTW2_PUPPET_MOVER_WORDS==32u &&
               offsetof(ntw2_status,puppet_select_words)+NTW2_PUPPET_SELECT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_s0_words) && NTW2_PUPPET_SELECT_WORDS==32u &&
-              offsetof(ntw2_status,brain_s0_words)+NTW2_BRAIN_S0_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_BRAIN_S0_WORDS==560u &&
+              offsetof(ntw2_status,brain_s0_words)+NTW2_BRAIN_S0_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_deferred_words) && NTW2_BRAIN_S0_WORDS==560u &&
+              offsetof(ntw2_status,ai_deferred_words)+NTW2_AI_DEFERRED_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_AI_DEFERRED_WORDS==64u &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
 static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
@@ -176,7 +177,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==52 && offsetof(ntw2_config,puppet_units)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,puppet_units)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -1628,6 +1629,196 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     return failures ? 1 : 0;
 }
 
+// ---- NTW2_AI_ASYNC2 deferred schedule (--ai-deferred) -------------------------------------------------------------------
+// A synthetic planner (P+9C/A0 node list, P+B0/B4 second array, P+B8 round-robin counter, P->vt+8->+64->+80 full-walk
+// gate) whose node bodies record their order. 0x7CD010 / 0x7CCF80 are redirected in the owned image to recorders;
+// decomposable nodes carry 0x7D7BF0 in their think slot (redirected to a trap: the driver must never call it), whole
+// nodes a recording think. Every tick's callback appends a tick marker after the start seam joined the slice, so the
+// log is the exact interleaving of slices and ticks. The scenario runs under four perturbations (workers 1/8, sleeps in
+// the worker's node bodies, sleeps on the tick thread) and must produce the identical log and counters each time.
+struct DfChild { U vtable, id, pad[10], f30, pad2[3], f40, marshal; };
+struct DfNode { U vtable, id, current, pad[15], childCount, children, pendingCount, pending[4], childArray[4]; };
+static_assert(offsetof(DfChild,f30)==0x30 && offsetof(DfChild,f40)==0x40 && offsetof(DfNode,childCount)==0x48 &&
+              offsetof(DfNode,children)==0x4C, "synthetic planner node layouts");
+static char dfLog[4096];
+static size_t dfLen;
+static volatile LONG dfCalls, dfOverlaps, dfThinkBodyCalls, dfPlannerCalls;
+static U dfChildSleepMs, dfMidSleepMs, dfWorkerThread, dfDestroyThread;
+static void DfNote(const char* format,U value) {
+    if(dfLen<sizeof(dfLog)) dfLen+=static_cast<size_t>(_snprintf_s(dfLog+dfLen,sizeof(dfLog)-dfLen,_TRUNCATE,format,value));
+    InterlockedIncrement(&dfCalls);
+}
+static void __fastcall DfPassA(DfNode* n,void*) { dfWorkerThread=GetCurrentThreadId(); DfNote(" A%u",n->id); }
+static void __fastcall DfPassB(DfNode* n,void*) { DfNote(" B%u",n->id); }
+static void __fastcall DfGenerate(DfNode* n,void*) {
+    DfNote(" G%u",n->id);
+    for(U i=0;i<n->pendingCount;++i) n->childArray[i]=n->pending[i];
+    n->childCount=n->pendingCount; n->children=A(n->childArray);
+}
+static U __fastcall DfCurrent(DfNode* n,void*) { return n->current; }
+static void __fastcall DfWhole(DfNode* n,void*) { DfNote(" W%u",n->id); if(dfChildSleepMs) Sleep(dfChildSleepMs); }
+static void __fastcall DfChildThink(DfChild* c,void*) {
+    DfNote(" C%u",c->id);
+    if(dfChildSleepMs) Sleep(dfChildSleepMs);
+    if(c->marshal) CallDestroySlot(); // worker-side delegate destruction inside a slice: marshalled to the next seam
+}
+static void* __fastcall DfDestroy(void* self,void*,U) { dfDestroyThread=GetCurrentThreadId(); DfNote(" D",0); return self; }
+static void __fastcall DfThinkBody(void*,void*) { InterlockedIncrement(&dfThinkBodyCalls); }
+static void __fastcall DfPlannerBody(void*,void*,U) { InterlockedIncrement(&dfPlannerCalls); }
+static U dfDecomposableVt[11], dfWholeVt[11], dfChildVt[11], dfPlannerVt[4], dfGateA[32], dfGateB[40];
+static DfNode dfNodes[5]; // N0..N3 (array 1), M0 (array 2, id 10)
+static DfChild dfChildren[5]; // 11, 12 (flags zero), 13 of N1; 21, 22 of M0
+static U dfArray1[4], dfArray2[1], dfPlanner[0x40];
+static void DfBuild() {
+    dfDecomposableVt[0]=A(reinterpret_cast<const void*>(&DfGenerate)); dfDecomposableVt[4]=0x7D7BF0+delta;
+    dfDecomposableVt[8]=A(reinterpret_cast<const void*>(&DfCurrent));
+    dfWholeVt[4]=A(reinterpret_cast<const void*>(&DfWhole)); dfWholeVt[8]=A(reinterpret_cast<const void*>(&DfCurrent));
+    dfChildVt[10]=A(reinterpret_cast<const void*>(&DfChildThink));
+    const U childIds[5]={11,12,13,21,22};
+    for(U i=0;i<5;++i) { dfChildren[i]={}; dfChildren[i].vtable=A(dfChildVt); dfChildren[i].id=childIds[i]; dfChildren[i].f30=i==1 ? 0 : 1; }
+    const U nodeIds[5]={0,1,2,3,10};
+    for(U i=0;i<5;++i) { dfNodes[i]={}; dfNodes[i].vtable=A(i==3 ? dfWholeVt : dfDecomposableVt); dfNodes[i].id=nodeIds[i]; }
+    dfNodes[0].current=1;
+    dfNodes[1].pendingCount=3; for(U i=0;i<3;++i) dfNodes[1].pending[i]=A(&dfChildren[i]);
+    dfNodes[4].pendingCount=2; dfNodes[4].pending[0]=A(&dfChildren[3]); dfNodes[4].pending[1]=A(&dfChildren[4]);
+    for(U i=0;i<4;++i) dfArray1[i]=A(&dfNodes[i]);
+    dfArray2[0]=A(&dfNodes[4]);
+    memset(dfPlanner,0,sizeof(dfPlanner)); memset(dfGateA,0,sizeof(dfGateA)); memset(dfGateB,0,sizeof(dfGateB));
+    dfPlannerVt[2]=A(dfGateA); dfGateA[0x64/4]=A(dfGateB); dfGateB[0x80/4]=0; // full walk enabled
+    dfPlanner[0]=A(dfPlannerVt);
+    dfPlanner[0x9C/4]=4; dfPlanner[0xA0/4]=A(dfArray1); dfPlanner[0xB0/4]=1; dfPlanner[0xB4/4]=A(dfArray2); dfPlanner[0xB8/4]=0;
+    dfLen=0; dfLog[0]=0; dfCalls=dfOverlaps=0;
+}
+// Tick-thread callback (after site 34): the marker, an optional sleep that must not overlap any node body, and the
+// scheduled mutations of the live planner state between slices.
+static void __stdcall DfMid(void* raw) {
+    const U tick=*static_cast<U*>(raw);
+    const LONG before=dfCalls;
+    DfNote(" T%u",tick);
+    if(dfMidSleepMs) Sleep(dfMidSleepMs);
+    if(tick==3) { dfNodes[4].childArray[0]=A(&dfChildren[4]); dfNodes[4].childCount=1; } // M0 loses child 21
+    if(tick==5) { dfArray1[2]=A(&dfNodes[3]); dfPlanner[0x9C/4]=3; }                     // N2 leaves the node list
+    if(tick==7) dfChildren[4].marshal=1;
+    if(tick==8) dfChildren[4].marshal=0;
+    if(dfCalls!=before+1) InterlockedIncrement(&dfOverlaps);
+}
+static const char kDfExpected[]=
+    " T1 A0 A1 A2 A3 B0 B1 B2 B3 G1 B1 C11 T2 C13 G10 B10 T3 C22 T4 A0 A1 A2 A3 B0 B1 B2 B3 C11 C13 T5 W3"
+    " T6 A0 A1 A3 B0 B1 B3 W3 C22 T7 A0 A1 A3 B0 B1 B3 C22 D T8 A0 A1 A3 B0 B1 B3 C11 C13 T9"
+    " T10 A0 A1 A3 B0 B1 B3 W3 C22 T11";
+// Deferred-row words that are functions of the schedule only (everything except the timing words).
+static const U kDfDeterministic[]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,21,24,25,26,27,28,29,30,31,39,40,41,42,43,
+                                   44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59};
+static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+    auto boundary=reinterpret_cast<ntw2_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_boundary"));
+    auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(runtimeModule,"ntw2_site_callee"));
+    Check(boundary!=nullptr && siteCallee!=nullptr,"ai_deferred lifecycle exports present");
+    if(!boundary || !siteCallee) return 1;
+    root[0x2829c]=1; Put(model,0xB0,A(armyManager));
+    config.workers=0; config.main_thread_id=GetCurrentThreadId();
+    const U deferred=1u|(2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT);
+    config.enabled_mask=NTW2_AI_ASYNC; config.ai_deferred=deferred;
+    Check(start(&config)==1,"ai_deferred without ai_async2 is refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CTRL; Check(start(&config)==1,"ai_deferred with ai_ctrl is refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CENSUS; Check(start(&config)==1,"ai_deferred with ai_census is refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
+    config.ai_deferred=2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT; Check(start(&config)==1,"K = 0 is refused");
+    config.ai_deferred=(NTW2_AI_DEFERRED_MAX_K+1)|(2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT); Check(start(&config)==1,"K above the maximum is refused");
+    config.ai_deferred=1u; Check(start(&config)==1,"budget 0 is refused");
+    config.ai_deferred=deferred|0x1000000u; Check(start(&config)==1,"unknown ai_deferred bits are refused");
+    const U destroyOriginal=*Ai2DestroyCell();
+    U tickIndex=0, gapMs=0;
+    auto tick=[&](U* planner,U flag,U options) {
+        if(gapMs) Sleep(gapMs); // a long inter-tick window: slices finish before the seam instead of stalling it
+        ++tickIndex;
+        return boundary(model,planner,flag,&DfMid,&tickIndex,options);
+    };
+    ntw2_status reference={};
+    char referenceLog[sizeof(dfLog)]={};
+    // workers, sleep in the worker's node bodies, sleep on the tick thread, sleep between ticks
+    struct Run { U workers, childSleepMs, midSleepMs, gapMs; };
+    const Run runs[5]={{1,0,0,0},{8,0,0,0},{1,15,0,0},{8,0,15,0},{8,0,0,20}};
+    for(U r=0;r<5;++r) {
+        config.workers=runs[r].workers; config.ai_deferred=deferred;
+        Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai_deferred generation activates");
+        if(r==0) {
+            // Probes go in only after the first activation validated and copied the clone sources.
+            Check(RedirectImage(0x7CD010,reinterpret_cast<const void*>(&DfPassA)) &&
+                  RedirectImage(0x7CCF80,reinterpret_cast<const void*>(&DfPassB)) &&
+                  RedirectImage(0x7D7BF0,reinterpret_cast<const void*>(&DfThinkBody)) &&
+                  RedirectImage(0x7D99F0,reinterpret_cast<const void*>(&DfPlannerBody)) &&
+                  RedirectImage(0x69D750,reinterpret_cast<const void*>(&DfDestroy)),
+                  "install node-body, think-body trap, planner trap and destructor probes");
+            Check(InRuntime(siteCallee(34)) && InRuntime(*Ai2DestroyCell()),"site 34 and the delegate destructor slot are gated");
+        }
+        DfBuild(); tickIndex=0;
+        dfChildSleepMs=runs[r].childSleepMs; dfMidSleepMs=runs[r].midSleepMs; gapMs=runs[r].gapMs;
+        const U owner=GetCurrentThreadId();
+        U* p=dfPlanner;
+        Check(tick(p,0,0)==1,"tick 1: site 34 admits; the think is deferred");
+        tick(p,1,0);  // busy refusal; the refused full-walk flag is owed
+        tick(p,0,0);  // busy refusal; M0 loses child 21 between slices
+        tick(p,0,0);  // think 1 consumed late (3 ticks); think 2 admitted with the owed full walk
+        tick(p,0,0);  // busy refusal; N2 leaves the node list between slices
+        tick(p,0,0);  // think 2 consumed late (2 ticks); think 3 admitted, finishes in one slice
+        tick(p,0,0);  // think 3 consumed on time; think 4 marshals the destructor from its slice
+        tick(p,0,0);  // the seam served the marshal; think 4 consumed on time; think 5 blocks on the budget
+        tick(nullptr,0,0); // planner not presented: think 5 is abandoned before the slice
+        tick(p,0,1);  // think 6 admitted, the second same-tick admission is a busy refusal
+        tick(nullptr,0,0); // think 6 consumed on time
+        Check(stop(nullptr)==0,"ai_deferred generation stops");
+        Check(*Ai2DestroyCell()==destroyOriginal && ReadOnly(Ai2DestroyCell()),"stop restores the gated destructor slot");
+        ntw2_status snapshot={};
+        Check(ReadState(state,snapshot),"ai_deferred telemetry readable after stop");
+        Check(dfLen<sizeof(dfLog) && !strcmp(dfLog,kDfExpected),"node order and slice/tick interleaving match the driver contract");
+        if(strcmp(dfLog,kDfExpected)) fprintf(stderr,"run %u log:%s\n",r,dfLog);
+        Check(dfOverlaps==0,"no node body ran while a tick was in progress");
+        Check(dfThinkBodyCalls==0 && dfPlannerCalls==0,"the driver never entered 0x7D7BF0 or the whole planner 0x7D99F0");
+        Check(dfWorkerThread && dfWorkerThread!=owner && dfDestroyThread==owner,"node bodies ran on the AI worker; the marshal was served by the tick");
+        const U* d=snapshot.ai_deferred_words;
+        Check(d[0]==1 && d[1]==1 && d[2]==2 && d[3]==6 && d[4]==4 && d[5]==0,"admitted 6, busy refusals 4, K=1, B=2");
+        Check(d[6]==5 && d[7]==3 && d[8]==2 && d[9]==1 && d[10]==0,"consumed 5 (3 on time, 2 late); one think abandoned unseen");
+        Check(d[11]==9 && d[12]==4 && d[13]==1 && d[14]==2 && d[15]==1 && d[16]==0,
+              "9 slices, 4 budget hits; one node skipped and two relocated on resume; one child skipped");
+        Check(d[17]+d[18]==9 && d[21]==1 && d[24]==1 && d[25]==0,"every slice joined at a seam; one seam marshal service; one carried flag");
+        Check(d[26]==20 && d[27]==22 && d[28]==12 && d[29]==2 && d[30]==10 && d[31]==3,"per-kind node calls");
+        Check(d[41]==3 && d[42]==3 && d[40]==11 && d[43]==0,"spanned max 3, slices max 3, last consumption at tick 11, nothing outstanding");
+        Check(d[44]==3 && d[45]==1 && d[46]==1 && d[52]==3 && d[53]==1 && d[54]==1,"histograms of ticks spanned and slices per think");
+        Check(snapshot.ai_async2_route_words[1]==3 && snapshot.ai_async2_words[1]==9 && snapshot.ai_async2_words[2]==9 &&
+              snapshot.ai_async2_words[6]==0,"route schedule 3; one dispatch and one completion per slice; no watchdog");
+        printf("ai_deferred fixture run %u (workers=%u child_sleep=%u mid_sleep=%u gap=%u): slices=%u slice_max_us=%u "
+               "slice_sum_us=%u seam_waits=%u seam_complete=%u seam_wait_sum_us=%u unit_max_us=%u\n",r,runs[r].workers,
+               runs[r].childSleepMs,runs[r].midSleepMs,runs[r].gapMs,d[11],d[22],d[23],d[17],d[18],d[19],d[38]);
+        if(r==0) { reference=snapshot; memcpy(referenceLog,dfLog,sizeof(dfLog)); continue; }
+        bool same=!strcmp(referenceLog,dfLog);
+        for(U w:kDfDeterministic) same=same && reference.ai_deferred_words[w]==d[w];
+        Check(same,"identical log, consumption hash and schedule counters under scheduling perturbations and worker counts");
+    }
+    // K = 2, B = 1: a finished think is consumed only at the seam two ticks after its admission; the planner is busy in
+    // between. Stop with a think parked between slices (no native frame) completes and drops it.
+    {
+        static DfNode x={};
+        static U arrayX[1];
+        DfBuild(); x={}; x.vtable=A(dfWholeVt); x.id=9; arrayX[0]=A(&x);
+        dfPlanner[0x9C/4]=1; dfPlanner[0xA0/4]=A(arrayX); dfPlanner[0xB0/4]=1; dfPlanner[0xB4/4]=A(arrayX);
+        dfChildSleepMs=dfMidSleepMs=0; gapMs=0; tickIndex=0;
+        config.workers=1; config.ai_deferred=2u|(1u<<NTW2_AI_DEFERRED_BUDGET_SHIFT);
+        Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"K=2 generation activates");
+        for(U t=0;t<4;++t) tick(dfPlanner,0,0);
+        Sleep(50);
+        const ULONGLONG stopBegin=GetTickCount64();
+        Check(stop(nullptr)==0 && GetTickCount64()-stopBegin<5000,"stop with a think parked between slices completes");
+        ntw2_status snapshot={};
+        Check(ReadState(state,snapshot),"K=2 telemetry readable");
+        const U* d=snapshot.ai_deferred_words;
+        Check(!strcmp(dfLog," T1 A9 B9 W9 T2 W9 T3 A9 B9 W9 T4 W9"),"K=2: two slices per think, consumption at the second seam");
+        if(strcmp(dfLog," T1 A9 B9 W9 T2 W9 T3 A9 B9 W9 T4 W9")) fprintf(stderr,"K=2 log:%s\n",dfLog);
+        Check(d[1]==2 && d[2]==1 && d[3]==2 && d[4]==2 && d[6]==1 && d[7]==1 && d[8]==0 && d[11]==4 && d[12]==2 &&
+              d[45]==1 && d[53]==1 && d[40]==3,"K=2: admitted 2, busy 2, one on-time consumption spanning 2 ticks after 2 slices");
+    }
+    return failures ? 1 : 0;
+}
+
 // --grid-probation: the real runtime's vectored handler traps, logs and resumes accesses to a synthetic
 // PAGE_NOACCESS range armed through the same handler path the owner window uses for the native cell heads.
 typedef U (__stdcall *ntw2_grid_probation_probe_fn)(void* base,U bytes);
@@ -1981,6 +2172,7 @@ int main(int argc,char** argv) {
         if(!strcmp(argv[3],"--ai-completion-controller")) return AiCompletionFixture(true,start,stop,state,config);
         if(!strcmp(argv[3],"--ai-census")) return AiCensusFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--ai-async2")) return AiAsync2Fixture(start,stop,state,config);
+        if(!strcmp(argv[3],"--ai-deferred")) return AiDeferredFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--loco-owned-activation-refusal")) return LocoOwnedActivationRefusalFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--va-budget")) return VirtualBudgetFixture(false,start,stop,state,config);
         if(!strcmp(argv[3],"--va-budget-post")) return VirtualBudgetFixture(true,start,stop,state,config);
@@ -2546,6 +2738,7 @@ int main(int argc,char** argv) {
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-completion-controller"),"AI controller configuration preserves subordinate completion boundary scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-census"),"AI mutation census gates, clone-call retarget, restore and refusals scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-async2"),"ai_async2 boundary schedule, writer joins, worker marshalling, watchdog and private walk scenario passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--ai-deferred"),"ai_deferred sliced thinks: node order, consumption seams, busy refusals, revalidation and perturbation determinism scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--loco-owned-activation-refusal"),"owned activation without a scene fails closed scenario (child process) passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--va-budget"),"activation VA floor and periodic minimum scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--va-budget-post"),"post-reservation VA refusal scenario passed");

@@ -48,6 +48,23 @@
 // never observes "drained" while a published call is outstanding. The lease and the worker's call start use a
 // store-then-check handshake on both sides (interlocked, sequentially consistent): no native call starts under a lease.
 // Nothing here suspends a thread, patches .text or copies native frames.
+//
+// Deferred schedule (--ai-deferred, ntw2_config::ai_deferred = K | B << 8; analysis/native-ai-deferred-think.md):
+//   * site 34 of tick N admits (planner, flag) as a deferred think unless that planner already has an outstanding
+//     (staged, sliced or finished-but-unconsumed) think: then the call is a busy refusal (native call skipped, counted);
+//     a refused nonzero full-walk flag is owed to the planner's next admitted think. Capacity: kMaxQueued outstanding.
+//   * the tick-end seam opens ONE slice for the inter-tick window: the worker runs the outstanding thinks in FIFO order
+//     through the private node driver (ntw2_ai_deferred) with a budget of B costed node units, then parks at a whole-node
+//     boundary (no native frame survives the slice). A think whose planner was not presented at site 34 during the tick
+//     that opens the slice is abandoned before the slice (its planner may be gone), never resumed.
+//   * the next tick's start is a BLOCKING join of that slice only (bounded by B), servicing marshals while it waits; no
+//     slice ever overlaps a tick. Then, in FIFO order, a finished think admitted at tick A is consumed at the first seam
+//     with tick >= A + K: only then is its planner admitted again. "Finished" is decided by the slice count, so every
+//     decision is a function of (tick index, site-34 order, live node counts, K, B), never of time.
+//   * structural joins and destructor/replacement gates keep their protocol: "in flight" is the open slice, so a
+//     non-tick owner teardown runs between slices, and the next slice revalidates every retained node by membership.
+//   * stop/fallback: outstanding thinks are abandoned at the next tick end (no frame to unwind); stop waits for the
+//     open slice exactly like a published batch.
 #include <stdint.h>
 
 namespace ntw2_ai_async2 {
@@ -89,18 +106,37 @@ static_assert(RFunctionEntries == 26 && RPinMarshal == 47 && RUnroutedEntries ==
 enum RouteSlot : U { SlotWalk, SlotObserver };      // 0x133E2DC (702BB0), 0x133773C (6A95A0)
 enum RouteClass : U { CWorkerPrivate, CWorkerIdle, CTick, COther };
 
+// Deferred schedule row ntw2_status::ai_deferred_words (labels NTW2_AI_DEFERRED_LABELS). Histogram buckets of ticks
+// spanned (admission tick -> consumption seam) and of slices per think: 1, 2, 3, 4, 5-8, 9-16, 17-32, >32.
+constexpr U kDeferWords = 64, kDeferBuckets = 8, kDeferVersion = 1;
+enum DeferWord : U {
+    DVersion, DK, DBudget, DAdmitted, DBusyRefusals, DCapacityRefusals, DConsumed, DConsumedOnTime, DConsumedLate,
+    DAbandonedUnseen, DAbandonedStop, DSlices, DBudgetHits, DNodesSkipped, DNodesRelocated, DChildrenSkipped,
+    DThinksDropped, DSeamSliceWaits, DSeamSliceComplete, DSeamWaitSum, DSeamWaitMax, DSeamMarshalServes,
+    DSliceMaxUs, DSliceSumUs, DFlagsCarried, DOverflows,
+    DCalls = 26,                // per ntw2_ai_deferred::Kind: pass A, pass B, is-current, generate, child, whole think
+    DUs = DCalls + 6,           // microseconds per kind
+    DUnitMaxUs = DUs + 6,       // worst single costed unit (generate / child / whole think)
+    DConsumeHash, DLastConsumeTick, DSpanMax, DSlicesMax, DOutstanding,
+    DSpanHist = 44, DSliceHist = DSpanHist + kDeferBuckets,
+    DSliceOver2ms = DSliceHist + kDeferBuckets, DSliceOver4ms, DReserved62, DReserved63
+};
+static_assert(DUnitMaxUs == 38 && DOutstanding == 43 && DSliceOver2ms == 60 && DReserved63 == 63 && kDeferWords == 64,
+              "ai_deferred word layout");
+
 // A pinned vtable slot: slot address vtable + 4 * slot (preferred VAs) must hold `original` exactly.
 // vtable == 0 is a clone-call gate (no data slot): used for the unrouted 0x83FD00 call inside AI2_POSITION_UPDATE.
 struct Pin { U vtable, slot, original, kind, argBytes; };
 const Pin* Pins();
 
 // Monitor, gates unpublished, worker idle. Creates the events once per process. False: event creation failed.
-bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerThread);
+// deferred = ntw2_config::ai_deferred (0: the boundary schedule; otherwise K in bits 0..7, B in bits 8..23).
+bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerThread, U deferred = 0);
 // Naked gate published into pin i's slot (or bound to a clone call for vtable == 0).
 U Gate(U pin);
 
 // Tick owner only.
-enum Admission : U { Queued, Synchronous };
+enum Admission : U { Queued, Synchronous, Busy }; // Busy: deferred schedule refused it (planner outstanding / capacity)
 U Admit(U planner, U flag = 0);
 void PublishBatch();                // tick-end seam: hand the staged calls to the worker, do not join
 void AbortBatch();                  // exceptional tick exit: drop the not-yet-published calls
@@ -108,6 +144,10 @@ void TickSeam();                    // next tick's start: blocking lifetime join
 void SetWake(U handle);             // runtime's AI wake event, signalled when queued work or a lease release needs it
 void Join(U kind);                  // blocking structural-writer join; services worker calls while waiting
 bool WorkerNext(U* planner, U* flag); // AI worker: pop the next published call; false = idle or a lease is held
+bool Deferred();                      // the generation runs the deferred schedule
+// AI worker, deferred schedule: run the open slice (FIFO, budget B) between enter() and leave(), which bracket the
+// native work (FPU state, think flag). False: no slice is open or a lease is held (idle transition done).
+bool WorkerSlice(void (*enter)(), void (*leave)());
 
 // AI worker only, around the whole native call of an admitted think.
 void WorkerBegin();
@@ -124,5 +164,6 @@ bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)());
 bool Drain(U timeoutMs);
 void Snapshot(volatile U* out);
 void RouteSnapshot(volatile U* out);
+void DeferredSnapshot(volatile U* out);
 }
 #endif

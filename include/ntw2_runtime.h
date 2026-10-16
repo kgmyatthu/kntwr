@@ -226,6 +226,30 @@ enum ntw2_memory_word {
     "marshal_dtor_13376fc", "marshal_dtor_13376ac", "marshal_command_805ce0", "marshal_command_7dec70", \
     "marshal_call_83fd00", "unrouted_83fd00_entries", "lookup_capacity", "gather_capacity", "walk_capacity", \
     "scratch_mask"
+/* NTW2_AI_ASYNC2 deferred schedule (ntw2_config::ai_deferred, launcher --ai-deferred [--ai-deferred-k K]
+   [--ai-deferred-budget B]). A site-34 think of tick A runs in count-budgeted slices (B generate/child/whole-think
+   node calls per inter-tick window, passes free) through a private node driver; the next tick start joins only the
+   open slice; a finished think is consumed at the first seam >= A + K; while outstanding, its planner's site-34 calls
+   are busy refusals. */
+#define NTW2_AI_DEFERRED_WORDS 64u /* ai_deferred_words; layout src/ntw2_ai_async2.h (DeferWord), labels NTW2_AI_DEFERRED_LABELS */
+#define NTW2_AI_DEFERRED_K_MASK 0xFFu
+#define NTW2_AI_DEFERRED_MAX_K 32u
+#define NTW2_AI_DEFERRED_BUDGET_SHIFT 8u
+#define NTW2_AI_DEFERRED_BUDGET_MASK 0xFFFF00u
+#define NTW2_AI_DEFERRED_DEFAULT_K 1u
+#define NTW2_AI_DEFERRED_DEFAULT_BUDGET 2u
+#define NTW2_AI_DEFERRED_BUCKET_LABELS(p) p "_1", p "_2", p "_3", p "_4", p "_5_8", p "_9_16", p "_17_32", p "_gt32"
+#define NTW2_AI_DEFERRED_KIND_LABELS(p) p "_pass_a", p "_pass_b", p "_is_current", p "_generate", p "_child_think", \
+    p "_whole_think"
+#define NTW2_AI_DEFERRED_LABELS \
+    "version", "k", "budget", "admitted", "busy_refusals", "capacity_refusals", "consumed", "consumed_on_time", \
+    "consumed_late", "abandoned_unseen", "abandoned_stop", "slices", "budget_hits", "nodes_skipped", \
+    "nodes_relocated", "children_skipped", "thinks_dropped", "seam_slice_waits", "seam_slice_complete", \
+    "seam_wait_sum_us", "seam_wait_max_us", "seam_marshal_serves", "slice_max_us", "slice_sum_us", "flags_carried", \
+    "snapshot_overflows", NTW2_AI_DEFERRED_KIND_LABELS("calls"), NTW2_AI_DEFERRED_KIND_LABELS("us"), "unit_max_us", \
+    "consume_hash", "last_consume_tick", "spanned_max", "slices_max", "outstanding", \
+    NTW2_AI_DEFERRED_BUCKET_LABELS("spanned"), NTW2_AI_DEFERRED_BUCKET_LABELS("slices"), "slices_over_2ms", \
+    "slices_over_4ms", "reserved62", "reserved63"
 #define NTW2_IMAGE_SHA256 "13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4"
 
 /* The launcher validates the file before launch. The in-process runtime also
@@ -245,6 +269,7 @@ typedef struct ntw2_config {
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
     uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS in bits 0..15 (NTW2_PUPPET_UNIT_MASK), nonzero exactly when NTW2_PUPPET is set; optional flag NTW2_PUPPET_STATS_OFF; other bits refused. */
+    uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -803,6 +828,12 @@ typedef struct ntw2_status {
        inclusive/exclusive cycles and per-occurrence second moments). Layout and labels in src/brain2/native_brain_s0.h.
        Tick-owner writer. Reset at activation, retained after stop. */
     uint32_t brain_s0_words[NTW2_BRAIN_S0_WORDS];
+    /* NTW2_AI_ASYNC2 deferred schedule (appended after brain_s0_words; ntw2_config::ai_deferred): admissions, busy
+       refusals, consumption (on time = at the first seam >= admission tick + K), abandonment, slices and budget hits,
+       node revalidation, seam joins, per-kind node calls and microseconds, histograms of ticks spanned and slices per
+       think. NTW2_AI_DEFERRED_LABELS order, layout src/ntw2_ai_async2.h (DeferWord). Written by the tick owner and the
+       AI worker; a poll is a non-atomic snapshot. All zero without the flag; reset at activation, retained after stop. */
+    uint32_t ai_deferred_words[NTW2_AI_DEFERRED_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1119,9 +1150,10 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(ntw2_config) == 52 && offsetof(ntw2_config, loco_flags) == 36 &&
+static_assert(sizeof(ntw2_config) == 56 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
-              offsetof(ntw2_config, puppet_units) == 48, "configuration ABI is append-only");
+              offsetof(ntw2_config, puppet_units) == 48 && offsetof(ntw2_config, ai_deferred) == 52,
+              "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
 static_assert(offsetof(ntw2_status,ai_slice_budget_words) == offsetof(ntw2_status,ai_ctrl_words) + 16 * sizeof(uint32_t) &&
               NTW2_AI_SLICE_BUDGET_WORDS == 8u, "slice budget telemetry preserves its shipped offset");
@@ -1218,8 +1250,10 @@ static_assert(offsetof(ntw2_status,puppet_mover_words) + NTW2_PUPPET_MOVER_WORDS
               NTW2_PUPPET_MOVER_WORDS == 32u, "puppet mover row appends after puppet_divert_words");
 static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_PUPPET_SELECT_WORDS == 32u, "puppet select row appends after puppet_mover_words");
-static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after puppet_select_words");
+static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&
