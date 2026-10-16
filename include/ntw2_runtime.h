@@ -281,6 +281,39 @@ enum ntw2_memory_word {
     "hist_outside", "hist_first", "flags_latched", \
     "id_calls", "id_served", "pose_served", "dist_calls", "dist_served", "distinct_RV", "dist_mismatch", "boundary_repeat", \
     "geo_spare8", "geo_spare9", "geo_spare10", "geo_spare11", "geo_spare12", "geo_spare13", "geo_spare14", "geo_spare15"
+/* --ai-prepass-census / --ai-presize (ntw2_config::ai_prepass_flags; src/ntw2_planner_prepass.h). CENSUS: observation of the AI planner's
+   child thinks and covered 0x7F1D40 walks on the thread that executes the think (AI worker under NTW2_AI_ASYNC); native always executes
+   once, unchanged. PRESIZE: behaviour-preserving query-local reservation of the 0x559090 hit-pair buffer. Bits 0x4 / 0x8 are reserved
+   for the prepass shadow / live modes (the sibling child widens NTW2_AI_PREPASS_FLAGS_VALID). Nonzero requires a routed MANAGER tick
+   (PROFILE or a simulation feature) and excludes NTW2_AI_ASYNC2; CENSUS excludes every other bit but PRESIZE. Row layout: header of
+   src/ntw2_planner_prepass.h. */
+#define NTW2_AI_PREPASS_CENSUS 0x1u /* --ai-prepass-census */
+#define NTW2_AI_PRESIZE 0x2u        /* --ai-presize */
+#define NTW2_AI_POLY_SHADOW 0x4u /* --ai-poly-shadow: native answers every 0x80DCF0 polygon test, ntw2_planner_search compares bit-for-bit (AL, x87 status, MXCSR) */
+#define NTW2_AI_POLY 0x8u        /* --ai-poly: exact SSE replacement of the kind-0 0x10EC150 OBB/polygon kernel, native fallback by reason */
+#define NTW2_AI_PREPASS_FLAGS_VALID 0xFu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones */
+#define NTW2_AI_PREPASS_WORDS 32u /* ai_prepass_words (src/ntw2_planner_search.h row layout, version 1) */
+#define NTW2_AI_PREPASS_LABELS \
+    "version", "mode", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", "shadow_compares", \
+    "mismatch_al", "mismatch_x87", "mismatch_mxcsr", "true_results", "vertices_sum", "vertices_max", "v_le16", "v_le64", \
+    "v_le256", "v_gt256", "observer_routed", "observer_unrouted", "spare21", "spare22", "spare23", "spare24", "spare25", \
+    "spare26", "spare27", "spare28", "spare29", "spare30", "spare31"
+#define NTW2_AI_PREPASS_CENSUS_WORDS 82u /* ai_prepass_census_words */
+#define NTW2_AI_PREPASS_CLASS_LABELS(c) c "_thinks", c "_think_us", c "_walk_us"
+#define NTW2_AI_PREPASS_CENSUS_LABELS \
+    "version", "scopes", "node_thinks", "child_thinks", "walks", "walks_in_child", "distinct", "duplicates", "dup_same_child", \
+    "unsupported", "overflow", "max_walks_scope", "max_distinct_scope", "max_walks_child", "think_us_sum", "think_us_max", "walk_us", \
+    "gather_us", "traversal_us", "max_walk_us", "polygon_tests", "res_al0", "res_al1", "gathered_sum", "gathered_max", \
+    "list_unsupported", "child_us_sum", "child_us_max", "d1_checked", "d1_other_thinks", "d1_other_words", "d1_list_thinks", \
+    "d1_self_thinks", "d1_self_words", "d1_truncated", "world_diff", "world_same", "site_7C7FD3", "site_7C8113", "site_other", \
+    NTW2_AI_PREPASS_CLASS_LABELS("le8ms"), NTW2_AI_PREPASS_CLASS_LABELS("le32ms"), NTW2_AI_PREPASS_CLASS_LABELS("le128ms"), \
+    NTW2_AI_PREPASS_CLASS_LABELS("le512ms"), NTW2_AI_PREPASS_CLASS_LABELS("gt512ms"), \
+    "presize_queries", "presize_reserved", "presize_skipped_nonempty", "presize_skipped_nobound", "presize_clamped", \
+    "presize_alloc_failed", "presize_pairs_reserved", "presize_hits_sum", "flags", \
+    "poly_vertices_sum", "poly_vertices_max", "poly_hit", "poly_vertices_unreadable", \
+    "poly_v_le8_calls", "poly_v_le16_calls", "poly_v_le32_calls", "poly_v_le64_calls", "poly_v_le256_calls", "poly_v_gt256_calls", \
+    "poly_v_le8_us", "poly_v_le16_us", "poly_v_le32_us", "poly_v_le64_us", "poly_v_le256_us", "poly_v_gt256_us", \
+    "site_808492", "poly_v_gt1024"
 #define NTW2_IMAGE_SHA256 "13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4"
 
 /* The launcher validates the file before launch. The in-process runtime also
@@ -302,6 +335,7 @@ typedef struct ntw2_config {
     uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS in bits 0..15 (NTW2_PUPPET_UNIT_MASK), nonzero exactly when NTW2_PUPPET is set; optional flag NTW2_PUPPET_STATS_OFF; other bits refused. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
+    uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE flags (launcher --ai-prepass-census, --ai-presize); 0: off. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -891,6 +925,18 @@ typedef struct ntw2_status {
        NTW2_UNIT_FATIGUE_LABELS), 128..255 the posture/engage half (src/brain2/native_unit_posture_engage.h
        NTW2_UNIT_POSTURE_ENGAGE_LABELS). Tick-owner writer; reset at activation, retained after stop; all zero without a unit flag. */
     uint32_t brain_unit_policy_words[NTW2_BRAIN_UNIT_POLICY_WORDS];
+    /* --ai-prepass-census / --ai-presize (appended after brain_unit_policy_words; src/ntw2_planner_prepass.h row layout, labels
+       NTW2_AI_PREPASS_CENSUS_LABELS): word 0 layout version (1; 0 while the flags are off), think/walk/D1/world-change counters, microsecond
+       sums converted from QPC, five think-duration classes, the 0x559090 presize counters (words 55..62), word 63 the latched flags and the
+       0x80DCF0 polygon vertex-count histogram (words 64..79) and the 0x808492 observer-route walk count (80).
+       Written by the thread that executes the think (AI worker under NTW2_AI_ASYNC); a poll is a non-atomic snapshot. All zero without
+       the flags; reset at activation, retained after stop. */
+    uint32_t ai_prepass_census_words[NTW2_AI_PREPASS_CENSUS_WORDS];
+    /* --ai-poly-shadow / --ai-poly (appended after ai_prepass_census_words; src/ntw2_planner_search.h): word 0 layout version (1; 0 while the
+       poly bits are off), mode, kernel calls, served/refused-by-reason counts, shadow compare mismatches, vertex-count classes and the observer
+       slot routing counts. Written by the thread executing the think; a poll is a non-atomic snapshot. Zero without the bits; reset at
+       activation, retained after stop. */
+    uint32_t ai_prepass_words[NTW2_AI_PREPASS_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1207,10 +1253,10 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(ntw2_config) == 60 && offsetof(ntw2_config, loco_flags) == 36 &&
+static_assert(sizeof(ntw2_config) == 64 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
               offsetof(ntw2_config, puppet_units) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
-              offsetof(ntw2_config, ai_ctrl_flags) == 56,
+              offsetof(ntw2_config, ai_ctrl_flags) == 56 && offsetof(ntw2_config, ai_prepass_flags) == 60,
               "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
 static_assert(offsetof(ntw2_status,ai_slice_budget_words) == offsetof(ntw2_status,ai_ctrl_words) + 16 * sizeof(uint32_t) &&
@@ -1320,11 +1366,18 @@ static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS *
 static_assert(offsetof(ntw2_status,loco_grid_build_words) + NTW2_LOCO_GRID_BUILD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_unit_policy_words) &&
               NTW2_LOCO_GRID_BUILD_WORDS == 16u && NTW2_LOCO_GRID_INCREMENTAL == 0x100u &&
               (NTW2_LOCO_FLAGS_VALID & NTW2_LOCO_GRID_INCREMENTAL) != 0, "loco_grid_build row appends after loco_cw_words");
-static_assert(offsetof(ntw2_status,brain_unit_policy_words) + NTW2_BRAIN_UNIT_POLICY_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+static_assert(offsetof(ntw2_status,brain_unit_policy_words) + NTW2_BRAIN_UNIT_POLICY_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_prepass_census_words) &&
               NTW2_BRAIN_UNIT_POLICY_WORDS == 256u && NTW2_BRAIN_UNIT_FATIGUE == 0x200u && NTW2_BRAIN_UNIT_FATIGUE_SHADOW == 0x400u &&
               NTW2_BRAIN_UNIT_POSTURE == 0x800u && NTW2_BRAIN_UNIT_POSTURE_SHADOW == 0x1000u && NTW2_BRAIN_UNIT_ENGAGE == 0x2000u &&
               NTW2_BRAIN_UNIT_ENGAGE_SHADOW == 0x4000u && (NTW2_BRAIN_FLAGS_VALID & 0x7e00u) == 0x7e00u,
               "brain_unit_policy row appends after loco_grid_build_words; unit flags 0x200..0x4000 are valid brain flags");
+static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_prepass_words) &&
+              offsetof(ntw2_status,ai_prepass_words) + NTW2_AI_PREPASS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_PREPASS_WORDS == 32u && NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&
+              NTW2_AI_POLY_SHADOW == 0x4u && NTW2_AI_POLY == 0x8u &&
+              (NTW2_AI_PREPASS_FLAGS_VALID & (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)) ==
+                  (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY),
+              "ai_prepass_census row appends after brain_unit_policy_words; ai_prepass_words row is the last status member");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

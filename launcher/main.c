@@ -210,6 +210,7 @@ typedef struct Options {
     uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
     uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
     uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags) */
+    uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize: NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -1175,6 +1176,8 @@ static const char *const k_ai_async2_metrics[NTW2_AI_ASYNC2_WORDS] = { NTW2_AI_A
 static const char *const k_ai_async2_route_metrics[NTW2_AI_ASYNC2_ROUTE_WORDS] = { NTW2_AI_ASYNC2_ROUTE_LABELS };
 static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_AI_DEFERRED_LABELS };
 static const char *const k_ai_ctrl_reuse_metrics[NTW2_AI_CTRL_REUSE_WORDS] = { NTW2_AI_CTRL_REUSE_LABELS };
+static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORDS] = { NTW2_AI_PREPASS_CENSUS_LABELS };
+static const char *const k_ai_prepass_metrics[NTW2_AI_PREPASS_WORDS] = { NTW2_AI_PREPASS_LABELS };
 /* --ai-ctrl-* (src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry). */
 static void print_ai_ctrl(const uint32_t *w)
 {
@@ -1186,6 +1189,55 @@ static void print_ai_ctrl(const uint32_t *w)
     say(L"\n");
 }
 static double pct(uint32_t part, uint32_t whole) { return whole ? 100.0 * (double)part / (double)whole : 0.0; }
+/* --ai-prepass-census / --ai-presize (src/ntw2_planner_prepass.h): per-think verdict lines, then every nonzero labelled word. */
+static void print_ai_prepass(const uint32_t *w)
+{
+    unsigned i;
+    uint32_t scopes = w[1], walks = w[4], classified = w[6] + w[7];
+    if (!w[0]) return;
+    if (w[63] & NTW2_AI_PREPASS_CENSUS) {
+        static const char *const cls[5] = { "<=8ms", "<=32ms", "<=128ms", "<=512ms", ">512ms" };
+        say(L"  ai_prepass census: think_scopes=%lu node_thinks=%lu child_thinks=%lu walks=%lu queries/think=%.1f distinct/think=%.1f "
+            L"duplicate%%=%.1f unsupported=%lu overflow=%lu max_walks/think=%lu max_distinct/think=%lu\n",
+            (unsigned long)scopes, (unsigned long)w[2], (unsigned long)w[3], (unsigned long)walks,
+            scopes ? (double)walks / scopes : 0.0, scopes ? (double)w[6] / scopes : 0.0, pct(w[7], classified),
+            (unsigned long)w[9], (unsigned long)w[10], (unsigned long)w[11], (unsigned long)w[12]);
+        say(L"  ai_prepass walk time: walk_us=%lu (gather %.1f%%, traversal %.1f%%) think_us=%lu walk_share_of_think=%.1f%% "
+            L"polygon_tests=%lu res_al0=%lu res_al1=%lu gathered/walk=%.1f\n",
+            (unsigned long)w[16], pct(w[17], w[16]), pct(w[18], w[16]), (unsigned long)w[14], pct(w[16], w[14]),
+            (unsigned long)w[20], (unsigned long)w[21], (unsigned long)w[22], walks ? (double)w[23] / walks : 0.0);
+        for (i = 0; i < 5; ++i)
+            say(L"  ai_prepass think class %hs: thinks=%lu think_us=%lu walk_us=%lu walk_share=%.1f%%\n", cls[i],
+                (unsigned long)w[40 + 3 * i], (unsigned long)w[41 + 3 * i], (unsigned long)w[42 + 3 * i],
+                pct(w[42 + 3 * i], w[41 + 3 * i]));
+        say(L"  ai_prepass D1: checked=%lu verdict=%hs other_child_thinks=%lu other_words=%lu list_changed=%lu self_thinks=%lu "
+            L"self_words=%lu truncated=%lu\n",
+            (unsigned long)w[28], w[29] ? "CROSS_TALK" : "no_cross_talk", (unsigned long)w[29], (unsigned long)w[30],
+            (unsigned long)w[31], (unsigned long)w[32], (unsigned long)w[33], (unsigned long)w[34]);
+        say(L"  ai_prepass world: same_key_diff_list=%lu same_key_same_list=%lu verdict=%hs\n", (unsigned long)w[35],
+            (unsigned long)w[36], w[35] ? "WORLD_CHANGES_BETWEEN_IDENTICAL_QUERIES" : "stable");
+    }
+    say(L"  ai_prepass: flags=0x%lX", (unsigned long)w[63]);
+    for (i = 0; i < NTW2_AI_PREPASS_CENSUS_WORDS; ++i)
+        if (i != 63 && w[i]) say(L" %hs=%lu", k_ai_prepass_census_metrics[i], (unsigned long)w[i]);
+    say(L"\n");
+}
+/* --ai-poly-shadow / --ai-poly (src/ntw2_planner_search.h): one verdict line, then every nonzero labelled word. */
+static void print_ai_poly(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"  ai_poly: mode=%hs calls=%lu served=%.1f%% fallback kind=%lu fp_state=%lu domain=%lu walk_cap=%lu mean_vertices=%.1f max_vertices=%lu",
+        w[1] == 1 ? "shadow" : "live", (unsigned long)w[2], pct(w[3], w[2]), (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6],
+        (unsigned long)w[7], w[3] ? (double)w[13] / w[3] : 0.0, (unsigned long)w[14]);
+    if (w[1] == 1)
+        say(L" shadow_compares=%lu mismatch_al=%lu mismatch_x87=%lu mismatch_mxcsr=%lu verdict=%hs", (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
+            (unsigned long)w[11], (w[9] || w[10] || w[11]) ? "MISMATCH" : "bit_identical");
+    say(L"\n  ai_poly words:");
+    for (i = 0; i < NTW2_AI_PREPASS_WORDS; ++i)
+        if (w[i]) say(L" %hs=%lu", k_ai_prepass_metrics[i], (unsigned long)w[i]);
+    say(L"\n");
+}
 /* Per-unit brain Stage A agreement table (native_unit_brain.h, version 2). held = this stage's UnitDecision (the
    unit's strict-majority record of the previous stage, valid while the unit-level input signature is unchanged),
    over non-exception main-class soldiers. tick = this stage's own strict majority over its voters (main-class
@@ -1936,6 +1988,8 @@ static void print_module_words(const ntw2_status *s)
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_ai_ctrl(s->ai_ctrl_reuse_words);
+    print_ai_prepass(s->ai_prepass_census_words);
+    print_ai_poly(s->ai_prepass_words);
     if (s->requested_mask & NTW2_PUPPET)
         print_puppet(s->puppet_words, s->puppet_motion_words, s->puppet_divert_words, s->puppet_mover_words,
                      s->puppet_select_words);
@@ -4161,6 +4215,20 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_ctrl_reuse_metrics[ctrl_index], (unsigned long)r->last.ai_ctrl_reuse_words[ctrl_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_ctrl\": null,\n");
+    if (r->have_status && r->cfg.ai_prepass_flags) {
+        unsigned prepass_index;
+        sb_fmt(&b, "  \"ai_prepass_census\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
+        for (prepass_index = 0; prepass_index < NTW2_AI_PREPASS_CENSUS_WORDS; ++prepass_index)
+            sb_fmt(&b, ", \"%s\": %lu", k_ai_prepass_census_metrics[prepass_index], (unsigned long)r->last.ai_prepass_census_words[prepass_index]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"ai_prepass_census\": null,\n");
+    if (r->have_status && (r->cfg.ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY))) {
+        unsigned poly_index;
+        sb_fmt(&b, "  \"ai_poly\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
+        for (poly_index = 0; poly_index < NTW2_AI_PREPASS_WORDS; ++poly_index)
+            sb_fmt(&b, ", \"%s\": %lu", k_ai_prepass_metrics[poly_index], (unsigned long)r->last.ai_prepass_words[poly_index]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"ai_poly\": null,\n");
     if (r->have_status) {
         const ntw2_status *s = &r->last;
         sb_put(&b, "  \"last_status\": {\n    \"phase\": ", 32);
@@ -4774,6 +4842,7 @@ static int install_runtime(Run *r)
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
+    r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
     {
@@ -5317,6 +5386,16 @@ static void usage(void)
         L"  --ai-ctrl-geometry    identity/pose/region-distance reuse inside a scoring batch\n"
         L"  --ai-ctrl-verify      with --ai-ctrl-histogram/-geometry: recompute native for every served value; a mismatch returns the\n"
         L"                        native value and latches the feature off\n"
+        L"  --ai-prepass-census   needs a routed tick (profile or a simulation feature, ai recommended); excludes ai_async2: AI planner think census on the\n"
+        L"                        executing thread (AI worker with ai): child thinks, covered 0x7F1D40 walks (distinct/duplicate keys, gather vs\n"
+        L"                        traversal time, 0x80DCF0 polygon vertex histogram), D1 cross-child writes, world-change, think-duration classes;\n"
+        L"                        native always executes once (ai_prepass_census row, several lines)\n"
+        L"  --ai-presize          behaviour-preserving query-local reserve of the 0x559090 hit-pair buffer (vtable word 0x13247EC); may combine\n"
+        L"                        with --ai-prepass-census; needs a routed tick, excludes ai_async2\n"
+        L"  --ai-poly-shadow      needs a routed tick, excludes ai_async2/--ai-prepass-census/--ai-poly: exact-kernel shadow. The native 0x80DCF0 OBB/polygon\n"
+        L"                        predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
+        L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n"
+        L"  --ai-poly             same routing; the replacement answers, native on any guard refusal (counted by reason in the ai_poly row)\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -5399,6 +5478,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->ai_deferred_k = NTW2_AI_DEFERRED_DEFAULT_K;
     o->ai_deferred_budget = NTW2_AI_DEFERRED_DEFAULT_BUDGET;
     o->ai_ctrl_flags = 0;
+    o->ai_prepass_flags = 0;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
     o->activate = TRUE;
@@ -5440,6 +5520,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--ai-ctrl-histogram")) o->ai_ctrl_flags |= NTW2_AI_CTRL_HISTOGRAM;
         else if (!wcscmp(name, L"--ai-ctrl-geometry")) o->ai_ctrl_flags |= NTW2_AI_CTRL_GEOMETRY;
         else if (!wcscmp(name, L"--ai-ctrl-verify")) o->ai_ctrl_flags |= NTW2_AI_CTRL_VERIFY;
+        else if (!wcscmp(name, L"--ai-prepass-census")) o->ai_prepass_flags |= NTW2_AI_PREPASS_CENSUS;
+        else if (!wcscmp(name, L"--ai-presize")) o->ai_prepass_flags |= NTW2_AI_PRESIZE;
+        else if (!wcscmp(name, L"--ai-poly-shadow")) o->ai_prepass_flags |= NTW2_AI_POLY_SHADOW;
+        else if (!wcscmp(name, L"--ai-poly")) o->ai_prepass_flags |= NTW2_AI_POLY;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
@@ -5538,6 +5622,15 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         (o->ai_ctrl_flags && (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)))) {
         errsay(L"--ai-ctrl-census is shadow-only (excludes -histogram/-geometry); --ai-ctrl-verify needs -histogram or -geometry; "
                L"every --ai-ctrl-* excludes the ai_ctrl and ai_async2 features.\n");
+        return -1;
+    }
+    if (o->ai_prepass_flags && (o->mask & NTW2_AI_ASYNC2)) {
+        errsay(L"--ai-prepass-census / --ai-presize exclude the ai_async2 feature (its think runs on private clones outside a site-34 scope).\n");
+        return -1;
+    }
+    if (((o->ai_prepass_flags & NTW2_AI_POLY_SHADOW) && (o->ai_prepass_flags & NTW2_AI_POLY)) ||
+        ((o->ai_prepass_flags & NTW2_AI_PREPASS_CENSUS) && (o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)))) {
+        errsay(L"--ai-poly-shadow, --ai-poly and --ai-prepass-census are mutually exclusive (the census perturbs timing; shadow and live are separate gates).\n");
         return -1;
     }
     if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
@@ -5759,6 +5852,7 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.puppet_units = (r->opt.mask & NTW2_PUPPET) ? r->opt.puppet_units | (r->opt.puppet_stats ? 0u : NTW2_PUPPET_STATS_OFF) : 0u;
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
+    r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];

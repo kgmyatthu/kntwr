@@ -51,6 +51,8 @@
 #include "formation/native_formation_runtime.h"
 #include "path/native_path_runtime.h"
 #include "ntw2_walk_memo.h"
+#include "ntw2_planner_search.h"
+#include "ntw2_planner_prepass.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -97,10 +99,10 @@ Module formation, query, path;
 volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
-constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins, with margin
+constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin
 Slot slots[kMaxSlots];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
-static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount<=kMaxSlots, "slot table holds every possible hook");
+static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2<=kMaxSlots, "slot table holds every possible hook");
 __declspec(align(64)) ntw_pool pool;
 bool poolReady, poolOwned; // ownership also covers an init-unwind whose join needs retrying
 bool collideSampleReady; // current runtime start has initialized solver counters; stop retains final samples
@@ -406,15 +408,27 @@ U BrainOwner(U site) {
 volatile U plannerWalkWords[16];
 U walkScopeDepth, walksInScope;
 volatile U walkScopeThread;
-void BeginWalkScope() {
+// The scope belongs to the thread that EXECUTES the site-34 planner update: the tick thread without NTW2_AI_ASYNC (or when the
+// dispatch is refused), the AI worker while it runs the dispatched original 0x7D99F0 (the tick thread only waits in AiBarrier).
+extern volatile U aiThreadId;
+extern volatile LONG aiBusy;
+bool PlannerScopeThread(U tid) {
+    // The AI worker joins the scope only for generations that asked for the prepass hooks (census or the sibling's poly modes); the
+    // default ai/profile stack keeps the worker on the original code (no clone chain, walk memo or site frames on it).
+    const bool workerRoute=(config.ai_prepass_flags&(NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY))!=0;
+    return walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)));
+}
+void BeginWalkScope(U planner) {
     if (walkScopeDepth++) return;
     walksInScope=0;
     walkScopeThread=GetCurrentThreadId();
     ntw2_walk_memo::begin();
+    ntw2_prepass::ScopeBegin(planner);
 }
-void EndWalkScope() {
+void EndWalkScope(U us) {
     if (--walkScopeDepth) return;
     ntw2_walk_memo::end();
+    ntw2_prepass::ScopeEnd(us);
     walkScopeThread=0;
     ++plannerWalkWords[0];
     if (walksInScope>plannerWalkWords[10]) plannerWalkWords[10]=walksInScope;
@@ -430,8 +444,7 @@ extern "C" U __stdcall WalkStateRoute() {
     const bool routed=Ai2WalkRouted(tid);
     if (Load(&ai2Armed)) ntw2_ai_async2::NoteGate(ntw2_ai_async2::SlotWalk,routed);
     if (routed) return Ai2WalkEntry();
-    return walkScopeThread && walkScopeThread==tid
-        ? clones.entries[NTW2_CLONE_AI_STATE_UPDATE] : V(0x702bb0);
+    return PlannerScopeThread(tid) ? clones.entries[NTW2_CLONE_AI_STATE_UPDATE] : V(0x702bb0);
 }
 __declspec(naked) void WalkStateGate() {
     __asm lea esp, [esp-4]
@@ -607,11 +620,11 @@ extern "C" __declspec(noinline) void __stdcall EnterSite(U site, U* returnSlot, 
         if (site>=106 && site<=109) ++collisionWords[23];
         return; // Plain tail jump, no matching exit; census explicitly reports this gap.
     }
-    if (site==34) BeginWalkScope();
+    if (site==34) BeginWalkScope(ecx);
     SiteFrame& frame=siteStack[siteDepth++];
     frame.site=site;
     frame.returnAddress=*returnSlot;
-    frame.outputList=(site==41 || site==106) ? returnSlot[1] : 0;
+    frame.outputList=(site==41 || site==44 || site==106) ? returnSlot[1] : 0; // 44: the polygon argument of the 0x80DCF0 predicate (census V)
     siteThis[site]=ecx;
     frame.family=brainFamily;
     if (site<kBrainFirst+kBrainEntries && site>=kBrainFirst) brainFamily=site-kBrainFirst;
@@ -630,9 +643,11 @@ extern "C" __declspec(noinline) void __stdcall EnterSite(U site, U* returnSlot, 
     // In-place pop/push of the return slot; stack arguments never move.
     if ((config.enabled_mask&(NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) || (config.loco_flags&NTW2_LOCO_GRID_PROBATION)) ntw2_grid_census_site=site+1;
     *returnSlot=FnAddress(&SiteExit);
+    // Census (observation only): the covered walk's key is read before its frame timer starts.
+    if (site==40) ntw2_prepass::WalkBegin(ecx,returnSlot[1],frame.returnAddress,0);
     QueryPerformanceCounter(&frame.start);
 }
-extern "C" __declspec(noinline) U __stdcall LeaveSite() {
+extern "C" __declspec(noinline) U __stdcall LeaveSite(U eax) { // EAX of the exiting callee (SiteExit passes its saved EAX)
     LARGE_INTEGER end;
     QueryPerformanceCounter(&end);
     const SiteFrame& frame=siteStack[--siteDepth];
@@ -668,9 +683,10 @@ extern "C" __declspec(noinline) U __stdcall LeaveSite() {
         }
         if (frame.site<kBrainFirst+kBrainEntries) brainFamily=frame.family;
     }
-    if (frame.site==34) EndWalkScope();
-    if (frame.site==40) plannerWalkWords[7]+=us;
+    if (frame.site==34) EndWalkScope(us);
+    if (frame.site==40) { plannerWalkWords[7]+=us; ntw2_prepass::WalkEnd(eax,elapsed,end.QuadPart); }
     if (frame.site==41) {
+        ntw2_prepass::WalkGathered(frame.outputList,elapsed,end.QuadPart);
         ++plannerWalkWords[2]; plannerWalkWords[8]+=us;
         const U count=WordOrZero(frame.outputList+8);
         plannerWalkWords[5]+=count;
@@ -682,7 +698,7 @@ extern "C" __declspec(noinline) U __stdcall LeaveSite() {
         if (count>plannerWalkWords[4]) plannerWalkWords[4]=count;
     }
     if (frame.site==43) ++plannerWalkWords[6];
-    if (frame.site==44 || frame.site==45) { ++plannerWalkWords[11]; plannerWalkWords[9]+=us; }
+    if (frame.site==44 || frame.site==45) { ++plannerWalkWords[11]; plannerWalkWords[9]+=us; ntw2_prepass::WalkPolygon(frame.site==44 ? frame.outputList : 0,eax,elapsed); }
     if (frame.site+1==siteGateIndex && siteGateDepth && !--siteGateDepth) siteInProgress=0;
     return frame.returnAddress;
 }
@@ -699,6 +715,7 @@ __declspec(naked) void SiteExit() {
     __asm and esp, -16
     __asm fxsave [esp]
     __asm cld
+    __asm push dword ptr [ebp+28]
     __asm call LeaveSite
     __asm mov dword ptr [ebp+36], eax
     __asm fxrstor [esp]
@@ -1222,6 +1239,33 @@ __declspec(naked) void Ai2ObserverGate() {
     __asm fxsave [esp]
     __asm cld
     __asm call Ai2ObserverRoute
+    __asm mov dword ptr [ebp+36], eax
+    __asm fxrstor [esp]
+    __asm mov esp, ebp
+    __asm popad
+    __asm popfd
+    __asm ret
+}
+// --ai-poly-shadow / --ai-poly (and the census' observer route): the SAME observer slot 16 of 0x13376FC, but routed to pure-retarget PS_* clones
+// that run on the ORIGINAL scratch, only inside a site-34 scope on the executing thread (PlannerScopeThread: tick thread without `ai`,
+// the AI worker under `ai`). Everyone else, including main/render, keeps the original. Excludes AI_ASYNC2, which owns the same slot.
+U psWalkTarget; // target of PS_808040's 0x808492 call: poly -> the bare PS_WALK clone, census-only -> the timed SITE_CALL_40 thunk
+__declspec(naked) void PsWalkCall() { __asm jmp dword ptr [psWalkTarget] }
+extern "C" U __stdcall PsObserverRoute() {
+    const bool routed=PlannerScopeThread(GetCurrentThreadId());
+    ntw2_poly::NoteObserver(routed);
+    return routed ? clones.entries[NTW2_CLONE_PS_6A95A0] : V(0x6A95A0);
+}
+__declspec(naked) void PsObserverGate() {
+    __asm lea esp, [esp-4]
+    __asm pushfd
+    __asm pushad
+    __asm mov ebp, esp
+    __asm sub esp, 528
+    __asm and esp, -16
+    __asm fxsave [esp]
+    __asm cld
+    __asm call PsObserverRoute
     __asm mov dword ptr [ebp+36], eax
     __asm fxrstor [esp]
     __asm mov esp, ebp
@@ -2211,6 +2255,9 @@ void SnapshotAiCtrl() {
     U geometry[ntw2_ai_ctrl_geometry::kStatusWords];
     ntw2_ai_ctrl_geometry::FillStatus(geometry);
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS-16;++i) row[16+i]=i<ntw2_ai_ctrl_geometry::kStatusWords ? geometry[i] : 0;
+    static_assert(ntw2_prepass::kCensusWords==NTW2_AI_PREPASS_CENSUS_WORDS, "census snapshot writes exactly the status row");
+    ntw2_prepass::CensusSnapshot(ntw2_state.ai_prepass_census_words); // --ai-prepass-*: same three poll/stop sites; all zero without the flags
+    for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=ntw2_poly::words[i]; // --ai-poly*: all zero without the bits
 }
 bool clonesCensus; // resident private clones were emitted with reader edge gates (census cannot be added to a resident arena)
 bool BuildClones() {
@@ -2220,6 +2267,8 @@ bool BuildClones() {
     }
     U bindings[NTW2_BIND_COUNT]={};
     bindings[NTW2_BIND_AI_CENSUS_REBUILD]=ntw2_ai_census::Gate(6);
+    bindings[NTW2_BIND_PS_WALK_CALL]=FnAddress(&PsWalkCall);
+    bindings[NTW2_BIND_PS_POLY]=FnAddress(&ntw2_poly::Gate);
     bindings[NTW2_BIND_ARMY_FSM_UPDATE]=FnAddress(&ArmyFsmGate);
     bindings[NTW2_BIND_TICK_ENTRY]=FnAddress(&TickGate);
     bindings[NTW2_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
@@ -2257,6 +2306,9 @@ bool BuildClones() {
     if (!ntw2_unit_policy::Bind(imageBase,bindings) || !ntw2_unit_fatigue::Bind(imageBase,bindings) ||
         !ntw2_unit_posture_engage::Bind(imageBase,bindings)) return false; // per-unit brain gates/data bindings (inert until Start)
     if (!ntw2_ai_ctrl::Bind(bindings) || !ntw2_ai_ctrl_geometry::Bind(imageBase,bindings)) return false; // gates are inert until Activate configures them
+    bindings[NTW2_BIND_PP_CHILD_THINK]=ntw2_prepass::ChildThinkGateAddress(); // --ai-prepass-census / --ai-presize gates: inert until Activate configures them
+    bindings[NTW2_BIND_PP_RESERVE]=ntw2_prepass::PresizeReserveGateAddress();
+    bindings[NTW2_BIND_PP_EXIT]=ntw2_prepass::PresizeExitGateAddress();
     ntw2_loco::Bind(delta,bindings); // before ntw2_build_clones: the module owns its clone bindings
     const U siteThunks[NTW2_TIMED_SITES]={
         FnAddress(&SiteCall0), FnAddress(&SiteCall1), FnAddress(&SiteCall2), FnAddress(&SiteCall3),
@@ -2321,6 +2373,7 @@ bool BuildClones() {
     for (U i=kBrainFirst;i<NTW2_TIMED_SITES;++i) if (!siteCallees[i]) { RecordError(MissingExport,0x1000+i); return false; }
     ntw2_walk_memo::configure(reinterpret_cast<ntw2_walk_memo::Kernel>(V(0x80dcf0)),
         reinterpret_cast<const U*>(V(0x1318038)),reinterpret_cast<const U*>(V(0x1318048)));
+    ntw2_prepass::PresizeConfigure(reinterpret_cast<ntw2_prepass::AllocFn>(V(0x449e10)));
     privateTick=clones.entries[NTW2_CLONE_TICK]; privateManager=clones.entries[NTW2_CLONE_BAL_MANAGER];
     return true;
 }
@@ -2670,9 +2723,19 @@ bool BuildSlots() {
         for (U table:tables) AddSlot(table+4,0x581200,clones.entries[NTW2_CLONE_FORM_COMMAND]);
     }
     if (config.enabled_mask & (kSimulation|NTW2_PROFILE)) AddSlot(0x132e954,0x5cc390,clones.entries[NTW2_CLONE_TASK]);
-    if (config.enabled_mask & (NTW2_PROFILE|NTW2_AI_ASYNC2)) AddSlot(0x133e2dc,0x702bb0,FnAddress(&WalkStateGate));
+    if ((config.enabled_mask & (NTW2_PROFILE|NTW2_AI_ASYNC2)) || (config.ai_prepass_flags & (NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY))) AddSlot(0x133e2dc,0x702bb0,FnAddress(&WalkStateGate));
+    // --ai-prepass-census: +0x10 of the ten node classes (pinned 0x7D7BF0) -> NodeThinkGate (clone only inside a site-34 scope on the
+    // executing thread). --ai-presize: the only vtable word reaching 0x551FE0 (0x13247EC = 0x56A610) -> the PRESIZE clone chain.
+    if (config.ai_prepass_flags & NTW2_AI_PREPASS_CENSUS)
+        for (U i=0;i<ntw2_prepass::kNodeThinkSlotCount;++i)
+            AddSlot(ntw2_prepass::kNodeThinkSlots[i],ntw2_prepass::kNodeThinkOriginal,ntw2_prepass::NodeThinkGateAddress());
+    if (config.ai_prepass_flags & NTW2_AI_PRESIZE)
+        AddSlot(ntw2_prepass::kPresizeSlot,ntw2_prepass::kPresizeSlotOriginal,clones.entries[NTW2_CLONE_PRESIZE_56A610]);
     // NTW2_AI_ASYNC2 observer LOS route: slot 16 of 0x13376FC, routed by thread (Ai2ObserverRoute).
     if (config.enabled_mask & NTW2_AI_ASYNC2) AddSlot(0x13376fc+4*16,0x6a95a0,FnAddress(&Ai2ObserverGate));
+    // --ai-poly* and --ai-prepass-census: the same slot, routed to the PS_* clone chain inside a site-34 scope (PsObserverRoute). Census-only
+    // runs reach the AI_WALK clone through the timed SITE_CALL_40 thunk (PsWalkCall target), so the census observes the 0x808492 route.
+    if (config.ai_prepass_flags & (NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY)) AddSlot(0x13376fc+4*16,0x6a95a0,FnAddress(&PsObserverGate));
     // Keep original entry slots intact in BRAIN2 observe/census mode. Its optional
     // timing is independent of the older profiling-family slot publication.
     if ((config.enabled_mask & NTW2_BRAIN) && !(config.enabled_mask & NTW2_BRAIN2))
@@ -3035,6 +3098,23 @@ bool Activate(const World& candidate) {
     siteCallees[33]=(config.enabled_mask&NTW2_AI_CTRL) ? FnAddress(&ControllerGate) :
         (config.enabled_mask&NTW2_AI_ASYNC2) ? FnAddress(&Ai2ControllerGate) : aiControllerOriginal;
     _InterlockedExchange(&ai2Armed,(config.enabled_mask&NTW2_AI_ASYNC2) ? 1 : 0);
+    // --ai-prepass-*: counters and tables are cleared before BuildSlots publishes the node/presize slots.
+    static_assert(ntw2_prepass::kFlagCensus==NTW2_AI_PREPASS_CENSUS && ntw2_prepass::kFlagPresize==NTW2_AI_PRESIZE, "prepass flag bits");
+    {
+        LARGE_INTEGER frequency; QueryPerformanceFrequency(&frequency);
+        const ntw2_prepass::Targets targets={V(0x7d7bf0),clones.entries[NTW2_CLONE_AI_THINK],clones.entries[NTW2_CLONE_AI_SHAPE_SEARCH],&PlannerScopeThread,
+                                             clones.entries[NTW2_CLONE_PS_808040]}; // the sibling's observer-route clone of 0x808040 (walk site 0x808492)
+        ntw2_prepass::CensusReset(config.ai_prepass_flags&(NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE),targets,frequency.QuadPart);
+    }
+    // --ai-poly*: configure/reset the row before BuildSlots publishes the observer slot. The kernel gate replaces the walk memo at the timed
+    // site 44 (R2/R3 AI_WALK clones); the PS_WALK clone calls the same gate through the bare PS_POLY binding.
+    {
+        const U polyBits=config.ai_prepass_flags&(NTW2_AI_POLY_SHADOW|NTW2_AI_POLY);
+        ntw2_poly::Configure(reinterpret_cast<ntw2_poly::Native>(V(0x80dcf0)),
+                             polyBits==NTW2_AI_POLY ? ntw2_poly::ModeLive : polyBits ? ntw2_poly::ModeShadow : ntw2_poly::ModeOff);
+        siteCallees[44]=polyBits ? FnAddress(&ntw2_poly::Gate) : FnAddress(&ntw2_walk_memo::kernel);
+        psWalkTarget=polyBits ? clones.entries[NTW2_CLONE_PS_WALK] : FnAddress(&SiteCall40);
+    }
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
     siteCallees[6]=(config.enabled_mask&NTW2_PUPPET) ? FnAddress(&PuppetStageGate) :
         (config.enabled_mask&NTW2_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
@@ -3310,6 +3390,12 @@ static U StartImpl(void* raw) {
         (next.ai_ctrl_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&(NTW2_AI_CTRL|NTW2_AI_ASYNC2)) ||
                                 ((next.ai_ctrl_flags&NTW2_AI_CTRL_CENSUS) && (next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))) ||
                                 ((next.ai_ctrl_flags&NTW2_AI_CTRL_VERIFY) && !(next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))))) ||
+        // --ai-prepass-*: the census hooks live behind the routed MANAGER tick and run on the thread executing site 34; the async2
+        // schedule (private clones, no site-34 scope on the executing thread) is excluded. CENSUS combines only with PRESIZE.
+        (next.ai_prepass_flags&~NTW2_AI_PREPASS_FLAGS_VALID) ||
+        (next.ai_prepass_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&NTW2_AI_ASYNC2) ||
+                                   ((next.ai_prepass_flags&NTW2_AI_PREPASS_CENSUS) && (next.ai_prepass_flags&~(NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE))) ||
+                                   ((next.ai_prepass_flags&NTW2_AI_POLY_SHADOW) && (next.ai_prepass_flags&NTW2_AI_POLY)))) ||
         // The puppet probe owns site 6 alone (BRAIN2/brain flags) and the class step slot (BRAIN profiling slots).
         (next.puppet_units&~(NTW2_PUPPET_UNIT_MASK|NTW2_PUPPET_STATS_OFF)) || (next.puppet_units&NTW2_PUPPET_UNIT_MASK)>NTW2_PUPPET_MAX_UNITS ||
         ((next.enabled_mask&NTW2_PUPPET)!=0)!=((next.puppet_units&NTW2_PUPPET_UNIT_MASK)!=0) ||
@@ -3337,6 +3423,7 @@ static U StartImpl(void* raw) {
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);
     ntw2_ai_async2::Reset(false,delta,&tickOwner,&aiThreadId); // zero row until a generation activates
     ntw2_ai_ctrl::Reset(0,delta,0); ntw2_ai_ctrl_geometry::Reset(); // zero rows until a generation activates (Activate configures)
+    { const ntw2_prepass::Targets none={}; ntw2_prepass::CensusReset(0,none,1); } // zero row until a generation activates
     memset(memoryWords,0,sizeof(memoryWords));
     memoryWords[NTW2_MEM_VERSION]=3;
     _InterlockedExchange(&budgetDisabledMask,0); budgetRetired=false;
@@ -3391,6 +3478,8 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_BRAIN_S0_WORDS;++i) ntw2_state.brain_s0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_UNIT_POLICY_WORDS;++i) ntw2_state.brain_unit_policy_words[i]=0;
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS;++i) ntw2_state.ai_ctrl_reuse_words[i]=0;
+    for (U i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) ntw2_state.ai_prepass_census_words[i]=0;
+    for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_DIVERT_WORDS;++i) ntw2_state.puppet_divert_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOVER_WORDS;++i) ntw2_state.puppet_mover_words[i]=0;

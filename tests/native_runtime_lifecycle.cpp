@@ -53,7 +53,7 @@ static_assert(NTW2_COLLIDE_LOD==0x400u && !(NTW2_ALL&NTW2_COLLIDE_LOD) &&
               (NTW2_VALID_MASK&NTW2_COLLIDE_LOD)==NTW2_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
 static_assert(NTW2_ALL==(NTW2_AI_ASYNC|NTW2_BATCH64|NTW2_VISUAL), "NTW2_ALL is exactly the shipping set batch64,ai,visual");
 static_assert(NTW2_BRAIN_SLOTS==23u && NTW2_BRAIN_FAMILIES==5u && NTW2_BRAIN_SITE_FIRST==46u && NTW2_BRAIN_SITES==49u && NTW2_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS+NTW2_PUPPET_DIVERT_WORDS+NTW2_PUPPET_MOVER_WORDS+NTW2_PUPPET_SELECT_WORDS+NTW2_BRAIN_S0_WORDS+NTW2_AI_DEFERRED_WORDS+NTW2_AI_CTRL_REUSE_WORDS+NTW2_LOCO_RELINK_WORDS+NTW2_LOCO_CW_WORDS+NTW2_LOCO_GRID_BUILD_WORDS+NTW2_BRAIN_UNIT_POLICY_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0, puppet motion, divert, mover, select, brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build and brain unit policy words without changing existing words");
+static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS+NTW2_PUPPET_DIVERT_WORDS+NTW2_PUPPET_MOVER_WORDS+NTW2_PUPPET_SELECT_WORDS+NTW2_BRAIN_S0_WORDS+NTW2_AI_DEFERRED_WORDS+NTW2_AI_CTRL_REUSE_WORDS+NTW2_LOCO_RELINK_WORDS+NTW2_LOCO_CW_WORDS+NTW2_LOCO_GRID_BUILD_WORDS+NTW2_BRAIN_UNIT_POLICY_WORDS+NTW2_AI_PREPASS_CENSUS_WORDS+NTW2_AI_PREPASS_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0, puppet motion, divert, mover, select, brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census and ai prepass words without changing existing words");
 static_assert(NTW2_AI_SLICE_BUDGET_WORDS==8u && offsetof(ntw2_status,ai_slice_budget_words)==offsetof(ntw2_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(ntw2_status,ai_park_words)==offsetof(ntw2_status,ai_slice_budget_words)+NTW2_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(ntw2_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -127,7 +127,10 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,loco_relink_words)+NTW2_LOCO_RELINK_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_cw_words) && NTW2_LOCO_RELINK_WORDS==32u &&
               offsetof(ntw2_status,loco_cw_words)+NTW2_LOCO_CW_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_grid_build_words) && NTW2_LOCO_CW_WORDS==32u &&
               offsetof(ntw2_status,loco_grid_build_words)+NTW2_LOCO_GRID_BUILD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_unit_policy_words) && NTW2_LOCO_GRID_BUILD_WORDS==16u &&
-              offsetof(ntw2_status,brain_unit_policy_words)+NTW2_BRAIN_UNIT_POLICY_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_BRAIN_UNIT_POLICY_WORDS==256u &&
+              offsetof(ntw2_status,brain_unit_policy_words)+NTW2_BRAIN_UNIT_POLICY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_census_words) && NTW2_BRAIN_UNIT_POLICY_WORDS==256u &&
+              offsetof(ntw2_status,ai_prepass_census_words)+NTW2_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_words) && NTW2_AI_PREPASS_CENSUS_WORDS==82u &&
+              offsetof(ntw2_status,ai_prepass_words)+NTW2_AI_PREPASS_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_AI_PREPASS_WORDS==32u &&
+              NTW2_AI_POLY_SHADOW==0x4u && NTW2_AI_POLY==0x8u && NTW2_AI_PREPASS_FLAGS_VALID==0xFu &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
 static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
@@ -182,7 +185,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,puppet_units)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,puppet_units)==48 && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -1443,6 +1446,105 @@ static void Ai2TeardownWhileThinking(Ai2Planner& p,U* cell,LONG started,U callsA
     Check(ai2Probe.calls==probeCalls && ai2Probe.thinksAtEntry==callsAtEntry && ai2Probe.thread==helperId,what);
     Sleep(50); // the lease release resumes the worker, which reports idle before the next tick start
 }
+
+// ---- --ai-prepass-census / --ai-presize: ten pinned node-think slots + the walk-state slot (census) and the 0x56A610 slot (presize) in the owned
+// image: untouched without the flags, published read-only while active, restored on stop with the row retained; an out-of-scope call through a
+// node gate runs the original 0x7D7BF0 unchanged and records nothing.
+static const U kPrepassNodeSlots[10]={0x13429b4,0x13429e8,0x1342a1c,0x1342a50,0x1342a84,0x1342ac4,0x1342afc,0x1342b34,0x1342b6c,0x1342bac};
+static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+    root[0x2829c]=1; Put(model,0xB0,A(armyManager));
+    const U nodeOriginal=0x7D7BF0+delta, presizeOriginal=0x56A610+delta, walkOriginal=0x702BB0+delta;
+    U* presizeSlot=At(0x13247EC); U* walkSlot=At(0x133e2dc);
+    for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal && ReadOnly(At(slot)),"prepass node slot holds the pinned 0x7D7BF0 and is read-only before start");
+    Check(*presizeSlot==presizeOriginal && ReadOnly(presizeSlot) && *walkSlot==walkOriginal,"presize and walk-state slots pristine before start");
+    config.enabled_mask=NTW2_AI_ASYNC; config.workers=0; config.main_thread_id=GetCurrentThreadId(); config.ai_prepass_flags=0;
+    // 1. AI alone: nothing published, row all zero.
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without prepass flags activates");
+    for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"no flags leave the node slots untouched");
+    Check(*presizeSlot==presizeOriginal && *walkSlot==walkOriginal,"no flags leave the presize and walk slots untouched");
+    ntw2_status snapshot={};
+    bool zero=ReadState(state,snapshot);
+    for(unsigned i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) zero=zero && !snapshot.ai_prepass_census_words[i];
+    for(unsigned i=0;i<NTW2_AI_PREPASS_WORDS;++i) zero=zero && !snapshot.ai_prepass_words[i];
+    Check(zero,"prepass row is all zero without the flags");
+    Check(stop(nullptr)==0,"stop prepass-free generation");
+    // 2. Census.
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai prepass census activates");
+    const U gate=*At(kPrepassNodeSlots[0]);
+    Check(gate!=nodeOriginal && InRuntime(gate),"census node slot holds a runtime gate");
+    for(U slot:kPrepassNodeSlots) Check(*At(slot)==gate && ReadOnly(At(slot)),"all ten node slots hold the same read-only gate");
+    Check(*walkSlot!=walkOriginal && InRuntime(*walkSlot),"census publishes the walk-state gate");
+    Check(*presizeSlot==presizeOriginal,"census alone leaves the presize slot untouched");
+    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==NTW2_AI_PREPASS_CENSUS; }),
+          "census row publishes version 1 and the latched flag");
+    {   // Out of any site-34 scope: the gate tail-jumps the original think (one child with an empty guard, nothing to do).
+        static uint8_t nodeBuf[0x200], childBuf[0x100]; static U childList[1];
+        childList[0]=A(childBuf); Put(nodeBuf,0x48,1); Put(nodeBuf,0x4C,A(childList));
+        const U g=gate; const void* node=nodeBuf; U esiBefore=0, esiAfter=0, ediBefore=0, ediAfter=0;
+        __asm {
+            pushad
+            mov esi, 0x55555555
+            mov edi, 0x66666666
+            mov esiBefore, esi
+            mov ediBefore, edi
+            mov ecx, node
+            call dword ptr [g]
+            mov esiAfter, esi
+            mov ediAfter, edi
+            popad
+        }
+        Check(esiAfter==esiBefore && ediAfter==ediBefore,"out-of-scope node gate preserves the callee-saved registers");
+        Check(ReadState(state,snapshot) && snapshot.ai_prepass_census_words[2]==0 && snapshot.ai_prepass_census_words[3]==0,
+              "out-of-scope node think records nothing");
+    }
+    Check(stop(nullptr)==0,"stop census generation");
+    for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal && ReadOnly(At(slot)),"stop restores every node slot read-only");
+    Check(*walkSlot==walkOriginal && *presizeSlot==presizeOriginal,"stop restores the walk-state slot");
+    Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.ai_prepass_census_words[0]==1,"stop retains the census row");
+    // 3. Presize alone.
+    config.ai_prepass_flags=NTW2_AI_PRESIZE;
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai presize activates");
+    Check(*presizeSlot!=presizeOriginal && !InRuntime(*presizeSlot) && ReadOnly(presizeSlot),"presize publishes the PRESIZE clone chain entry read-only");
+    for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"presize alone leaves the node slots untouched");
+    Check(*walkSlot==walkOriginal,"presize alone leaves the walk-state slot untouched");
+    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==NTW2_AI_PRESIZE; }),
+          "presize row publishes version 1 and the latched flag");
+    Check(stop(nullptr)==0 && *presizeSlot==presizeOriginal,"stop restores the presize slot");
+    // 4. Both.
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE;
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"census+presize activates");
+    Check(*presizeSlot!=presizeOriginal && *At(kPrepassNodeSlots[9])!=nodeOriginal,"both sets of slots published");
+    Check(stop(nullptr)==0 && *presizeSlot==presizeOriginal && *At(kPrepassNodeSlots[9])==nodeOriginal && *walkSlot==walkOriginal,"stop restores both sets");
+    // 5. --ai-poly-shadow / --ai-poly: the observer slot 0x13376FC+0x40 and the walk-state slot are published read-only, the node slots are not, the
+    // row publishes version 1 and its mode, stop restores both slots and retains the row; a later generation without the bits zeroes it.
+    {
+        U* observerSlot=At(0x13376fc+4*16); const U observerOriginal=0x6A95A0+delta;
+        Check(*observerSlot==observerOriginal && ReadOnly(observerSlot),"observer slot pristine before the poly modes");
+        const U modes[2]={NTW2_AI_POLY_SHADOW,NTW2_AI_POLY};
+        for(U k=0;k<2;++k) {
+            config.ai_prepass_flags=modes[k];
+            Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai poly mode activates");
+            Check(*observerSlot!=observerOriginal && InRuntime(*observerSlot) && ReadOnly(observerSlot),"poly publishes the read-only observer gate");
+            Check(*walkSlot!=walkOriginal && InRuntime(*walkSlot) && *presizeSlot==presizeOriginal,"poly publishes the walk-state gate, not the presize slot");
+            for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"poly leaves the node slots untouched");
+            bool published=false;
+            for(U i=0;i<300 && !published;++i) { if(ReadState(state,snapshot) && snapshot.ai_prepass_words[0]==1 && snapshot.ai_prepass_words[1]==k+1) published=true; else Sleep(10); }
+            Check(published,"poly row publishes version 1 and its mode (1 shadow, 2 live)");
+            bool censusZero=true; for(unsigned i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) censusZero=censusZero && !snapshot.ai_prepass_census_words[i];
+            Check(censusZero,"poly leaves the census row zero");
+            Check(stop(nullptr)==0 && *observerSlot==observerOriginal && ReadOnly(observerSlot) && *walkSlot==walkOriginal,"stop restores the observer and walk-state slots");
+            Check(ReadState(state,snapshot) && snapshot.ai_prepass_words[0]==1,"stop retains the poly row");
+        }
+        config.ai_prepass_flags=0;
+        Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without prepass flags activates after the poly generations");
+        bool rowZero=ReadState(state,snapshot);
+        for(unsigned i=0;i<NTW2_AI_PREPASS_WORDS;++i) rowZero=rowZero && !snapshot.ai_prepass_words[i];
+        Check(rowZero && *observerSlot==observerOriginal,"poly row is all zero and the observer slot pristine without the bits");
+        Check(stop(nullptr)==0,"stop poly-free generation");
+    }
+    return failures ? 1 : 0;
+}
 static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
     auto boundary=reinterpret_cast<ntw2_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_boundary"));
     auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(runtimeModule,"ntw2_site_callee"));
@@ -2085,6 +2187,22 @@ int main(int argc,char** argv) {
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-ctrl excludes ai_async2");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-ctrl excludes the controller offload");
     config.ai_ctrl_flags=0;
+    // --ai-prepass-*: routed tick, no ai_async2, census combines only with presize, known bits only.
+    config.enabled_mask=NTW2_AI_ASYNC; config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;
+    Check(start(&config)==2,"ai-prepass census passes validation and refuses a foreign main image");
+    config.ai_prepass_flags=NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-presize passes validation");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-prepass census+presize passes validation");
+    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW; Check(start(&config)==2,"ai-poly-shadow passes validation");
+    config.ai_prepass_flags=NTW2_AI_POLY; Check(start(&config)==2,"ai-poly passes validation");
+    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-poly combines with presize");
+    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW|NTW2_AI_POLY; Check(start(&config)==1,"ai-poly-shadow and ai-poly exclude each other");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY; Check(start(&config)==1,"ai-poly excludes the census");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW; Check(start(&config)==1,"ai-poly-shadow excludes the census");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_FLAGS_VALID+1; Check(start(&config)==1,"ai-prepass unknown flag bit refused");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS; config.enabled_mask=NTW2_BATCH64;
+    Check(start(&config)==1,"ai-prepass without a routed tick refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-prepass excludes ai_async2");
+    config.ai_prepass_flags=0;
     config.enabled_mask=NTW2_BRAIN; config.main_thread_id=1; Check(start(&config)==1,"brain profiling without profile refused"); config.main_thread_id=0;
     config.enabled_mask=NTW2_AI_CTRL; Check(start(&config)==1,"controller offload without ai refused");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_BUDGET_EMA; Check(start(&config)==1,"retired EMA budget refused with ai");
@@ -2213,6 +2331,7 @@ int main(int argc,char** argv) {
         if(!strcmp(argv[3],"--ai-completion")) return AiCompletionFixture(false,start,stop,state,config);
         if(!strcmp(argv[3],"--ai-completion-controller")) return AiCompletionFixture(true,start,stop,state,config);
         if(!strcmp(argv[3],"--ai-census")) return AiCensusFixture(start,stop,state,config);
+        if(!strcmp(argv[3],"--ai-prepass")) return AiPrepassFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--ai-async2")) return AiAsync2Fixture(start,stop,state,config);
         if(!strcmp(argv[3],"--ai-deferred")) return AiDeferredFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--loco-owned-activation-refusal")) return LocoOwnedActivationRefusalFixture(start,stop,state,config);
@@ -2808,6 +2927,7 @@ int main(int argc,char** argv) {
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-completion"),"AI subordinate destruction completion barrier scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-completion-controller"),"AI controller configuration preserves subordinate completion boundary scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-census"),"AI mutation census gates, clone-call retarget, restore and refusals scenario passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--ai-prepass"),"AI prepass census/presize slot gates, restore, row and refusals scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-async2"),"ai_async2 boundary schedule, writer joins, worker marshalling, watchdog and private walk scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-deferred"),"ai_deferred sliced thinks: node order, consumption seams, busy refusals, revalidation and perturbation determinism scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--loco-owned-activation-refusal"),"owned activation without a scene fails closed scenario (child process) passed");

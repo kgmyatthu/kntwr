@@ -1637,6 +1637,14 @@ SOURCES = [
     ('AI_CTRL_REBUILD', 0x7492F0, 0x7496D6, 'clone'),
     ('AI_CTRL_ASSIGN', 0x749090, 0x74929A, 'clone'),
     ('AI_CTRL_SCORER', 0x7B1270, 0x7B1557, 'clone'),
+    # --ai-prepass-census / --ai-presize (src/ntw2_planner_prepass.h). AI_THINK: node think 7D7BF0 (ret at 7D7C2B; its child call
+    # `mov eax,[ecx]; call [eax+28]` at 7D7C1E becomes call PP_CHILD_THINK); reached through the ten node vtables' +10 slot gate.
+    # PRESIZE: the only route to 0x559090 is vtable word 0x13247EC = 56A610 (ret 8 at 56A678) -> 551FE0 (call 56A66D, ret C at
+    # 5523D8) -> 559090 (call 55208A, ret 8 at 559C06); int3 padding follows each.
+    ('AI_THINK', 0x7D7BF0, 0x7D7C2C, 'clone'),
+    ('PRESIZE_56A610', 0x56A610, 0x56A67B, 'clone'),
+    ('PRESIZE_551FE0', 0x551FE0, 0x5523DB, 'clone'),
+    ('PRESIZE_559090', 0x559090, 0x559C09, 'clone'),
     # Participant-private reference-node projection family 7FD070 -> 81C080 -> 81C050 -> 67A790. Sources are shared by all
     # participant clones. 7FD070 ends at 7FD5A5 (INT3 pad to 7FD5AF; 7FD5B0 is a separate function); the destructor stubs are
     # pinned only as the evidence for host-side teardown: free(data) with 0xFF7EF0 after per-element RET 444B60.
@@ -2147,6 +2155,50 @@ def ai_ctrl_extra_checks(image, plans):
         fail('AI_CTRL: point-distance region no longer ends with the 0x76DCD0 call')
 
 
+# --ai-prepass-census / --ai-presize. Node think 7D7BF0: the only rewrite is the same-length 5-byte run `mov eax,[ecx]; call [eax+28]`
+# at 7D7C1E (child think) -> call PP_CHILD_THINK; the generate call 7D7BFD stays an indirect call and 7CCF80 stays original.
+# PRESIZE_559090 inserts: PP_RESERVE before `mov esi,[esp+194]` at 55930E (once per query, after the cell bounds [esp+150/158/194/1AC]
+# are final and the x-range test passed) and PP_EXIT before the epilogue at 559BFE; both are `call rel32` gates that preserve every
+# register, EFLAGS and x87/SSE.
+PREPASS_CHILD_RUN = bytes.fromhex('8b01ff5028')
+PREPASS_NODE_SLOTS = (0x13429B4, 0x13429E8, 0x1342A1C, 0x1342A50, 0x1342A84,
+                      0x1342AC4, 0x1342AFC, 0x1342B34, 0x1342B6C, 0x1342BAC)
+PREPASS_PRESIZE_SLOT = 0x13247EC
+PREPASS_PINS = {
+    0x7D7C1E: '8b01ff5028', 0x7D7C2B: 'c3', 0x56A66D: 'e86e79feff', 0x56A678: 'c20800', 0x55208A: 'e801700000',
+    0x55930E: '8bb42494010000', 0x559BFE: '5f5e81c4ac010000c20800', 0x5523D8: 'c20c00',
+}
+
+
+def prepass_configs():
+    return [
+        dict(clone='AI_THINK', source='AI_THINK',
+             run_rewrites={0x7D7C1E: (PREPASS_CHILD_RUN, [b'\xe8', Fix('rel', Bind('PP_CHILD_THINK'))])},
+             indirect_calls={0x7D7BFD}, expect_rets={0x7D7C2B: b'\xc3'}),
+        dict(clone='PRESIZE_56A610', source='PRESIZE_56A610',
+             calls={0x551FE0: (Clone('PRESIZE_551FE0'), 1, [0x56A66D])},
+             indirect_calls=set(), expect_rets={0x56A678: RET(8)}),
+        dict(clone='PRESIZE_551FE0', source='PRESIZE_551FE0',
+             calls={0x559090: (Clone('PRESIZE_559090'), 1, [0x55208A])},
+             indirect_calls={0x552021}, expect_rets={0x5523D8: RET(0xC)}),
+        dict(clone='PRESIZE_559090', source='PRESIZE_559090',
+             inserts={0x55930E: [b'\xe8', Fix('rel', Bind('PP_RESERVE'))],
+                      0x559BFE: [b'\xe8', Fix('rel', Bind('PP_EXIT'))]},
+             indirect_calls=set(), expect_rets={0x559C06: RET(8)}),
+    ]
+
+
+def prepass_extra_checks(image):
+    """Pin every rewritten/inserted site's original bytes and the vtable words the runtime publishes over."""
+    for va, want in PREPASS_PINS.items():
+        if image.read(va, len(want) // 2) != bytes.fromhex(want):
+            fail(f'PREPASS: original bytes at {va:#x} changed')
+    for slot in PREPASS_NODE_SLOTS:
+        if struct.unpack('<I', image.read(slot, 4))[0] != 0x7D7BF0:
+            fail(f'PREPASS: node vtable word {slot:#x} is no longer 0x7D7BF0')
+    if struct.unpack('<I', image.read(PREPASS_PRESIZE_SLOT, 4))[0] != 0x56A610:
+        fail('PREPASS: vtable word 0x13247EC is no longer 0x56A610')
+
 def clone_configs():
     manager_insert = [b'\x52\x8b\xcf\xba', Fix('abs', Bind('BAL_JOB')), b'\xe8', Fix('rel', Bind('BAL_STAGE')), b'\x5a']
     worker_init = b'\x55\x81\xec' + u32(BATCH_CONTEXT_BYTES) + bytes.fromhex('8bec894d00c7450400000000')
@@ -2340,6 +2392,8 @@ def clone_configs():
         *unit_core_configs(),
         *unit_policy_configs(),
         *ai_ctrl_configs(),
+        *prepass_configs(),
+        *ps_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2437,6 +2491,67 @@ EXPECT_CENSUS.update(S0_EXPECT_CENSUS)
 EXPECT_CENSUS['BRAIN_U'] = _U_CORE_CENSUS
 EXPECT_CENSUS.update(_U_POLICY_CENSUS)
 EXPECT_JUMPS['BRAIN_U_FINALIZE'] = {0x444B60}
+# --ai-prepass-census / --ai-presize clones: external call targets that stay original, and the census.
+PREPASS_EXPECT_CALLS = {'AI_THINK': {0x7CCF80}, 'PRESIZE_56A610': {0x542C20, 0x80E9D0},
+                        'PRESIZE_551FE0': {0x445A50, 0x4A5140, 0x504090, 0x56CBD0, 0x61DB20, 0x6601D0, 0x6A3110, 0x6DBC50, 0xFF7EF0},
+                        'PRESIZE_559090': {0x449E10, 0xFF7EF0, 0x10D0900, 0x559C10}}
+PREPASS_EXPECT_CENSUS = {'AI_THINK': (28, 0, 1, 0), 'PRESIZE_56A610': (29, 0, 2, 0), 'PRESIZE_551FE0': (298, 2, 19, 0), 'PRESIZE_559090': (597, 5, 12, 0)}
+EXPECT_CALLS.update(PREPASS_EXPECT_CALLS)
+EXPECT_CENSUS.update(PREPASS_EXPECT_CENSUS)
+
+
+# --ai-poly-shadow / --ai-poly: the observer LOS route 6A95A0 -> 6C71D0 -> {6CC730 -> 808550 | 7FCA40 -> 7FCA90} -> 808040 -> 7F1D40 copied as
+# PURE-RETARGET clones on the ORIGINAL scratch (same thread executes either the original or the copy, never both: the slot gate routes by
+# PlannerScopeThread). Sources are the existing AI2 'private' extents (with their cold static-init tails) and AI_WALK; unlike AI2 nothing is
+# rebased, NOPped or counted. Only the walk calls change: 808040's call 808492 -> PS_WALK_CALL (census: timed SITE_CALL_40 thunk, poly: PS_WALK)
+# and PS_WALK's 80DCF0 call 7F1E5A -> PS_POLY (bare host gate). 7F6ED0/81C050/7F6F20 projection calls stay original (no walk reachable).
+def ps_configs():
+    return [
+        dict(clone='PS_6A95A0', source='AI2_6A95A0',
+             calls={0x6C71D0: (Clone('PS_6C71D0'), 1, [0x6A994F]), 0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6A9699])},
+             indirect_calls={0x6A96DD, 0x6A990A, 0x6A9916}, expect_rets={0x6A99CE: RET(0xC)}),
+        dict(clone='PS_6C71D0', source='AI2_6C71D0',
+             calls={0x6CC730: (Clone('PS_6CC730'), 3, [0x6C7316, 0x6C7410, 0x6C77E2]),
+                    0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6C79A8])},
+             indirect_calls=set(), expect_rets={0x6C7AAB: RET(0x14)}),
+        dict(clone='PS_6CC730', source='AI2_6CC730',
+             calls={0x808550: (Clone('PS_808550'), 1, [0x6CC851])},
+             indirect_calls=set(), expect_rets={0x6CC85B: RET(4), 0x6CC865: RET(4)}),
+        dict(clone='PS_808550', source='AI2_808550',
+             calls={0x808040: (Clone('PS_808040'), 1, [0x808566])},
+             indirect_calls=set(), expect_rets={0x80856C: RET(4)}),
+        dict(clone='PS_7FCA40', source='AI2_7FCA40',
+             calls={0x7FCA90: (Clone('PS_7FCA90'), 1, [0x7FCA7A])},
+             indirect_calls=set(), expect_rets={0x7FCA86: RET(0xC)}),
+        dict(clone='PS_7FCA90', source='AI2_7FCA90',
+             calls={0x808040: (Clone('PS_808040'), 2, [0x7FCC59, 0x7FCD47])},
+             indirect_calls=set(), expect_rets={0x7FCDB9: RET(0xC), 0x7FCE36: RET(0xC)}),
+        dict(clone='PS_808040', source='AI2_808040',
+             calls={0x7F1D40: (Bind('PS_WALK_CALL'), 1, [0x808492])},
+             indirect_calls={0x808447}, expect_rets={0x8082F5: RET(0x14), 0x808501: RET(0x14)}),
+        dict(clone='PS_WALK', source='AI_WALK',
+             calls={0x80DCF0: (Bind('PS_POLY'), 1, [0x7F1E5A])},
+             indirect_calls=set(), expect_rets={0x7F1E1A: RET(4), 0x7F1E91: RET(4)}),
+    ]
+
+
+# PS_808040 keeps the native call of the node-projection entry 0x81C050 (same thread, original scratch, exactly as the unrouted code): exempt from
+# the 'no untouched call into a cloned original' rule that protects the participant-private projection clones.
+PS_ORIGINAL_OK = {0x81C050, 0x804DD0}  # PS_WALK likewise keeps the bare original gather 0x804DD0 (no timing thunk)
+PS_EXPECT_CALLS = {
+    'PS_6A95A0': {0x80E9D0, 0x5187A0, 0x68E7E0, 0x68E5C0, 0x5EFCC0, 0x6A33F0, 0xFF7EF0},
+    'PS_6C71D0': {0x531E30, 0x7FCFF0, 0x6E6CC0, 0x6DA460, 0x6B3C00, 0x80E9D0, 0x126DF40, 0x7E6C30, 0x126E299, 0x126DEF6, 0x7F6ED0},
+    'PS_6CC730': {0x55A1B0, 0x6B3C00}, 'PS_808550': set(), 'PS_7FCA40': {0x7EAD50},
+    'PS_7FCA90': {0x126DEF6, 0x126DF40, 0x126E299, 0x7E6C30, 0x7FCFF0, 0x80B940},
+    'PS_808040': {0x126DEF6, 0x126DF40, 0x126E299, 0x4C9D40, 0x531E30, 0x5DAC30, 0x5DAC60, 0x6F2040, 0x73F4B0,
+                  0x7E1BD0, 0x7E6C30, 0x7FCE80, 0x7FCFF0, 0x81C050, 0x7F6F20},
+    'PS_WALK': {0x7EE620, 0x804DD0, 0x808F90, 0x126DEF6, 0x126DF40, 0x126E299},
+}
+PS_EXPECT_CENSUS = {'PS_6A95A0': (251, 11, 9, 0), 'PS_6C71D0': (471, 53, 16, 0), 'PS_6CC730': (78, 2, 2, 0),
+                    'PS_808550': (13, 0, 0, 0), 'PS_7FCA40': (22, 0, 1, 0), 'PS_7FCA90': (260, 12, 8, 0),
+                    'PS_808040': (347, 11, 22, 0), 'PS_WALK': (112, 17, 6, 0)}
+EXPECT_CALLS.update(PS_EXPECT_CALLS)
+EXPECT_CENSUS.update(PS_EXPECT_CENSUS)
 
 
 # ============================================================================================ generation
@@ -2997,6 +3112,7 @@ def build_all(image, header_path):
         finalize.forward_tables.append((offset, entries, jump))
     s0_extra_checks(image)
     ai_ctrl_extra_checks(image, plans)
+    prepass_extra_checks(image)
     append_table(image, registry, plans['AI_CONTROLLER'], AI_CONTROLLER_TABLE_CFG)
     army_insns = {i.address: i for i, _, _ in plans['ARMY'].instructions}
     if army_insns[0x58037F].bytes != bytes.fromhex('e9fc9afbff'):
@@ -3064,7 +3180,8 @@ def build_all(image, header_path):
         for target in list(plan.external_calls) + list(plan.external_jumps):
             for lo, hi, owner in clone_spans:
                 if lo <= target < hi and not (plan.name.startswith('BRAIN_S0') and target in S0_ORIGINAL_OK) and \
-                        not (plan.name.startswith('BRAIN_U') and target in U_ORIGINAL_OK):
+                        not (plan.name.startswith('BRAIN_U') and target in U_ORIGINAL_OK) and \
+                        not (plan.name.startswith('PS_') and target in PS_ORIGINAL_OK):
                     fail(f'{plan.name}: untouched call/jump to {target:#x} inside cloned original {owner}')
         if plan.source is not None and plan.source['code']:
             for r in image.span_relocs(plan.source['va'], plan.source['size']):

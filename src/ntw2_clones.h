@@ -150,6 +150,15 @@ enum ntw2_binding {
     NTW2_BIND_U_POSTURE, NTW2_BIND_U_EVP, NTW2_BIND_U_ENGAGE_CNT, NTW2_BIND_U_DRIVER_ALT, NTW2_BIND_U_UNIT_MODIFIER,
     NTW2_BIND_U_ORDER_PREDICATE, NTW2_BIND_U_UNIT_ARRIVAL, NTW2_BIND_U_NODE_BEGIN, NTW2_BIND_U_NODE_STEP,
     NTW2_BIND_U_PHASE6, NTW2_BIND_U_PHASE7, /* 658FDE / 6590FC own-phase stores (+ the next kept instruction): EDX only, plain RET */
+    /* --ai-prepass-census / --ai-presize (appended; src/ntw2_planner_prepass.h). PP_CHILD_THINK replaces the AI_THINK clone's
+       `mov eax,[ecx]; call [eax+28]` at 7D7C1E (ECX = child, EDI = node, ESI = index, plain return, the gate makes the original call
+       exactly once). PP_RESERVE is inserted into PRESIZE_559090 at 55930E before `mov esi,[esp+194]`, PP_EXIT at 559BFE before the
+       epilogue: both preserve every register, EFLAGS and x87/SSE and read the clone frame at the insertion point. */
+    NTW2_BIND_PP_CHILD_THINK, NTW2_BIND_PP_RESERVE, NTW2_BIND_PP_EXIT,
+    /* --ai-poly-shadow / --ai-poly (appended): PS_WALK_CALL is the 0x808492 call of the PS_808040 clone (census-only runs: the timed
+       SITE_CALL_40 thunk; poly runs: the bare PS_WALK clone). PS_POLY is the bare host gate bound to PS_WALK's 0x7F1E5A call of 0x80DCF0
+       (fastcall ECX=shape, stack polygon, ret 4; no site thunk, no fxsave). */
+    NTW2_BIND_PS_WALK_CALL, NTW2_BIND_PS_POLY,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -286,6 +295,13 @@ enum ntw2_clone_id {
     NTW2_CLONE_BRAIN_U_HOT_BEGIN, NTW2_CLONE_BRAIN_U_HOT_STEP, NTW2_CLONE_BRAIN_U_IDLE_STEP,
     NTW2_CLONE_BRAIN_U_ACTION_BEGIN, NTW2_CLONE_BRAIN_U_ACTION_STEP,
     NTW2_CLONE_BRAIN_U_RELATED_BEGIN, NTW2_CLONE_BRAIN_U_RELATED_STEP,
+    /* --ai-prepass-census / --ai-presize (appended): AI_THINK = 7D7BF0..7D7C2C node think, child call routed to PP_CHILD_THINK;
+       PRESIZE_56A610 (-> PRESIZE_551FE0 at 56A66D) -> PRESIZE_559090 (at 55208A) with the two PP inserts. */
+    NTW2_CLONE_AI_THINK, NTW2_CLONE_PRESIZE_56A610, NTW2_CLONE_PRESIZE_551FE0, NTW2_CLONE_PRESIZE_559090,
+    /* --ai-poly* (appended): pure-retarget copies of the observer LOS route on the ORIGINAL scratch: slot 0x13376FC+0x40 -> PS_6A95A0 ->
+       {PS_6C71D0 | PS_7FCA40} ... -> PS_808040 -> (PS_WALK_CALL) -> 7F1D40; PS_WALK is the bare 7F1D40 copy whose 80DCF0 call is PS_POLY. */
+    NTW2_CLONE_PS_6A95A0, NTW2_CLONE_PS_6C71D0, NTW2_CLONE_PS_6CC730, NTW2_CLONE_PS_808550, NTW2_CLONE_PS_7FCA40,
+    NTW2_CLONE_PS_7FCA90, NTW2_CLONE_PS_808040, NTW2_CLONE_PS_WALK,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and
