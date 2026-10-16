@@ -186,7 +186,7 @@ typedef struct Options {
     BOOL loco_grid;          /* --loco-grid: owned soldier grid v2, published at site-13 exit; default off */
     BOOL loco_grid_verify;   /* --loco-grid-verify: implies grid; owner-side verification */
     BOOL grid_probation;     /* --grid-probation: native cell-head trap detector; requires --loco-grid (or verify), not ballistic */
-    uint32_t puppet_units;   /* --puppet-probe N: NTW2_PUPPET stage 1, N = 1..4 ordinary foot-infantry units (ntw2_config::puppet_units) */
+    uint32_t puppet_units;   /* --puppet-probe N|all: NTW2_PUPPET, N = 1..NTW2_PUPPET_MAX_UNITS ordinary foot-infantry units; all = NTW2_PUPPET_MAX_UNITS (ntw2_config::puppet_units) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -1354,9 +1354,9 @@ static void print_army_b0(const uint32_t *u, const uint32_t *b)
         g_steps ? L"PASS" : L"FAIL", 100.0 * p_closed, g_rec ? L"PASS" : L"FAIL", pct(b[139], u[16]), g_save ? L"PASS" : L"FAIL",
         native_ms - t_exp, g_cover && g_steps && g_rec && g_save ? L"GO" : L"NO-GO");
 }
-/* Puppet probe stage 1 (NTW2_PUPPET, native_puppet.h): every labelled word plus derived per-stage rates. The probe's
-   per-tick cost is adapter (seam + gated replacement work) + dispatch (sampled routing overhead on every occurrence). */
-static void print_puppet(const uint32_t *p, const uint32_t *m)
+/* Puppet probe (NTW2_PUPPET, native_puppet.h): every labelled word plus derived per-stage rates. The probe's per-tick
+   cost is adapter (seam + gated replacement work) + dispatch (sampled routing overhead on every occurrence). */
+static void print_puppet(const uint32_t *p, const uint32_t *m, const uint32_t *d)
 {
     static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
     const double stages = p[6] ? (double)p[6] : 1.0; /* word 6 = stages */
@@ -1368,7 +1368,7 @@ static void print_puppet(const uint32_t *p, const uint32_t *m)
         (unsigned long)p[10], (unsigned long)p[11], (unsigned long)p[12], (unsigned long)p[14], (unsigned long)p[15],
         (unsigned long)p[16], (unsigned long)p[17], (unsigned long)p[18], (unsigned long)p[24], (unsigned long)p[19],
         (unsigned long)p[23], (unsigned long)p[28]);
-    for (i = 0; i < p[3] && i < NTW2_PUPPET_MAX_UNITS; ++i) {
+    for (i = 0; i < p[3] && i < NTW2_PUPPET_ROW_UNITS; ++i) {
         const uint32_t *u = p + 40u + 4u * i;
         float x, z;
         memcpy(&x, u + 2, 4); memcpy(&z, u + 3, 4);
@@ -1400,6 +1400,25 @@ static void print_puppet(const uint32_t *p, const uint32_t *m)
             (unsigned long)m[17], (unsigned long)m[18], (unsigned long)m[19], (unsigned long)m[20], (unsigned long)m[21],
             (unsigned long)m[22], (unsigned long)m[23], m[24] / 100.0, m[25] / 100.0, (unsigned long)m[26], m[27] / 100.0,
             m[28] / 100.0, (unsigned long)m[29]);
+    }
+    {
+        static const char *const kinds[] = {"0", "1", "2", "3", "4", "other"};
+        const double occurrences = p[39] ? (double)p[39] : 1.0; /* word 39 = loop_occurrences */
+        say(L"  puppet share of site-6 occurrences: skipped %.1f%% (%lu), diverted native %.1f%% (%lu) of %lu\n",
+            100.0 * p[15] / occurrences, (unsigned long)p[15], 100.0 * d[21] / occurrences, (unsigned long)d[21],
+            (unsigned long)p[39]);
+        say(L"  puppet +628 divert ownership: events=%lu active=%lu (peak %lu) by kind:", (unsigned long)d[1],
+            (unsigned long)d[2], (unsigned long)d[3]);
+        for (i = 0; i < 6u; ++i) if (d[4 + i]) say(L" [%hs]=%lu", kinds[i], (unsigned long)d[4 + i]);
+        say(L"; tables 1334250=%lu 1334218=%lu other=%lu (last other 0x%08lX); last kind %lu activity 0x%lX target "
+            L"(%.1f, %.1f) table 0x%08lX; target distance mean %.2f m max %.2f m\n", (unsigned long)d[10],
+            (unsigned long)d[11], (unsigned long)d[12], (unsigned long)d[13], (unsigned long)d[14], (unsigned long)d[15],
+            *(const float *)&d[16], *(const float *)&d[17], (unsigned long)d[18], d[19] / 100.0, d[20] / 100.0);
+        say(L"  puppet divert outcomes: native steps=%lu common forwarded=%lu released=%lu resumed=%lu reparked=%lu "
+            L"handed back=%lu departed=%lu; duration mean %lu max %lu stages; moved member-ticks %lu; first stage %lu\n",
+            (unsigned long)d[21], (unsigned long)d[22], (unsigned long)d[23], (unsigned long)d[24], (unsigned long)d[25],
+            (unsigned long)d[26], (unsigned long)d[27], (unsigned long)d[28], (unsigned long)d[29], (unsigned long)d[30],
+            (unsigned long)d[31]);
     }
     say(L"   ");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) say(L" %hs=%lu", labels[i], (unsigned long)p[i]);
@@ -1614,7 +1633,7 @@ static void print_module_words(const ntw2_status *s)
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
-    if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words, s->puppet_motion_words);
+    if (s->requested_mask & NTW2_PUPPET) print_puppet(s->puppet_words, s->puppet_motion_words, s->puppet_divert_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -3060,6 +3079,7 @@ static void sb_puppet(Sb *b, const Run *r)
 {
     static const char *const labels[] = { NTW2_PUPPET_WORD_LABELS };
     static const char *const motion[] = { NTW2_PUPPET_MOTION_LABELS };
+    static const char *const divert[] = { NTW2_PUPPET_DIVERT_LABELS };
     const uint32_t *w = r->last.puppet_words;
     unsigned i;
     if (!(r->opt.mask & NTW2_PUPPET) || !r->have_status || !w[0]) {
@@ -3069,7 +3089,7 @@ static void sb_puppet(Sb *b, const Run *r)
     sb_fmt(b, "  \"puppet\": {\"metrics\": {");
     for (i = 0; i < NTW2_PUPPET_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"units\": [");
-    for (i = 0; i < w[3] && i < NTW2_PUPPET_MAX_UNITS; ++i) {
+    for (i = 0; i < w[3] && i < NTW2_PUPPET_ROW_UNITS; ++i) {
         const uint32_t *u = w + 40u + 4u * i;
         float x, z;
         memcpy(&x, u + 2, 4); memcpy(&z, u + 3, 4);
@@ -3087,6 +3107,9 @@ static void sb_puppet(Sb *b, const Run *r)
     sb_fmt(b, "], \"motion\": {");
     for (i = 0; i < NTW2_PUPPET_MOTION_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", motion[i], (unsigned long)r->last.puppet_motion_words[i]);
+    sb_fmt(b, "}, \"divert\": {");
+    for (i = 0; i < NTW2_PUPPET_DIVERT_WORDS; ++i)
+        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", divert[i], (unsigned long)r->last.puppet_divert_words[i]);
     sb_fmt(b, "}},\n");
 }
 static void sb_ai_census(Sb *b, const Run *r)
@@ -4830,9 +4853,10 @@ static void usage(void)
         L"                        add ai,ai_census to measure planner writes. Also Stage B0 qualification (army_b0_words,\n"
         L"                        receipt army_unit.b0): FSM steps/transitions, formation queue/scratch, recorder pins, RNG\n"
         L"                        member bound, own-state copy, exclusive refusal cost and the Stage B release gates\n"
-        L"  --puppet-probe N      puppet survival probe stage 1: N = 1..4 ordinary foot-infantry units (class 0x1333714, registry\n"
-        L"                        order) get the engine's real wait node; their native site-6 step and common-step node/slot\n"
-        L"                        advancement are gated (stationary; puppet_words, receipt puppet). Owns site 6: excludes\n"
+        L"  --puppet-probe N|all  puppet survival probe: N = 1..2048 ordinary foot-infantry units (class 0x1333714, registry\n"
+        L"                        order), or all qualifying units, get the engine's real wait node; their native site-6 step\n"
+        L"                        and common-step node/slot advancement are gated (stationary; a +628 divert runs his native\n"
+        L"                        controller branch until released; puppet_words, receipt puppet). Owns site 6: excludes\n"
         L"                        brain2, brain and every --brain-* option\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
@@ -4970,7 +4994,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
         } else if (!wcscmp(name, L"--puppet-probe")) {
             NEEDVAL();
-            if (!parse_uint(val, 1, NTW2_PUPPET_MAX_UNITS, &o->puppet_units)) { errsay(L"--puppet-probe must be 1..%u.\n", NTW2_PUPPET_MAX_UNITS); return -1; }
+            if (!wcscmp(val, L"all")) o->puppet_units = NTW2_PUPPET_MAX_UNITS;
+            else if (!parse_uint(val, 1, NTW2_PUPPET_MAX_UNITS, &o->puppet_units)) { errsay(L"--puppet-probe must be 1..%u or all.\n", NTW2_PUPPET_MAX_UNITS); return -1; }
             feature_options |= NTW2_PUPPET;
         } else if (!wcscmp(name, L"--poll-ms")) {
             NEEDVAL();
@@ -5057,7 +5082,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->mask & NTW2_PUPPET) && !o->puppet_units) {
-        errsay(L"puppet_probe needs its unit count: use --puppet-probe N (1..%u).\n", NTW2_PUPPET_MAX_UNITS);
+        errsay(L"puppet_probe needs its unit count: use --puppet-probe N (1..%u) or --puppet-probe all.\n", NTW2_PUPPET_MAX_UNITS);
         return -1;
     }
     if ((o->mask & NTW2_PUPPET) && ((o->mask & (NTW2_BRAIN2 | NTW2_BRAIN)) || o->brain_census || o->brain_timing ||

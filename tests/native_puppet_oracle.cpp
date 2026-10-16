@@ -203,6 +203,16 @@ struct World {
     }
 };
 static std::array<U, pp::kWords> Words() { std::array<U, pp::kWords> w{}; pp::Snapshot(w.data()); return w; }
+static std::array<U, pp::kDivertWords> Diverts() { std::array<U, pp::kDivertWords> d{}; pp::SnapshotDivert(d.data()); return d; }
+// +628 controller fixtures: slot 0 of the real tables 0x1334250 / 0x1334218, and a foreign table.
+static std::array<U, 4> controllerSelf{}, controllerNull{}, controllerOther{}, controllerTable{};
+// The engine's registration 0x662E90 fields; +30 cleared so the site-6 loop does not run the real brain step on the
+// fixture (the controller branch itself is the engine's 0x67A050, not exercised here).
+static void Divert(Soldier& s, U* controller, U kind, U activity, float x, float z) {
+    Put(s.data(), 0x628, Addr(controller)); Put(s.data(), 0x62c, kind); Put(s.data(), 0x630, activity);
+    Put(s.data(), 0x63c, x); Put(s.data(), 0x640, 0.0f); Put(s.data(), 0x644, z); s[0x30] = 0;
+}
+static void Release(Soldier& s) { Put(s.data(), 0x628, U(0)); s[0x30] = 1; } // 0x65FEE0 -> 0x63CE20
 static void StageCase() {
     label = "stage: selection, admission and skip"; ++cases;
     static World w;
@@ -246,9 +256,9 @@ static void StageCase() {
     v = Words();
     Require(v[pp::DispatchSamples] - samplesBefore == 2 && v[pp::CommonCallerVa] == 0x58395e, "one sample per 64 calls");
 
-    label = "stage: external nodes, deaths, departures"; ++cases;
+    label = "stage: external nodes, divert, deaths, departures"; ++cases;
     ForeignIdle(w.s[0]);                                        // e.g. a formation/order install: repark at the seam
-    Put(w.s[1].data(), 0x628, U(1)); w.s[1][0x30] = 0;          // divert controller: handed back, not a death
+    Divert(w.s[1], controllerSelf.data(), 4, 0x1d, 130.5f, -42.25f); // controller registration: kept, not handed back
     w.members[2] = w.members[6]; Put(w.unit.data(), 0x2cc, U(6)); w.s[2][0x30] = 0; // left the unit list
     ForeignIdle(w.s[3]); Put(w.s[3].data(), 0x1ec, Addr(target.data())); w.s[3][0x30] = 0; // engaged: hand back
     ForeignIdle(w.s[4]);
@@ -262,31 +272,117 @@ static void StageCase() {
     v = Words();
     Require(v[pp::Reparks] == 2 && v[pp::ExternalSeenSeam] == 2 && v[pp::ExternalNodesSeen] == 3,
             "two reparks (seam + common-step detection), engaged member seen at the seam");
-    Require(v[pp::DivertedHandbacks] == 1 && v[pp::DepartedMembers] == 1 && v[pp::DeathsImported] == 1 &&
-            v[pp::IneligibleHandbacks] == 1 && v[pp::Handbacks] == 2, "membership import and handbacks");
+    Require(!v[pp::DivertedHandbacks] && v[pp::DepartedMembers] == 1 && v[pp::DeathsImported] == 1 &&
+            v[pp::IneligibleHandbacks] == 1 && v[pp::Handbacks] == 1, "membership import; the diverted member stays");
     Require(v[pp::ParkedNoCommonTicks] == 4, "four parked members had no common step in the closed window (s5, s4 had)");
     {
         U m[pp::kMotionWords]; pp::SnapshotMotion(m);
         Require(m[pp::MotionVersion] == 1 && m[pp::MotionDivertFirst] == 2 && m[pp::MotionDivertLast] == 2 &&
-                m[pp::MotionDivertPeak] == 1 && m[pp::MotionDivertPeakStage] == 2 && m[pp::MotionDivertHist + 1] == 1,
-                "divert timing: one +628 handback at stage 2 (bucket 2-3)");
+                m[pp::MotionDivertHist + 1] == 1, "divert timing: one event at stage 2 (bucket 2-3)");
         Require(m[pp::MotionIntentLast] == 1 && m[pp::MotionMovedLast] == 1 && m[pp::MotionFirstMoveStage] == 2 &&
-                m[pp::MotionDispMaxCm] == 300 && m[pp::MotionDispMeanCm] == 60 && !m[pp::MotionSlotMembers],
-                "parked motion: one man with intent moved 3 m of five measured; no slot node");
+                m[pp::MotionDispMaxCm] == 300 && m[pp::MotionDispMeanCm] == 75 && !m[pp::MotionSlotMembers],
+                "parked motion: one man with intent moved 3 m of four measured (diverted member excluded); no slot node");
+        const auto d = Diverts();
+        Require(d[pp::DivertVersion] == 1 && d[pp::DivertEvents] == 1 && d[pp::DivertActive] == 1 &&
+                d[pp::DivertKind + 4] == 1 && d[pp::DivertTableSelf] == 1 && d[pp::DivertLastKind] == 4 &&
+                d[pp::DivertLastActivity] == 0x1d && Get<float>(&d[pp::DivertLastTargetX], 0) == 130.5f &&
+                Get<float>(&d[pp::DivertLastTargetZ], 0) == -42.25f && d[pp::DivertLastTable] == 0x1334250 &&
+                d[pp::DivertTargetMaxCm] == 900 && d[pp::DivertFirstStage] == 2 && !d[pp::DivertReleased],
+                "divert event: kind 4, controller table 0x1334250, activity and target recorded, 9 m from the man");
     }
-    Require(v[pp::MembersParked] == 3 && v[pp::SkippedNativeSteps] == 9 && v[pp::ParkedMemberTicks] == 9 && stubSteps == 2,
-            "three parked members skipped; handed-back members are native");
-    Require(pp::WaitNodeInstalled(A(w.s[0])) && pp::WaitNodeInstalled(A(w.s[4])) &&
-            Get<U>(w.s[3].data(), 0x22c) == Addr(At(0x133405c)), "reparked wait nodes; handed-back member keeps its node");
+    Require(v[pp::MembersParked] == 4 && v[pp::SkippedNativeSteps] == 9 && stubSteps == 2,
+            "three parked members skipped (the diverted one is not an occurrence here); handed-back members are native");
+    Require(pp::WaitNodeInstalled(A(w.s[0])) && pp::WaitNodeInstalled(A(w.s[4])) && pp::WaitNodeInstalled(A(w.s[1])) &&
+            Get<U>(w.s[3].data(), 0x22c) == Addr(At(0x133405c)), "reparked wait nodes; diverted member keeps his; handed-back member keeps its node");
     Require(!v[pp::Faults], "no fault");
 
+    label = "stage: divert release resumes, reparks or hands back"; ++cases;
+    Release(w.s[1]);                                            // wait node intact: resume skipping
+    Divert(w.s[4], controllerNull.data(), 0, 0x1d, 125.0f, -42.25f); ForeignIdle(w.s[4]); // node replaced during divert
+    pp::Stage(Addr(w.manager.data()));                          // stage 3
+    {
+        const auto d = Diverts(); U m[pp::kMotionWords]; pp::SnapshotMotion(m);
+        Require(d[pp::DivertReleased] == 1 && d[pp::DivertResumed] == 1 && d[pp::DivertDurationMax] == 1 &&
+                d[pp::DivertEvents] == 2 && d[pp::DivertKind] == 1 && d[pp::DivertTableNull] == 1 && d[pp::DivertActive] == 1,
+                "s1 resumed after one stage; s4 diverted by a null-slot controller (kind 0)");
+        Require(m[pp::MotionDivertPeak] == 1 && m[pp::MotionDivertPeakStage] == 2, "stage-2 divert window closed at stage 3");
+    }
+    Require(Words()[pp::SkippedNativeSteps] == 12, "s0, s1 (resumed) and s5 skipped; diverted s4 is not an occurrence");
+    Divert(w.s[5], controllerOther.data(), 9, 0x2a, 121.0f, -42.25f);
+    Release(w.s[4]);                                            // foreign node, eligible: repark transaction
+    pp::Stage(Addr(w.manager.data()));                          // stage 4
+    {
+        const auto d = Diverts();
+        Require(d[pp::DivertReleased] == 2 && d[pp::DivertReparked] == 1 && Words()[pp::Reparks] == 3 &&
+                pp::WaitNodeInstalled(A(w.s[4])) && d[pp::DivertKind + 5] == 1 && d[pp::DivertTableOther] == 1 &&
+                d[pp::DivertTableOtherVa] == Addr(controllerTable.data()) - delta,
+                "s4 reparked after its divert; s5 diverted by a foreign controller table (kind other)");
+    }
+    Require(!pp::CommonStep(A(w.s[5]), Caller()) && Diverts()[pp::DivertCommonForwarded] == 1,
+            "a diverted member's common step forwards to the original");
+    Put(w.s[5].data(), 0x48, Get<float>(w.s[5].data(), 0x48) + 1.0f); // the controller moves him
+    ForeignIdle(w.s[5]); Put(w.s[5].data(), 0x1ec, Addr(target.data())); // replaced node, engaged: no repark
+    Release(w.s[5]); w.s[5][0x30] = 0;
+    pp::Stage(Addr(w.manager.data()));                          // stage 5
+    v = Words();
+    {
+        const auto d = Diverts();
+        Require(d[pp::DivertReleased] == 3 && d[pp::DivertHandedBack] == 1 && v[pp::DivertedHandbacks] == 1 &&
+                d[pp::DivertMovedTicks] == 1 && !d[pp::DivertActive] && d[pp::DivertActivePeak] == 1 &&
+                d[pp::DivertDurationMean] == 1 && !d[pp::DivertNativeSteps],
+                "s5 handed back at release (ineligible); his move while diverted counted");
+    }
+    Require(v[pp::MembersParked] == 3 && v[pp::Handbacks] == 2 && !v[pp::Faults], "s0, s1, s4 parked");
+
     label = "stop hands back without native writes"; ++cases;
-    Soldier snapshot = w.s[5];
+    Soldier snapshot = w.s[0];
     pp::Stop();
     v = Words();
     Require(v[pp::StopHandbacks] == 3 && v[pp::Handbacks] == 5 && v[pp::MembersParked] == 0 && !v[pp::Enabled], "stop handback");
-    Require(!memcmp(snapshot.data(), w.s[5].data(), snapshot.size()), "no byte written at stop");
-    Require(!pp::CommonStep(A(w.s[5]), Caller()), "stopped module gates nothing");
+    Require(!memcmp(snapshot.data(), w.s[0].data(), snapshot.size()), "no byte written at stop");
+    Require(!pp::CommonStep(A(w.s[0]), Caller()), "stopped module gates nothing");
+}
+
+// --puppet-probe all: six qualifying two-man units; identity rows only for the first four, aggregates for all.
+static void AllUnitsCase() {
+    label = "stage: all units"; ++cases;
+    static std::array<std::array<B, 0xe00>, 6> units{};
+    static Soldier men[12];
+    static std::array<U, 2> lists[6];
+    static std::array<B, 0x300> manager{};
+    static std::array<U, 12> registry{};
+    static std::array<B, 0x40> army{};
+    for (U u = 0; u < 6; ++u) {
+        Put(units[u].data(), 0, U(0x0b1e55ed));
+        for (U k = 0; k < 2; ++k) {
+            Soldier& s = men[2 * u + k];
+            InitSoldier(s, 500 + 2 * u + k, Addr(units[u].data())); Put(s.data(), 0x1f8, Addr(army.data()));
+            Put(s.data(), 0x48, 10.0f * u); Put(s.data(), 0x50, 1.0f * k); Warm(s);
+            lists[u][k] = A(s); registry[2 * u + k] = A(s);
+        }
+        Put(units[u].data(), 0x2cc, U(2)); Put(units[u].data(), 0x2d0, Addr(lists[u].data()));
+    }
+    Put(manager.data(), 0x24c, U(12)); Put(manager.data(), 0x250, Addr(registry.data()));
+    Put(manager.data(), 0x260, U(12)); Put(manager.data(), 0x264, Addr(registry.data()));
+    pp::Binding b = Bind(); b.units = pp::kMaxUnits;
+    Require(pp::Start(b), "start for every qualifying unit");
+    pp::Binding over = Bind(); over.units = pp::kMaxUnits + 1;
+    Require(!pp::Start(over), "beyond the unit capacity refused");
+    Require(pp::Start(b), "restart for every qualifying unit");
+    ResetFp();
+    pp::Stage(Addr(manager.data()));
+    const auto v = Words();
+    Require(v[pp::UnitsRequested] == pp::kMaxUnits && v[pp::UnitsExamined] == 6 && v[pp::UnitsSelected] == 6 &&
+            v[pp::MembersAdmitted] == 12 && v[pp::MembersParked] == 12 && v[pp::SkippedNativeSteps] == 12,
+            "all six units admitted and skipped");
+    for (U u = 0; u < pp::kRowUnits; ++u)
+        Require(NTW2_PUPPET_UNIT_ORDINAL(v[pp::UnitRows + 4 * u]) == u && NTW2_PUPPET_UNIT_MEN(v[pp::UnitRows + 4 * u]) == 2 &&
+                v[pp::UnitRows + 4 * u + 1] == 2 && Get<float>(&v[pp::UnitRows + 4 * u + 2], 0) == 10.0f * u,
+                "identity rows for the first four units");
+    Require(!v[pp::ParkedNoCommonTicks] && v[pp::ParkedPeak] == 12 && !v[pp::Faults],
+            "rows past the fourth unit do not spill into the following words");
+    pp::Stop();
+    Require(Words()[pp::StopHandbacks] == 12, "stop hands back every member");
 }
 
 int main(int argc, char** argv) {
@@ -303,6 +399,8 @@ int main(int argc, char** argv) {
     });
     requestTable[1] = Fn(&MakeAttached); attachTable[1] = Fn(&Attach); attachTable[3] = Fn(&Detach);
     Put(attached.data(), 0, Addr(attachTable.data())); Put(transform.data(), 0x5c, U(0x2468));
+    controllerSelf[0] = Addr(At(0x1334250)); controllerNull[0] = Addr(At(0x1334218));
+    controllerOther[0] = Addr(controllerTable.data());
     label = "start"; Require(pp::Start(Bind()), "class and node table pins hold on the mapped image");
     { pp::Binding b = Bind(); b.tick_owner = nullptr; Require(!pp::Start(b), "start refuses a binding without an epoch"); }
     Require(pp::Start(Bind()), "restart");
@@ -313,6 +411,7 @@ int main(int argc, char** argv) {
     InstallCase("speed exactly at threshold is not quiet", true, 0.01f, false, false);
     InstallCase("repark over a done wait node", true, 0.0f, false, true);
     StageCase();
+    AllUnitsCase();
     std::printf("native_puppet_oracle: %u cases, %u checks passed\n", cases, checks);
     return 0;
 }

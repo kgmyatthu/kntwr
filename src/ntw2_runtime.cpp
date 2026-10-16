@@ -531,7 +531,8 @@ U __fastcall LocoMoveGate(void* manager) {
     return reinterpret_cast<Manager>(V(0x531af0))(manager);
 }
 static_assert(ntw2_puppet::kWords==NTW2_PUPPET_WORDS && ntw2_puppet::kMaxUnits==NTW2_PUPPET_MAX_UNITS &&
-              ntw2_puppet::kMotionWords==NTW2_PUPPET_MOTION_WORDS, "puppet status word contract");
+              ntw2_puppet::kMotionWords==NTW2_PUPPET_MOTION_WORDS && ntw2_puppet::kRowUnits==NTW2_PUPPET_ROW_UNITS &&
+              ntw2_puppet::kDivertWords==NTW2_PUPPET_DIVERT_WORDS, "puppet status word contract");
 // NTW2_PUPPET (--puppet-probe N): sole owner of site 6 (the ACTIVE clone's call of the loop 0x585D10, ECX = manager)
 // and of the infantry class slot 0x1333714+08 (common step 0x670EB0, thiscall, no stack argument). Outside the tick
 // owner's epoch both run only the original. The slot gate is reached by every class-0x1333714 common step; the module
@@ -2783,6 +2784,7 @@ void SampleCounters() {
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
+    ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -2908,6 +2910,7 @@ bool Activate(const World& candidate) {
     ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
+    ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -3182,6 +3185,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_PUPPET_WORDS;++i) ntw2_state.puppet_words[i]=0;
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
+    for (U i=0;i<NTW2_PUPPET_DIVERT_WORDS;++i) ntw2_state.puppet_divert_words[i]=0;
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;

@@ -53,7 +53,7 @@ static_assert(NTW2_COLLIDE_LOD==0x400u && !(NTW2_ALL&NTW2_COLLIDE_LOD) &&
               (NTW2_VALID_MASK&NTW2_COLLIDE_LOD)==NTW2_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
 static_assert(NTW2_ALL==(NTW2_AI_ASYNC|NTW2_BATCH64|NTW2_VISUAL), "NTW2_ALL is exactly the shipping set batch64,ai,visual");
 static_assert(NTW2_BRAIN_SLOTS==23u && NTW2_BRAIN_FAMILIES==5u && NTW2_BRAIN_SITE_FIRST==46u && NTW2_BRAIN_SITES==49u && NTW2_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0 and puppet motion words without changing existing words");
+static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_PUPPET_WORDS+NTW2_ARMY_B0_WORDS+NTW2_PUPPET_MOTION_WORDS+NTW2_PUPPET_DIVERT_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, puppet, army B0, puppet motion and puppet divert words without changing existing words");
 static_assert(NTW2_AI_SLICE_BUDGET_WORDS==8u && offsetof(ntw2_status,ai_slice_budget_words)==offsetof(ntw2_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(ntw2_status,ai_park_words)==offsetof(ntw2_status,ai_slice_budget_words)+NTW2_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(ntw2_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -117,14 +117,15 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,army_unit_words)+NTW2_ARMY_UNIT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_words) && NTW2_ARMY_UNIT_WORDS==192u &&
               offsetof(ntw2_status,puppet_words)+NTW2_PUPPET_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_b0_words) && NTW2_PUPPET_WORDS==64u &&
               offsetof(ntw2_status,army_b0_words)+NTW2_ARMY_B0_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_motion_words) && NTW2_ARMY_B0_WORDS==160u &&
-              offsetof(ntw2_status,puppet_motion_words)+NTW2_PUPPET_MOTION_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_PUPPET_MOTION_WORDS==32u &&
+              offsetof(ntw2_status,puppet_motion_words)+NTW2_PUPPET_MOTION_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,puppet_divert_words) && NTW2_PUPPET_MOTION_WORDS==32u &&
+              offsetof(ntw2_status,puppet_divert_words)+NTW2_PUPPET_DIVERT_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_PUPPET_DIVERT_WORDS==32u &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
 static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
               (NTW2_VALID_MASK&NTW2_ARMY_UNIT_SHADOW)==NTW2_ARMY_UNIT_SHADOW && !(NTW2_ARMY_UNIT_SHADOW&NTW2_PROFILE),
               "army unit shadow is its own opt-in observation bit outside the shipping set");
 static_assert(NTW2_PUPPET==0x80000u && !(NTW2_ALL&NTW2_PUPPET) && (NTW2_VALID_MASK&NTW2_PUPPET)==NTW2_PUPPET &&
-              !(NTW2_PUPPET&(NTW2_PROFILE|NTW2_BRAIN|NTW2_BRAIN2)) && NTW2_PUPPET_MAX_UNITS==4u,
+              !(NTW2_PUPPET&(NTW2_PROFILE|NTW2_BRAIN|NTW2_BRAIN2)) && NTW2_PUPPET_MAX_UNITS==2048u && NTW2_PUPPET_ROW_UNITS==4u,
               "puppet probe is its own opt-in simulation bit outside the shipping set");
 static_assert(NTW2_AI_CENSUS==0x10000u && !(NTW2_ALL&NTW2_AI_CENSUS) && (NTW2_VALID_MASK&NTW2_AI_CENSUS)==NTW2_AI_CENSUS &&
               !(NTW2_AI_CENSUS&(NTW2_PROFILE|NTW2_GRID_CENSUS)) && NTW2_AI_CENSUS_WORDS==768u,
@@ -1852,9 +1853,10 @@ int main(int argc,char** argv) {
     config.enabled_mask=NTW2_ARMY_UNIT_SHADOW; Check(start(&config)==1,"army unit shadow alone refused (no routed tick reaches site 18)");
     config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL|NTW2_ARMY_UNIT_SHADOW;
     Check(start(&config)==1,"army unit shadow refused without profile or a simulation feature");
-    // Puppet probe: unit count 1..4 exactly with its bit; sole owner of site 6 and the infantry class step slot.
+    // Puppet probe: unit count 1..NTW2_PUPPET_MAX_UNITS ("all") exactly with its bit; sole owner of site 6 and the
+    // infantry class step slot.
     config.enabled_mask=NTW2_PUPPET; config.puppet_units=0; Check(start(&config)==1,"puppet probe without a unit count refused");
-    config.puppet_units=5; Check(start(&config)==1,"puppet probe beyond four units refused");
+    config.puppet_units=NTW2_PUPPET_MAX_UNITS+1; Check(start(&config)==1,"puppet probe beyond the unit capacity refused");
     config.enabled_mask=NTW2_BATCH64; config.puppet_units=1; Check(start(&config)==1,"puppet unit count without the puppet bit refused");
     config.enabled_mask=NTW2_PUPPET|NTW2_BRAIN2; Check(start(&config)==1,"puppet probe and brain2 cannot both own site 6");
     config.enabled_mask=NTW2_PUPPET|NTW2_PROFILE|NTW2_BRAIN; config.main_thread_id=1;
@@ -2208,7 +2210,7 @@ int main(int argc,char** argv) {
         U* taskSlot=At(0x132e954); U* commonSlot=At(0x1333714+8);
         const U taskOriginal=0x5cc390+delta, commonOriginal=0x670eb0+delta, loopOriginal=0x585d10+delta;
         Check(*commonSlot==commonOriginal && ReadOnly(commonSlot),"pristine read-only infantry common-step slot");
-        config.enabled_mask=NTW2_PUPPET; config.puppet_units=1; config.workers=0; config.main_thread_id=0;
+        config.enabled_mask=NTW2_PUPPET; config.puppet_units=NTW2_PUPPET_MAX_UNITS; config.workers=0; config.main_thread_id=0;
         root[0x2829c]=0;
         Check(start(&config)==0,"puppet-only start accepted while the scheduler is unarmed");
         Sleep(80);
@@ -2220,9 +2222,10 @@ int main(int argc,char** argv) {
         Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"site 6 bound to the puppet stage gate");
         Check(*commonSlot!=commonOriginal && InRuntime(*commonSlot) && ReadOnly(commonSlot),
               "infantry common-step slot published read-only to the runtime gate");
-        Check(ReadState(state,snapshot) && snapshot.puppet_words[0]==3u && snapshot.puppet_words[1]==1u &&
-              snapshot.puppet_words[2]==1u && !snapshot.puppet_words[6] && !snapshot.puppet_words[38],
-              "puppet row: version 3, enabled, one unit requested, no stage or common call without a tick");
+        Check(ReadState(state,snapshot) && snapshot.puppet_words[0]==4u && snapshot.puppet_words[1]==1u &&
+              snapshot.puppet_words[2]==NTW2_PUPPET_MAX_UNITS && !snapshot.puppet_words[6] && !snapshot.puppet_words[38] &&
+              snapshot.puppet_divert_words[0]==1u && !snapshot.puppet_divert_words[1],
+              "puppet row: version 4, enabled, all units requested (storage allocated), no stage, common call or divert without a tick");
         Check(stop(nullptr)==0,"puppet stop joins the monitor");
         Check(*commonSlot==commonOriginal && ReadOnly(commonSlot) && *taskSlot==taskOriginal && ReadOnly(taskSlot),
               "puppet stop restores the common-step and task slots with their protection");
