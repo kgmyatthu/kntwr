@@ -3706,6 +3706,15 @@ static void print_profile_threads(const ntw2_profile_status *p)
             scale * p->in_image[i], scale * p->in_wait[i], scale * p->in_tbb[i],
             p->thread_id[i] == p->tick_thread_id ? L"  tick" : L"");
     }
+    /* Render-load tag: the busiest non-tick thread is the renderer; its image share during ticks is the only
+       camera-dependent quantity in a run. Compare it across runs before trusting sub-2 ms tick deltas. */
+    for (rank = 0; rank < count; ++rank) {
+        i = order[rank];
+        if (p->thread_id[i] == p->tick_thread_id || !p->thread_samples[i]) continue;
+        say(L"  render-load tag: busiest non-tick thread %lu at %.2f%% image occupancy during ticks (camera/render pressure indicator)\n",
+            (unsigned long)p->thread_id[i], 100.0 * p->in_image[i] / p->thread_samples[i]);
+        break;
+    }
 }
 
 static void print_profile_waits(const ntw2_profile_status *p)
