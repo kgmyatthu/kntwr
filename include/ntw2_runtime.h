@@ -1249,7 +1249,8 @@ typedef struct ntw2_trace_entry {
                              bit3: census valid; bit4: the gate was entered on an E-core (lower efficiency class), before placement;
                              bit5: the last census sample was on an E-core; bit6: the tick body was hard-pinned to P cores
                              (NTW2_TICK_PCORE, or an even tick under NTW2_TICK_CORE_AB); bit7: pinned to E cores (odd tick, AB);
-                             bits 8..15: E-core share of the tick body 0..255; bits 16..23: E-core share of site 6 0..255;
+                             bits 8..15: E-core share of the tick body 0..255; bits 16..23: E-core share of site 6 0..255
+                             (also 0 when site 6 did not run: qualify with site_calls[6]);
                              bits 24..31: core-class changes between consecutive samples (saturating). Samples are the
                              processor class at gate entry (after placement), at every timed site entry/exit and at tick end;
                              the QPC gap between two samples counts for their class, half each when they differ. */

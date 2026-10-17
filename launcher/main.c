@@ -2375,21 +2375,25 @@ static BOOL write_trace(Run *r)
         t->path_sum * share_scale, t->remainder_sum * share_scale,
         (unsigned long)t->over100, (unsigned long)t->over150);
     {   /* Tick core census (ntw2_trace_entry::flags bits 3..31): processor class carrying each routed tick, and placement. */
-        uint32_t census = 0, entered_e = 0, pinned_p = 0, pinned_e = 0;
+        uint32_t census = 0, census6 = 0, entered_e = 0, pinned_p = 0, pinned_e = 0;
         uint64_t share = 0, share6 = 0, changes = 0;
         const uint32_t first = (p->head + p->entries - t->count) % p->entries;
         for (i = 0; i < t->count; ++i) {
-            const uint32_t f = p->ring[(first + i) % p->entries].flags;
+            const ntw2_trace_entry *e = &p->ring[(first + i) % p->entries];
+            const uint32_t f = e->flags;
             if (!(f & 8u)) continue;
             ++census;
             entered_e += (f >> 4) & 1u; pinned_p += (f >> 6) & 1u; pinned_e += (f >> 7) & 1u;
-            share += (f >> 8) & 255u; share6 += (f >> 16) & 255u; changes += f >> 24;
+            share += (f >> 8) & 255u; changes += f >> 24;
+            /* The site-6 byte is 0 both for an all-P site 6 and for a tick without site 6: average only ticks that ran it. */
+            if (e->site_calls[6]) { ++census6; share6 += (f >> 16) & 255u; }
         }
         if (census)
-            say(L"  Tick core census: %lu ticks; entered on E-core %.1f%%; mean E share tick %.1f%% site 6 %.1f%%; "
+            say(L"  Tick core census: %lu ticks; entered on E-core %.1f%%; mean E share tick %.1f%% site 6 %.1f%% (%lu ticks ran it); "
                 L"class changes/tick %.2f; pinned P/E %lu/%lu\n",
                 (unsigned long)census, 100.0 * entered_e / census, 100.0 * share / (255.0 * census),
-                100.0 * share6 / (255.0 * census), (double)changes / census, (unsigned long)pinned_p, (unsigned long)pinned_e);
+                census6 ? 100.0 * share6 / (255.0 * census6) : 0.0, (unsigned long)census6, (double)changes / census,
+                (unsigned long)pinned_p, (unsigned long)pinned_e);
     }
     say(L"  Inclusive sites: %lu timed ticks; shares of all %lu retained tick durations.\n"
         L"  Each call is timed and counted; site 2 includes sites 16..25; totals overlap gate timings.\n"
