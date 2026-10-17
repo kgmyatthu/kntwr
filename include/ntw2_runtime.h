@@ -14,16 +14,16 @@ extern "C" {
 #define NTW2_BALLISTICS 0x04u
 #define NTW2_AI_ASYNC 0x08u /* Whole native planner calls run in a single worker slot and join before site 34 returns. */
 #define NTW2_BATCH64 0x10u
-#define NTW2_PROFILE 0x20u /* Opt-in instrumentation; deliberately not part of NTW2_ALL. */
+#define NTW2_PROFILE 0x20u /* Instrumentation; part of the shipping set NTW2_ALL (receipt/tick readout). */
 #define NTW2_BRAIN 0x40u /* Opt-in, requires NTW2_PROFILE: times every level-1 callee of the per-agent brain step per class family (see brain_words). Not part of NTW2_ALL. */
 #define NTW2_BRAIN2 0x80u /* Opt-in BRAIN2 v2: owner-ordered observation or serial gated clones at site 6 (Stage 1); with NTW2_BRAIN_PARALLEL (+census) the per-soldier step also runs speculatively on pool workers over private receiver copies with guarded owner-ordered commit (Stage 2). Outside NTW2_ALL. */
 #define NTW2_VISUAL 0x100u /* Main-thread 0x779E60 loop-1 sharding; part of the shipping set. */
-#define NTW2_COLLIDE 0x200u /* Opt-in experimental Phase B soft-collision solver; not part of NTW2_ALL. */
+#define NTW2_COLLIDE 0x200u /* Phase B soft-collision solver; part of the shipping set NTW2_ALL (with contact workers by launcher default). */
 #define NTW2_COLLIDE_LOD 0x400u /* Opt-in half-rate far-unit queries; incompatible with COLLIDE and FORMATION. */
 #define NTW2_AI_CTRL 0x800u /* Experimental controller offload with an immediate completion barrier; requires AI_ASYNC. */
 #define NTW2_AI_BUDGET_EMA 0x1000u /* Reserved retired bit; configurations requesting it are rejected. */
 #define NTW2_AI_SAFE_PARK 0x2000u /* Reserved retired bit; configurations requesting it are rejected. */
-#define NTW2_LOCO 0x4000u /* Experimental locomotion Stages A/B/C (timed site 13 = 0x531AF0). Opt-in, outside NTW2_ALL; refuses BRAIN and COLLIDE_LOD. Coexists with owner-serial BRAIN2. COLLIDE requires CLONE, PARALLEL, OWNED_SERVICES and GRID (or GRID_VERIFY). */
+#define NTW2_LOCO 0x4000u /* Locomotion Stages A/B/C (timed site 13 = 0x531AF0); part of the shipping set NTW2_ALL. Refuses BRAIN and COLLIDE_LOD. Coexists with owner-serial BRAIN2. COLLIDE requires CLONE, PARALLEL, OWNED_SERVICES and GRID (or GRID_VERIFY). */
 #define NTW2_GRID_CENSUS 0x8000u /* Opt-in reader edge counts and sampled occupancy; requires LOCO and a main thread id, not PROFILE. */
 #define NTW2_AI_CENSUS 0x10000u /* Opt-in observation of who mutates/destroys the AI planner object graph (ai_census_words): pinned vtable-slot gates, one clone-call gate and sampler ranges. Requires AI_ASYNC and a main thread id; outside NTW2_ALL. */
 #define NTW2_AI_CENSUS_WORDS 768u /* 16 header + 7 targets * (8 + 8 callers * 12) + 3 sample ranges * 8; layout: src/ntw2_ai_census.h */
@@ -190,9 +190,10 @@ enum ntw2_memory_word {
 #define NTW2_ALLOCATOR_WORDS (NTW2_ALLOCATOR_THREADS * NTW2_ALLOCATOR_ROW_WORDS)
 #define NTW2_ERROR_ALLOCATOR 14u
 #define NTW2_ERROR_VA_BUDGET 15u
-/* Shipping feature selection (launcher `--features all` and its default). The AI lifetime cutover requires fresh live verification.
-   PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE, COLLIDE_LOD, AI_CTRL, PROFILE and BRAIN are opt-in. */
-#define NTW2_ALL (NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_VISUAL)
+/* Shipping feature selection (launcher `--features all` and its default) = the verified reference stack
+   (dn-cwlive/dn-cwlive2: loco owned+grid incremental+cw workers, collide Phase B + contact workers, profile).
+   PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE_LOD, AI_CTRL and BRAIN remain opt-in. */
+#define NTW2_ALL (NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_VISUAL | NTW2_PROFILE | NTW2_LOCO | NTW2_COLLIDE)
 /* Every feature bit the runtime accepts in ntw2_config::enabled_mask. */
 #define NTW2_VALID_MASK (NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_BRAIN2 | NTW2_VISUAL | NTW2_PROFILE | NTW2_BRAIN | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_AI_CTRL | NTW2_LOCO | NTW2_GRID_CENSUS | NTW2_AI_CENSUS | NTW2_AI_ASYNC2 | NTW2_ARMY_UNIT_SHADOW)
 /* ai_async2_words labels, word order (histogram buckets: <=125us, <=250us, ... <=128ms, >128ms; gate kinds: site 34
@@ -1390,8 +1391,8 @@ static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&
               sizeof(ntw2_grid_census_status) == 40 + 64 * 1008 + 512 * 32 &&
               offsetof(ntw2_grid_reader_status, calls_site) == 96 + 8, "grid census status geometry");
-static_assert(NTW2_LOCO == 0x4000u && !(NTW2_ALL & NTW2_LOCO) && (NTW2_VALID_MASK & NTW2_LOCO) == NTW2_LOCO &&
-              !(NTW2_LOCO & (NTW2_AI_BUDGET_EMA | NTW2_AI_SAFE_PARK | NTW2_AI_CTRL)), "loco is an opt-in simulation feature outside NTW2_ALL");
+static_assert(NTW2_LOCO == 0x4000u && (NTW2_ALL & NTW2_LOCO) == NTW2_LOCO && (NTW2_VALID_MASK & NTW2_LOCO) == NTW2_LOCO &&
+              !(NTW2_LOCO & (NTW2_AI_BUDGET_EMA | NTW2_AI_SAFE_PARK | NTW2_AI_CTRL)), "loco is part of the shipping set NTW2_ALL");
 static_assert(offsetof(ntw2_status,ai_ctrl_words) == offsetof(ntw2_status,collide_lod_words) + NTW2_COLLIDE_LOD_WORDS * sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->ai_ctrl_words) == 16 * sizeof(uint32_t), "controller telemetry is append-only");
 static_assert(NTW2_AI_CTRL == 0x800u && !(NTW2_ALL & NTW2_AI_CTRL) && (NTW2_VALID_MASK & NTW2_AI_CTRL), "controller offload is explicit opt-in");

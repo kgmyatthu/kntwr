@@ -3998,6 +3998,10 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"grid_probation\": %s,\n", r->opt.grid_probation ? "true" : "false");
     sb_fmt(&b, "  \"loco_relink_shadow\": %s,\n", r->opt.loco_relink_shadow ? "true" : "false");
     sb_fmt(&b, "  \"loco_relink_workers\": %s,\n", r->opt.loco_relink_workers ? "true" : "false");
+    sb_fmt(&b, "  \"loco_cw_shadow\": %s,\n", r->opt.loco_cw_shadow ? "true" : "false");
+    sb_fmt(&b, "  \"loco_cw_workers\": %s,\n", r->opt.loco_cw_workers ? "true" : "false");
+    sb_fmt(&b, "  \"ai_poly_requested\": %s,\n  \"ai_prepass_flags\": %lu,\n", (r->opt.ai_prepass_flags & NTW2_AI_POLY) ? "true" : "false",
+           (unsigned long)r->opt.ai_prepass_flags);
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
@@ -5168,14 +5172,17 @@ static void usage(void)
         L"  --game DIR            folder containing Napoleon.exe (prompted when omitted)\n"
         L"  --replay FILE         start the game on a replay (game_startup_mode replay \"FILE\")\n"
         L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
-        L"                        all = batch64,ai,visual (the shipping set); every other feature is an explicit opt-in, e.g. all,profile\n"
+        L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
+        L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
+        L"                        --collide-contact-workers --ai-poly); any explicit --loco-*/--collide-contact-* (resp. --ai-poly*/\n"
+        L"                        --ai-prepass-census) switch replaces those defaults; spell the shipping set as just all\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
         L"                        the next tick start joins it (no think crosses into a tick; the stall is reported); writers join\n"
         L"                        (site 33, quadtree update, delegate and owner-destructor slots; 5 s watchdog -> synchronous fallback);\n"
         L"                        requires ai, excludes ai_ctrl/ai_census; experimental (non-tick direct-call owner teardown is not covered)\n"
-        L"                        collide = Phase B opt-in soft-collision solver (not in all); overrides the PROFILE collision census\n"
+        L"                        collide = Phase B soft-collision solver; overrides the PROFILE collision census\n"
         L"                        collide_lod = half-rate far-unit queries (not in all); cannot combine with collide or formation\n"
         L"                        (~200 all-thread rounds/s, <=10%% measured duty)\n"
         L"                        brain (needs profile) publishes the 23 vtable slots +0x0C as timed entries and prints/records the\n"
@@ -5216,7 +5223,7 @@ static void usage(void)
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
         L"                        tracker/+0x13C/avoidance effects in contact order; other contacts run the original callback in place\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
-        L"                        loco = experimental locomotion Stages A/B/C (not in all); optional owned grid v2 published at site-13 exit;\n"
+        L"                        loco = locomotion Stages A/B/C; optional owned grid v2 published at site-13 exit;\n"
         L"                        cannot combine with brain or collide_lod; brain2 v2 can coexist; collide requires --loco-clone --loco-parallel --loco-owned-services and grid\n"
         L"  --loco-clone          loco only: execute admitted movement occurrences through the private clone family (default: observe only, original code)\n"
         L"  --loco-parallel       requires loco and --loco-clone: closed direct-selector movement workers; native services/publication stay owner-only\n"
@@ -5479,6 +5486,23 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 #undef NEEDVAL
     }
     o->mask |= feature_options; /* independent of the position of --features */
+    /* The shipping set implies its verified default switches (dn-cwlive2 reference stack): loco
+       clone+parallel+owned+quiet+grid+incremental+cw workers and collide contact workers. Any explicit
+       --loco-* / --grid-* / --collide-contact-* switch opts out and keeps the previous behavior. */
+    if ((o->mask & NTW2_ALL) == NTW2_ALL &&
+        !o->loco_clone && !o->loco_parallel && !o->loco_shadow && !o->loco_owned && !o->loco_quiet &&
+        !o->loco_grid && !o->loco_grid_verify && !o->loco_grid_incremental && !o->grid_probation &&
+        !o->loco_relink_shadow && !o->loco_relink_workers && !o->loco_cw_shadow && !o->loco_cw_workers &&
+        !o->collide_contact_shadow && !o->collide_contact_workers) {
+        o->loco_clone = TRUE; o->loco_parallel = TRUE; o->loco_owned = TRUE; o->loco_quiet = TRUE;
+        o->loco_grid = TRUE; o->loco_grid_incremental = TRUE; o->loco_cw_workers = TRUE;
+        o->collide_contact_workers = TRUE;
+    }
+    /* The shipping set also implies the live polygon kernel (--ai-poly; dp-polylive2 S=2.98, 0 mismatches).
+       An explicit --ai-poly-shadow / --ai-prepass-census or the ai_async2 feature opts out. */
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & NTW2_AI_ASYNC2) &&
+        !(o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_PREPASS_CENSUS)))
+        o->ai_prepass_flags |= NTW2_AI_POLY;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
