@@ -69,6 +69,8 @@ bool Start(const Binding& binding);
 void Stop();
 void Reset();
 bool Started();
+// Bytes of the solver workspace allocated by Start (ntw_solver::WorkspaceBytes(), 11,907,616 B ~ 11.4 MiB at kMaxM 1200); 0 while stopped.
+unsigned long long StorageBytes();
 // Tick owner, routed epoch: one route-slot entry (counters only).
 void NoteRoute(Route route);
 // Tick owner, tick trace writer: closes the tick (top tables) with the trace tick id.

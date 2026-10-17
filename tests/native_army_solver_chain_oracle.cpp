@@ -10,8 +10,12 @@
 // 0x700 each, member array, slot vector/records, tick objects, the assignment vector header and its entries; object pointers are replaced
 // by (object, offset) tags because the twins live at different heap addresses), the global list 0x14A40A4/A8 (cap, count; data pointer
 // non-null iff cap; the list CONTENTS are dead data the kernel does not replicate), the allocator call sequence (sizes, free ordinals),
-// EBX/ESI/EDI/EBP/ESP, MXCSR control and the x87 control word. The suppression count of the SolveShim is checked against the native
-// pre-step 0x18F0200 probed on a third fixture (a wrong clone return-address offset would silently double-solve).
+// EBX/ESI/EDI/EBP/ESP, MXCSR control and the x87 control word. The SolveShim's suppress/forward counts are checked EXACTLY, per case and
+// per mode, against the counts of the ORIGINAL trampoline 0x18F0D00 observed in the native twin: observation-only hooks replace its two
+// exits (`pop eax; popfd; ret 0x10` at 0x18F0D1D = suppress, `pop eax; popfd; jmp 0x502770` at 0x18F0D22 = forward) by a jump to a host stub
+// that counts and then performs the identical exit (the call/pop PIC test above them is untouched). No heuristic expectation is used: the
+// pre-step result alone does NOT decide suppression, because 0x5373F0 only reaches the trampoline (call at 0x53765A) when it left men
+// unpushed (0x537613 `cmp eax, edx; jbe 0x537779`), e.g. never when every man is pushed by its first pass (unit predicate set / anchored men).
 //
 // Glue patches of the private copy (everything else is original bytes; clones are built BEFORE the patches): 0x00FF7F20 / 0x00FF7EF0
 // (game heap) -> logging host malloc/free, 0x0054C8B0 (unit predicate used by 0x5373F0) -> `mov eax, <case flag>; ret`, [0x14A40B0] = INT_MIN,
@@ -148,6 +152,59 @@ void ResetList() {                            // global list 0x14A40A4 cap / A8 
     U* l = (U*)(uintptr_t)NativeAddress(0x14A40A4);
     l[0] = 0; l[1] = 0; l[2] = 0;
     g_heapLog.clear(); g_heapOrdinal.clear(); g_heapNext = 0;
+}
+
+// ---- observation hooks on the ORIGINAL trampoline 0x18F0D00 (native twin only; clones were built before and never call it)
+volatile U g_nativeSuppress, g_nativeForward, g_native502770, g_native502776, g_nativeSolverEntries;
+__declspec(naked) void NativeSuppressStub() {
+    __asm {
+        inc dword ptr [g_nativeSuppress]
+        pop eax
+        popfd
+        ret 0x10
+    }
+}
+__declspec(naked) void NativeForwardStub() {
+    __asm {
+        inc dword ptr [g_nativeForward]
+        pop eax
+        popfd
+        jmp dword ptr [g_native502770]
+    }
+}
+__declspec(naked) void NativeSolverEntryStub() {          // 0x502770: count the entry, run the displaced `mov eax, fs:[2C]`, resume at 0x502776
+    __asm {
+        inc dword ptr [g_nativeSolverEntries]
+        mov eax, dword ptr fs:[0x2C]
+        jmp dword ptr [g_native502776]
+    }
+}
+// Hooks are applied only around the native twin runs and removed again before any chain mode (ntw2_army_solver::Start verifies the pristine
+// 0x502770 prologue, and the chain must run against the unhooked image).
+struct HookSite { U va; size_t len; uint8_t original[8]; };
+HookSite g_hookSites[3] = {{0x18F0D1D, 5, {}}, {0x18F0D22, 7, {}}, {0x502770, 6, {}}};
+bool InstallHooks(bool on) {
+    static const uint8_t expect[3][8] = {{0x58, 0x9D, 0xC2, 0x10, 0x00},                      // pop eax; popfd; ret 0x10            (suppress exit)
+                                         {0x58, 0x9D, 0xE9, 0x47, 0x1A, 0xC1, 0xFE},           // pop eax; popfd; jmp 0x502770       (forward exit)
+                                         {0x64, 0xA1, 0x2C, 0x00, 0x00, 0x00}};                // mov eax, fs:[2C]                   (0x502770 entry)
+    const void* const stubs[3] = {(const void*)&NativeSuppressStub, (const void*)&NativeForwardStub, (const void*)&NativeSolverEntryStub};
+    g_native502770 = NativeAddress(0x502770);
+    g_native502776 = NativeAddress(0x502776);
+    for (int k = 0; k < 3; ++k) {
+        uint8_t* at = (uint8_t*)(uintptr_t)NativeAddress(g_hookSites[k].va);
+        const size_t len = g_hookSites[k].len;
+        if (on) {
+            if (std::memcmp(at, expect[k], len) != 0) return false;
+            std::memcpy(g_hookSites[k].original, at, len);
+            at[0] = 0xE9;
+            const U rel = Addr(stubs[k]) - (Addr(at) + 5);
+            std::memcpy(at + 1, &rel, 4);
+            for (size_t i = 5; i < len; ++i) at[i] = 0x90;
+        } else {
+            std::memcpy(at, g_hookSites[k].original, len);
+        }
+    }
+    return FlushInstructionCache(GetCurrentProcess(), nullptr, 0) != 0;
 }
 
 // ---- fixtures (the slot harness' mock objects with the exact native offsets)
@@ -426,6 +483,23 @@ Case MakeCase(Rng& r, U idx, U forcedN, int forcedFlag, int forcedLayout, int fo
     return c;
 }
 
+// Hand-built deterministic case (no RNG): n men on a line, m == n slots (the pre-step 0x18F0200 requires slot count == member count, a layout
+// vtable [+0x24] == 0x18ED200, side [+0x1C] == 2, at least one officer 0x134841C with id k in {1,2}, and distinct left/right extreme slots).
+struct Named { int pre, suppress, forward, direct; const char* why; };
+Case HandCase(const char* name, std::vector<uint8_t> cls, uint8_t unitFlag, uint8_t flag, int32_t layoutIndex, U modBreak) {
+    Case c;
+    c.n = c.m = (U)cls.size();
+    c.cls = cls;
+    for (U i = 0; i < c.n; ++i) {
+        c.x.push_back(1.5f * (float)i); c.z.push_back(0.25f * (float)i); c.ang.push_back((uint16_t)(1000 + 37 * i));
+        c.skip.push_back(0); c.id.push_back(c.cls[i] == kOfficer ? 0x57460001u : 0u);   // officer id k = 1: the pre-step 0x18F0200 needs one with k in {1, 2}
+        c.sx.push_back(1.5f * (float)(c.n - 1 - i)); c.sz.push_back(0.0f); c.sang.push_back(0);   // slots on one line perpendicular to the slot angle, first slot at one end
+    }
+    c.unitFlag = unitFlag; c.flagParam = flag; c.layoutIndex = layoutIndex; c.modBreak = modBreak;
+    c.label = std::string("hand:") + name;
+    return c;
+}
+
 // ---- comparison
 std::string Diff(const DumpResult& a, const DumpResult& b) {
     char buf[256];
@@ -463,7 +537,9 @@ struct Stats { int cases = 0, runs = 0, failures = 0, suppressed = 0, forwarded 
 
 const char* ModeName(as::Mode m) { return m == as::ModeForward ? "forward" : m == as::ModeMemo ? "memo" : "shadow"; }
 
-bool CheckCounters(const Case& c, as::Mode mode, int pre, const U* w, std::string& why, Stats& st) {
+struct NativeRun { DumpResult r; int pre = -1; bool preOk = true; U sup = 0, fwd = 0, solverEntries = 0; };   // sup/fwd: exits of the ORIGINAL trampoline 0x18F0D00 observed in the native twin
+
+bool CheckCounters(const Case& c, as::Mode mode, const NativeRun& nat, const U* w, std::string& why, Stats& st) {
     char buf[320];
     const U seen = w[as::SolvesSeen], flag1 = w[as::SolvesFlag1], flag0 = w[as::Flag0Native], sup = w[as::ShimSuppressed], fwd = w[as::ShimForwarded];
     const U direct = w[as::Direct18F12AA];
@@ -478,17 +554,18 @@ bool CheckCounters(const Case& c, as::Mode mode, int pre, const U* w, std::strin
         why = buf; return false;
     }
     if (sup + fwd > 1) { why = "shim saw the trampoline call more than once"; return false; }
-    if (pre >= 0) {                                    // layoutIndex == -1: the pre-step ran; its result decides suppression
-        if (pre == 1) {
-            if (sup != 1) { std::snprintf(buf, sizeof buf, "pre-step returned 1 but shim_suppressed=%u (forwarded %u): the trampoline test would double-solve", sup, fwd); why = buf; return false; }
-        } else {
-            if (sup != 0) { why = "pre-step returned 0 but the shim suppressed"; return false; }
-            if (direct != 0) { why = "pre-step returned 0 but 18F1200's solver call ran"; return false; }
-        }
-    } else {                                           // layoutIndex >= 0: no pre-step, flag byte stays 0: never suppressed, no post-step
-        if (sup != 0) { why = "layout index >= 0 but the shim suppressed"; return false; }
-        if (direct != 0) { why = "layout index >= 0 but 18F1200's solver call ran"; return false; }
+    // Exact expectation: the shim must take the same exit as the original trampoline in the native twin (observation hooks on 0x18F0D00).
+    if (sup != nat.sup || fwd != nat.fwd) {
+        std::snprintf(buf, sizeof buf, "shim exits (suppressed %u, forwarded %u) != original trampoline exits (suppressed %u, forwarded %u); pre-step %d, n=%u unit=%u", sup, fwd, nat.sup, nat.fwd, nat.pre, c.n, c.unitFlag);
+        why = buf; return false;
     }
+    if (nat.sup && nat.pre != 1) { why = "native suppressed although the pre-step did not return 1 (oracle fixture bug)"; return false; }
+    // Every native entry of 0x502770 is either the trampoline's forward exit or the direct 18F12AA call, and the gate sees exactly those.
+    if (seen != nat.solverEntries || direct != nat.solverEntries - nat.fwd) {
+        std::snprintf(buf, sizeof buf, "gate entries (seen %u, direct %u) != native 0x502770 entries %u (of which %u via the trampoline)", seen, direct, nat.solverEntries, nat.fwd);
+        why = buf; return false;
+    }
+    if (direct && nat.pre != 1) { why = "post-step 18F1200 solved without a pre-step result of 1"; return false; }
     const U empty = w[as::EmptyNative];
     if (mode == as::ModeForward) {
         if (w[as::SolvedKernel] != 0 || w[as::ShadowCompares] != 0 || fb != 0) { why = "forward mode used the kernel"; return false; }
@@ -511,8 +588,6 @@ bool CheckCounters(const Case& c, as::Mode mode, int pre, const U* w, std::strin
     return true;
 }
 
-struct NativeRun { DumpResult r; int pre = -1; bool preOk = true; };
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -520,16 +595,18 @@ int main(int argc, char** argv) {
     std::string image, tablePath;
     int cases = 300;
     U seed = 1;
+    U overbound = 0;                       // 0: kMaxM + 100; a value reproduces an older case list (the size of the two 'm > kMaxM' cases)
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string a = argv[i];
         if (a == "--image") image = argv[i + 1];
         else if (a == "--table") tablePath = argv[i + 1];
         else if (a == "--cases") cases = std::atoi(argv[i + 1]);
         else if (a == "--seed") seed = (U)std::strtoul(argv[i + 1], nullptr, 10);
+        else if (a == "--overbound") overbound = (U)std::strtoul(argv[i + 1], nullptr, 10);
     }
     std::vector<uint8_t> file, table;
     if (image.empty() || tablePath.empty() || !ReadAll(image, file) || !ReadAll(tablePath, table)) {
-        std::fprintf(stderr, "usage: --image Napoleon.exe --table angle-table.bin [--cases N] [--seed S]\n");
+        std::fprintf(stderr, "usage: --image Napoleon.exe --table angle-table.bin [--cases N] [--seed S] [--overbound N]\n");
         return 2;
     }
     if (Sha256(file.data(), file.size()) != kImageSha) { std::fprintf(stderr, "image SHA-256 mismatch\n"); return 2; }
@@ -545,12 +622,25 @@ int main(int argc, char** argv) {
         for (int flag = 0; flag <= 1; ++flag)
             for (int layout : {-1, 0, -3})
                 for (int mod : {0, 1}) all.push_back(MakeCase(rng, idx++, n, flag, layout, mod));
-    for (int flag = 0; flag <= 1; ++flag) all.push_back(MakeCase(rng, idx++, 1000, flag, -1, 0));    // m > kMaxM: kernel fallback
+    for (int flag = 0; flag <= 1; ++flag) all.push_back(MakeCase(rng, idx++, overbound ? overbound : ntw_solver::kMaxM + 100, flag, -1, 0));    // m > kMaxM: kernel fallback
     for (int i = 0; i < cases; ++i) all.push_back(MakeCase(rng, idx++, 0, -1, -2, -1));
+    // Hand-built permanent cases (appended after the random ones, so the seeded stream above is unchanged). The expectation is the behaviour of the
+    // ORIGINAL code, pinned from disassembly: 0x5373F0 calls the trampoline at 0x53765A only when men remain unpushed after its first pass
+    // (0x537613), the trampoline suppresses iff the call came from 0x18F0A00's return address AND the pre-step flag [ebp-8] == 1, and the post-step
+    // 0x18F1200 runs iff the pre-step returned 1 and makes its direct 0x18F12AA solver call only when unpushed rows remain.
+    std::vector<Named> named(all.size(), Named{-9, 0, 0, 0, nullptr});
+    auto addHand = [&](Case c, Named e) { all.push_back(std::move(c)); named.push_back(e); };
+    const uint8_t A = kAnchored, N = kNormal, O = kOfficer;
+    addHand(HandCase("n2-all-anchored-pre1-no-trampoline", {O, A}, 0, 1, -1, 0), {1, 0, 0, 0, "every man pushed by the first pass: 0x5373F0 never calls the trampoline (0x537613) and the post-step 0x18F1200 finds no unpushed rows (`cmp edi, [ebp-1C]; jae 0x18F12AF`), so 0x502770 is never entered although the pre-step returned 1 (the case that broke the pre-step-based expectation)"});
+    addHand(HandCase("n3-one-anchored-pre1-suppressed", {O, N, N}, 0, 1, -1, 0), {1, 1, 0, 1, "men left unpushed: trampoline entered, suppressed by the pre-step flag, post-step solves"});
+    addHand(HandCase("n4-unit-predicate-pre1-suppressed", {O, N, N, N}, 1, 1, -1, 0), {1, 1, 0, 1, "unit predicate set: first pass skipped, trampoline entered and suppressed"});
+    addHand(HandCase("n3-layout-vtable-broken-pre0-forwarded", {O, N, N}, 0, 1, -1, 1), {0, 0, 1, 0, "pre-step returns 0: trampoline forwards to 0x502770, no post-step"});
+    addHand(HandCase("n3-layout-index-forwarded", {O, N, N}, 0, 1, 1, 0), {-1, 0, 1, 0, "layout index >= 0: pre-step not run, flag byte 0: forwarded"});
 
     // twin A: the ORIGINAL 0x18F0A00 once per case, plus the native pre-step probe
     std::vector<NativeRun> nat(all.size());
     int failures = 0;
+    if (!InstallHooks(true)) { std::fprintf(stderr, "original trampoline 0x18F0D00 / solver 0x502770 do not have the pinned bytes\n"); return 2; }
     for (size_t i = 0; i < all.size(); ++i) {
         const Case& c = all[i];
         NativeRun& n = nat[i];
@@ -561,10 +651,36 @@ int main(int argc, char** argv) {
         Mock k; Build(c, k);
         SetUnitPredicate(c.unitFlag);
         ResetList();
-        if (!RunStub(NativeAddress(0x18F0A00), k, c, n.r)) { ++failures; std::fprintf(stderr, "FAIL native twin faulted: %s\n", c.label.c_str()); }
+        g_nativeSuppress = 0; g_nativeForward = 0; g_nativeSolverEntries = 0;
+        const bool ranNative = RunStub(NativeAddress(0x18F0A00), k, c, n.r);
+        n.sup = g_nativeSuppress; n.fwd = g_nativeForward; n.solverEntries = g_nativeSolverEntries;
+        if (!ranNative) { ++failures; std::fprintf(stderr, "FAIL native twin faulted: %s\n", c.label.c_str()); }
     }
-    int expectedSuppress = 0;
-    for (const NativeRun& n : nat) if (n.pre == 1) ++expectedSuppress;
+    if (!InstallHooks(false)) return 2;
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (!named[i].why) continue;
+        const NativeRun& n = nat[i];
+        const U direct = n.solverEntries - n.fwd;
+        if (n.r.faulted || n.pre != named[i].pre || (int)n.sup != named[i].suppress || (int)n.fwd != named[i].forward || (int)direct != named[i].direct) {
+            ++failures;
+            std::fprintf(stderr, "FAIL %s: native twin pre %d suppress %u forward %u direct %u, expected pre %d suppress %d forward %d direct %d (%s)\n", all[i].label.c_str(), n.pre, n.sup, n.fwd, direct,
+                         named[i].pre, named[i].suppress, named[i].forward, named[i].direct, named[i].why);
+        }
+    }
+    int expectedSuppress = 0, expectedForward = 0, pre1NoTrampoline = 0, pre1 = 0;
+    for (size_t i = 0; i < nat.size(); ++i) {
+        const NativeRun& n = nat[i];
+        expectedSuppress += n.sup; expectedForward += n.fwd;
+        if (n.pre == 1) {
+            ++pre1;
+            if (!n.sup && !n.fwd) {
+                ++pre1NoTrampoline;
+                U anchored = 0;
+                for (uint8_t cl : all[i].cls) anchored += cl != kNormal;
+                std::printf("  pre-step 1 without a trampoline entry: %s (men %u, anchored/officer %u): every man was pushed by 0x5373F0's first pass, so 0x537613 (`cmp eax, edx; jbe 0x537779`) skips the call at 0x53765A\n", all[i].label.c_str(), all[i].n, anchored);
+            }
+        }
+    }
 
     for (as::Mode mode : {as::ModeForward, as::ModeMemo, as::ModeShadow}) {
         as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[NTW2_CLONE_SOLVER_18F0A00]};
@@ -584,23 +700,24 @@ int main(int argc, char** argv) {
             std::string why = Diff(nat[i].r, r);
             U w[as::kWords];
             as::Snapshot(w);
-            if (why.empty()) { std::string cw; if (!CheckCounters(c, mode, c.layoutIndex == -1 ? nat[i].pre : -1, w, cw, st)) why = "counters: " + cw; }
+            if (why.empty()) { std::string cw; if (!CheckCounters(c, mode, nat[i], w, cw, st)) why = "counters: " + cw; }
             if (!why.empty()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] %s: %s\n", ModeName(mode), c.label.c_str(), why.c_str()); }
         }
         as::Stop();
         std::printf("%-7s: cases=%d failures=%d suppressed=%d forwarded=%d direct_18f12aa=%d solves flag1=%d flag0=%d kernel=%d shadow_compares=%d fallbacks=%d\n",
                     ModeName(mode), st.cases, st.failures, st.suppressed, st.forwarded, st.direct, st.flag1, st.flag0, st.kernel, st.shadowCompares, st.fallbacks);
         failures += st.failures;
-        if (st.suppressed != expectedSuppress) {
+        if (st.suppressed != expectedSuppress || st.forwarded != expectedForward) {
             ++failures;
-            std::fprintf(stderr, "FAIL [%s] total suppression count %d != native pre-step expectation %d\n", ModeName(mode), st.suppressed, expectedSuppress);
+            std::fprintf(stderr, "FAIL [%s] total shim exits (suppressed %d, forwarded %d) != original trampoline exits (suppressed %d, forwarded %d)\n", ModeName(mode), st.suppressed, st.forwarded, expectedSuppress, expectedForward);
         }
-        if (mode != as::ModeForward && st.fallbacks == 0) { ++failures; std::fprintf(stderr, "FAIL [%s] no too_large fallback was exercised (n=1000 case)\n", ModeName(mode)); }
+        if (mode != as::ModeForward && st.fallbacks == 0 && (!overbound || overbound > ntw_solver::kMaxM)) { ++failures; std::fprintf(stderr, "FAIL [%s] no too_large fallback was exercised (n=kMaxM+100 case)\n", ModeName(mode)); }
         if (mode == as::ModeMemo && st.kernel == 0) { ++failures; std::fprintf(stderr, "FAIL memo never reached the kernel (oracle would be vacuous)\n"); }
         if (mode == as::ModeShadow && st.shadowCompares == 0) { ++failures; std::fprintf(stderr, "FAIL shadow never compared a solve\n"); }
         if (st.suppressed == 0 || st.forwarded == 0 || st.direct == 0) { ++failures; std::fprintf(stderr, "FAIL [%s] suppression/forward/direct paths not all exercised\n", ModeName(mode)); }
     }
-    std::printf("native pre-step expectation: %d suppressed cases of %zu; clones built from %s image delta %#llx\n", expectedSuppress, all.size(), "the pinned", (unsigned long long)g_delta);
+    std::printf("original trampoline 0x18F0D00 in the native twin: %d suppress exits, %d forward exits over %zu cases; pre-step returned 1 in %d cases, %d of them never entered the trampoline; image delta %#llx\n",
+                expectedSuppress, expectedForward, all.size(), pre1, pre1NoTrampoline, (unsigned long long)g_delta);
     std::printf("army solver chain oracle: failures=%d\n", failures);
     return failures ? 1 : 0;
 }

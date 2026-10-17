@@ -31,6 +31,7 @@
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
 #include "army/native_army_solver.h"
+#include "formation/native_formation_solver.h"
 #include "brain2/native_brain_s0.h"
 #include "brain2/native_brain_locality.h"
 #include "brain2/native_unit_policy.h"
@@ -2724,6 +2725,7 @@ void SampleMemoryStorage() {
     memoryWords[NTW2_MEM_OTHER_BYTES]=(formation.state ? formation.state[NFR_S_STORAGE_BYTES] : 0)+
         (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0)+
         ntw2_unit_policy::StorageBytes()+ // retained unit-policy storage (allocated once, kept for the process)
+        static_cast<U>(ntw2_army_solver::StorageBytes())+ // solver workspace (allocated at ntw2_army_solver::Start, freed at Stop)
         ntw2_brain_locality::StorageBytes(); // retained locality census storage (allocated once, kept for the process)
     ULONGLONG total=0;
     for(U i=NTW2_MEM_LOCO_BYTES;i<=NTW2_MEM_OTHER_BYTES;++i) total+=memoryWords[i];
@@ -2809,6 +2811,7 @@ bool StartModules() {
         if (!ntw2_army_storm::Start(binding)) { RecordError(ModuleError,NTW2_ARMY_STORM_CENSUS); return false; }
     }
     if (config.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) { // clones are built: the solver forwards AssignGate to CLONE_SOLVER_18F0A00
+        if (!VirtualBudget(ntw_solver::WorkspaceBytes())) return false; // the workspace is allocated by Start below, per activation
         const ntw2_army_solver::Binding binding={delta,(config.va_watch_flags&NTW2_ARMY_SOLVER_SHADOW) ? ntw2_army_solver::ModeShadow : ntw2_army_solver::ModeMemo,
                                                  clones.entries[NTW2_CLONE_SOLVER_18F0A00]};
         if (!ntw2_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)); return false; }

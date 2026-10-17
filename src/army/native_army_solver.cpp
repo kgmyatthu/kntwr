@@ -289,6 +289,7 @@ void Reset() {
     g_curFormation = g_curMembers = 0;
 }
 bool Started() { return g_started; }
+unsigned long long StorageBytes() { return g_ws ? ntw_solver::WorkspaceBytes() : 0ull; }
 void NoteRoute(Route route) {
     if (!g_started) return;
     if (route == RouteR1) ++g_total.r1; else if (route == RouteR1b) ++g_total.r1b; else ++g_total.r2;

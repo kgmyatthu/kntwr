@@ -83,8 +83,9 @@ constexpr uint8_t kPop4[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
 
 constexpr uint32_t kPad = kMaxM + 8;            // list-order arrays: whole 4-lane blocks readable past the live length
 constexpr uint32_t kS = (kMaxM + 1u + 3u) & ~3u;   // stride == rows of the kSimd tables (>= kMaxM + 1, multiple of 4)
-constexpr uint32_t kP = 1024;                   // leaves of the worst-scan tournament tree (power of two >= kMaxM)
+constexpr uint32_t kP = 2048;                   // leaves of the worst-scan tournament tree (power of two >= kMaxM)
 static_assert(kP >= kMaxM && (kP & (kP - 1)) == 0, "tournament tree capacity");
+static_assert(kMaxM < 65535u, "list positions / tournament-tree entries are uint16_t");
 
 struct Workspace {
     // kSimd list-order SoA (position u of the private 0x14A40AC list), 16-byte aligned for packed loads.
@@ -113,7 +114,7 @@ struct Workspace {
     alignas(16) float table[kS * kS];   // kSimd T[man id][slot] (row stride S): cost, or def for a null man / null slot
     alignas(16) float tableT[kS * kS];  // kSimd TT[slot][man id] = T transposed
 };
-static_assert(sizeof(Workspace) <= 4u * 1024u * 1024u, "workspace budget");
+static_assert(sizeof(Workspace) <= 12u * 1024u * 1024u, "workspace budget");
 
 Workspace* CreateWorkspace() {
     void* p = _aligned_malloc(sizeof(Workspace), 64);

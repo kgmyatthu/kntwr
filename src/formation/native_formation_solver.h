@@ -37,9 +37,11 @@
 
 namespace ntw_solver {
 
-// Largest m (entries per solve) the workspace holds; above it Solve returns kFallback.  Workspace ~= 3.4 MiB (two eager
-// cost tables of (kMaxM+1) x (kMaxM+1) floats dominate).  Live capture 28252: 88 units, max 404 men.
-constexpr uint32_t kMaxM = 640;
+// Largest m (entries per solve) the workspace holds; above it Solve returns kFallback (kReasonTooLarge, native runs).
+// Live capture 28252: 88 units, max 404 men; user battles have units of 500-800+ men, so the bound is 1200.  The workspace is
+// allocated ONCE (CreateWorkspace at activation, never per solve) and is ~11.4 MiB (see WorkspaceBytes(); the two eager cost
+// tables of (kMaxM+4) x (kMaxM+4) floats dominate).
+constexpr uint32_t kMaxM = 1200;
 
 struct Entry12 {               // live 12-byte entry; 0 = null pointer
     uint32_t man;
@@ -92,7 +94,7 @@ enum FallbackReason : uint32_t {
 struct Workspace;              // owner-private buffers (capacity kMaxM); one per solving thread
 Workspace* CreateWorkspace();  // nullptr if the allocation fails
 void DestroyWorkspace(Workspace*);
-uint64_t WorkspaceBytes();     // sizeof(Workspace) (~3.4 MiB)
+uint64_t WorkspaceBytes();     // sizeof(Workspace) (~11.4 MiB)
 
 enum Outcome : int { kSolved = 0, kFallback = 1 };   // kFallback: nothing written, caller runs native 0x502770
 
