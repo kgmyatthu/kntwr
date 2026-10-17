@@ -49,7 +49,8 @@ bool EqualWalkKey(const WalkKey& a, const WalkKey& b);
 // owner[+0x20] >= threshold reach 0x80DCF0; mode 2: owners with owner[+0x1C]==1 reach 0x808F90). In list order the hash covers
 // the entry pointer, entry type and (type 0x10) the owner pointer, owner[+8] polygon pointer, owner[+0x1C], owner[+0x20], and for
 // the entries the traversal consumes the polygon's ring by value: vertex count and every vertex (node[3], node[4]; next = node[2]),
-// bounded to kMaxPolygonVertices. SEH-safe. The Ex form reports why the hash is only a lower bound.
+// bounded to kMaxPolygonVertices. Words are mixed with the MurmurHash3_x86_32 block step (not word-wise FNV-1a, whose upward-only
+// carries let two equal high-bit changes cancel). SEH-safe. The Ex form reports why the hash is only a lower bound.
 constexpr U kMaxPolygonVertices = 64;
 constexpr U kMaxListEntries = 4096;
 constexpr U kMaxCountedVertices = 1024;   // census vertex-count histogram bound (independent of the list-hash bound above)

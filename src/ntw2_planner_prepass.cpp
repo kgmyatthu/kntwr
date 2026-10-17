@@ -51,38 +51,46 @@ bool EqualWalkKey(const WalkKey& a, const WalkKey& b) { return !memcmp(a.w, b.w,
 
 // ------------------------------------------------------------------------------------------------------------ gathered list
 namespace {
+// MurmurHash3_x86_32 block step. For a fixed word every step is a bijection of the state, so one changed word always changes
+// the hash; the rotations carry high-bit differences down. Word-wise FNV-1a (Mix) only carries differences up: two equal
+// high-bit changes (one vertex of a polygon consumed by two owners, any two sign flips) leave a 1-2 bit state difference that
+// the second change cancels, always for bit 31 and for a layout-dependent share of bit 30.
+inline void MixList(U& h, U v) {
+    v *= 0xCC9E2D51u; v = _rotl(v, 15); v *= 0x1B873593u;
+    h ^= v; h = _rotl(h, 13); h = h * 5u + 0xE6546B64u;
+}
 U HashListGuarded(const U* entries, U count, U mode, float threshold, U* flagsOut) {
     U h = 2166136261u, flags = 0;
-    Mix(h, count); Mix(h, mode); Mix(h, Bits(threshold));
+    MixList(h, count); MixList(h, mode); MixList(h, Bits(threshold));
     if (mode != 1) flags |= kListMode2;
     __try {
         U n = count;
         if (n > kMaxListEntries) { flags |= kListOversize; n = kMaxListEntries; }
         for (U i = 0; i < n; ++i) {
             const U entry = entries[i];
-            Mix(h, entry);
+            MixList(h, entry);
             if (!entry) continue;
             const U type = *P(entry);
-            Mix(h, type);
+            MixList(h, type);
             if (type != 0x10) continue;                  // the walk skips every other interest type
             const U owner = *P(entry + 0xC);
-            Mix(h, owner);
+            MixList(h, owner);
             if (!owner) continue;
             const U polygon = *P(owner + 8), f1c = *P(owner + 0x1C), f20 = *P(owner + 0x20);
-            Mix(h, polygon); Mix(h, f1c); Mix(h, f20);
+            MixList(h, polygon); MixList(h, f1c); MixList(h, f20);
             float level; memcpy(&level, &f20, 4);
             const bool consumed = mode == 1 ? (level >= threshold) : (mode == 2 && f1c == 1);
             if (!consumed || !polygon) continue;
             U vertices = 0, node = polygon;
             for (;;) {
                 const U x = *P(node + 0xC), y = *P(node + 0x10), next = *P(node + 8);
-                Mix(h, x); Mix(h, y);
+                MixList(h, x); MixList(h, y);
                 if (++vertices > kMaxPolygonVertices) { flags |= kListOversize; break; }
                 if (!next) { flags |= kListUnreadable; break; }
                 node = next;
                 if (node == polygon) break;
             }
-            Mix(h, vertices);
+            MixList(h, vertices);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { flags |= kListUnreadable; }
     *flagsOut = flags;

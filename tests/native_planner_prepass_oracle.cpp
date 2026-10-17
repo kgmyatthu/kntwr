@@ -142,6 +142,12 @@ static void TestList() {
     // Consumed polygon: vertex coordinates by value; unconsumed (owner[+0x20] < threshold): not read.
     poly[0][1].v[3]^=0x40000000u; Require(H(4)!=base,"consumed polygon vertex coordinates are hashed by value"); poly[0][1].v[3]^=0x40000000u;
     Require(H(4)==base,"restored vertex restores the hash");
+    // poly[0] is consumed twice (owners 0 and 2). Every single-bit change of one of its vertex words must survive both visits:
+    // word-wise FNV-1a cancels bit 31 always and bit 30 for an address-layout-dependent share of ASLR bases.
+    for(U bit=0;bit<32;++bit) {
+        poly[0][1].v[3]^=1u<<bit; const U changed=H(4); poly[0][1].v[3]^=1u<<bit;
+        Require(changed!=base,"a vertex bit change in a polygon consumed twice changes the hash");
+    }
     Require(H(4,1,5.0f)!=base,"threshold is part of the hash");
     const U unconsumed=H(4,1,5.0f); poly[0][1].v[3]^=0x40000000u; Require(H(4,1,5.0f)==unconsumed,"polygons failing the threshold are not hashed"); poly[0][1].v[3]^=0x40000000u;
     // NaN level never passes the walk's comiss/jb test: unconsumed.
