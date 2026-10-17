@@ -359,6 +359,69 @@ U siteLastUs[NTW2_TRACE_SITES];
 // Sampler gate for --profile-site: the executing thread id while the selected site (index+1) is active, else 0.
 volatile U siteInProgress; U siteGateIndex; U siteGateDepth;
 U siteCallees[NTW2_TIMED_SITES];
+// Tick core census + placement (trace flags bits 3..31; NTW2_TICK_PCORE / NTW2_TICK_CORE_AB). The topology is read once per start
+// from the CPU set information (group 0, processor numbers 0..31: a 32-bit affinity mask); the census state is tick-owner only.
+unsigned char cpuECore[64]; // 1: processor number is in a lower efficiency class than the highest one present
+DWORD_PTR cpuPMask, cpuEMask; // highest-class / lower-class processors, intersected with the process affinity
+bool cpuTopology, cpuHybrid;  // topology read; both classes present and usable
+struct CoreCensus { LONGLONG last, all, e, s6All, s6E; U lastE, changes, owner; bool inSite6, active; } coreCensus;
+void CpuTopologyInit() {
+    memset(cpuECore,0,sizeof(cpuECore)); cpuPMask=cpuEMask=0; cpuTopology=cpuHybrid=false;
+    alignas(8) static unsigned char buffer[16384];
+    ULONG length=0;
+    if (!GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer),sizeof(buffer),&length,GetCurrentProcess(),0) ||
+        length>sizeof(buffer)) return;
+    BYTE minClass=0xff, maxClass=0;
+    DWORD_PTR classMask[2]={}; // [0]: processors of the highest class (second pass), [1]: all lower classes
+    for (int pass=0; pass<2; ++pass) {
+        for (ULONG offset=0; offset+sizeof(DWORD)*2<=length;) {
+            const auto* info=reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer+offset);
+            if (!info->Size || offset+info->Size>length) return;
+            if (info->Type==CpuSetInformation && info->CpuSet.Group==0 && info->CpuSet.LogicalProcessorIndex<32) {
+                const BYTE cls=info->CpuSet.EfficiencyClass;
+                if (!pass) { if (cls<minClass) minClass=cls; if (cls>maxClass) maxClass=cls; }
+                else {
+                    const BYTE index=info->CpuSet.LogicalProcessorIndex;
+                    classMask[cls==maxClass ? 0 : 1]|=static_cast<DWORD_PTR>(1)<<index;
+                    cpuECore[index]=cls==maxClass ? 0 : 1;
+                }
+            }
+            offset+=info->Size;
+        }
+        if (!pass && minClass>maxClass) return; // no group-0 processor reported
+    }
+    DWORD_PTR process=0, system=0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(),&process,&system)) return;
+    cpuPMask=classMask[0]&process; cpuEMask=classMask[1]&process;
+    cpuTopology=true;
+    cpuHybrid=minClass!=maxClass && cpuPMask && cpuEMask;
+}
+// One census sample: the gap since the previous sample counts for their class (half each when they differ). Inert outside a
+// census tick (CoreBegin .. CoreFlags) and on any other thread: the AI worker also reaches timed sites (e.g. site 40 under the
+// prepass census / polygon modes) while the owner waits, and its processor must not enter the owner's census.
+inline void CoreSample(LONGLONG now) {
+    CoreCensus& c=coreCensus;
+    if (!c.active || GetCurrentThreadId()!=c.owner) return;
+    const U e=cpuECore[GetCurrentProcessorNumber()&63];
+    const LONGLONG dt=now-c.last, eShare=(static_cast<LONGLONG>(e+c.lastE)*dt)>>1;
+    c.all+=dt; c.e+=eShare;
+    if (c.inSite6) { c.s6All+=dt; c.s6E+=eShare; }
+    if (e!=c.lastE) ++c.changes;
+    c.last=now; c.lastE=e;
+}
+inline void CoreBegin(LONGLONG now) {
+    CoreCensus& c=coreCensus;
+    c.owner=GetCurrentThreadId(); c.all=c.e=c.s6All=c.s6E=0; c.changes=0; c.inSite6=false; c.active=true;
+    c.last=now; c.lastE=cpuECore[GetCurrentProcessorNumber()&63];
+}
+inline U CoreShare(LONGLONG part, LONGLONG all) { return all>0 ? static_cast<U>((part*255+all/2)/all) : 0u; }
+// Ends the census tick. placed: 0 none, 1 pinned to P, 2 pinned to E. Layout: ntw2_trace_entry::flags.
+U CoreFlags(U entryE, U placed) {
+    CoreCensus& c=coreCensus;
+    c.active=false;
+    return 8u | (entryE<<4) | (c.lastE<<5) | (placed==1 ? 0x40u : placed==2 ? 0x80u : 0u) |
+           (CoreShare(c.e,c.all)<<8) | (CoreShare(c.s6E,c.s6All)<<16) | ((c.changes>255u ? 255u : c.changes)<<24);
+}
 const U siteCalleeVas[]=NTW2_SITE_CALLEE_VAS;
 static_assert(sizeof(siteCalleeVas)/sizeof(siteCalleeVas[0])==NTW2_TIMED_SITES, "one callee VA per timed site");
 // NTW2_BRAIN accounting (tick-owner thread only; cumulative since the last activation, copied into ntw2_status::brain_words).
@@ -716,11 +779,15 @@ extern "C" __declspec(noinline) void __stdcall EnterSite(U site, U* returnSlot, 
     // Census (observation only): the covered walk's key is read before its frame timer starts.
     if (site==40) ntw2_prepass::WalkBegin(ecx,returnSlot[1],frame.returnAddress,0);
     QueryPerformanceCounter(&frame.start);
+    CoreSample(frame.start.QuadPart); // tick core census (trace flags): the class sample costs one processor-number read
+    if (site==6) coreCensus.inSite6=true;
 }
 extern "C" __declspec(noinline) U __stdcall LeaveSite(U eax) { // EAX of the exiting callee (SiteExit passes its saved EAX)
     LARGE_INTEGER end;
     QueryPerformanceCounter(&end);
     const SiteFrame& frame=siteStack[--siteDepth];
+    CoreSample(end.QuadPart);
+    if (frame.site==6) coreCensus.inSite6=false;
     if ((config.enabled_mask&(NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) || (config.loco_flags&NTW2_LOCO_GRID_PROBATION))
         ntw2_grid_census_site=siteDepth ? siteStack[siteDepth-1].site+1 : 0;
     const U us=Micro(frame.start.QuadPart,end.QuadPart);
@@ -2260,6 +2327,18 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     if (currentMask&NTW2_GRID_CENSUS) ntw2_grid_census_tick(modelTick);
     if (currentMask&NTW2_AI_CENSUS) ntw2_ai_census::Tick();
     if (currentMask&NTW2_BRAIN) BrainStateBeginTick();
+    // Tick core census (trace flags bits 3..31) and opt-in placement (NTW2_TICK_PCORE / NTW2_TICK_CORE_AB): a hard affinity for the
+    // tick body only, restored first thing in the __finally below. Placement never touches engine state or order.
+    const bool census=cpuTopology;
+    const U entryE=census ? cpuECore[GetCurrentProcessorNumber()&63] : 0u;
+    U placed=0;
+    DWORD_PTR priorAffinity=0;
+    if (cpuHybrid && (config.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))) {
+        const bool toE=(config.va_watch_flags&NTW2_TICK_CORE_AB) && (modelTick&1u);
+        priorAffinity=SetThreadAffinityMask(GetCurrentThread(),toE ? cpuEMask : cpuPMask);
+        if (priorAffinity) placed=toE ? 2u : 1u;
+    }
+    if (census) { LARGE_INTEGER now; QueryPerformanceCounter(&now); CoreBegin(now.QuadPart); }
     U result=0;
     bool traced=false, ai2Published=false;
     __try {
@@ -2271,8 +2350,11 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         const U bodyUs=Micro(start.QuadPart,end.QuadPart);
         SimRecord(start.QuadPart,end.QuadPart,tid,true);
         TraceTick(trace,modelTick,tid,bodyUs,interval,true,start.QuadPart);
+        if (census) { CoreSample(end.QuadPart); trace.flags|=CoreFlags(entryE,placed); }
         traced=true;
     } __finally {
+        coreCensus.active=false;
+        if (placed) SetThreadAffinityMask(GetCurrentThread(),priorAffinity);
         if (!ai2Published) Ai2TickAbort();
         AiBarrier(); epochMask=0; _InterlockedExchange(&tickOwner,0);
         if(Load(&budgetReleasePending)) {
@@ -3533,6 +3615,9 @@ static U StartImpl(void* raw) {
         // The storm-gated sampler threshold needs the census, the profile sampler and the site-18 gate (profile_site 19).
         ((next.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK) && (!(next.va_watch_flags&NTW2_ARMY_STORM_CENSUS) ||
                                                                !(next.enabled_mask&NTW2_PROFILE) || next.profile_site!=19)) ||
+        // --tick-pcore / --tick-core-ab place the routed tick body (TickGate's routed path); one placement mode at a time.
+        ((next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB)) && (!(next.enabled_mask&kRouted) ||
+                                                                       (next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))==(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))) ||
         ((next.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) && !next.main_thread_id) || next.profile_site>NTW2_TIMED_SITES) return BadConfig;
     const LONG before=Load(&life);
     if (before!=Never && before!=Stopped) return BadConfig;
@@ -3552,6 +3637,7 @@ static U StartImpl(void* raw) {
         _InterlockedExchange(&life,before); return ThreadError;
     }
     config=next;
+    CpuTopologyInit(); // tick core census + NTW2_TICK_PCORE / NTW2_TICK_CORE_AB masks; no tick is routed before activation
     ntw2_grid_census_reset((config.enabled_mask&NTW2_GRID_CENSUS)!=0); // sampler is stopped; disabled starts publish an all-zero row
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);
     ntw2_ai_async2::Reset(false,delta,&tickOwner,&aiThreadId); // zero row until a generation activates

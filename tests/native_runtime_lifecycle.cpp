@@ -182,7 +182,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK) && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB) && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -2219,6 +2219,13 @@ int main(int argc,char** argv) {
     config.profile_site=20; Check(start(&config)==1,"storm sample threshold with the wrong profile site (index 19) refused");
     config.profile_site=19; Check(start(&config)==2,"storm sample threshold with census, PROFILE and site 18 passes validation");
     config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK; Check(start(&config)==2,"storm sample threshold 255 ms passes validation");
+    // --tick-pcore / --tick-core-ab validation: routed tick only, one placement mode at a time.
+    config.profile_site=0; config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.va_watch_flags=NTW2_TICK_PCORE;
+    Check(start(&config)==1,"tick placement refused without a routed tick");
+    config.enabled_mask=NTW2_AI_ASYNC; Check(start(&config)==2,"tick placement with a simulation feature passes validation");
+    config.enabled_mask=NTW2_PROFILE; config.va_watch_flags=NTW2_TICK_CORE_AB;
+    Check(start(&config)==2,"tick core A/B with PROFILE passes validation");
+    config.va_watch_flags=NTW2_TICK_PCORE|NTW2_TICK_CORE_AB; Check(start(&config)==1,"tick placement modes are exclusive");
     config.va_watch_flags=0; config.profile_site=0; config.main_thread_id=0;
     // --ai-ctrl-* validation: routed tick, census shadow-only, verify needs a live feature, no ai_ctrl/ai_async2, known bits only.
     config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=NTW2_AI_CTRL_HISTOGRAM;

@@ -200,6 +200,8 @@ typedef struct Options {
     BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (ntw2_config::va_watch_flags); load-crash forensics only. */
     BOOL army_storm_census;  /* --army-storm-census: opt-in site-18 storm census (ntw2_config::va_watch_flags NTW2_ARMY_STORM_CENSUS) */
     uint32_t army_storm_sample_ms; /* --army-storm-sample-ms N, 1..255 (0 = off): storm-gated sampler threshold, bits 8..15 of va_watch_flags */
+    BOOL tick_pcore;         /* --tick-pcore: pin the routed tick body to P cores on a hybrid CPU (va_watch_flags NTW2_TICK_PCORE) */
+    BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags NTW2_TICK_CORE_AB) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -2372,6 +2374,23 @@ static BOOL write_trace(Run *r)
         t->manager_sum * share_scale, t->ballistics_sum * share_scale,
         t->path_sum * share_scale, t->remainder_sum * share_scale,
         (unsigned long)t->over100, (unsigned long)t->over150);
+    {   /* Tick core census (ntw2_trace_entry::flags bits 3..31): processor class carrying each routed tick, and placement. */
+        uint32_t census = 0, entered_e = 0, pinned_p = 0, pinned_e = 0;
+        uint64_t share = 0, share6 = 0, changes = 0;
+        const uint32_t first = (p->head + p->entries - t->count) % p->entries;
+        for (i = 0; i < t->count; ++i) {
+            const uint32_t f = p->ring[(first + i) % p->entries].flags;
+            if (!(f & 8u)) continue;
+            ++census;
+            entered_e += (f >> 4) & 1u; pinned_p += (f >> 6) & 1u; pinned_e += (f >> 7) & 1u;
+            share += (f >> 8) & 255u; share6 += (f >> 16) & 255u; changes += f >> 24;
+        }
+        if (census)
+            say(L"  Tick core census: %lu ticks; entered on E-core %.1f%%; mean E share tick %.1f%% site 6 %.1f%%; "
+                L"class changes/tick %.2f; pinned P/E %lu/%lu\n",
+                (unsigned long)census, 100.0 * entered_e / census, 100.0 * share / (255.0 * census),
+                100.0 * share6 / (255.0 * census), (double)changes / census, (unsigned long)pinned_p, (unsigned long)pinned_e);
+    }
     say(L"  Inclusive sites: %lu timed ticks; shares of all %lu retained tick durations.\n"
         L"  Each call is timed and counted; site 2 includes sites 16..25; totals overlap gate timings.\n"
         L"    site callee sum_us calls duration_share\n",
@@ -5055,7 +5074,8 @@ static int install_runtime(Run *r)
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
-                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT);
+                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
+                            (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
@@ -5608,6 +5628,11 @@ static void usage(void)
         L"                        route-unit count/us and >=5 ms units per tick go to tick-log slots 110/111. Default off.\n"
         L"  --army-storm-sample-ms N  with --army-storm-census, --features profile and --profile-site 18: the sampler admits a\n"
         L"                        sample only once site 18 has been in progress for N ms (1..255), profiling just the storm tails.\n"
+        L"  --tick-pcore          requires profile or a simulation feature: on a hybrid CPU the thread executing a routed tick is\n"
+        L"                        hard-pinned to the P cores (highest efficiency class) for the tick body and restored afterwards.\n"
+        L"                        Placement only; inert on a non-hybrid host. Every tick-log entry carries the core census (flags).\n"
+        L"  --tick-core-ab        measurement only, exclusive with --tick-pcore: even model ticks pinned to P, odd ticks to E cores,\n"
+        L"                        so neighbouring ticks measure the in-run E-core penalty (tick-log flags bits 6/7).\n"
         L"  --ai-deferred         with ai,ai_async2: deferred sliced thinks. The planner runs through a private node driver in\n"
         L"                        slices of B costed node calls (generate/child think/whole think; passes free) in the inter-tick\n"
         L"                        window; the next tick start joins only that slice; a finished think is consumed at the first\n"
@@ -5775,6 +5800,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--va-watch")) o->va_watch = TRUE;
         else if (!wcscmp(name, L"--army-storm-census")) o->army_storm_census = TRUE;
+        else if (!wcscmp(name, L"--tick-pcore")) o->tick_pcore = TRUE;
+        else if (!wcscmp(name, L"--tick-core-ab")) o->tick_core_ab = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -5914,6 +5941,15 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if (o->army_storm_sample_ms && (!o->army_storm_census || !(o->mask & NTW2_PROFILE) || o->profile_site != 19u)) {
         errsay(L"--army-storm-sample-ms requires --army-storm-census, --features profile and --profile-site 18.\n");
+        return -1;
+    }
+    if ((o->tick_pcore || o->tick_core_ab) &&
+        !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        errsay(L"--tick-pcore/--tick-core-ab need a routed tick: add profile or a simulation feature (e.g. --features all).\n");
+        return -1;
+    }
+    if (o->tick_pcore && o->tick_core_ab) {
+        errsay(L"--tick-pcore and --tick-core-ab are exclusive.\n");
         return -1;
     }
     if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
@@ -6139,7 +6175,8 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
-                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT);
+                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
+                            (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;

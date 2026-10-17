@@ -38,7 +38,9 @@ extern "C" {
 #define NTW2_ARMY_STORM_CENSUS 0x2u /* ntw2_config::va_watch_flags bit (launcher --army-storm-census): opt-in site-18 storm census (src/army/native_army_storm.h): sites 101/103 (0x581F30 calls) are bound to owner-thread gates that time each unit update, read cheap route evidence, and publish the army_storm_words row plus trace slots 110/111 (see NTW2_TRACE_SITES); nothing changes when clear. Requires a routed tick (NTW2_PROFILE or a simulation feature) and main_thread_id; exclusive with NTW2_ARMY_UNIT_SHADOW. */
 #define NTW2_ARMY_STORM_SAMPLE_SHIFT 8u
 #define NTW2_ARMY_STORM_SAMPLE_MASK 0xFF00u /* bits 8..15: storm-gated sampler threshold in ms (launcher --army-storm-sample-ms, 1..255); 0: sampler unchanged. Requires NTW2_ARMY_STORM_CENSUS, NTW2_PROFILE and profile_site 19 (site 18): the profile gate then admits a sample only while site 18 has been in progress for at least this long. */
-#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK)
+#define NTW2_TICK_PCORE 0x4u /* ntw2_config::va_watch_flags bit (launcher --tick-pcore): on a hybrid CPU the thread that executes a routed tick gets a hard affinity to the highest-efficiency-class (P) logical processors for the tick body; its previous affinity is restored before the gate returns. Placement only: no engine state, order or result changes. Requires a routed tick (NTW2_PROFILE or a simulation feature); a non-hybrid host leaves it inert. Exclusive with NTW2_TICK_CORE_AB. */
+#define NTW2_TICK_CORE_AB 0x8u /* ntw2_config::va_watch_flags bit (launcher --tick-core-ab): measurement only. Like NTW2_TICK_PCORE, but even model ticks are pinned to P and odd model ticks to E logical processors, so neighbouring ticks give an in-run E-core penalty. Requires a routed tick; exclusive with NTW2_TICK_PCORE. */
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB)
 #define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
@@ -1242,7 +1244,15 @@ typedef struct ntw2_trace_entry {
     uint32_t ballistics_us;
     uint32_t path_us;
     uint32_t thread_id;
-    uint32_t flags;       /* bit0: private tick clone, bit1: sub-phase gates, bit2: inclusive site timings */
+    uint32_t flags;       /* bit0: private tick clone, bit1: sub-phase gates, bit2: inclusive site timings.
+                             Tick core census (routed ticks on a host whose CPU set topology was read; always on, observation only):
+                             bit3: census valid; bit4: the gate was entered on an E-core (lower efficiency class), before placement;
+                             bit5: the last census sample was on an E-core; bit6: the tick body was hard-pinned to P cores
+                             (NTW2_TICK_PCORE, or an even tick under NTW2_TICK_CORE_AB); bit7: pinned to E cores (odd tick, AB);
+                             bits 8..15: E-core share of the tick body 0..255; bits 16..23: E-core share of site 6 0..255;
+                             bits 24..31: core-class changes between consecutive samples (saturating). Samples are the
+                             processor class at gate entry (after placement), at every timed site entry/exit and at tick end;
+                             the QPC gap between two samples counts for their class, half each when they differ. */
     uint32_t site_us[NTW2_TRACE_SITES];
     uint32_t site_calls[NTW2_TRACE_SITES];
     uint32_t qpc_start_lo, qpc_start_hi; /* raw gate-entry QPC */
@@ -1388,7 +1398,7 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
-              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK)),
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB)),
               "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");
