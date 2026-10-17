@@ -46,6 +46,7 @@
 #include "brain2/native_unit_posture_engage.h"
 #include "brain2/native_unit_posture_engage.h"
 #include "army/native_army_unit.h"
+#include "army/native_army_storm.h"
 #include "collision/native_contact.h"
 
 #include "ntw2_runtime.h"
@@ -191,6 +192,8 @@ typedef struct Options {
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
     BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (ntw2_config::va_watch_flags); load-crash forensics only. */
+    BOOL army_storm_census;  /* --army-storm-census: opt-in site-18 storm census (ntw2_config::va_watch_flags NTW2_ARMY_STORM_CENSUS) */
+    uint32_t army_storm_sample_ms; /* --army-storm-sample-ms N, 1..255 (0 = off): storm-gated sampler threshold, bits 8..15 of va_watch_flags */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -1716,6 +1719,40 @@ static void print_army_b0(const uint32_t *u, const uint32_t *b)
         g_steps ? L"PASS" : L"FAIL", 100.0 * p_closed, g_rec ? L"PASS" : L"FAIL", pct(b[139], u[16]), g_save ? L"PASS" : L"FAIL",
         native_ms - t_exp, g_cover && g_steps && g_rec && g_save ? L"GO" : L"NO-GO");
 }
+/* Site-18 storm census (native_army_storm.h): header 12 words, storm aggregate at 12 and non-storm aggregate at 26 (14 words each, AggWord),
+   top-8 storm-tick table at 40 (11 words each, largest site-18 us first). Prints nothing when the census is off (enabled word 0). */
+#define STORM_AGG_STORM 12u
+#define STORM_AGG_CALM 26u
+#define STORM_TOP 40u
+#define STORM_ENTRY_WORDS 11u
+static void print_army_storm(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[1]) return;
+    say(L"army_storm v%lu: ticks=%lu storm_ticks=%lu median_site18_us=%lu (storm > %lux median) observer_us=%lu unreadable=%lu "
+        L"sample_ms=%lu admitted=%lu rejected=%lu route_gate_outside_unit=%lu\n",
+        (unsigned long)w[0], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
+        (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
+        (unsigned long)w[11]);
+    for (i = 0; i < 2; ++i) {
+        const uint32_t *a = w + (i ? STORM_AGG_CALM : STORM_AGG_STORM);
+        say(L"  %ls max_unit_us=%lu units=%lu route_units(R2 reaches 576B30)=%lu route_us=%lu unit_us=%lu sum_max_unit_us=%lu units>=5ms=%lu "
+            L"units>=1ms=%lu prep=%lu us fsm=%lu us/%lu calls formation=%lu us R2_gate=%lu us R1_entries=%lu\n",
+            i ? L"calm: " : L"storm:", (unsigned long)a[0], (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3],
+            (unsigned long)a[4], (unsigned long)a[5], (unsigned long)a[6], (unsigned long)a[7], (unsigned long)a[8],
+            (unsigned long)a[9], (unsigned long)a[10], (unsigned long)a[11], (unsigned long)a[12], (unsigned long)a[13]);
+    }
+    for (i = 0; i < 8; ++i) {
+        const uint32_t *e = w + STORM_TOP + i * STORM_ENTRY_WORDS;
+        if (!e[0] && !e[1]) continue;
+        say(L"  top%lu: tick=%lu site18=%lu us site34=%lu us units=%lu route_units=%lu max_unit_us=%lu (ordinal %lu, side 0x%04lX) "
+            L"prep=%lu fsm=%lu formation=%lu R2_gate=%lu us units>=5ms=%lu R2_full_solves=%lu R1_entries=%lu\n",
+            (unsigned long)i, (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)(e[3] & 0xFFFFu),
+            (unsigned long)(e[3] >> 16), (unsigned long)e[4], (unsigned long)(e[5] & 0xFFFFu), (unsigned long)(e[5] >> 16),
+            (unsigned long)e[6], (unsigned long)e[7], (unsigned long)e[8], (unsigned long)e[9],
+            (unsigned long)(e[10] & 0x3FFu), (unsigned long)((e[10] >> 10) & 0x3FFu), (unsigned long)((e[10] >> 20) & 0x3FFu));
+    }
+}
 static void print_module_words(const ntw2_status *s)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
@@ -1943,6 +1980,7 @@ static void print_module_words(const ntw2_status *s)
         }
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
+    print_army_storm(s->army_storm_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
@@ -3444,6 +3482,22 @@ static void sb_army_unit(Sb *b, const Run *r)
     for (i = 0; i < NTW2_ARMY_B0_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.army_b0_words[i]);
     sb_fmt(b, "]},\n");
 }
+/* army_storm (NTW2_ARMY_STORM_CENSUS): every labelled word of army_storm_words (native_army_storm.h) plus the decoded top-8 table. */
+static void sb_army_storm(Sb *b, const Run *r)
+{
+    static const char *const labels[NTW2_ARMY_STORM_WORDS] = { NTW2_ARMY_STORM_LABELS };
+    const uint32_t *w = r->last.army_storm_words;
+    unsigned i;
+    if (!(r->cfg.va_watch_flags & NTW2_ARMY_STORM_CENSUS) || !r->have_status || !w[1]) {
+        sb_fmt(b, "  \"army_storm\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"army_storm\": {\"sample_ms\": %lu, \"words\": {", (unsigned long)((r->cfg.va_watch_flags & NTW2_ARMY_STORM_SAMPLE_MASK) >> NTW2_ARMY_STORM_SAMPLE_SHIFT));
+    for (i = 0; i < NTW2_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"raw\": [");
+    for (i = 0; i < NTW2_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -4078,6 +4132,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_grid_census(&b, r);
     sb_ai_census(&b, r);
     sb_army_unit(&b, r);
+    sb_army_storm(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -4756,7 +4811,8 @@ static int install_runtime(Run *r)
                          (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.va_watch_flags = r->opt.va_watch ? NTW2_VA_WATCH : 0u;
+    r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
+                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
@@ -5177,6 +5233,7 @@ static BOOL launch_game(Run *r)
     }
     memset(&pi, 0, sizeof pi);
     say(L"Launching: %ls\n  working directory: %ls\n", cmd, r->game_dir);
+    if (r->opt.army_storm_census) say(L"  army storm census: ON, storm-gated sampler threshold %lu ms (0 = sampler unchanged)\n", (unsigned long)r->opt.army_storm_sample_ms);
     if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, NULL, r->game_dir, &si, &pi)) {
         DWORD e = GetLastError();
         if (e == ERROR_ELEVATION_REQUIRED)
@@ -5288,6 +5345,13 @@ static void usage(void)
         L"                        add ai,ai_census to measure planner writes. Also Stage B0 qualification (army_b0_words,\n"
         L"                        receipt army_unit.b0): FSM steps/transitions, formation queue/scratch, recorder pins, RNG\n"
         L"                        member bound, own-state copy, exclusive refusal cost and the Stage B release gates\n"
+        L"  --army-storm-census   requires profile or a simulation feature; exclusive with --army-unit-shadow: opt-in site-18 storm\n"
+        L"                        census. Times every 0x581F30 call (sites 101/103), counts units taking the command/formation\n"
+        L"                        route, sub-brackets the preparation/FSM/formation calls, and keeps the top-8 storm ticks (site 18\n"
+        L"                        > 3 x its running 256-tick median) in army_storm_words (receipt army_storm); the longest unit,\n"
+        L"                        route-unit count/us and >=5 ms units per tick go to tick-log slots 110/111. Default off.\n"
+        L"  --army-storm-sample-ms N  with --army-storm-census, --features profile and --profile-site 18: the sampler admits a\n"
+        L"                        sample only once site 18 has been in progress for N ms (1..255), profiling just the storm tails.\n"
         L"  --ai-deferred         with ai,ai_async2: deferred sliced thinks. The planner runs through a private node driver in\n"
         L"                        slices of B costed node calls (generate/child think/whole think; passes free) in the inter-tick\n"
         L"                        window; the next tick start joins only that slice; a finished think is consumed at the first\n"
@@ -5449,6 +5513,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--va-watch")) o->va_watch = TRUE;
+        else if (!wcscmp(name, L"--army-storm-census")) o->army_storm_census = TRUE;
+        else if (!wcscmp(name, L"--army-storm-sample-ms")) {
+            NEEDVAL();
+            if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
+        }
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
         else if (!wcscmp(name, L"--loco-grid")) o->loco_grid = TRUE;
         else if (!wcscmp(name, L"--loco-grid-verify")) { o->loco_grid_verify = TRUE; o->loco_grid = TRUE; }
@@ -5571,6 +5640,19 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     if (((o->ai_prepass_flags & NTW2_AI_POLY_SHADOW) && (o->ai_prepass_flags & NTW2_AI_POLY)) ||
         ((o->ai_prepass_flags & NTW2_AI_PREPASS_CENSUS) && (o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)))) {
         errsay(L"--ai-poly-shadow, --ai-poly and --ai-prepass-census are mutually exclusive (the census perturbs timing; shadow and live are separate gates).\n");
+        return -1;
+    }
+    if (o->army_storm_census &&
+        !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        errsay(L"--army-storm-census needs the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
+        return -1;
+    }
+    if (o->army_storm_census && (o->mask & NTW2_ARMY_UNIT_SHADOW)) {
+        errsay(L"--army-storm-census and --army-unit-shadow are exclusive (both bind sites 101/103).\n");
+        return -1;
+    }
+    if (o->army_storm_sample_ms && (!o->army_storm_census || !(o->mask & NTW2_PROFILE) || o->profile_site != 19u)) {
+        errsay(L"--army-storm-sample-ms requires --army-storm-census, --features profile and --profile-site 18.\n");
         return -1;
     }
     if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
@@ -5779,7 +5861,8 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.va_watch_flags = r->opt.va_watch ? NTW2_VA_WATCH : 0u;
+    r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
+                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;

@@ -164,6 +164,10 @@ enum ntw2_binding {
        calls 0x6C7316/0x6C7410/0x6C77E2 (ret 4), PS_SPIRAL = PS_6C71D0's 0x6C79A8 call of 0x7FCA40 (ret 0xC; the cap goes into a private
        copy of the spec), PS_SPIRAL_PROBE = PS_7FCA90's 0x7FCC59/0x7FCD47 calls of 0x808040 (ret 0x14). */
     NTW2_BIND_PS_LADDER, NTW2_BIND_PS_LADDER_PROBE, NTW2_BIND_PS_SPIRAL, NTW2_BIND_PS_SPIRAL_PROBE,
+    /* --army-storm-census (appended; src/army/native_army_storm.h): ARMY_UNIT's preparation call 581FFB -> 57F070 (ARMY_PREP) and
+       formation update call 5820DE -> 585D50 (ARMY_FORMATION): ECX = U, no stack argument, plain return. Inclusive timing gates; each
+       forwards the original exactly once (like ARMY_FSM_UPDATE, the original directly unless the census epoch is open). */
+    NTW2_BIND_ARMY_PREP, NTW2_BIND_ARMY_FORMATION,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {

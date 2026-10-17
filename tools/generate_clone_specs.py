@@ -1072,7 +1072,11 @@ ARMY_UPDATE_CALLS = (
 # B0 (NTW2_ARMY_UNIT_SHADOW): the per-unit update 0x581F30, cloned only to observe its unit FSM update call 58202E
 # (ECX = U+D68 -> 0x582530 -> 10FBBD0 query/leave/enter/step). Every other edge stays original.
 ARMY_UNIT_FSM_SITE, ARMY_UNIT_FSM_TARGET = 0x58202E, 0x582530
-ARMY_UNIT_CALLS = {0x55AC80, 0x56D8B0, 0x4A8A50, 0x56AC40, 0x5691F0, 0x57F070, 0x5557E0, 0x582680, 0x56D910, 0x585D50,
+# --army-storm-census: the preparation call 581FFB -> 57F070 and the formation update call 5820DE -> 585D50 (both ECX = U, no stack
+# argument, plain ret) are bound to inclusive timing brackets (ARMY_PREP / ARMY_FORMATION); the gates forward the original once.
+ARMY_UNIT_PREP_SITE, ARMY_UNIT_PREP_TARGET = 0x581FFB, 0x57F070
+ARMY_UNIT_FORMATION_SITE, ARMY_UNIT_FORMATION_TARGET = 0x5820DE, 0x585D50
+ARMY_UNIT_CALLS = {0x55AC80, 0x56D8B0, 0x4A8A50, 0x56AC40, 0x5691F0, 0x5557E0, 0x582680, 0x56D910,
                    0x52E840, 0x56E410, 0x601500, 0x600EF0, 0x53A9E0, 0x54C1F0}
 # --brain-s0 (S0 attribution, analysis/native-unit-compromise-plan.md section 5.3): private copies of the per-man step whose
 # candidate decision calls reach counting/timing gates (bindings S0_*). Every gate forwards exactly one original (or the
@@ -2267,7 +2271,8 @@ def clone_configs():
              site_calls={site: Bind(f'SITE_CALL_{95+i}') for i, (site, _) in enumerate(ARMY_UPDATE_CALLS)},
              indirect_calls={0x580556, 0x5805A0}, expect_rets={0x5805D4: b'\xc3'}),
         dict(clone='ARMY_UNIT', source='ARMY_UNIT',
-             site_calls={ARMY_UNIT_FSM_SITE: Bind('ARMY_FSM_UPDATE')},
+             site_calls={ARMY_UNIT_FSM_SITE: Bind('ARMY_FSM_UPDATE'), ARMY_UNIT_PREP_SITE: Bind('ARMY_PREP'),
+                         ARMY_UNIT_FORMATION_SITE: Bind('ARMY_FORMATION')},
              indirect_calls={0x581F8F, 0x581FF3, 0x582022, 0x582081, 0x5820A7}, expect_rets={0x5821A6: b'\xc3'}),
         dict(clone='AIWRAP', source='AIWRAP',
              site_jumps={0x583385: (0x7B25A0, Clone('AICTRL'))},
@@ -2472,7 +2477,7 @@ EXPECT_CENSUS = {
     'MANAGER': (208, 3, 26, 0), 'ACTIVE': (66, 0, 0, 0),
     'ARMIES': (104, 1, 0, 0), 'AIPASS': (60, 0, 0, 0), 'ARMY': (38, 0, 0, 0),
     'ARMY_UPDATE': (176, 0, 0, 0),
-    'ARMY_UNIT': (165, 1, 16, 0),
+    'ARMY_UNIT': (165, 1, 14, 0),
     'AIWRAP': (4, 0, 0, 0), 'AICTRL': (99, 0, 0, 0),
     'AI_STATE_UPDATE': (7, 0, 0, 0), 'AI_POSITION_UPDATE': (233, 11, 19, 1),
     'AI_SHAPE_SEARCH': (256, 17, 21, 0), 'AI_WALK': (112, 17, 4, 0), 'AI_GATHER': (117, 12, 6, 0),
@@ -3131,6 +3136,13 @@ def build_all(image, header_path):
             unit_insns[0x581F32].bytes != bytes.fromhex('8bf1') or        # mov esi, ecx: U kept in ESI
             unit_insns[0x5821A6].bytes != b'\xc3'):
         fail('ARMY_UNIT: FSM receiver U+D68, call 58202E -> 582530, unit register or plain ret changed')
+    if (unit_insns[0x581FF9].bytes != bytes.fromhex('8bce') or            # mov ecx, esi: ECX = U
+            unit_insns[ARMY_UNIT_PREP_SITE].bytes !=
+            b'\xe8' + u32((ARMY_UNIT_PREP_TARGET - ARMY_UNIT_PREP_SITE - 5) & 0xFFFFFFFF) or
+            unit_insns[0x5820D5].bytes != bytes.fromhex('8bce') or        # mov ecx, esi: ECX = U
+            unit_insns[ARMY_UNIT_FORMATION_SITE].bytes !=
+            b'\xe8' + u32((ARMY_UNIT_FORMATION_TARGET - ARMY_UNIT_FORMATION_SITE - 5) & 0xFFFFFFFF)):
+        fail('ARMY_UNIT: preparation 581FFB -> 57F070 / formation update 5820DE -> 585D50 receiver (ECX = U) or target changed')
     wrap_insns = {i.address: i for i, _, _ in plans['AIWRAP'].instructions}
     if (wrap_insns[0x583380].bytes != bytes.fromhex('8b490c') or
             wrap_insns[0x583383].bytes != bytes.fromhex('85c9') or

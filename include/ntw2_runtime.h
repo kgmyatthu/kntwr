@@ -35,7 +35,11 @@ extern "C" {
 /* Mask bit 0x80000u is retired (former puppet probe, removed); NTW2_VALID_MASK refuses it and it is never reused. */
 #define NTW2_VA_WATCH_WORDS 64u /* va_watch_words: process VA watch (former puppet probe row, same size/offset); layout NTW2_VA_* below */
 #define NTW2_VA_WATCH 0x1u /* ntw2_config::va_watch_flags bit (launcher --va-watch): enable the VA watch sampler; default off, nothing is sampled or written without it */
-#define NTW2_VA_WATCH_FLAGS_VALID 0x1u
+#define NTW2_ARMY_STORM_CENSUS 0x2u /* ntw2_config::va_watch_flags bit (launcher --army-storm-census): opt-in site-18 storm census (src/army/native_army_storm.h): sites 101/103 (0x581F30 calls) are bound to owner-thread gates that time each unit update, read cheap route evidence, and publish the army_storm_words row plus trace slots 110/111 (see NTW2_TRACE_SITES); nothing changes when clear. Requires a routed tick (NTW2_PROFILE or a simulation feature) and main_thread_id; exclusive with NTW2_ARMY_UNIT_SHADOW. */
+#define NTW2_ARMY_STORM_SAMPLE_SHIFT 8u
+#define NTW2_ARMY_STORM_SAMPLE_MASK 0xFF00u /* bits 8..15: storm-gated sampler threshold in ms (launcher --army-storm-sample-ms, 1..255); 0: sampler unchanged. Requires NTW2_ARMY_STORM_CENSUS, NTW2_PROFILE and profile_site 19 (site 18): the profile gate then admits a sample only while site 18 has been in progress for at least this long. */
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK)
+#define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
    NTW2_VA_RING_ENTRIES samples x 4 words (uptime s, avail MiB, largest free region MiB, phase). Written by the monitor,
@@ -50,10 +54,6 @@ enum ntw2_va_word {
     NTW2_VA_RING_BASE /* = 16 */
 };
 #define NTW2_ARMY_B0_WORDS 160u /* army_b0_words (NTW2_ARMY_UNIT_SHADOW, Stage B0 qualification); layout src/army/native_army_unit.h (B0Word), labels NTW2_ARMY_B0_LABELS */
-#define NTW2_RESERVED_PUPPET_MOTION_WORDS 32u /* reserved_puppet_motion_words: retired row, always zero */
-#define NTW2_RESERVED_PUPPET_DIVERT_WORDS 32u /* reserved_puppet_divert_words: retired row, always zero */
-#define NTW2_RESERVED_PUPPET_MOVER_WORDS 32u /* reserved_puppet_mover_words: retired row, always zero */
-#define NTW2_RESERVED_PUPPET_SELECT_WORDS 32u /* reserved_puppet_select_words: retired row, always zero */
 #define NTW2_BRAIN_S0_WORDS 560u /* brain_s0_words (NTW2_BRAIN_S0 attribution timer); layout src/brain2/native_brain_s0.h (Word/RowWord), labels NTW2_BRAIN_S0_HEADER_LABELS / NTW2_BRAIN_S0_ROW_LABELS / NTW2_BRAIN_S0_ROW_WORD_LABELS */
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
@@ -362,7 +362,7 @@ typedef struct ntw2_config {
     uint32_t loco_flags;     /* Appended (config grew 36 -> 40 bytes); own field, no other field is reinterpreted. NTW2_LOCO_* flags; nonzero requires NTW2_LOCO. */
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
-    uint32_t va_watch_flags; /* Offset 48 (config 48 -> 52 bytes; former puppet probe unit count, retired). NTW2_VA_WATCH (launcher --va-watch); 0: off (nothing sampled); other bits refused. */
+    uint32_t va_watch_flags; /* Offset 48 (config 48 -> 52 bytes; former puppet probe unit count, retired). NTW2_VA_WATCH (launcher --va-watch), NTW2_ARMY_STORM_CENSUS (--army-storm-census) and the storm sampler threshold in ms in bits 8..15 (NTW2_ARMY_STORM_SAMPLE_MASK, --army-storm-sample-ms); 0: off (nothing sampled); other bits refused. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
     uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE / NTW2_AI_POLY* flags (launcher --ai-prepass-census, --ai-presize, --ai-poly-shadow, --ai-poly), NTW2_AI_SPIRAL_CENSUS (--ai-spiral-census) and the spiral cap in metres in bits 16..31 (--ai-spiral-cap-m); 0: off. */
@@ -902,13 +902,12 @@ typedef struct ntw2_status {
        bound, own-state bytes, exclusive refusal cost). Layout and labels in src/army/native_army_unit.h (B0Word,
        NTW2_ARMY_B0_LABELS). Tick-owner writer; reads only, no native write. Reset at activation, retained after stop. */
     uint32_t army_b0_words[NTW2_ARMY_B0_WORDS];
-    /* Retired rows (former puppet probe motion, divert, mover and selection diagnostics, appended after army_b0_words);
-       space kept so every later row keeps its offset. Always zero. */
-    uint32_t reserved_puppet_motion_words[NTW2_RESERVED_PUPPET_MOTION_WORDS];
-    uint32_t reserved_puppet_divert_words[NTW2_RESERVED_PUPPET_DIVERT_WORDS];
-    uint32_t reserved_puppet_mover_words[NTW2_RESERVED_PUPPET_MOVER_WORDS];
-    uint32_t reserved_puppet_select_words[NTW2_RESERVED_PUPPET_SELECT_WORDS];
-    /* NTW2_BRAIN_S0 attribution timer (appended after reserved_puppet_select_words): 32 header words (calibration, stages,
+    /* NTW2_ARMY_STORM_CENSUS (appended after army_b0_words; occupies the four retired puppet motion/divert/mover/select rows,
+       4 x 32 words, so every later row keeps its offset): the opt-in site-18 storm census row. Layout and labels in
+       src/army/native_army_storm.h (Word, NTW2_ARMY_STORM_LABELS). Tick-owner writer; reads only, no native write. All zero
+       without the feature; reset at activation, retained after stop. */
+    uint32_t army_storm_words[NTW2_ARMY_STORM_WORDS];
+    /* NTW2_BRAIN_S0 attribution timer (appended after army_storm_words): 32 header words (calibration, stages,
        occurrences, site-6 cycles, TSC/QPC span) then 33 mechanic rows x 16 words (calls, sampled calls, nesting counts,
        inclusive/exclusive cycles and per-occurrence second moments). Layout and labels in src/brain2/native_brain_s0.h.
        Tick-owner writer. Reset at activation, retained after stop. */
@@ -1202,7 +1201,14 @@ typedef struct ntw2_profile_status {
    Available only for PROFILE epochs without FORMATION; flags bit2 means timed calls.
    The army AI tail uses call/ret instead of jmp: the ECX-only callee must not inspect
    its return address (nor require the original caller's stack identity). */
-/* ABI 8: 944-byte entry (112 sites + raw gate QPC pair); all site offsets/indices preserved. */
+/* ABI 8: 944-byte entry (112 sites + raw gate QPC pair); all site offsets/indices preserved. Slots 110 and 111 are not timed
+   sites (NTW2_TIMED_SITES == 110) and stay zero unless NTW2_ARMY_STORM_CENSUS is on and the tick is routed; then the tick owner
+   writes four storm-census words there at tick end (src/army/native_army_storm.h, TickEnd):
+     site_us[110]    max single-unit 0x581F30 call us this tick (instrumentation excluded)
+     site_calls[110] units this tick whose route evidence says the command/formation route ran
+     site_us[111]    sum of those route units' us
+     site_calls[111] bits 0..15: units with cost >= 5000 us (saturating); bits 16..31: army/side index of the max unit
+                     (0xFFFF when unproven or no unit ran) */
 #define NTW2_TRACE_SITES 112u
 #define NTW2_TIMED_SITES 110u
 #define NTW2_SITE_CALLEE_VAS { \
@@ -1368,17 +1374,14 @@ static_assert(offsetof(ntw2_status,va_watch_words) + NTW2_VA_WATCH_WORDS * sizeo
               NTW2_VA_WATCH_WORDS == 64u && NTW2_VA_RING_BASE + NTW2_VA_RING_ENTRIES * NTW2_VA_RING_WORDS == NTW2_VA_WATCH_WORDS &&
               !(NTW2_VALID_MASK & 0x80000u),
               "VA watch row keeps the retired puppet row's space after army_unit_words; the puppet mask bit stays refused");
-static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_motion_words) &&
+static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_storm_words) &&
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
-static_assert(offsetof(ntw2_status,reserved_puppet_motion_words) + NTW2_RESERVED_PUPPET_MOTION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_divert_words) &&
-              offsetof(ntw2_status,reserved_puppet_divert_words) + NTW2_RESERVED_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_mover_words) &&
-              offsetof(ntw2_status,reserved_puppet_mover_words) + NTW2_RESERVED_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_select_words) &&
-              offsetof(ntw2_status,reserved_puppet_select_words) + NTW2_RESERVED_PUPPET_SELECT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
-              NTW2_RESERVED_PUPPET_MOTION_WORDS == 32u && NTW2_RESERVED_PUPPET_DIVERT_WORDS == 32u &&
-              NTW2_RESERVED_PUPPET_MOVER_WORDS == 32u && NTW2_RESERVED_PUPPET_SELECT_WORDS == 32u,
-              "retired puppet motion/divert/mover/select rows keep their space after army_b0_words");
+static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
+              NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK)),
+              "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
-              NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after reserved_puppet_select_words");
+              NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");
 static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&

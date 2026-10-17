@@ -19,6 +19,9 @@ __declspec(dllexport) volatile ntw2_profile_status ntw2_profile = {
 }
 volatile uint32_t* ntw2_profile_tick_gate;
 volatile uint32_t* ntw2_profile_main_tick_gate;
+volatile uint32_t ntw2_profile_storm_threshold_ms;
+volatile uint32_t ntw2_profile_storm_admitted;
+volatile uint32_t ntw2_profile_storm_rejected;
 volatile uint32_t ntw2_grid_census_site;
 
 namespace {
@@ -42,6 +45,7 @@ U frameChain[NTW2_PROFILE_CHAIN_DEPTH];
 LARGE_INTEGER frequency;
 __declspec(align(8)) volatile LONGLONG lastTickEnd;
 __declspec(align(8)) volatile LONGLONG lastTickStart;
+__declspec(align(8)) volatile LONGLONG stormEntry; // QPC when the selected site (18) was entered, set before its gate word
 LONGLONG postTickWindow, startTickWindow;
 U mainWaitHandles[MAXIMUM_WAIT_OBJECTS];
 // Preallocated exact handle counts, not a misleading first-eight or approximate
@@ -471,7 +475,19 @@ void Sample(U slot, CONTEXT& context) {
     // No allocation, loader/CRT locks or runtime locks while any target is suspended.
     const BOOL got = GetThreadContext(threads[slot], &context);
     const U phase = main ? MainPhase() : NTW2_PROFILE_PHASE_C;
-    const U tickThread = ntw2_profile_tick_gate ? *ntw2_profile_tick_gate : 0;
+    U tickThread = ntw2_profile_tick_gate ? *ntw2_profile_tick_gate : 0;
+    if (tickThread && ntw2_profile_storm_threshold_ms) {
+        // --army-storm-sample-ms: the selected site (18) admits a sample only once it has been in progress for the threshold.
+        const LONGLONG entry = InterlockedCompareExchange64(&stormEntry, 0, 0);
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const bool admit = entry && now.QuadPart - entry >= frequency.QuadPart * ntw2_profile_storm_threshold_ms / 1000;
+        if (ntw2_profile.thread_id[slot] == tickThread) { // count the site thread's visits only, not every sampled thread
+            if (admit) ntw2_profile_storm_admitted = ntw2_profile_storm_admitted + 1;
+            else ntw2_profile_storm_rejected = ntw2_profile_storm_rejected + 1;
+        }
+        if (!admit) tickThread = 0;
+    }
     const bool gated = tickThread != 0;
     const bool tick = gated && ntw2_profile.thread_id[slot] == tickThread;
     const U actualTickThread = ntw2_profile_main_tick_gate ? *ntw2_profile_main_tick_gate : 0;
@@ -638,6 +654,10 @@ void ntw2_profile_tick_end(uint64_t qpc_end) {
     InterlockedExchange64(&lastTickEnd, static_cast<LONGLONG>(qpc_end));
 }
 
+void ntw2_profile_storm_entry(uint64_t qpc) {
+    InterlockedExchange64(&stormEntry, static_cast<LONGLONG>(qpc));
+}
+
 void ntw2_grid_census_reset(bool enabled) {
     for (U i = 0; i < sizeof(census) / sizeof(U); ++i) CensusWords()[i] = 0;
     InterlockedExchange(&censusOn, 0);
@@ -753,6 +773,8 @@ uint32_t ntw2_profile_start(U threadId, U base, U bytes, U self, U clones, U clo
     ZeroMemory(mainWaitHandles, sizeof(mainWaitHandles));
     InterlockedExchange64(&lastTickEnd, 0);
     InterlockedExchange64(&lastTickStart, 0);
+    InterlockedExchange64(&stormEntry, 0);
+    ntw2_profile_storm_admitted = 0; ntw2_profile_storm_rejected = 0; // the threshold is runtime-configured before start
     ZeroMemory(frameChain, sizeof(frameChain));
     static const char* const names[6] = { "NtWaitForSingleObject", "NtWaitForMultipleObjects",
         "NtDelayExecution", "NtWaitForAlertByThreadId", "NtReleaseKeyedEvent", "NtWaitForKeyedEvent" };

@@ -74,6 +74,13 @@ extern volatile uint32_t* ntw2_profile_main_tick_gate;
 /* Publish the same raw entry QPC as the trace before setting the actual gate word. */
 void ntw2_profile_tick_start(uint64_t qpc_start);
 void ntw2_profile_tick_end(uint64_t qpc_end);
+/* --army-storm-sample-ms (NTW2_ARMY_STORM_SAMPLE_MASK): nonzero threshold makes the selected-site gate admit a sample only once
+   the site has been in progress that many ms. The runtime publishes the site's entry QPC (before it sets the gate word) via
+   ntw2_profile_storm_entry; admitted/rejected count gated sampler visits. Zero: sampler unchanged. */
+extern volatile uint32_t ntw2_profile_storm_threshold_ms;
+extern volatile uint32_t ntw2_profile_storm_admitted;
+extern volatile uint32_t ntw2_profile_storm_rejected;
+void ntw2_profile_storm_entry(uint64_t qpc);
 void ntw2_profile_stop();
 #endif /* __cplusplus */
 #endif
