@@ -2436,12 +2436,16 @@ bool NeedsActivationWorkload() {
     return (config.enabled_mask&(NTW2_COLLIDE|NTW2_COLLIDE_LOD)) ||
         ((config.enabled_mask&NTW2_LOCO) && (config.loco_flags&(NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY)));
 }
+// Every refusal leaves a reason in memoryWords[NTW2_MEM_ERROR] (0xCA000000 | code), published as the StorageError detail.
 bool CaptureWorkloadImpl() {
     constexpr U maxRecords=131072, maxCells=1048576, maxMemberships=2097152;
     const U manager=world.army;
-    if(!manager) return false;
+    auto refuse=[](U code,U value){ memoryWords[NTW2_MEM_ERROR]=0xCA000000u|(code<<16)|(value&0xFFFFu); return false; };
+    if(!manager) return refuse(1,0);
     const U primary=LodWord(manager,0x24C), secondary=LodWord(manager,0x278), work=LodWord(manager,0x260);
-    if(primary>maxRecords || secondary>maxRecords-primary || work>maxRecords) return false;
+    if(primary>maxRecords) return refuse(2,primary);
+    if(secondary>maxRecords-primary) return refuse(3,secondary);
+    if(work>maxRecords) return refuse(4,work);
     const U primaryNeed=primary>work ? primary : work;
     // Only allocation alignment headroom for records. Reinforcements beyond the
     // admitted generation run natively rather than expanding VA during a tick.
@@ -2454,11 +2458,11 @@ bool CaptureWorkloadImpl() {
         ((config.enabled_mask&NTW2_LOCO) && (config.loco_flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY)));
     if(spatial) {
         const U grid=LodWord(world.model,0xA4);
-        if(!grid) return false;
+        if(!grid) return refuse(5,0);
         const U shift=LodWord(grid,8), maximum=LodWord(grid,0x14);
-        if(shift>20 || maximum>=(1u<<shift)) return false;
+        if(shift>20 || maximum>=(1u<<shift)) return refuse(6,shift|(maximum<<8));
         const ULONGLONG cells=(static_cast<ULONGLONG>(maximum)<<shift)+maximum+1;
-        if(cells>maxCells) return false;
+        if(cells>maxCells) return refuse(7,static_cast<U>(cells>>8));
         activationCapacity.cells=static_cast<U>(cells);
         memoryWords[NTW2_MEM_NATIVE_GRID_SHIFT]=shift;
         memoryWords[NTW2_MEM_NATIVE_GRID_MAXIMUM]=maximum;
@@ -2466,11 +2470,11 @@ bool CaptureWorkloadImpl() {
         const U arrays[2]={LodWord(manager,0x250),LodWord(manager,0x27C)};
         const U counts[2]={primary,secondary};
         for(U domain=0;domain<2;++domain) {
-            if(counts[domain] && !arrays[domain]) return false;
+            if(counts[domain] && !arrays[domain]) return refuse(8,domain);
             for(U i=0;i<counts[domain];++i) {
                 const U record=LodWord(arrays[domain],4*i);
                 if(record) memberships+=LodWord(record,0xAC);
-                if(memberships>maxMemberships) return false;
+                if(memberships>maxMemberships) return refuse(9,static_cast<U>(memberships>>8));
             }
         }
     }
@@ -2479,7 +2483,7 @@ bool CaptureWorkloadImpl() {
     activationCapacity.pairs=16u*activationCapacity.primary;
     memberships=(memberships+(memberships+3)/4+255u)&~ULONGLONG(255u);
     if(!memberships) memberships=256;
-    if(memberships>maxMemberships) return false;
+    if(memberships>maxMemberships) return refuse(10,static_cast<U>(memberships>>8));
     activationCapacity.memberships=static_cast<U>(memberships);
     return true;
 }
