@@ -4422,6 +4422,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"ai_poly_requested\": %s,\n  \"ai_prepass_flags\": %lu,\n", (r->opt.ai_prepass_flags & NTW2_AI_POLY) ? "true" : "false",
            (unsigned long)r->opt.ai_prepass_flags);
     sb_fmt(&b, "  \"tick_pcore\": %s,\n", r->opt.tick_pcore ? "true" : "false");
+    sb_fmt(&b, "  \"army_solver_memo\": %s,\n", r->opt.army_solver_memo ? "true" : "false");
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
@@ -5613,8 +5614,8 @@ static void usage(void)
         L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
         L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
-        L"                        --collide-contact-workers --ai-poly --tick-pcore); any explicit --loco-*/--collide-contact-* (resp. --ai-poly*/\n"
-        L"                        --ai-prepass-census, --tick-core-ab) switch replaces those defaults; spell the shipping set as just all\n"
+        L"                        --collide-contact-workers --ai-poly --tick-pcore --army-solver-memo); any explicit --loco-*/--collide-contact-* (resp. --ai-poly*/\n"
+        L"                        --ai-prepass-census, --tick-core-ab, --army-solver-shadow) switch replaces those defaults; spell the shipping set as just all\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
@@ -5994,6 +5995,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     /* The shipping set also implies P-core placement of the tick thread (--tick-pcore; ta-pc: perf bad mean tick
        61.5 -> 54.6 ms, p90 97 -> 74, borodino p99 -30 ms; inert on a non-hybrid host). --tick-core-ab opts out. */
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->tick_core_ab) o->tick_pcore = TRUE;
+    /* The shipping set also implies the bit-exact slot solver kernel (--army-solver-memo; sv-memo4: perf bad storm-tick
+       site 18 2306 -> 473 ms, ticks >300 ms 5 -> 1; 0 mismatches over 2132 live shadow solves). --army-solver-shadow opts out. */
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
