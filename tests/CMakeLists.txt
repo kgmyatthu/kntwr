@@ -275,7 +275,7 @@ ntw2_harness(native_brain2_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_move_node.cpp"
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
           "${NTW2_SRC}/brain2/native_brain_s0.cpp"
-          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/brain2/native_unit_select.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_brain_workers_oracle STD 20 FP strict
   SOURCES native_brain_workers_oracle.cpp "${NTW2_SRC}/brain2/native_brain_workers.cpp"
@@ -304,11 +304,6 @@ ntw2_harness(native_army_unit_oracle STD 20 FP strict
 add_test(NAME ntw2_army_unit_oracle COMMAND native_army_unit_oracle)
 set_tests_properties(ntw2_army_unit_oracle PROPERTIES LABELS "synthetic;shadow" TIMEOUT 120)
 ntw2_note_registered(ntw2_army_unit_oracle)
-# Puppet probe stage 1: mapped-image wait-node install transaction vs the native watcher-install path, gated common
-# step vs 0x670EB0, and the stage membership/handback contract on fixture records.
-ntw2_harness(native_puppet_oracle STD 20 FP strict
-  SOURCES native_puppet_oracle.cpp "${NTW2_SRC}/puppet/native_puppet.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
-  INCLUDES "${NTW2_SRC}" LIBS bcrypt)
 ntw2_harness(native_node_oracle STD 20 FP strict
   SOURCES native_node_oracle.cpp "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
           "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
@@ -322,7 +317,7 @@ ntw2_harness(native_move_node_oracle STD 20 FP strict
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
           "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_brain_s0.cpp"
-          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/brain2/native_unit_select.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 # Per-unit posture / engage: the BRAIN_U_* clones and gates against the mapped originals (private relocated image).
@@ -333,7 +328,7 @@ ntw2_harness(native_unit_posture_engage_oracle STD 20 FP strict
 # shared module on a manager/registry fixture.
 ntw2_harness(native_unit_fatigue_oracle STD 20 FP strict
   SOURCES native_unit_fatigue_oracle.cpp "${NTW2_SRC}/brain2/native_unit_fatigue.cpp"
-          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/puppet/native_unit_select.cpp"
+          "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/brain2/native_unit_select.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_fire_oracle STD 20 FP strict
   SOURCES native_fire_oracle.cpp "${NTW2_SRC}/brain2/native_fire.cpp"
@@ -473,9 +468,6 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_env_oracle COMMAND native_env_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_env_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 300)
   ntw2_note_registered(ntw2_env_oracle)
-  add_test(NAME ntw2_puppet_oracle COMMAND native_puppet_oracle "${NTW2_IMAGE_ARG}")
-  set_tests_properties(ntw2_puppet_oracle PROPERTIES LABELS "image" TIMEOUT 120)
-  ntw2_note_registered(ntw2_puppet_oracle)
   ntw2_note_registered(ntw2_collision_solver)
   if(TARGET native_runtime_lifecycle)
     add_test(NAME ntw2_runtime_lifecycle
@@ -485,7 +477,7 @@ if(NTW2_HAVE_IMAGE)
   endif()
 else()
   foreach(_t ballistics_query_cache ballistics_runtime_integration formation_slot formation_batch formation_runtime
-             formation_layout path_workspace path_runtime animation_pose animation_render_batch walk_memo ai_ctrl_geometry ai_ctrl_oracle planner_prepass planner_search collision_solver contact_oracle brain2_oracle brain_workers_oracle node_oracle fire_oracle loco_oracle resolve_oracle puppet_oracle)
+             formation_layout path_workspace path_runtime animation_pose animation_render_batch walk_memo ai_ctrl_geometry ai_ctrl_oracle planner_prepass planner_search collision_solver contact_oracle brain2_oracle brain_workers_oracle node_oracle fire_oracle loco_oracle resolve_oracle)
     ntw2_note_skipped(ntw2_${_t} "NTW2_TEST_IMAGE not set to an existing Napoleon.exe")
   endforeach()
   if(TARGET native_runtime_lifecycle)

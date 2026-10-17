@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
-// Unit selection rules shared by the puppet probe (src/puppet/native_puppet.*) and the per-unit brain slices
-// (src/brain2/native_unit_policy.*): ONE copy of the infantry-table pin, the member admissibility rule, the unit
+// Unit selection rules of the per-unit brain slices (src/brain2/native_unit_policy.*; originally the puppet probe's,
+// removed from the runtime): ONE copy of the infantry-table pin, the member admissibility rule, the unit
 // qualification rule and the first-appearance registry scan. Owner thread only; every read is a plain load (callers
 // wrap a scan in SEH and treat a fault as "nothing selected").
 //
@@ -27,8 +27,8 @@ static_assert(!(kSeenHash & (kSeenHash - 1)), "power-of-two examined set");
 // Multiplicative hash folded so aligned pointers (zero low bits) still spread over the low slot bits.
 inline U HashSlot(U key, U mask) { const U h = key * 2654435761u; return (h ^ (h >> 15)) & mask; }
 
-// First failing unit-level reason. The numeric values equal the puppet's SelectWord indices (RejectMemberCount ..
-// RejectNoInfantry), so a caller may index a reason counter row with them.
+// First failing unit-level reason (RejectMemberCount .. RejectNoInfantry are 1..5), so a caller may index a reason
+// counter row with them.
 enum Reject : U { RejectNone, RejectMemberCount, RejectNullMember, RejectArtillery, RejectCavalry, RejectNoInfantry };
 // Why a member of a qualified unit is not selected (first failing test, in this order).
 enum MemberClass : U { MemberSelected, MemberOtherClass, MemberBacklink, MemberSerialOutOfRange, MemberCrew };

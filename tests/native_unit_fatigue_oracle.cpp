@@ -28,7 +28,7 @@
 #include "native_image_relocation.h"
 #include "brain2/native_unit_fatigue.h"
 #include "brain2/native_unit_policy.h"
-#include "puppet/native_unit_select.h"
+#include "brain2/native_unit_select.h"
 #include "ntw2_clones.h"
 #pragma fenv_access(on)
 using U = uint32_t;

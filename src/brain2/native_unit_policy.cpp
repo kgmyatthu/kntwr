@@ -6,7 +6,7 @@
 #include <string.h>
 #include "native_unit_policy.h"
 #include "ntw2_clones.h"
-#include "puppet/native_unit_select.h"
+#include "native_unit_select.h"
 
 namespace ntw2_unit_policy {
 Occurrence g_occ;

@@ -30,8 +30,6 @@
 #include "brain2/native_unit_brain.h"
 #include "army/native_army_unit.h"
 #include "brain2/native_brain_s0.h"
-#include "puppet/native_puppet.h"
-#include "puppet/native_unit_select.h"
 #include "brain2/native_unit_policy.h"
 #include "brain2/native_unit_fatigue.h"
 #include "brain2/native_unit_posture_engage.h"
@@ -75,7 +73,7 @@ void __fastcall bal_worker(bal_job*, U);
 }
 
 namespace {
-constexpr U kPreferred = 0x400000, kSimulation = NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO | NTW2_PUPPET;
+constexpr U kPreferred = 0x400000, kSimulation = NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO;
 constexpr U kProjectileCapacity = 65536, kStopTimeoutMs = 15000;
 enum Error : U { BadConfig=1, BadImage=2, MissingExport=3, CloneError=4, ModuleError=5,
                  SlotConflict=6, SlotProtection=7, StopTimeout=8, PoolError=9, ThreadError=10,
@@ -297,8 +295,7 @@ volatile LONG gateDepth;
 constexpr U kRouted = kSimulation | NTW2_PROFILE; // the clone route is also taken for profiling (sub-phase timing)
 // Features whose sites live behind the MANAGER clone route (FORMATION takes its own hook; PATH and BALLISTICS are
 // bound in the TICK clone). Every other routed feature must take the clone, or its site gates are never reached.
-constexpr U kManagerRouted = NTW2_PROFILE | NTW2_BRAIN2 | NTW2_AI_ASYNC | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO |
-                             NTW2_PUPPET;
+constexpr U kManagerRouted = NTW2_PROFILE | NTW2_BRAIN2 | NTW2_AI_ASYNC | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO;
 static_assert(kManagerRouted == (kRouted & ~(NTW2_FORMATION | NTW2_PATH | NTW2_BALLISTICS)),
               "every routed feature except formation/path/ballistics takes the MANAGER clone");
 volatile U phaseUs[3];       // manager, ballistics, path: accumulated inside the current tick (single executor, depth <= 1)
@@ -549,31 +546,6 @@ U __fastcall LocoMoveGate(void* manager) {
     if (Epoch(NTW2_LOCO) && !(static_cast<U>(Load(&budgetDisabledMask))&NTW2_LOCO))
         return ntw2_loco::Stage(manager);
     return reinterpret_cast<Manager>(V(0x531af0))(manager);
-}
-static_assert(ntw2_puppet::kWords==NTW2_PUPPET_WORDS && ntw2_puppet::kMaxUnits==NTW2_PUPPET_MAX_UNITS &&
-              ntw2_puppet::kMotionWords==NTW2_PUPPET_MOTION_WORDS && ntw2_puppet::kRowUnits==NTW2_PUPPET_ROW_UNITS &&
-              ntw2_puppet::kDivertWords==NTW2_PUPPET_DIVERT_WORDS && ntw2_puppet::kMoverWords==NTW2_PUPPET_MOVER_WORDS &&
-              ntw2_puppet::kSelectWords==NTW2_PUPPET_SELECT_WORDS && ntw2_unit_select::kInfantryTableCount<=1+kBrainSlotCount,
-              "puppet status word contract; its infantry +08 slots fit in place of the brain slots it excludes");
-// NTW2_PUPPET (--puppet-probe N|all): sole owner of site 6 (the ACTIVE clone's call of the loop 0x585D10, ECX = manager)
-// and of slot +08 of the admitted infantry tables (common step 0x670EB0, thiscall, no stack argument). Outside the tick
-// owner's epoch both run only the original. The slot gate is reached by every admitted-table common step; the module
-// owns its epoch test (bound to tickOwner/epochMask at Start) so its sampled dispatch cost covers the whole gate.
-bool PuppetEpoch() { return (epochMask&NTW2_PUPPET) && static_cast<U>(tickOwner)==GetCurrentThreadId(); }
-void __fastcall PuppetStageGate(void* g) {
-    if (!PuppetEpoch()) { reinterpret_cast<void (__fastcall*)(void*)>(V(0x585d10))(g); return; }
-    ntw2_puppet::Stage(Address(g));
-}
-U __fastcall PuppetCommonGate(U entity, U) {
-    if (ntw2_puppet::CommonStep(entity,Address(_ReturnAddress()))) return 0;
-    return reinterpret_cast<U (__thiscall*)(U)>(V(0x670eb0))(entity);
-}
-// NTW2_PUPPET stage 2: site 13 (movement loop 0x531AF0) entry. The tick owner inside a puppet epoch first writes the
-// slot mover's intent for parked members (after every other producer of the tick), then the movement loop (owned loco
-// or original, as LocoMoveGate decides) consumes it once.
-U __fastcall PuppetMoveGate(void* manager) {
-    if (PuppetEpoch()) ntw2_puppet::Move();
-    return LocoMoveGate(manager);
 }
 static_assert(ntw2_army_unit::kWords==NTW2_ARMY_UNIT_WORDS, "army unit status word contract");
 static_assert(ntw2_army_unit::kB0Words==NTW2_ARMY_B0_WORDS, "army B0 status word contract");
@@ -2501,7 +2473,6 @@ void SampleMemoryStorage() {
     memoryWords[NTW2_MEM_BALLISTICS_BYTES]=records ? sizeof(bal_record)*kProjectileCapacity : 0;
     memoryWords[NTW2_MEM_OTHER_BYTES]=(formation.state ? formation.state[NFR_S_STORAGE_BYTES] : 0)+
         (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0)+
-        ntw2_puppet::StorageBytes()+ // retained puppet activation storage (allocated once, kept for the process)
         ntw2_unit_policy::StorageBytes(); // retained unit-policy storage (allocated once, kept for the process)
     ULONGLONG total=0;
     for(U i=NTW2_MEM_LOCO_BYTES;i<=NTW2_MEM_OTHER_BYTES;++i) total+=memoryWords[i];
@@ -2578,14 +2549,6 @@ bool StartModules() {
         const ntw2_army_unit::Binding binding={imageBase,config.workers,
             (mask&NTW2_AI_CENSUS) ? &ntw2_ai_census::OwnerCalls : nullptr,(mask&NTW2_AI_ASYNC2) ? 1u : 0u};
         if (!ntw2_army_unit::Start(binding)) { RecordError(ModuleError,NTW2_ARMY_UNIT_SHADOW); return false; }
-    }
-    // The probe's activation storage is allocated once and retained for the process: budget it before the first
-    // allocation (VA floor policy) and report it in memory other_bytes.
-    if ((mask & NTW2_PUPPET) && !ntw2_puppet::StorageBytes() && !VirtualBudget(ntw2_puppet::RequiredStorageBytes()))
-        return false;
-    if ((mask & NTW2_PUPPET) && !ntw2_puppet::Start({imageBase,config.puppet_units&NTW2_PUPPET_UNIT_MASK,&tickOwner,&epochMask,
-                                                     NTW2_PUPPET,(config.puppet_units&NTW2_PUPPET_STATS_OFF)==0})) {
-        RecordError(ModuleError,NTW2_PUPPET); return false;
     }
     if (mask & NTW2_COLLIDE) {
         ntw2_collide::Binding binding={delta,&ntw_pool_dispatch,Address(&pool),config.workers};
@@ -2740,10 +2703,6 @@ bool BuildSlots() {
     // timing is independent of the older profiling-family slot publication.
     if ((config.enabled_mask & NTW2_BRAIN) && !(config.enabled_mask & NTW2_BRAIN2))
         for (const BrainTable& t:kBrainTables) AddSlot(t.table+kBrainSlotOffset,t.original,BrainEntryThunk(t.site));
-    // NTW2_PUPPET: common step slot +08 (pinned original 0x670EB0) of every admitted infantry table, gated per parked
-    // member. PUPPET refuses BRAIN, so these never coexist with the brain profiling slots they displace in kMaxSlots.
-    if (config.enabled_mask & NTW2_PUPPET)
-        for (U table : ntw2_unit_select::kInfantryTables) AddSlot(table+8,0x670eb0,FnAddress(&PuppetCommonGate));
     if (config.enabled_mask & NTW2_VISUAL) {
         U address=0;
         if (!FindVisualSlot(address)) return false;
@@ -2989,15 +2948,10 @@ void SampleCounters() {
     ntw2_brain_workers::PhaseSnapshot(const_cast<U*>(ntw2_state.brain_worker_phase_words));
     ntw2_unit_brain::Snapshot(const_cast<U*>(ntw2_state.brain_unit_words));
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
-    ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
-    ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
-    ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
-    ntw2_puppet::SnapshotMover(const_cast<U*>(ntw2_state.puppet_mover_words));
-    ntw2_puppet::SnapshotSelect(const_cast<U*>(ntw2_state.puppet_select_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -3034,7 +2988,6 @@ bool StopModules() {
             Sleep(1);
         }
     }
-    ntw2_puppet::Stop(); // tick owner drained, slot restored: surviving members are handed back (no native write)
     SampleCounters();
     ntw2_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     ntw2_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
@@ -3117,10 +3070,8 @@ bool Activate(const World& candidate) {
         psWalkTarget=polyBits ? clones.entries[NTW2_CLONE_PS_WALK] : FnAddress(&SiteCall40);
     }
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
-    siteCallees[6]=(config.enabled_mask&NTW2_PUPPET) ? FnAddress(&PuppetStageGate) :
-        (config.enabled_mask&NTW2_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
-    siteCallees[13]=(config.enabled_mask&NTW2_PUPPET) ? FnAddress(&PuppetMoveGate) :
-        (config.enabled_mask&NTW2_LOCO) ? FnAddress(&LocoMoveGate) : V(0x531af0);
+    siteCallees[6]=(config.enabled_mask&NTW2_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
+    siteCallees[13]=(config.enabled_mask&NTW2_LOCO) ? FnAddress(&LocoMoveGate) : V(0x531af0);
     const bool armyUnit=(config.enabled_mask&NTW2_ARMY_UNIT_SHADOW)!=0;
     siteCallees[18]=armyUnit ? FnAddress(&ArmyStageGate) : clones.entries[NTW2_CLONE_ARMY_UPDATE];
     siteCallees[101]=armyUnit ? FnAddress(&ArmyUnitGateMain) : V(0x581f30);
@@ -3146,15 +3097,10 @@ bool Activate(const World& candidate) {
     ntw2_brain_workers::PhaseSnapshot(const_cast<U*>(ntw2_state.brain_worker_phase_words));
     ntw2_unit_brain::Snapshot(const_cast<U*>(ntw2_state.brain_unit_words));
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
-    ntw2_puppet::Snapshot(const_cast<U*>(ntw2_state.puppet_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
-    ntw2_puppet::SnapshotMotion(const_cast<U*>(ntw2_state.puppet_motion_words));
-    ntw2_puppet::SnapshotDivert(const_cast<U*>(ntw2_state.puppet_divert_words));
-    ntw2_puppet::SnapshotMover(const_cast<U*>(ntw2_state.puppet_mover_words));
-    ntw2_puppet::SnapshotSelect(const_cast<U*>(ntw2_state.puppet_select_words));
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
         ntw2_idle_node::EventSnapshot(cls,const_cast<U*>(ntw2_state.idle_node_event_words[cls]));
@@ -3346,7 +3292,7 @@ static U StartImpl(void* raw) {
         // unit bits, which it routes (the unit seams ride its runner).
         ((next.brain_flags&NTW2_BRAIN_S0) && (next.brain_flags&~(NTW2_BRAIN_S0|kUnitBrainBits))) ||
         // Per-unit brain slices: a shadow bit needs its base bit; every unit bit excludes the census/timing/shadow flags, the
-        // Stage 2 worker walk (bypasses the runner), --brain-unit-shadow (one observer owner) and the puppet.
+        // Stage 2 worker walk (bypasses the runner) and --brain-unit-shadow (one observer owner).
         (next.brain_flags&NTW2_BRAIN_UNIT_FATIGUE_SHADOW && !(next.brain_flags&NTW2_BRAIN_UNIT_FATIGUE)) ||
         (next.brain_flags&NTW2_BRAIN_UNIT_POSTURE_SHADOW && !(next.brain_flags&NTW2_BRAIN_UNIT_POSTURE)) ||
         (next.brain_flags&NTW2_BRAIN_UNIT_ENGAGE_SHADOW && !(next.brain_flags&NTW2_BRAIN_UNIT_ENGAGE)) ||
@@ -3397,10 +3343,8 @@ static U StartImpl(void* raw) {
         (next.ai_prepass_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&NTW2_AI_ASYNC2) ||
                                    ((next.ai_prepass_flags&NTW2_AI_PREPASS_CENSUS) && (next.ai_prepass_flags&~(NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE))) ||
                                    ((next.ai_prepass_flags&NTW2_AI_POLY_SHADOW) && (next.ai_prepass_flags&NTW2_AI_POLY)))) ||
-        // The puppet probe owns site 6 alone (BRAIN2/brain flags) and the class step slot (BRAIN profiling slots).
-        (next.puppet_units&~(NTW2_PUPPET_UNIT_MASK|NTW2_PUPPET_STATS_OFF)) || (next.puppet_units&NTW2_PUPPET_UNIT_MASK)>NTW2_PUPPET_MAX_UNITS ||
-        ((next.enabled_mask&NTW2_PUPPET)!=0)!=((next.puppet_units&NTW2_PUPPET_UNIT_MASK)!=0) ||
-        ((next.enabled_mask&NTW2_PUPPET) && ((next.enabled_mask&(NTW2_BRAIN2|NTW2_BRAIN)) || next.brain_flags)) ||
+        // Offset 48 is retired (former puppet probe unit count) and must stay zero.
+        next.reserved48 ||
         ((next.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) && !next.main_thread_id) || next.profile_site>NTW2_TIMED_SITES) return BadConfig;
     const LONG before=Load(&life);
     if (before!=Never && before!=Stopped) return BadConfig;
@@ -3433,7 +3377,7 @@ static U StartImpl(void* raw) {
     memoryNextSample=0; activationCapacity={};
     collideSampleReady=false; // retained solver words belong to the previous start until the next activation
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
-    Brain2Reset(); ntw2_army_unit::Reset(); ntw2_puppet::Reset();
+    Brain2Reset(); ntw2_army_unit::Reset();
     CollideLodReset();
     memset(const_cast<U*>(visualWords),0,sizeof(visualWords));
     memset(allocatorWords,0,sizeof(allocatorWords));
@@ -3474,17 +3418,12 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) ntw2_state.collide_contact_words[i]=0;
     for (U i=0;i<NTW2_GRID_PROBATION_WORDS;++i) ntw2_state.grid_probation_words[i]=0;
     for (U i=0;i<NTW2_ARMY_UNIT_WORDS;++i) ntw2_state.army_unit_words[i]=0;
-    for (U i=0;i<NTW2_PUPPET_WORDS;++i) ntw2_state.puppet_words[i]=0;
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_S0_WORDS;++i) ntw2_state.brain_s0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_UNIT_POLICY_WORDS;++i) ntw2_state.brain_unit_policy_words[i]=0;
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS;++i) ntw2_state.ai_ctrl_reuse_words[i]=0;
     for (U i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) ntw2_state.ai_prepass_census_words[i]=0;
     for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=0;
-    for (U i=0;i<NTW2_PUPPET_MOTION_WORDS;++i) ntw2_state.puppet_motion_words[i]=0;
-    for (U i=0;i<NTW2_PUPPET_DIVERT_WORDS;++i) ntw2_state.puppet_divert_words[i]=0;
-    for (U i=0;i<NTW2_PUPPET_MOVER_WORDS;++i) ntw2_state.puppet_mover_words[i]=0;
-    for (U i=0;i<NTW2_PUPPET_SELECT_WORDS;++i) ntw2_state.puppet_select_words[i]=0;
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;

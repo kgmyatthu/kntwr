@@ -6,7 +6,7 @@
 // their own membership: each registers a Provider that decides once per selected unit and stage and applies through a
 // binding that tests `g_occ`.
 //
-// Selection reuses the puppet's rules (src/puppet/native_unit_select.*): the eleven infantry class tables, member
+// Selection uses the shared rules of src/brain2/native_unit_select.*: the eleven infantry class tables, member
 // admissibility, serial < 2^20, first-appearance unit order over the primary registry (manager+24C/+250), retried every
 // 64 stages while nothing qualified. NOT parking: no wait node, no slot+08 swap, no site-13 work and no native write by
 // this module.
@@ -83,7 +83,7 @@ struct Occurrence {
 static_assert(sizeof(U) == 4 && sizeof(void*) == 4, "Win32 layout: g_occ is read by inline asm");
 extern Occurrence g_occ;     // bindings: (g_occ.entity == A && (g_occ.mask & kMaskX)) ? apply slot : native (+ Drain)
 bool Bind(U imageBase, U* bindings); // writes NTW2_BIND_U_OCC = &g_occ (data binding); gates themselves belong to the mechanic modules
-bool Start(const Config&);   // pins the 11 infantry tables (puppet rule) and the routed slots +108/+1A4 = 670F40/6543D0
+bool Start(const Config&);   // pins the 11 infantry tables (native_unit_select rule) and the routed slots +108/+1A4 = 670F40/6543D0
 void Stop();                 // owner drained: routing off; persisted unit state stays in native men (no write)
 void Reset();
 void Snapshot(U* words /*[kHeaderWords]*/);

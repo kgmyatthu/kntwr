@@ -32,17 +32,13 @@ extern "C" {
 #define NTW2_AI_ASYNC2_ROUTE_WORDS 65u /* ai_async2_route_words; layout src/ntw2_ai_async2.h (RouteWord), labels NTW2_AI_ASYNC2_ROUTE_LABELS */
 #define NTW2_ARMY_UNIT_SHADOW 0x40000u /* Opt-in --army-unit-shadow: item 4 Stage A, instrumentation only. Site 18 (ARMY_UPDATE clone) and its 0x581F30 calls (sites 101/103) are bound to owner-thread gates that time each unit update, classify it under the approved compromises (owner-only reasons, RNG draws, foreign-unit witness, command-class census) and measure a frozen-view copy; the native calls run unchanged. Requires a routed tick (PROFILE or a simulation feature); planner writes are measured only with AI_CENSUS. Outside NTW2_ALL. Words: army_unit_words, src/army/native_army_unit.h. */
 #define NTW2_ARMY_UNIT_WORDS 192u /* army_unit_words; layout src/army/native_army_unit.h (Word), labels NTW2_ARMY_UNIT_*_LABELS */
-#define NTW2_PUPPET 0x80000u /* Opt-in --puppet-probe N|all: puppet survival probe (analysis/native-unit-sim-rewrite.md section 3). N = ntw2_config::puppet_units (1..NTW2_PUPPET_MAX_UNITS; the maximum selects every qualifying unit) ordinary foot-infantry units (class 0x1333714, registry order) get the engine's real wait node (0x650600 -> 0x61D8F0, table 0x1334028) at an owner stage seam; site 6 skips their native step +0C and the class common-step slot +08 (0x670EB0) keeps only terrain/extent 0x81AC80 and order->activity 0x663730 for them. A +628 divert keeps the member but runs his native step (the controller branch 0x67A050) until the controller releases him. Externally installed nodes are reparked or handed back; stop hands members back without native writes. Sole owner of site 6: refuses BRAIN2, BRAIN and brain flags. Routed simulation feature outside NTW2_ALL. Words: puppet_words, puppet_motion_words, puppet_divert_words, src/puppet/native_puppet.h. */
-#define NTW2_PUPPET_WORDS 64u /* puppet_words; layout src/puppet/native_puppet.h (Word), labels NTW2_PUPPET_WORD_LABELS */
+/* Mask bit 0x80000u is retired (former puppet probe, removed); NTW2_VALID_MASK refuses it and it is never reused. */
+#define NTW2_RESERVED_PUPPET_WORDS 64u /* reserved_puppet_words: former puppet probe row, kept so later rows keep their offsets; always zero */
 #define NTW2_ARMY_B0_WORDS 160u /* army_b0_words (NTW2_ARMY_UNIT_SHADOW, Stage B0 qualification); layout src/army/native_army_unit.h (B0Word), labels NTW2_ARMY_B0_LABELS */
-#define NTW2_PUPPET_MOTION_WORDS 32u /* puppet_motion_words; layout src/puppet/native_puppet.h (MotionWord), labels NTW2_PUPPET_MOTION_LABELS */
-#define NTW2_PUPPET_MAX_UNITS 2048u /* unit capacity; puppet_units == NTW2_PUPPET_MAX_UNITS is --puppet-probe all */
-#define NTW2_PUPPET_ROW_UNITS 4u    /* units with an identity row in puppet_words (words 40..55) */
-#define NTW2_PUPPET_DIVERT_WORDS 32u /* puppet_divert_words; layout src/puppet/native_puppet.h (DivertWord), labels NTW2_PUPPET_DIVERT_LABELS */
-#define NTW2_PUPPET_UNIT_MASK 0xFFFFu       /* ntw2_config::puppet_units bits 0..15: unit count 1..NTW2_PUPPET_MAX_UNITS */
-#define NTW2_PUPPET_STATS_OFF 0x80000000u   /* ntw2_config::puppet_units flag (launcher --puppet-stats 0): production-stats mode, no per-man diagnostics, no site-13 hash pass */
-#define NTW2_PUPPET_MOVER_WORDS 32u /* puppet_mover_words; layout src/puppet/native_puppet.h (MoverWord), labels NTW2_PUPPET_MOVER_LABELS */
-#define NTW2_PUPPET_SELECT_WORDS 32u /* puppet_select_words; layout src/puppet/native_puppet.h (SelectWord), labels NTW2_PUPPET_SELECT_LABELS */
+#define NTW2_RESERVED_PUPPET_MOTION_WORDS 32u /* reserved_puppet_motion_words: retired row, always zero */
+#define NTW2_RESERVED_PUPPET_DIVERT_WORDS 32u /* reserved_puppet_divert_words: retired row, always zero */
+#define NTW2_RESERVED_PUPPET_MOVER_WORDS 32u /* reserved_puppet_mover_words: retired row, always zero */
+#define NTW2_RESERVED_PUPPET_SELECT_WORDS 32u /* reserved_puppet_select_words: retired row, always zero */
 #define NTW2_BRAIN_S0_WORDS 560u /* brain_s0_words (NTW2_BRAIN_S0 attribution timer); layout src/brain2/native_brain_s0.h (Word/RowWord), labels NTW2_BRAIN_S0_HEADER_LABELS / NTW2_BRAIN_S0_ROW_LABELS / NTW2_BRAIN_S0_ROW_WORD_LABELS */
 #define NTW2_LOCO_CLONE 0x1u /* ntw2_config::loco_flags bit (launcher --loco-clone): execute admitted movement occurrences through the private LOCO clone family instead of the original code; requires NTW2_LOCO. */
 #define NTW2_LOCO_PARALLEL 0x2u /* ntw2_config::loco_flags bit (launcher --loco-parallel): closed movement workers; requires NTW2_LOCO and NTW2_LOCO_CLONE. Requested grid/CSR workers also run without this bit. */
@@ -85,8 +81,8 @@ extern "C" {
 #define NTW2_BRAIN_FINALIZER_SHADOW 0x20u /* --brain-finalizer-shadow: owner-only private-copy rerun of proved 0x819770 calls, bit-exact compare; implies gated census. Words: brain2_unknown_site_words witness 21..23 (native_brain2.h). */
 #define NTW2_BRAIN_QUIET 0x40u /* --brain-quiet: the performance configuration of NTW2_BRAIN_PARALLEL (required). Owner-run occurrences execute the ORIGINAL step (no serial gated census clone, no per-service bookkeeping, no first-unresolved histograms, no QPC per service); workers keep their classification gates and the guarded commit; guard misses are counted without block checksums. Excludes NTW2_BRAIN_CENSUS, TIMING and every shadow flag. Phase telemetry: brain_worker_phase_words. */
 #define NTW2_BRAIN_UNIT_SHADOW 0x80u /* --brain-unit-shadow: per-unit brain Stage A, shadow only. Before the unchanged site-6 loop, pool workers compute one UnitDecision per unit from unit-level inputs (no writes); after each soldier's native step the owner compares the fields it decided against its unit's decision. Requires BRAIN2; excludes NTW2_BRAIN_PARALLEL/QUIET. Words: brain_unit_words, src/brain2/native_unit_brain.h. */
-#define NTW2_BRAIN_S0 0x100u /* --brain-s0: diagnostics-only S0 attribution timer (analysis/native-unit-compromise-plan.md 5.3). Each occurrence's step runs through the BRAIN_S0 clone family whose candidate decision calls (target, drivers, node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue selector, timer/providers) reach counting gates; deterministic 1/64 occurrences are timed with serialized RDTSCP (gate overhead calibrated at start and subtracted). Native work runs exactly once, unchanged; no game-state write (unless combined with the unit bits 0x200..0x4000, whose applies the S0 gates then route to and time). Requires BRAIN2; excludes every other NTW2_BRAIN_* flag except those unit bits, and NTW2_PUPPET. Words: brain_s0_words, src/brain2/native_brain_s0.h. */
-#define NTW2_BRAIN_UNIT_FATIGUE 0x200u /* --brain-unit-fatigue: S4 per-unit fatigue pair (src/brain2/native_unit_fatigue.h); the NTW2_BIND_U_FATIGUE gate applies the unit's (acc, level) to A+370/+374 of admitted units instead of running 0x670F40. Unit bits require BRAIN2; exclude CENSUS/TIMING/NODE/FIRE/FINALIZER shadows, PARALLEL, QUIET, UNIT_SHADOW and NTW2_PUPPET; combine with each other and with NTW2_BRAIN_S0. Words: brain_unit_policy_words (header 0..31, fatigue 32..127). */
+#define NTW2_BRAIN_S0 0x100u /* --brain-s0: diagnostics-only S0 attribution timer (analysis/native-unit-compromise-plan.md 5.3). Each occurrence's step runs through the BRAIN_S0 clone family whose candidate decision calls (target, drivers, node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue selector, timer/providers) reach counting gates; deterministic 1/64 occurrences are timed with serialized RDTSCP (gate overhead calibrated at start and subtracted). Native work runs exactly once, unchanged; no game-state write (unless combined with the unit bits 0x200..0x4000, whose applies the S0 gates then route to and time). Requires BRAIN2; excludes every other NTW2_BRAIN_* flag except those unit bits. Words: brain_s0_words, src/brain2/native_brain_s0.h. */
+#define NTW2_BRAIN_UNIT_FATIGUE 0x200u /* --brain-unit-fatigue: S4 per-unit fatigue pair (src/brain2/native_unit_fatigue.h); the NTW2_BIND_U_FATIGUE gate applies the unit's (acc, level) to A+370/+374 of admitted units instead of running 0x670F40. Unit bits require BRAIN2; exclude CENSUS/TIMING/NODE/FIRE/FINALIZER shadows, PARALLEL, QUIET and UNIT_SHADOW; combine with each other and with NTW2_BRAIN_S0. Words: brain_unit_policy_words (header 0..31, fatigue 32..127). */
 #define NTW2_BRAIN_UNIT_FATIGUE_SHADOW 0x400u /* --brain-unit-fatigue-shadow (sets 0x200|0x400): the unit pair is decided and compared with the native pair of every admitted man; native results stay. */
 #define NTW2_BRAIN_UNIT_POSTURE 0x800u /* --brain-unit-posture: S2b per-unit posture (src/brain2/native_unit_posture_engage.h). */
 #define NTW2_BRAIN_UNIT_POSTURE_SHADOW 0x1000u /* --brain-unit-posture-shadow (sets 0x800|0x1000). */
@@ -198,7 +194,7 @@ enum ntw2_memory_word {
    PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE, COLLIDE_LOD, AI_CTRL, PROFILE and BRAIN are opt-in. */
 #define NTW2_ALL (NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_VISUAL)
 /* Every feature bit the runtime accepts in ntw2_config::enabled_mask. */
-#define NTW2_VALID_MASK (NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_BRAIN2 | NTW2_VISUAL | NTW2_PROFILE | NTW2_BRAIN | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_AI_CTRL | NTW2_LOCO | NTW2_GRID_CENSUS | NTW2_AI_CENSUS | NTW2_AI_ASYNC2 | NTW2_ARMY_UNIT_SHADOW | NTW2_PUPPET)
+#define NTW2_VALID_MASK (NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BATCH64 | NTW2_BRAIN2 | NTW2_VISUAL | NTW2_PROFILE | NTW2_BRAIN | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_AI_CTRL | NTW2_LOCO | NTW2_GRID_CENSUS | NTW2_AI_CENSUS | NTW2_AI_ASYNC2 | NTW2_ARMY_UNIT_SHADOW)
 /* ai_async2_words labels, word order (histogram buckets: <=125us, <=250us, ... <=128ms, >128ms; gate kinds: site 34
    admission (capacity drain, lease wait, fallback join), site 33 controller, TICK 57DFDF quadtree update, tick end
    (start seam, abort drain), delegate replacement 6EA520/6B3010, delegate destructor 69D710/69D750, command callback
@@ -332,7 +328,7 @@ typedef struct ntw2_config {
     uint32_t loco_flags;     /* Appended (config grew 36 -> 40 bytes); own field, no other field is reinterpreted. NTW2_LOCO_* flags; nonzero requires NTW2_LOCO. */
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
-    uint32_t puppet_units;   /* Appended at offset 48 (config 48 -> 52 bytes). NTW2_PUPPET unit count 1..NTW2_PUPPET_MAX_UNITS in bits 0..15 (NTW2_PUPPET_UNIT_MASK), nonzero exactly when NTW2_PUPPET is set; optional flag NTW2_PUPPET_STATS_OFF; other bits refused. */
+    uint32_t reserved48;     /* Offset 48 (config 48 -> 52 bytes): retired (former puppet probe unit count); must be zero. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
     uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE flags (launcher --ai-prepass-census, --ai-presize); 0: off. */
@@ -864,32 +860,21 @@ typedef struct ntw2_status {
        src/army/native_army_unit.h (Word, NTW2_ARMY_UNIT_*_LABELS). Tick-owner writer; a poll is a non-atomic snapshot.
        Nothing here changes a native write. All zero without the feature; reset at activation, retained after stop. */
     uint32_t army_unit_words[NTW2_ARMY_UNIT_WORDS];
-    /* NTW2_PUPPET (appended after army_unit_words): puppet probe stage 1 membership/admission counters; layout and labels
-       in src/puppet/native_puppet.h (Word, NTW2_PUPPET_WORD_LABELS). Tick-owner writer; a poll is a non-atomic snapshot.
-       All zero without the feature; reset at activation, retained after stop. */
-    uint32_t puppet_words[NTW2_PUPPET_WORDS];
-    /* NTW2_ARMY_UNIT_SHADOW, Stage B0 (appended after puppet_words): qualification observers for an item 4 Stage B (FSM
+    /* Retired (former puppet probe row, appended after army_unit_words); space kept so every later row keeps its offset.
+       Always zero. */
+    uint32_t reserved_puppet_words[NTW2_RESERVED_PUPPET_WORDS];
+    /* NTW2_ARMY_UNIT_SHADOW, Stage B0 (appended after reserved_puppet_words): qualification observers for an item 4 Stage B (FSM
        steps/transitions through the ARMY_UNIT clone's 58202E gate, formation queue/scratch, recorder pins, RNG member
        bound, own-state bytes, exclusive refusal cost). Layout and labels in src/army/native_army_unit.h (B0Word,
        NTW2_ARMY_B0_LABELS). Tick-owner writer; reads only, no native write. Reset at activation, retained after stop. */
     uint32_t army_b0_words[NTW2_ARMY_B0_WORDS];
-    /* NTW2_PUPPET motion/divert diagnostics (appended after army_b0_words): +628 divert timing, parked members' movement
-       intent, actual motion, admission displacement and delivered-slot distance per seam. Layout and labels in
-       src/puppet/native_puppet.h (MotionWord, NTW2_PUPPET_MOTION_LABELS). Tick-owner writer, reads only. */
-    uint32_t puppet_motion_words[NTW2_PUPPET_MOTION_WORDS];
-    /* NTW2_PUPPET +628 divert ownership (appended after puppet_motion_words): divert events by kind/controller table,
-       last target, native controller-branch steps, release outcomes (resumed/reparked/handed back). Layout and labels in
-       src/puppet/native_puppet.h (DivertWord, NTW2_PUPPET_DIVERT_LABELS). Tick-owner writer. */
-    uint32_t puppet_divert_words[NTW2_PUPPET_DIVERT_WORDS];
-    /* NTW2_PUPPET stage 2 machinery (appended after puppet_divert_words): site-13 determinism hash chain with fixed
-       checkpoints, parked/diverted members hashed, parked men holding a delivered unbegun slot (slot_waiting) and the
-       hash cost. Layout and labels in src/puppet/native_puppet.h (MoverWord, NTW2_PUPPET_MOVER_LABELS). Tick-owner writer. */
-    uint32_t puppet_mover_words[NTW2_PUPPET_MOVER_WORDS];
-    /* NTW2_PUPPET selection diagnostics (appended after puppet_mover_words): unit rejection reasons, member refusals,
-       pinned infantry tables, top rejected majority class tables. Layout and labels in src/puppet/native_puppet.h
-       (SelectWord, NTW2_PUPPET_SELECT_LABELS). Tick-owner writer. */
-    uint32_t puppet_select_words[NTW2_PUPPET_SELECT_WORDS];
-    /* NTW2_BRAIN_S0 attribution timer (appended after puppet_select_words): 32 header words (calibration, stages,
+    /* Retired rows (former puppet probe motion, divert, mover and selection diagnostics, appended after army_b0_words);
+       space kept so every later row keeps its offset. Always zero. */
+    uint32_t reserved_puppet_motion_words[NTW2_RESERVED_PUPPET_MOTION_WORDS];
+    uint32_t reserved_puppet_divert_words[NTW2_RESERVED_PUPPET_DIVERT_WORDS];
+    uint32_t reserved_puppet_mover_words[NTW2_RESERVED_PUPPET_MOVER_WORDS];
+    uint32_t reserved_puppet_select_words[NTW2_RESERVED_PUPPET_SELECT_WORDS];
+    /* NTW2_BRAIN_S0 attribution timer (appended after reserved_puppet_select_words): 32 header words (calibration, stages,
        occurrences, site-6 cycles, TSC/QPC span) then 33 mechanic rows x 16 words (calls, sampled calls, nesting counts,
        inclusive/exclusive cycles and per-occurrence second moments). Layout and labels in src/brain2/native_brain_s0.h.
        Tick-owner writer. Reset at activation, retained after stop. */
@@ -1255,7 +1240,7 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 }
 static_assert(sizeof(ntw2_config) == 64 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
-              offsetof(ntw2_config, puppet_units) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
+              offsetof(ntw2_config, reserved48) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
               offsetof(ntw2_config, ai_ctrl_flags) == 56 && offsetof(ntw2_config, ai_prepass_flags) == 60,
               "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
@@ -1336,26 +1321,24 @@ static_assert(offsetof(ntw2_status,grid_probation_words) + NTW2_GRID_PROBATION_W
               NTW2_GRID_PROBATION_WORDS == 32u + 256u * 8u, "grid probation row appends after collide_contact_words");
 static_assert(offsetof(ntw2_status,ai_async2_route_words) + NTW2_AI_ASYNC2_ROUTE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_unit_words) &&
               NTW2_AI_ASYNC2_ROUTE_WORDS == 65u, "ai_async2 route row appends after grid_probation_words");
-static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_words) &&
+static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_words) &&
               NTW2_ARMY_UNIT_WORDS == 192u && NTW2_ARMY_UNIT_SHADOW == 0x40000u &&
               (NTW2_VALID_MASK & NTW2_ARMY_UNIT_SHADOW) && !(NTW2_ALL & NTW2_ARMY_UNIT_SHADOW),
               "army unit row appends after ai_async2_route_words; its bit is valid and outside NTW2_ALL");
-static_assert(offsetof(ntw2_status,puppet_words) + NTW2_PUPPET_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_b0_words) &&
-              NTW2_PUPPET_WORDS == 64u && NTW2_PUPPET == 0x80000u && NTW2_PUPPET_ROW_UNITS == 4u &&
-              (NTW2_VALID_MASK & NTW2_PUPPET) && !(NTW2_ALL & NTW2_PUPPET),
-              "puppet row appends after army_unit_words; its bit is valid and outside NTW2_ALL");
-static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_motion_words) &&
-              NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after puppet_words");
-static_assert(offsetof(ntw2_status,puppet_motion_words) + NTW2_PUPPET_MOTION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_divert_words) &&
-              NTW2_PUPPET_MOTION_WORDS == 32u, "puppet motion row appends after army_b0_words");
-static_assert(offsetof(ntw2_status,puppet_divert_words) + NTW2_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_mover_words) &&
-              NTW2_PUPPET_DIVERT_WORDS == 32u, "puppet divert row appends after puppet_motion_words");
-static_assert(offsetof(ntw2_status,puppet_mover_words) + NTW2_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,puppet_select_words) &&
-              NTW2_PUPPET_MOVER_WORDS == 32u, "puppet mover row appends after puppet_divert_words");
-static_assert(offsetof(ntw2_status,puppet_select_words) + NTW2_PUPPET_SELECT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
-              NTW2_PUPPET_SELECT_WORDS == 32u, "puppet select row appends after puppet_mover_words");
+static_assert(offsetof(ntw2_status,reserved_puppet_words) + NTW2_RESERVED_PUPPET_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_b0_words) &&
+              NTW2_RESERVED_PUPPET_WORDS == 64u && !(NTW2_VALID_MASK & 0x80000u),
+              "retired puppet row keeps its space after army_unit_words; its mask bit stays refused");
+static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_motion_words) &&
+              NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after reserved_puppet_words");
+static_assert(offsetof(ntw2_status,reserved_puppet_motion_words) + NTW2_RESERVED_PUPPET_MOTION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_divert_words) &&
+              offsetof(ntw2_status,reserved_puppet_divert_words) + NTW2_RESERVED_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_mover_words) &&
+              offsetof(ntw2_status,reserved_puppet_mover_words) + NTW2_RESERVED_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_select_words) &&
+              offsetof(ntw2_status,reserved_puppet_select_words) + NTW2_RESERVED_PUPPET_SELECT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
+              NTW2_RESERVED_PUPPET_MOTION_WORDS == 32u && NTW2_RESERVED_PUPPET_DIVERT_WORDS == 32u &&
+              NTW2_RESERVED_PUPPET_MOVER_WORDS == 32u && NTW2_RESERVED_PUPPET_SELECT_WORDS == 32u,
+              "retired puppet motion/divert/mover/select rows keep their space after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
-              NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after puppet_select_words");
+              NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after reserved_puppet_select_words");
 static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&
