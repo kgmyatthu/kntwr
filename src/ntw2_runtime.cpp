@@ -30,6 +30,7 @@
 #include "brain2/native_unit_brain.h"
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
+#include "army/native_army_solver.h"
 #include "brain2/native_brain_s0.h"
 #include "brain2/native_brain_locality.h"
 #include "brain2/native_unit_policy.h"
@@ -100,10 +101,10 @@ Module formation, query, path;
 volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
-constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots
+constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot
 Slot slots[kMaxSlots];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
-static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2<=kMaxSlots, "slot table holds every possible hook");
+static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1<=kMaxSlots, "slot table holds every possible hook");
 __declspec(align(64)) ntw_pool pool;
 bool poolReady, poolOwned; // ownership also covers an init-unwind whose join needs retrying
 bool collideSampleReady; // current runtime start has initialized solver counters; stop retains final samples
@@ -669,9 +670,12 @@ U __fastcall LocoMoveGate(void* manager) {
 static_assert(ntw2_army_unit::kWords==NTW2_ARMY_UNIT_WORDS, "army unit status word contract");
 static_assert(ntw2_army_unit::kB0Words==NTW2_ARMY_B0_WORDS, "army B0 status word contract");
 static_assert(ntw2_army_storm::kWords==NTW2_ARMY_STORM_WORDS, "army storm status word contract");
+static_assert(ntw2_army_solver::kWords==NTW2_ARMY_SOLVER_WORDS, "army solver status word contract");
 // --army-storm-census gate: the tick owner inside a routed epoch with the census bit (the bit is feature-independent, so it is not
 // part of epochMask).
 bool StormEpoch() { return (config.va_watch_flags&NTW2_ARMY_STORM_CENSUS)!=0 && Epoch(kRouted); }
+// --army-solver-memo/-shadow gate: the tick owner inside a routed epoch with either solver bit and a started module.
+bool SolverEpoch() { return (config.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW))!=0 && ntw2_army_solver::Started() && Epoch(kRouted); }
 static_assert(ntw2_brain_s0::kWords==NTW2_BRAIN_S0_WORDS, "brain S0 status word contract");
 static_assert(ntw2_brain_locality::kWords==NTW2_BRAIN_S0_WORDS && NTW2_BRAIN_LOC_WORDS==NTW2_BRAIN_S0_WORDS,
               "brain locality census reuses the S0 status row");
@@ -725,13 +729,27 @@ U __fastcall ArmyFormationGate(void* unit) {
     return StormEpoch() ? ntw2_army_storm::Call(ntw2_army_storm::BFormation,unit,native) : native(unit);
 }
 // R2 (slot 0x1325474, 0x581AE0: ECX = command C, plain ret) and R1 (slot 0x1331E74, 0x617510: ECX = state, one stack argument, ret 4).
+// --army-solver-memo/-shadow: on the tick owner inside a routed epoch the same gates enter the dedicated SOLVER clone of the target instead
+// of the original (same ABI), so its flag=1 solves reach ntw2_army_solver::SolveGate; the census (when also on) brackets whichever target runs.
 U __fastcall StormRoute2Gate(void* command) {
-    const auto native=reinterpret_cast<ntw2_army_storm::Native>(V(0x581ae0));
+    const bool solver=SolverEpoch();
+    const auto native=reinterpret_cast<ntw2_army_storm::Native>(solver ? clones.entries[NTW2_CLONE_SOLVER_581AE0] : V(0x581ae0));
+    if (solver) ntw2_army_solver::NoteRoute(ntw2_army_solver::RouteR2);
     return StormEpoch() ? ntw2_army_storm::Route2(command,native) : native(command);
 }
 U __fastcall StormRoute1Gate(void* state, void* edx, U arg) {
-    const auto native=reinterpret_cast<ntw2_army_storm::Native3>(V(0x617510));
+    const bool solver=SolverEpoch();
+    const auto native=reinterpret_cast<ntw2_army_storm::Native3>(solver ? clones.entries[NTW2_CLONE_SOLVER_617510] : V(0x617510));
+    if (solver) ntw2_army_solver::NoteRoute(ntw2_army_solver::RouteR1);
     return StormEpoch() ? ntw2_army_storm::Route1(state,edx,arg,native) : native(state,edx,arg);
+}
+// Second R1 state-enter (slot 0x1332110, 0x611CF0: ECX unused, one stack argument, ret 4): 611CF0 is `ecx = arg ? arg-0x1C : 0; call 65D7D0;
+// ret 4` ([proven by disasm], pinned by the generator), so the gate performs that arithmetic and enters the SOLVER_65D7D0 clone (thiscall,
+// plain ret, EAX returned unchanged). Only installed with a solver bit; outside a solver epoch it runs the original.
+U __fastcall SolverRoute1bGate(void* state, void* edx, U arg) {
+    if (!SolverEpoch()) return reinterpret_cast<ntw2_army_storm::Native3>(V(0x611cf0))(state,edx,arg);
+    ntw2_army_solver::NoteRoute(ntw2_army_solver::RouteR1b);
+    return reinterpret_cast<ntw2_army_storm::Native>(clones.entries[NTW2_CLONE_SOLVER_65D7D0])(reinterpret_cast<void*>(arg ? arg-0x1c : 0));
 }
 __declspec(naked) void CollisionSlot44() {
     __asm mov eax, dword ptr [ecx]
@@ -1054,6 +1072,7 @@ void TraceTick(ntw2_trace_entry& e, U tick, U tid, U duration, U interval, bool 
         ntw2_army_storm::TickEnd(e.tick,siteUs[18],siteUs[34],census);
         e.site_us[110]=census[0]; e.site_calls[110]=census[1]; e.site_us[111]=census[2]; e.site_calls[111]=census[3];
     }
+    if (routed && (config.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW))) ntw2_army_solver::TickEnd(e.tick); // closes the solver's per-tick table with the same tick id
 }
 void PublishTrace(ntw2_trace_entry& e, LONGLONG end) {
     e.qpc_end_lo=static_cast<U>(end); e.qpc_end_hi=static_cast<U>(static_cast<uint64_t>(end)>>32);
@@ -2432,6 +2451,12 @@ void SnapshotArmyStorm() {
     ntw2_army_storm::Snapshot(words,ntw2_profile_storm_admitted,ntw2_profile_storm_rejected);
     for (U i=0;i<NTW2_ARMY_STORM_WORDS;++i) ntw2_state.army_storm_words[i]=words[i];
 }
+// --army-solver-memo/-shadow: the module row (all zero without the bits).
+void SnapshotArmySolver() {
+    U words[NTW2_ARMY_SOLVER_WORDS];
+    ntw2_army_solver::Snapshot(words);
+    for (U i=0;i<NTW2_ARMY_SOLVER_WORDS;++i) ntw2_state.army_solver_words[i]=words[i];
+}
 // --ai-ctrl-*: A half (batch/histogram) and B half (geometry) of the status row; reads module counters only.
 void SnapshotAiCtrl() {
     volatile U* row=ntw2_state.ai_ctrl_reuse_words;
@@ -2462,6 +2487,7 @@ bool BuildClones() {
     bindings[NTW2_BIND_ARMY_FSM_UPDATE]=FnAddress(&ArmyFsmGate);
     bindings[NTW2_BIND_ARMY_PREP]=FnAddress(&ArmyPrepGate);
     bindings[NTW2_BIND_ARMY_FORMATION]=FnAddress(&ArmyFormationGate);
+    ntw2_army_solver::Bind(delta,bindings); // solver gates (inert until Start: they forward to the originals)
     bindings[NTW2_BIND_TICK_ENTRY]=FnAddress(&TickGate);
     bindings[NTW2_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
     bindings[NTW2_BIND_FORM_MANAGER]=FnAddress(&FormationGate);
@@ -2782,6 +2808,11 @@ bool StartModules() {
         const ntw2_army_storm::Binding binding={imageBase,(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT};
         if (!ntw2_army_storm::Start(binding)) { RecordError(ModuleError,NTW2_ARMY_STORM_CENSUS); return false; }
     }
+    if (config.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) { // clones are built: the solver forwards AssignGate to CLONE_SOLVER_18F0A00
+        const ntw2_army_solver::Binding binding={delta,(config.va_watch_flags&NTW2_ARMY_SOLVER_SHADOW) ? ntw2_army_solver::ModeShadow : ntw2_army_solver::ModeMemo,
+                                                 clones.entries[NTW2_CLONE_SOLVER_18F0A00]};
+        if (!ntw2_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)); return false; }
+    }
     if (mask & NTW2_COLLIDE) {
         ntw2_collide::Binding binding={delta,&ntw_pool_dispatch,Address(&pool),config.workers};
         if ((mask&NTW2_LOCO) && (config.loco_flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY)))
@@ -2928,10 +2959,12 @@ bool BuildSlots() {
         AddSlot(ntw2_prepass::kPresizeSlot,ntw2_prepass::kPresizeSlotOriginal,clones.entries[NTW2_CLONE_PRESIZE_56A610]);
     // --army-storm-census route gates: the 0x581AE0 execute slot of the class-1325470 assignment command (R2) and the 0x617510 state-enter
     // that builds it (R1); both gates run the original unless the tick owner is inside a census epoch.
-    if (config.va_watch_flags & NTW2_ARMY_STORM_CENSUS) {
+    if (config.va_watch_flags & (NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) {
         AddSlot(0x1325474,0x581ae0,FnAddress(&StormRoute2Gate));
         AddSlot(0x1331e74,0x617510,FnAddress(&StormRoute1Gate));
     }
+    // --army-solver-memo/-shadow: the second R1 state-enter (0x1332110 = 0x611CF0), entered through SolverRoute1bGate (SOLVER_65D7D0 clone chain).
+    if (config.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) AddSlot(0x1332110,0x611cf0,FnAddress(&SolverRoute1bGate));
     // NTW2_AI_ASYNC2 observer LOS route: slot 16 of 0x13376FC, routed by thread (Ai2ObserverRoute).
     if (config.enabled_mask & NTW2_AI_ASYNC2) AddSlot(0x13376fc+4*16,0x6a95a0,FnAddress(&Ai2ObserverGate));
     // --ai-poly* and --ai-prepass-census: the same slot, routed to the PS_* clone chain inside a site-34 scope (PsObserverRoute). Census-only
@@ -3194,6 +3227,7 @@ void SampleCounters() {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     SnapshotArmyStorm();
+    SnapshotArmySolver();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
@@ -3237,6 +3271,7 @@ bool StopModules() {
     ntw2_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     ntw2_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
     ntw2_army_storm::Stop();
+    ntw2_army_solver::Stop(); // same drain: the final counters stay published
     if (locoRunning) { ntw2_loco::Stop(); locoRunning=false; } // the single participant is the drained tick owner; final counters stay sampled
     if (probationRunning) { // pages restored and handler removed: publish the final detector totals
         ProbationStop();
@@ -3354,6 +3389,7 @@ bool Activate(const World& candidate) {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     SnapshotArmyStorm();
+    SnapshotArmySolver();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
@@ -3618,6 +3654,9 @@ static U StartImpl(void* raw) {
         // --tick-pcore / --tick-core-ab place the routed tick body (TickGate's routed path); one placement mode at a time.
         ((next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB)) && (!(next.enabled_mask&kRouted) ||
                                                                        (next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))==(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))) ||
+        // --army-solver-memo / --army-solver-shadow: like the census, a routed tick behind the MANAGER clone and main_thread_id; the two modes are exclusive.
+        ((next.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) && (!(next.enabled_mask&kManagerRouted) || !next.main_thread_id ||
+            (next.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW))==(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW))) ||
         ((next.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) && !next.main_thread_id) || next.profile_site>NTW2_TIMED_SITES) return BadConfig;
     const LONG before=Load(&life);
     if (before!=Never && before!=Stopped) return BadConfig;
@@ -3652,7 +3691,7 @@ static U StartImpl(void* raw) {
     memset(vaWords,0,sizeof(vaWords)); vaNextSample=0; vaStart=0;
     collideSampleReady=false; // retained solver words belong to the previous start until the next activation
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
-    Brain2Reset(); ntw2_army_unit::Reset(); ntw2_army_storm::Reset();
+    Brain2Reset(); ntw2_army_unit::Reset(); ntw2_army_storm::Reset(); ntw2_army_solver::Reset();
     CollideLodReset();
     memset(const_cast<U*>(visualWords),0,sizeof(visualWords));
     memset(allocatorWords,0,sizeof(allocatorWords));
@@ -3696,6 +3735,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_ARMY_UNIT_WORDS;++i) ntw2_state.army_unit_words[i]=0;
     for (U i=0;i<NTW2_ARMY_B0_WORDS;++i) ntw2_state.army_b0_words[i]=0;
     for (U i=0;i<NTW2_ARMY_STORM_WORDS;++i) ntw2_state.army_storm_words[i]=0;
+    for (U i=0;i<NTW2_ARMY_SOLVER_WORDS;++i) ntw2_state.army_solver_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_S0_WORDS;++i) ntw2_state.brain_s0_words[i]=0;
     for (U i=0;i<NTW2_BRAIN_UNIT_POLICY_WORDS;++i) ntw2_state.brain_unit_policy_words[i]=0;
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS;++i) ntw2_state.ai_ctrl_reuse_words[i]=0;

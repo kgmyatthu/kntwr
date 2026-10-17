@@ -40,7 +40,9 @@ extern "C" {
 #define NTW2_ARMY_STORM_SAMPLE_MASK 0xFF00u /* bits 8..15: storm-gated sampler threshold in ms (launcher --army-storm-sample-ms, 1..255); 0: sampler unchanged. Requires NTW2_ARMY_STORM_CENSUS, NTW2_PROFILE and profile_site 19 (site 18): the profile gate then admits a sample only while site 18 has been in progress for at least this long. */
 #define NTW2_TICK_PCORE 0x4u /* ntw2_config::va_watch_flags bit (launcher --tick-pcore): on a hybrid CPU the thread that executes a routed tick gets a hard affinity to the highest-efficiency-class (P) logical processors for the tick body; its previous affinity is restored before the gate returns. Placement only: no engine state, order or result changes. Requires a routed tick (NTW2_PROFILE or a simulation feature); a non-hybrid host leaves it inert. Exclusive with NTW2_TICK_CORE_AB. */
 #define NTW2_TICK_CORE_AB 0x8u /* ntw2_config::va_watch_flags bit (launcher --tick-core-ab): measurement only. Like NTW2_TICK_PCORE, but even model ticks are pinned to P and odd model ticks to E logical processors, so neighbouring ticks give an in-run E-core penalty. Requires a routed tick; exclusive with NTW2_TICK_PCORE. */
-#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB)
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW)
+#define NTW2_ARMY_SOLVER_MEMO 0x10u /* ntw2_config::va_watch_flags bit (launcher --army-solver-memo): bit-exact memoised flag=1 formation slot solver (src/army/native_army_solver.h). Inside a routed tick on the tick owner the R1/R2 assignment-command slots 0x1331E74 / 0x1332110 / 0x1325474 run a dedicated SOLVER clone chain whose 0x502770 calls (18F12AA and the 18F0D00 trampoline path) enter ntw_solver::Solve instead of the native pair-swap solver; any out-of-contract input falls back to the native solver. Entries, EAX and the allocator call sequence are bit-identical to native. Requires a routed tick (a kManagerRouted feature such as NTW2_PROFILE) and main_thread_id; exclusive with NTW2_ARMY_SOLVER_SHADOW; compatible with NTW2_ARMY_STORM_CENSUS. */
+#define NTW2_ARMY_SOLVER_SHADOW 0x20u /* ntw2_config::va_watch_flags bit (launcher --army-solver-shadow): same chain, but the NATIVE 0x502770 stays authoritative; the kernel re-solves a pre-call copy and the result (entries bytes, EAX) is compared and counted; native/kernel inclusive times are recorded per solve. Same requirements as NTW2_ARMY_SOLVER_MEMO; exclusive with it. */
 #define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
@@ -324,6 +326,20 @@ enum ntw2_memory_word {
 #define NTW2_AI_SPIRAL_CAP_MIN_M 20u
 #define NTW2_AI_SPIRAL_BITS (NTW2_AI_SPIRAL_CENSUS | NTW2_AI_SPIRAL_CAP_MASK)
 #define NTW2_AI_SPIRAL_WORDS 32u /* ai_spiral_words (src/ntw2_spiral.h row layout, version 1) */
+#define NTW2_ARMY_SOLVER_WORDS 519u /* army_solver_words (src/army/native_army_solver.h row layout, version 1): 55 header + 16 x 13 tick table + 16 x 16 solve table */
+#define NTW2_ARMY_SOLVER_LABELS \
+    "version", "mode", "started", "ticks", "solves_seen", "solves_flag1", "solved_kernel", "flag0_native", "foreign_native", \
+    "fb_too_large", "fb_range", "fb_list_state", "fb_guard", "fb_env", "shadow_compares", "shadow_mismatch_solves", \
+    "mismatch_entries", "mismatch_eax", "shim_suppressed", "shim_forwarded", "assign_calls", "route_r1", "route_r1b", "route_r2", \
+    "native_us", "kernel_us", "evals_lo", "evals_hi", "distinct_lo", "distinct_hi", "iterations_lo", "iterations_hi", \
+    "swaps", "removals", "max_m", "max_formation_members", "m_1_16", "m_17_64", "m_65_128", "m_129_256", \
+    "m_257_512", "m_gt_512", "observer_us", "assign_members_sum", "scans_lo", "scans_hi", "cost_us", "loop_us", \
+    "timed_solves", "kernel_total_us", "gather_us", "direct_18f12aa", "fb_fpenv", "fb_ctx", "empty_native"
+#define NTW2_ARMY_SOLVER_TICK_LABELS \
+    "tick", "solves", "formations", "native_us", "kernel_us", "evals", "distinct", "iterations", "max_m", "solved_kernel", "fallbacks", "swaps", "assign_formations"
+#define NTW2_ARMY_SOLVER_SOLVE_LABELS \
+    "tick", "formation", "m", "evals", "distinct", "iterations", "native_us", "kernel_us", "swaps", "flags", "members", "eax", \
+    "scans", "cost_us", "loop_us", "spare"
 #define NTW2_AI_SPIRAL_LABELS \
     "version", "cap_m", "ladder_calls", "stage_spot", "stage_clamp", "stage_ring", "stage_spiral", "stage_none", "stage_unknown", \
     "spiral_entries", "spiral_candidates", "spiral_rings", "spiral_found", "spiral_capped", "spiral_edge", "max_radius_m", \
@@ -969,6 +985,12 @@ typedef struct ntw2_status {
        edge exits and maxima, fallback observer calls with the entries-per-call histogram and 0x82F3A0 tail/same-tick/memo counts.
        Written by the thread executing the think; a poll is a non-atomic snapshot. Reset at activation, retained after stop. */
     uint32_t ai_spiral_words[NTW2_AI_SPIRAL_WORDS];
+    /* --army-solver-memo / --army-solver-shadow (appended after ai_spiral_words; src/army/native_army_solver.h, labels NTW2_ARMY_SOLVER_LABELS,
+       NTW2_ARMY_SOLVER_TICK_LABELS, NTW2_ARMY_SOLVER_SOLVE_LABELS): bit-exact flag=1 slot-solver counters. Header 55 words (version,
+       mode, solve/fallback/shadow-mismatch counts, native/kernel us, evals/iterations/scans, phase split, m histogram), then the top-16 ticks
+       (13 words each, at word 55) and the top-16 single solves (16 words each, at word 263) ordered by solver us; 519 words in all. Written by the tick owner; a poll is a non-atomic snapshot. All zero without
+       the bits; reset at activation, retained after stop. */
+    uint32_t army_solver_words[NTW2_ARMY_SOLVER_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1399,7 +1421,7 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
-              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB)),
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW)),
               "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");
@@ -1420,12 +1442,14 @@ static_assert(offsetof(ntw2_status,brain_unit_policy_words) + NTW2_BRAIN_UNIT_PO
               "brain_unit_policy row appends after loco_grid_build_words; unit flags 0x200..0x4000 are valid brain flags");
 static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_prepass_words) &&
               offsetof(ntw2_status,ai_prepass_words) + NTW2_AI_PREPASS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_spiral_words) &&
-              offsetof(ntw2_status,ai_spiral_words) + NTW2_AI_SPIRAL_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              offsetof(ntw2_status,ai_spiral_words) + NTW2_AI_SPIRAL_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_solver_words) &&
+              offsetof(ntw2_status,army_solver_words) + NTW2_ARMY_SOLVER_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              NTW2_ARMY_SOLVER_WORDS == 519u && NTW2_ARMY_SOLVER_MEMO == 0x10u && NTW2_ARMY_SOLVER_SHADOW == 0x20u &&
               NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_PREPASS_WORDS == 32u && NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&
               NTW2_AI_POLY_SHADOW == 0x4u && NTW2_AI_POLY == 0x8u && NTW2_AI_SPIRAL_CENSUS == 0x10u && NTW2_AI_SPIRAL_WORDS == 32u &&
               NTW2_AI_SPIRAL_CAP_MASK == (0xFFFFu << NTW2_AI_SPIRAL_CAP_SHIFT) &&
               NTW2_AI_PREPASS_FLAGS_VALID == (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_SPIRAL_BITS),
-              "ai_prepass_census row appends after brain_unit_policy_words; ai_spiral_words row (after ai_prepass_words) is the last status member");
+              "ai_prepass_census row appends after brain_unit_policy_words; ai_spiral_words row (after ai_prepass_words) precedes army_solver_words, the last status member");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

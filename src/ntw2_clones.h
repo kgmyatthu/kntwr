@@ -168,6 +168,12 @@ enum ntw2_binding {
        formation update call 5820DE -> 585D50 (ARMY_FORMATION): ECX = U, no stack argument, plain return. Inclusive timing gates; each
        forwards the original exactly once (like ARMY_FSM_UPDATE, the original directly unless the census epoch is open). */
     NTW2_BIND_ARMY_PREP, NTW2_BIND_ARMY_FORMATION,
+    /* --army-solver-* (appended; src/army/native_army_solver.h): SOLVER_ASSIGN replaces 555CEB's call of 18F0A00 in CLONE_SOLVER_555CA0
+       (thiscall ECX = F, four stack arguments, ret 0x10: records F and [F+18], forwards to CLONE_SOLVER_18F0A00). SOLVER_SOLVE replaces
+       18F12AA's call of the slot solver 502770 in CLONE_SOLVER_18F1200 (thiscall ECX = ctx, four stack arguments, ret 0x10, AL/EAX result).
+       SOLVER_SHIM replaces 53765A's call of the .aistbl trampoline 18F0D00 in CLONE_SOLVER_5373F0 (same ABI as 502770): naked, replays the
+       trampoline's suppression test against the SOLVER_18F0A00 clone's return address, else tail-jumps to SOLVER_SOLVE. */
+    NTW2_BIND_SOLVER_ASSIGN, NTW2_BIND_SOLVER_SOLVE, NTW2_BIND_SOLVER_SHIM,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -311,6 +317,13 @@ enum ntw2_clone_id {
        {PS_6C71D0 | PS_7FCA40} ... -> PS_808040 -> (PS_WALK_CALL) -> 7F1D40; PS_WALK is the bare 7F1D40 copy whose 80DCF0 call is PS_POLY. */
     NTW2_CLONE_PS_6A95A0, NTW2_CLONE_PS_6C71D0, NTW2_CLONE_PS_6CC730, NTW2_CLONE_PS_808550, NTW2_CLONE_PS_7FCA40,
     NTW2_CLONE_PS_7FCA90, NTW2_CLONE_PS_808040, NTW2_CLONE_PS_WALK,
+    /* --army-solver-memo / --army-solver-shadow (appended; generator solver_configs): dedicated copy of the flag=1 route. R1 slot 0x1331E74:
+       617510 -> 65D740 -> 51A530 -> 576B30; second R1 slot 0x1332110 (host gate performs 611CF0's arithmetic): 65D7D0 -> 51A9A0 -> 57AFC0; R2 slot
+       0x1325474: 581AE0 -> 576B30; common tail 576B30 -> 57AFC0 -> 555CA0 -> (SOLVER_ASSIGN gate) 18F0A00 -> {5373F0 -> (SOLVER_SHIM), 18F1200 ->
+       (SOLVER_SOLVE)}. SOLVER_57AFC0 / SOLVER_555CA0 share the FORM_HELPER / FORM_ASSIGN source spans. */
+    NTW2_CLONE_SOLVER_617510, NTW2_CLONE_SOLVER_65D740, NTW2_CLONE_SOLVER_51A530, NTW2_CLONE_SOLVER_581AE0, NTW2_CLONE_SOLVER_576B30,
+    NTW2_CLONE_SOLVER_57AFC0, NTW2_CLONE_SOLVER_555CA0, NTW2_CLONE_SOLVER_18F0A00, NTW2_CLONE_SOLVER_5373F0, NTW2_CLONE_SOLVER_18F1200,
+    NTW2_CLONE_SOLVER_65D7D0, NTW2_CLONE_SOLVER_51A9A0,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and
@@ -322,6 +335,10 @@ enum ntw2_clone_id {
    bodies, excluding arena alignment; generator asserted. */
 #define NTW2_NODE_PROJ_PARTICIPANTS 9u
 #define NTW2_NODE_PROJ_CLONE_BYTES 0x744u
+/* --army-solver-*: offset inside CLONE_SOLVER_18F0A00 of the return address of its 5373F0 call (original 0x18F0A96); the clone has no
+   insertions, so it is the source offset. NTW2_BIND_SOLVER_SHIM compares the SOLVER_5373F0 clone's frame with clone base + this. The
+   generator asserts the value against the planned layout and the trampoline constant. */
+#define NTW2_SOLVER_ASSIGN_RET_OFFSET 0x96u
 /* A source span hash is FNV-1a64 over bytes with HIGHLOW relocations normalized
    back to preferred image base 0x400000. Relocation offsets are sorted. */
 typedef struct ntw2_source_spec {

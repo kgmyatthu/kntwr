@@ -1713,6 +1713,17 @@ SOURCES = [
     ('PIN_CONTACT_SIGN_MASK', 0x1318150, 0x1318160, 'pin-data'),
     ('PIN_CONTACT_DOMINANCE', 0x1325CF8, 0x1325CFC, 'pin-data'),
     ('PIN_CONTACT_LEAD', 0x1325D24, 0x1325D28, 'pin-data'),
+    # --army-solver-*: dedicated flag=1 route family (clone_configs solver_configs); 57AFC0/555CA0 reuse the FORM_HELPER/FORM_ASSIGN sources.
+    ('SOLVER_617510', 0x617510, 0x617525, 'clone'),
+    ('SOLVER_65D740', 0x65D740, 0x65D7CC, 'clone'),
+    ('SOLVER_51A530', 0x51A530, 0x51A90C, 'clone'),
+    ('SOLVER_581AE0', 0x581AE0, 0x581BA8, 'clone'),
+    ('SOLVER_576B30', 0x576B30, 0x576B9D, 'clone'),
+    ('SOLVER_18F0A00', 0x18F0A00, 0x18F0B10, 'clone'),
+    ('SOLVER_5373F0', 0x5373F0, 0x537783, 'clone'),
+    ('SOLVER_18F1200', 0x18F1200, 0x18F12EC, 'clone'),
+    ('SOLVER_65D7D0', 0x65D7D0, 0x65D883, 'clone'),
+    ('SOLVER_51A9A0', 0x51A9A0, 0x51AC48, 'clone'),
 ]
 
 # Allowed unrelocated image-looking operand fields, pinned by source, field VA and value.
@@ -1720,6 +1731,8 @@ HIDDEN_ABS_OK = {
     # mov dword ptr [esp+40h],01010100h: packed byte flags, not an image pointer.
     'BRAIN_W_REFERENCE': {0x675B06: 0x01010100},
 }
+HIDDEN_ABS_OK['SOLVER_18F1200'] = {0x18F1292: 0x00F25DB4, 0x18F129A: 0x00F25D48}   # [edx+disp]: image-base-relative offsets (edx = PIC base from 18F0200), not pointers
+HIDDEN_ABS_OK['SOLVER_51A9A0'] = {0x51AAB2: 0x01000000}   # mov dword ptr [esp+5Ah],01000000h: packed byte flags written into a stack struct (unrelocated), not a pointer
 
 RET = lambda n: bytes([0xC2]) + struct.pack('<H', n)  # noqa: E731
 
@@ -2399,6 +2412,7 @@ def clone_configs():
         *ai_ctrl_configs(),
         *prepass_configs(),
         *ps_configs(),
+        *solver_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2560,6 +2574,99 @@ PS_EXPECT_CENSUS = {'PS_6A95A0': (251, 11, 9, 0), 'PS_6C71D0': (471, 53, 16, 0),
                     'PS_808040': (347, 11, 22, 0), 'PS_WALK': (112, 17, 6, 0)}
 EXPECT_CALLS.update(PS_EXPECT_CALLS)
 EXPECT_CENSUS.update(PS_EXPECT_CENSUS)
+
+
+# --army-solver-memo / --army-solver-shadow (src/army/native_army_solver.h): a DEDICATED copy of the flag=1 assignment route, not the
+# FORM_HELPER/FORM_ASSIGN family (whose 555CEB binding belongs to the formation runtime).  R1 slot 0x1331E74 (0x617510 state-enter) ->
+# 65D740 -> 51A530 (ctor of the class-1325470 command) -> 576B30; second R1 slot 0x1332110 (0x611CF0, entered by the host gate, which
+# performs 611CF0's `ecx = arg ? arg-0x1C : 0` itself) -> 65D7D0 -> 51A9A0 (ctor of class 13254D8) -> 57AFC0; R2 slot 0x1325474 (0x581AE0) ->
+# 576B30.  Common tail 576B30 -> 57AFC0 -> 555CA0 -> [555CEB: SOLVER_ASSIGN gate] -> 18F0A00 clone -> {5373F0 clone -> [53765A: SOLVER_SHIM],
+# 18F1200 clone -> [18F12AA: SOLVER_SOLVE]}.  Every other call/jump stays the original instruction; 18F0A00's 18F0200 pre-step, the 18F12EC /
+# 18F1349 helpers and every original callee run unmodified at their own addresses.
+# Return-address audit (all [proven by disasm]): the only return-address-dependent code of the closure is the .aistbl trampoline 18F0D00
+# (`call+0; pop eax; sub eax,0x271` = 0x18F0A96, the return address of 18F0A00's call of 5373F0, compared with [esp+0x58]; suppression also needs
+# [[esp+0x24]-8]==1).  SOLVER_5373F0 therefore calls the SOLVER_SHIM host thunk, which replays that test against the SOLVER_18F0A00 clone's return
+# address (clone base + NTW2_SOLVER_ASSIGN_RET_OFFSET; the generator asserts the offset).  The only other call+0 idioms of .aistbl are 18F0209
+# (18F0200, NOT cloned, PIC base only) and 18F3000 (outside the closure); no cloned span contains call+0, [esp] return reads, fs: or fldcw/ldmxcsr.
+SOLVER_PINS = {
+    0x18F0D00: '9c50' 'e800000000' '58' '2d71020000' '39442458' '750f' '8b442424' '8378f801' '7505' '589d' 'c21000' '589d' 'e9471ac1fe',
+    0x537656: '8d4c2438' 'e8a1963b01' '837c242401',                       # lea ecx,[esp+38]; call 18F0D00; cmp [esp+24],1
+    0x18F129E: '83f001' '52' '50' 'ff75e4' '57' '8d4ddc' 'e8c114c1fe',    # xor eax,1; push edx; push eax; push [ebp-1C]; push edi; lea ecx,[ebp-24]; call 502770
+    0x18F0A91: 'e85a69c4fe' '9c',                                         # call 5373F0; (return address 18F0A96:) pushfd
+    0x611CF0: '8b4c2404' '8d41e4' 'f7d9' '1bc9' '23c8' 'e8ceba0400' 'c20400',   # ecx = arg ? arg-0x1C : 0; call 65D7D0; ret 4 (the host gate replays the arithmetic)
+}
+SOLVER_SHIM_RET_VA = 0x18F0A96
+
+
+def solver_configs():
+    return [
+        dict(clone='SOLVER_617510', source='SOLVER_617510', calls={0x65D740: (Clone('SOLVER_65D740'), 1, [0x61751D])},
+             indirect_calls=set(), expect_rets={0x617522: RET(4)}),
+        dict(clone='SOLVER_65D740', source='SOLVER_65D740', calls={0x51A530: (Clone('SOLVER_51A530'), 1, [0x65D7C2])},
+             indirect_calls=set(), expect_rets={0x65D7CB: b'\xc3'}),
+        dict(clone='SOLVER_51A530', source='SOLVER_51A530', calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x51A8E3])},
+             indirect_calls={0x51A70D, 0x51A746}, expect_rets={0x51A909: RET(0xC)}),
+        dict(clone='SOLVER_581AE0', source='SOLVER_581AE0', calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x581B38])},
+             indirect_calls=set(), expect_rets={0x581BA7: b'\xc3'}),
+        dict(clone='SOLVER_576B30', source='SOLVER_576B30', calls={0x57AFC0: (Clone('SOLVER_57AFC0'), 1, [0x576B7D])},
+             indirect_calls=set(), expect_rets={0x576B9A: RET(4)}),
+        dict(clone='SOLVER_57AFC0', source='FORM_HELPER', calls={0x555CA0: (Clone('SOLVER_555CA0'), 1, None)},
+             expect_rets={0x57AFFA: RET(0x10)}),
+        dict(clone='SOLVER_555CA0', source='FORM_ASSIGN', calls={0x18F0A00: (Bind('SOLVER_ASSIGN'), 1, [0x555CEB])},
+             expect_rets={0x555DE8: RET(0x14)}),
+        dict(clone='SOLVER_18F0A00', source='SOLVER_18F0A00',
+             calls={0x5373F0: (Clone('SOLVER_5373F0'), 1, [0x18F0A91]), 0x18F1200: (Clone('SOLVER_18F1200'), 1, [0x18F0AD4])},
+             indirect_calls=set(), expect_rets={0x18F0B0D: RET(0x10)}),
+        dict(clone='SOLVER_5373F0', source='SOLVER_5373F0', calls={0x18F0D00: (Bind('SOLVER_SHIM'), 1, [0x53765A])},
+             indirect_calls={0x537452, 0x5374B4, 0x537512, 0x537687}, expect_rets={0x537780: RET(0x10)}),
+        dict(clone='SOLVER_18F1200', source='SOLVER_18F1200', calls={0x502770: (Bind('SOLVER_SOLVE'), 1, [0x18F12AA])},
+             indirect_calls={0x18F1255}, expect_rets={0x18F12E9: RET(8)}),
+        dict(clone='SOLVER_65D7D0', source='SOLVER_65D7D0', calls={0x51A9A0: (Clone('SOLVER_51A9A0'), 1, [0x65D877])},
+             indirect_calls=set(), expect_rets={0x65D882: b'\xc3'}),
+        dict(clone='SOLVER_51A9A0', source='SOLVER_51A9A0', calls={0x57AFC0: (Clone('SOLVER_57AFC0'), 1, [0x51A9D7])},
+             indirect_calls={0x51A9F9, 0x51AC08}, expect_rets={0x51AC45: RET(0xC)}),
+    ]
+
+
+SOLVER_EXPECT_CALLS = {
+    'SOLVER_617510': set(),
+    'SOLVER_65D740': {0x649B30, 0x659450, 0x51A910, 0x522D70, 0x51A970},
+    'SOLVER_51A530': {0x519190, 0x621090, 0x7EE6E0, 0x5769D0, 0x4456D0, 0x523440, 0xFF7EF0, 0x80E9D0, 0x817CF0, 0x550EC0, 0x816E40,
+                      0x531A70, 0x584E10},
+    'SOLVER_581AE0': {0x572B00, 0x531A70, 0x4B4A50, 0x584E10, 0x53FBA0, 0x531B70},
+    'SOLVER_576B30': {0x7F2D70, 0x532360, 0x623BD0, 0x126E016},
+    'SOLVER_57AFC0': {0x4B4A50},
+    'SOLVER_555CA0': {0x444B40, 0x557C80, 0xFF7EF0},
+    'SOLVER_18F0A00': {0x18F0200},
+    'SOLVER_5373F0': {0x54C8B0, 0x572390, 0x445A50, 0xFF7EF0},
+    'SOLVER_18F1200': {0x18F12EC, 0x18F1349},
+    'SOLVER_65D7D0': {0x655BC0, 0x649B30},
+    'SOLVER_51A9A0': {0x519190, 0x56D0B0, 0x5650E0, 0x57E230, 0xFF7EF0},
+}
+# (decoded instructions, source relocations, surviving external call sites, external jump sites)
+SOLVER_EXPECT_CENSUS = {
+    'SOLVER_617510': (7, 0, 0, 0), 'SOLVER_65D740': (47, 0, 7, 0), 'SOLVER_51A530': (240, 12, 14, 0), 'SOLVER_581AE0': (53, 3, 8, 0),
+    'SOLVER_576B30': (40, 0, 4, 0), 'SOLVER_57AFC0': (20, 0, 2, 0), 'SOLVER_555CA0': (110, 0, 5, 0), 'SOLVER_18F0A00': (73, 0, 1, 0),
+    'SOLVER_5373F0': (282, 2, 9, 0), 'SOLVER_18F1200': (82, 0, 4, 0), 'SOLVER_65D7D0': (44, 0, 2, 0), 'SOLVER_51A9A0': (167, 3, 7, 0)}
+EXPECT_CALLS.update(SOLVER_EXPECT_CALLS)
+EXPECT_CENSUS.update(SOLVER_EXPECT_CENSUS)
+
+
+def solver_extra_checks(image, plans, header_path):
+    """Pin the trampoline/frame bytes the SOLVER_SHIM replay and the two solver gates depend on, and the clone return-address offset."""
+    for va, want in SOLVER_PINS.items():
+        got = image.read(va, len(want) // 2)
+        if got != bytes.fromhex(want):
+            fail(f'SOLVER: pinned bytes at {va:#x} changed: {got.hex()} != {want}')
+    # 18F0D00 computes the return address it compares with as (18F0D07 - 0x271); it must be the return address of 18F0A00's 5373F0 call.
+    if 0x18F0D07 - 0x271 != SOLVER_SHIM_RET_VA or 0x18F0A91 + 5 != SOLVER_SHIM_RET_VA:
+        fail('SOLVER: trampoline return-address constant no longer equals the return address of 18F0A00 call 5373F0')
+    plan = plans['SOLVER_18F0A00']
+    offset = plan.mapping.get(SOLVER_SHIM_RET_VA)
+    declared = re.search(r'#define\s+NTW2_SOLVER_ASSIGN_RET_OFFSET\s+(0x[0-9A-Fa-f]+)u?', Path(header_path).read_text(encoding='utf-8'))
+    if offset is None or offset != SOLVER_SHIM_RET_VA - 0x18F0A00 or not declared or int(declared.group(1), 16) != offset:
+        fail(f'SOLVER_18F0A00: return-address offset of 18F0A96 is {offset!r}, header NTW2_SOLVER_ASSIGN_RET_OFFSET '
+             f'{declared.group(1) if declared else None}')
 
 
 # ============================================================================================ generation
@@ -3089,6 +3196,7 @@ def build_all(image, header_path):
     visual_extra_checks(plans)
     loco_extra_checks(image, plans, header_path)
     node_projection_extra_checks(image, plans, header_clones, header_path)
+    solver_extra_checks(image, plans, header_path)
     manager = plans['MANAGER']
     by_addr = {i.address: i for i, _, _ in manager.instructions}
     if (by_addr[MANAGER_TABLE_JMP].bytes != bytes.fromhex('ff24b5') + u32(MANAGER_TABLE_VA) or

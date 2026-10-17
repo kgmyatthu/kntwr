@@ -202,6 +202,8 @@ typedef struct Options {
     uint32_t army_storm_sample_ms; /* --army-storm-sample-ms N, 1..255 (0 = off): storm-gated sampler threshold, bits 8..15 of va_watch_flags */
     BOOL tick_pcore;         /* --tick-pcore: pin the routed tick body to P cores on a hybrid CPU (va_watch_flags NTW2_TICK_PCORE) */
     BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags NTW2_TICK_CORE_AB) */
+    BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (ntw2_config::va_watch_flags NTW2_ARMY_SOLVER_MEMO) */
+    BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -1930,6 +1932,51 @@ static void print_army_storm(const uint32_t *w)
             (unsigned long)(e[10] & 0x3FFu), (unsigned long)((e[10] >> 10) & 0x3FFu), (unsigned long)((e[10] >> 20) & 0x3FFu));
     }
 }
+/* Army solver (native_army_solver.h): header 55 words (NTW2_ARMY_SOLVER_LABELS), top-16 tick table at 55 (13 words each) and top-16 solve table
+   at 263 (16 words each), longest solver time first, 519 words in all. Prints nothing when the module is off (version word 0). */
+#define SOLVER_TICK_TABLE 55u
+#define SOLVER_SOLVE_TABLE 263u
+#define SOLVER_ENTRY_WORDS 13u
+#define SOLVER_SOLVE_WORDS 16u
+static void print_army_solver(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"army_solver v%lu: mode=%ls started=%lu ticks=%lu solves=%lu flag1=%lu kernel=%lu flag0_native=%lu foreign_native=%lu "
+        L"fallback(too_large=%lu range=%lu list_state=%lu guard=%lu env=%lu) shadow(compares=%lu mismatch_solves=%lu entries=%lu eax=%lu)\n",
+        (unsigned long)w[0], w[1] == 1u ? L"memo" : L"shadow", (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4],
+        (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
+        (unsigned long)w[11], (unsigned long)w[12], (unsigned long)w[13], (unsigned long)w[14], (unsigned long)w[15], (unsigned long)w[16],
+        (unsigned long)w[17]);
+    say(L"  route: assign_calls=%lu r1=%lu r1b=%lu r2=%lu shim_suppressed=%lu shim_forwarded=%lu | native_us=%lu kernel_us=%lu observer_us=%lu | "
+        L"evals=%I64u distinct=%I64u iterations=%I64u swaps=%lu removals=%lu | max_m=%lu max_formation=%lu members_sum=%lu | "
+        L"m hist 1-16=%lu 17-64=%lu 65-128=%lu 129-256=%lu 257-512=%lu >512=%lu\n",
+        (unsigned long)w[20], (unsigned long)w[21], (unsigned long)w[22], (unsigned long)w[23], (unsigned long)w[18], (unsigned long)w[19],
+        (unsigned long)w[24], (unsigned long)w[25], (unsigned long)w[42],
+        ((unsigned __int64)w[27] << 32) | w[26], ((unsigned __int64)w[29] << 32) | w[28], ((unsigned __int64)w[31] << 32) | w[30],
+        (unsigned long)w[32], (unsigned long)w[33], (unsigned long)w[34], (unsigned long)w[35], (unsigned long)w[43],
+        (unsigned long)w[36], (unsigned long)w[37], (unsigned long)w[38], (unsigned long)w[39], (unsigned long)w[40], (unsigned long)w[41]);
+    say(L"  phases (timed kernel solves=%lu, kernel total %lu us): scans=%I64u cost_phase=%lu us (gather+table fill) loop_phase=%lu us | gather=%lu us | fallbacks fpenv=%lu ctx=%lu empty_native=%lu | solves via 18F12AA direct=%lu (via 53765A shim = solves - this)\n",
+        (unsigned long)w[48], (unsigned long)w[49], ((unsigned __int64)w[45] << 32) | w[44], (unsigned long)w[46], (unsigned long)w[47], (unsigned long)w[50], (unsigned long)w[52], (unsigned long)w[53], (unsigned long)w[54], (unsigned long)w[51]);
+    for (i = 0; i < 16; ++i) {
+        const uint32_t *e = w + SOLVER_TICK_TABLE + i * SOLVER_ENTRY_WORDS;
+        if (!e[0] && !e[1]) continue;
+        say(L"  tick%lu: tick=%lu solves=%lu formations(distinct among flag=1 solves)=%lu native=%lu us kernel=%lu us evals=%lu distinct=%lu iterations=%lu max_m=%lu "
+            L"solved_kernel=%lu fallbacks=%lu swaps=%lu assign_formations=%lu\n",
+            (unsigned long)i, (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3], (unsigned long)e[4],
+            (unsigned long)e[5], (unsigned long)e[6], (unsigned long)e[7], (unsigned long)e[8], (unsigned long)e[9], (unsigned long)e[10],
+            (unsigned long)e[11], (unsigned long)e[12]);
+    }
+    for (i = 0; i < 16; ++i) {
+        const uint32_t *e = w + SOLVER_SOLVE_TABLE + i * SOLVER_SOLVE_WORDS;
+        if (!e[0] && !e[1] && !e[2]) continue;
+        say(L"  solve%lu: tick=%lu F=0x%08lX m=%lu evals=%lu distinct=%lu iterations=%lu native=%lu us kernel=%lu us swaps=%lu flags=0x%lX "
+            L"members=%lu eax=0x%08lX scans=%lu cost=%lu us loop=%lu us\n",
+            (unsigned long)i, (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3], (unsigned long)e[4],
+            (unsigned long)e[5], (unsigned long)e[6], (unsigned long)e[7], (unsigned long)e[8], (unsigned long)e[9], (unsigned long)e[10],
+            (unsigned long)e[11], (unsigned long)e[12], (unsigned long)e[13], (unsigned long)e[14]);
+    }
+}
 static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
@@ -2159,6 +2206,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     }
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_army_storm(s->army_storm_words);
+    print_army_solver(s->army_solver_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
@@ -3753,6 +3801,40 @@ static void sb_army_storm(Sb *b, const Run *r)
     for (i = 0; i < NTW2_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+/* army_solver (NTW2_ARMY_SOLVER_MEMO/SHADOW): every labelled header word of army_solver_words (native_army_solver.h) plus the decoded top-16 tick and solve tables. */
+static void sb_army_solver(Sb *b, const Run *r)
+{
+    static const char *const labels[55] = { NTW2_ARMY_SOLVER_LABELS };
+    static const char *const tick_labels[13] = { NTW2_ARMY_SOLVER_TICK_LABELS };
+    static const char *const solve_labels[16] = { NTW2_ARMY_SOLVER_SOLVE_LABELS };
+    const uint32_t *w = r->last.army_solver_words;
+    unsigned i, j, first;
+    if (!(r->cfg.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW)) || !r->have_status || !w[0]) {
+        sb_fmt(b, "  \"army_solver\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"army_solver\": {\"mode\": \"%s\", \"words\": {", w[1] == 1u ? "memo" : "shadow");
+    for (i = 0; i < 55; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"ticks\": [");
+    for (i = 0, first = 1; i < 16; ++i) {
+        const uint32_t *e = w + SOLVER_TICK_TABLE + i * SOLVER_ENTRY_WORDS;
+        if (!e[0] && !e[1]) continue;
+        sb_fmt(b, "%s{", first ? "" : ", "); first = 0;
+        for (j = 0; j < 13; ++j) sb_fmt(b, "%s\"%s\": %lu", j ? ", " : "", tick_labels[j], (unsigned long)e[j]);
+        sb_fmt(b, "}");
+    }
+    sb_fmt(b, "], \"solves\": [");
+    for (i = 0, first = 1; i < 16; ++i) {
+        const uint32_t *e = w + SOLVER_SOLVE_TABLE + i * SOLVER_SOLVE_WORDS;
+        if (!e[0] && !e[1] && !e[2]) continue;
+        sb_fmt(b, "%s{", first ? "" : ", "); first = 0;
+        for (j = 0; j < 16; ++j) sb_fmt(b, "%s\"%s\": %lu", j ? ", " : "", solve_labels[j], (unsigned long)e[j]);
+        sb_fmt(b, "}");
+    }
+    sb_fmt(b, "], \"raw\": [");
+    for (i = 0; i < NTW2_ARMY_SOLVER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -4395,6 +4477,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_ai_census(&b, r);
     sb_army_unit(&b, r);
     sb_army_storm(&b, r);
+    sb_army_solver(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -5081,6 +5164,7 @@ static int install_runtime(Run *r)
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
@@ -5502,6 +5586,7 @@ static BOOL launch_game(Run *r)
     memset(&pi, 0, sizeof pi);
     say(L"Launching: %ls\n  working directory: %ls\n", cmd, r->game_dir);
     if (r->opt.army_storm_census) say(L"  army storm census: ON, storm-gated sampler threshold %lu ms (0 = sampler unchanged)\n", (unsigned long)r->opt.army_storm_sample_ms);
+    if (r->opt.army_solver_memo || r->opt.army_solver_shadow) say(L"  army solver: %ls\n", r->opt.army_solver_memo ? L"MEMO (kernel replaces the native flag=1 solver)" : L"SHADOW (native authoritative, kernel compared)");
     if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, NULL, r->game_dir, &si, &pi)) {
         DWORD e = GetLastError();
         if (e == ERROR_ELEVATION_REQUIRED)
@@ -5638,6 +5723,13 @@ static void usage(void)
         L"                        Placement only; inert on a non-hybrid host. Every tick-log entry carries the core census (flags).\n"
         L"  --tick-core-ab        measurement only, exclusive with --tick-pcore: even model ticks pinned to P, odd ticks to E cores,\n"
         L"                        so neighbouring ticks measure the in-run E-core penalty (tick-log flags bits 6/7).\n"
+        L"  --army-solver-memo    requires profile or a simulation feature (manager-routed tick), exclusive with --army-solver-shadow,\n"
+        L"                        compatible with --army-storm-census: the flag=1 formation slot solver (0x502770, reached from the R1 FSM\n"
+        L"                        state-enters and the R2 per-tick execute of the assignment command) is replaced by a bit-exact memoised\n"
+        L"                        kernel through a dedicated clone chain; any out-of-contract input runs the native solver. Entries, EAX and\n"
+        L"                        allocator calls are identical to native; counters in army_solver_words (receipt army_solver). Default off.\n"
+        L"  --army-solver-shadow  same chain, native solver authoritative: the kernel re-solves a pre-call copy and the entries/EAX are\n"
+        L"                        compared and counted (mismatches in army_solver); native and kernel times per solve/tick/top tables.\n"
         L"  --ai-deferred         with ai,ai_async2: deferred sliced thinks. The planner runs through a private node driver in\n"
         L"                        slices of B costed node calls (generate/child think/whole think; passes free) in the inter-tick\n"
         L"                        window; the next tick start joins only that slice; a finished think is consumed at the first\n"
@@ -5807,6 +5899,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--army-storm-census")) o->army_storm_census = TRUE;
         else if (!wcscmp(name, L"--tick-pcore")) o->tick_pcore = TRUE;
         else if (!wcscmp(name, L"--tick-core-ab")) o->tick_core_ab = TRUE;
+        else if (!wcscmp(name, L"--army-solver-memo")) o->army_solver_memo = TRUE;
+        else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -5958,6 +6052,15 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if (o->tick_pcore && o->tick_core_ab) {
         errsay(L"--tick-pcore and --tick-core-ab are exclusive.\n");
+        return -1;
+    }
+    if ((o->army_solver_memo || o->army_solver_shadow) &&
+        !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        errsay(L"--army-solver-memo/--army-solver-shadow need the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
+        return -1;
+    }
+    if (o->army_solver_memo && o->army_solver_shadow) {
+        errsay(L"--army-solver-memo and --army-solver-shadow are exclusive.\n");
         return -1;
     }
     if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
@@ -6185,6 +6288,7 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;

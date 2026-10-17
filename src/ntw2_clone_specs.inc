@@ -254,6 +254,16 @@
 #define NTW2_SRC_PIN_CONTACT_SIGN_MASK 248u
 #define NTW2_SRC_PIN_CONTACT_DOMINANCE 249u
 #define NTW2_SRC_PIN_CONTACT_LEAD 250u
+#define NTW2_SRC_SOLVER_617510 251u
+#define NTW2_SRC_SOLVER_65D740 252u
+#define NTW2_SRC_SOLVER_51A530 253u
+#define NTW2_SRC_SOLVER_581AE0 254u
+#define NTW2_SRC_SOLVER_576B30 255u
+#define NTW2_SRC_SOLVER_18F0A00 256u
+#define NTW2_SRC_SOLVER_5373F0 257u
+#define NTW2_SRC_SOLVER_18F1200 258u
+#define NTW2_SRC_SOLVER_65D7D0 259u
+#define NTW2_SRC_SOLVER_51A9A0 260u
 
 static const uint32_t ntw2_reloc_TICK[] = {
     0xF8u, 0x108u, 0x14Au, 0x15Au
@@ -664,6 +674,19 @@ static const uint32_t ntw2_reloc_PIN_CONTACT_FACING[] = {
 static const uint32_t ntw2_reloc_PIN_CONTACT_AVOID_SLOT[] = {
     0x0u
 };
+static const uint32_t ntw2_reloc_SOLVER_51A530[] = {
+    0x1Fu, 0x67u, 0x73u, 0x22Du, 0x236u, 0x24Fu, 0x257u, 0x2E5u,
+    0x2EEu, 0x2F5u, 0x304u, 0x313u
+};
+static const uint32_t ntw2_reloc_SOLVER_581AE0[] = {
+    0x76u, 0x87u, 0x8Fu
+};
+static const uint32_t ntw2_reloc_SOLVER_5373F0[] = {
+    0x237u, 0x241u
+};
+static const uint32_t ntw2_reloc_SOLVER_51A9A0[] = {
+    0x24u, 0xFFu, 0x219u
+};
 
 static const ntw2_source_spec ntw2_sources[] = {
     { 0x57DF40u, 0x1C5u, 0xC6F9BAB0D5EF051Aull, ntw2_reloc_TICK, 4u }, /* TICK clone */
@@ -917,6 +940,16 @@ static const ntw2_source_spec ntw2_sources[] = {
     { 0x1318150u, 0x10u, 0xED2C7C1ED19BB465ull, 0, 0u }, /* PIN_CONTACT_SIGN_MASK pin-data */
     { 0x1325CF8u, 0x4u, 0x83B0EBDCE187497Dull, 0, 0u }, /* PIN_CONTACT_DOMINANCE pin-data */
     { 0x1325D24u, 0x4u, 0x4B05767F9BFFAD95ull, 0, 0u }, /* PIN_CONTACT_LEAD pin-data */
+    { 0x617510u, 0x15u, 0x6AC388DD96594529ull, 0, 0u }, /* SOLVER_617510 clone */
+    { 0x65D740u, 0x8Cu, 0x0981EA85F5F3E7A8ull, 0, 0u }, /* SOLVER_65D740 clone */
+    { 0x51A530u, 0x3DCu, 0xD1BA61BB30CC27B8ull, ntw2_reloc_SOLVER_51A530, 12u }, /* SOLVER_51A530 clone */
+    { 0x581AE0u, 0xC8u, 0x2E012FB63A74C2BDull, ntw2_reloc_SOLVER_581AE0, 3u }, /* SOLVER_581AE0 clone */
+    { 0x576B30u, 0x6Du, 0xCD3E809253DC3D05ull, 0, 0u }, /* SOLVER_576B30 clone */
+    { 0x18F0A00u, 0x110u, 0x07B612813684A811ull, 0, 0u }, /* SOLVER_18F0A00 clone */
+    { 0x5373F0u, 0x393u, 0xB8168332D99BDA78ull, ntw2_reloc_SOLVER_5373F0, 2u }, /* SOLVER_5373F0 clone */
+    { 0x18F1200u, 0xECu, 0xF2971802FE66BA54ull, 0, 0u }, /* SOLVER_18F1200 clone */
+    { 0x65D7D0u, 0xB3u, 0x15341C95981B01A6ull, 0, 0u }, /* SOLVER_65D7D0 clone */
+    { 0x51A9A0u, 0x2A8u, 0x2C550D43579BE3B7ull, ntw2_reloc_SOLVER_51A9A0, 3u }, /* SOLVER_51A9A0 clone */
 };
 static const uint32_t ntw2_source_count = (uint32_t)(sizeof(ntw2_sources) / sizeof(ntw2_sources[0]));
 
@@ -10091,6 +10124,130 @@ static const ntw2_clone_op ntw2_ops_PS_WALK[] = {
     { NTW2_RELATIVE, 0x17Eu, 4u, NTW2_TARGET_IMAGE, 0x126DEF6u, 0, 0 },
 };
 
+static const ntw2_clone_op ntw2_ops_SOLVER_617510[] = {
+    { NTW2_COPY, 0x0u, 0x15u, NTW2_SRC_SOLVER_617510, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0xEu, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_65D740, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_65D740[] = {
+    { NTW2_COPY, 0x0u, 0x8Cu, NTW2_SRC_SOLVER_65D740, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0xEu, 4u, NTW2_TARGET_IMAGE, 0x649B30u, 0, 0 },
+    { NTW2_RELATIVE, 0x20u, 4u, NTW2_TARGET_IMAGE, 0x659450u, 0, 0 },
+    { NTW2_RELATIVE, 0x34u, 4u, NTW2_TARGET_IMAGE, 0x51A910u, 0, 0 },
+    { NTW2_RELATIVE, 0x41u, 4u, NTW2_TARGET_IMAGE, 0x522D70u, 0, 0 },
+    { NTW2_RELATIVE, 0x4Cu, 4u, NTW2_TARGET_IMAGE, 0x659450u, 0, 0 },
+    { NTW2_RELATIVE, 0x5Bu, 4u, NTW2_TARGET_IMAGE, 0x51A970u, 0, 0 },
+    { NTW2_RELATIVE, 0x68u, 4u, NTW2_TARGET_IMAGE, 0x522D70u, 0, 0 },
+    { NTW2_RELATIVE, 0x83u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_51A530, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_51A530[] = {
+    { NTW2_COPY, 0x0u, 0x3DCu, NTW2_SRC_SOLVER_51A530, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x15u, 4u, NTW2_TARGET_IMAGE, 0x519190u, 0, 0 },
+    { NTW2_RELATIVE, 0xA1u, 4u, NTW2_TARGET_IMAGE, 0x621090u, 0, 0 },
+    { NTW2_RELATIVE, 0xD7u, 4u, NTW2_TARGET_IMAGE, 0x7EE6E0u, 0, 0 },
+    { NTW2_RELATIVE, 0x108u, 4u, NTW2_TARGET_IMAGE, 0x5769D0u, 0, 0 },
+    { NTW2_RELATIVE, 0x144u, 4u, NTW2_TARGET_IMAGE, 0x4456D0u, 0, 0 },
+    { NTW2_RELATIVE, 0x1E4u, 4u, NTW2_TARGET_IMAGE, 0x523440u, 0, 0 },
+    { NTW2_RELATIVE, 0x1F2u, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+    { NTW2_RELATIVE, 0x268u, 4u, NTW2_TARGET_IMAGE, 0x80E9D0u, 0, 0 },
+    { NTW2_RELATIVE, 0x29Cu, 4u, NTW2_TARGET_IMAGE, 0x817CF0u, 0, 0 },
+    { NTW2_RELATIVE, 0x343u, 4u, NTW2_TARGET_IMAGE, 0x550EC0u, 0, 0 },
+    { NTW2_RELATIVE, 0x350u, 4u, NTW2_TARGET_IMAGE, 0x816E40u, 0, 0 },
+    { NTW2_RELATIVE, 0x37Eu, 4u, NTW2_TARGET_IMAGE, 0x816E40u, 0, 0 },
+    { NTW2_RELATIVE, 0x3B4u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_576B30, 0, 0 },
+    { NTW2_RELATIVE, 0x3C5u, 4u, NTW2_TARGET_IMAGE, 0x531A70u, 0, 0 },
+    { NTW2_RELATIVE, 0x3CEu, 4u, NTW2_TARGET_IMAGE, 0x584E10u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_581AE0[] = {
+    { NTW2_COPY, 0x0u, 0xC8u, NTW2_SRC_SOLVER_581AE0, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x5u, 4u, NTW2_TARGET_IMAGE, 0x572B00u, 0, 0 },
+    { NTW2_RELATIVE, 0xCu, 4u, NTW2_TARGET_IMAGE, 0x531A70u, 0, 0 },
+    { NTW2_RELATIVE, 0x19u, 4u, NTW2_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x32u, 4u, NTW2_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x59u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_576B30, 0, 0 },
+    { NTW2_RELATIVE, 0xA2u, 4u, NTW2_TARGET_IMAGE, 0x584E10u, 0, 0 },
+    { NTW2_RELATIVE, 0xA9u, 4u, NTW2_TARGET_IMAGE, 0x53FBA0u, 0, 0 },
+    { NTW2_RELATIVE, 0xB7u, 4u, NTW2_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { NTW2_RELATIVE, 0xBEu, 4u, NTW2_TARGET_IMAGE, 0x531B70u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_576B30[] = {
+    { NTW2_COPY, 0x0u, 0x6Du, NTW2_SRC_SOLVER_576B30, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0xEu, 4u, NTW2_TARGET_IMAGE, 0x7F2D70u, 0, 0 },
+    { NTW2_RELATIVE, 0x2Du, 4u, NTW2_TARGET_IMAGE, 0x532360u, 0, 0 },
+    { NTW2_RELATIVE, 0x4Eu, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_57AFC0, 0, 0 },
+    { NTW2_RELATIVE, 0x59u, 4u, NTW2_TARGET_IMAGE, 0x623BD0u, 0, 0 },
+    { NTW2_RELATIVE, 0x61u, 4u, NTW2_TARGET_IMAGE, 0x126E016u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_57AFC0[] = {
+    { NTW2_COPY, 0x0u, 0x3Du, NTW2_SRC_FORM_HELPER, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x5u, 4u, NTW2_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { NTW2_RELATIVE, 0xEu, 4u, NTW2_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x34u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_555CA0, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_555CA0[] = {
+    { NTW2_COPY, 0x0u, 0x14Bu, NTW2_SRC_FORM_ASSIGN, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x4Cu, 4u, NTW2_TARGET_BINDING, NTW2_BIND_SOLVER_ASSIGN, 0, 0 },
+    { NTW2_RELATIVE, 0x99u, 4u, NTW2_TARGET_IMAGE, 0x444B40u, 0, 0 },
+    { NTW2_RELATIVE, 0xB7u, 4u, NTW2_TARGET_IMAGE, 0x444B40u, 0, 0 },
+    { NTW2_RELATIVE, 0xE5u, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+    { NTW2_RELATIVE, 0x12Du, 4u, NTW2_TARGET_IMAGE, 0x557C80u, 0, 0 },
+    { NTW2_RELATIVE, 0x13Eu, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_18F0A00[] = {
+    { NTW2_COPY, 0x0u, 0x110u, NTW2_SRC_SOLVER_18F0A00, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x4Du, 4u, NTW2_TARGET_IMAGE, 0x18F0200u, 0, 0 },
+    { NTW2_RELATIVE, 0x92u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_5373F0, 0, 0 },
+    { NTW2_RELATIVE, 0xD5u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_18F1200, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_5373F0[] = {
+    { NTW2_COPY, 0x0u, 0x393u, NTW2_SRC_SOLVER_5373F0, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x1Eu, 4u, NTW2_TARGET_IMAGE, 0x54C8B0u, 0, 0 },
+    { NTW2_RELATIVE, 0x90u, 4u, NTW2_TARGET_IMAGE, 0x572390u, 0, 0 },
+    { NTW2_RELATIVE, 0xF2u, 4u, NTW2_TARGET_IMAGE, 0x572390u, 0, 0 },
+    { NTW2_RELATIVE, 0x15Au, 4u, NTW2_TARGET_IMAGE, 0x445A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x183u, 4u, NTW2_TARGET_IMAGE, 0x445A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x1E1u, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+    { NTW2_RELATIVE, 0x26Bu, 4u, NTW2_TARGET_BINDING, NTW2_BIND_SOLVER_SHIM, 0, 0 },
+    { NTW2_RELATIVE, 0x2CFu, 4u, NTW2_TARGET_IMAGE, 0x445A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x2F4u, 4u, NTW2_TARGET_IMAGE, 0x445A50u, 0, 0 },
+    { NTW2_RELATIVE, 0x351u, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_18F1200[] = {
+    { NTW2_COPY, 0x0u, 0xECu, NTW2_SRC_SOLVER_18F1200, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x3Au, 4u, NTW2_TARGET_IMAGE, 0x18F12ECu, 0, 0 },
+    { NTW2_RELATIVE, 0x48u, 4u, NTW2_TARGET_IMAGE, 0x18F12ECu, 0, 0 },
+    { NTW2_RELATIVE, 0x60u, 4u, NTW2_TARGET_IMAGE, 0x18F1349u, 0, 0 },
+    { NTW2_RELATIVE, 0xABu, 4u, NTW2_TARGET_BINDING, NTW2_BIND_SOLVER_SOLVE, 0, 0 },
+    { NTW2_RELATIVE, 0xD4u, 4u, NTW2_TARGET_IMAGE, 0x18F1349u, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_65D7D0[] = {
+    { NTW2_COPY, 0x0u, 0xB3u, NTW2_SRC_SOLVER_65D7D0, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x9u, 4u, NTW2_TARGET_IMAGE, 0x655BC0u, 0, 0 },
+    { NTW2_RELATIVE, 0x14u, 4u, NTW2_TARGET_IMAGE, 0x649B30u, 0, 0 },
+    { NTW2_RELATIVE, 0xA8u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_51A9A0, 0, 0 },
+};
+
+static const ntw2_clone_op ntw2_ops_SOLVER_51A9A0[] = {
+    { NTW2_COPY, 0x0u, 0x2A8u, NTW2_SRC_SOLVER_51A9A0, 0x0u, 0, 0 },
+    { NTW2_RELATIVE, 0x16u, 4u, NTW2_TARGET_IMAGE, 0x519190u, 0, 0 },
+    { NTW2_RELATIVE, 0x38u, 4u, NTW2_TARGET_CLONE, NTW2_CLONE_SOLVER_57AFC0, 0, 0 },
+    { NTW2_RELATIVE, 0x87u, 4u, NTW2_TARGET_IMAGE, 0x56D0B0u, 0, 0 },
+    { NTW2_RELATIVE, 0x9Cu, 4u, NTW2_TARGET_IMAGE, 0x5650E0u, 0, 0 },
+    { NTW2_RELATIVE, 0x144u, 4u, NTW2_TARGET_IMAGE, 0x56D0B0u, 0, 0 },
+    { NTW2_RELATIVE, 0x158u, 4u, NTW2_TARGET_IMAGE, 0x5650E0u, 0, 0 },
+    { NTW2_RELATIVE, 0x225u, 4u, NTW2_TARGET_IMAGE, 0x57E230u, 0, 0 },
+    { NTW2_RELATIVE, 0x296u, 4u, NTW2_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
+};
+
 static const ntw2_clone_spec ntw2_specs[NTW2_CLONE_COUNT] = {
     { 0x1C5u, ntw2_ops_TICK, (uint32_t)(sizeof(ntw2_ops_TICK) / sizeof(ntw2_ops_TICK[0])) }, /* NTW2_CLONE_TICK */
     { 0x46u, ntw2_ops_TASK, (uint32_t)(sizeof(ntw2_ops_TASK) / sizeof(ntw2_ops_TASK[0])) }, /* NTW2_CLONE_TASK */
@@ -10295,6 +10452,18 @@ static const ntw2_clone_spec ntw2_specs[NTW2_CLONE_COUNT] = {
     { 0x3E9u, ntw2_ops_PS_7FCA90, (uint32_t)(sizeof(ntw2_ops_PS_7FCA90) / sizeof(ntw2_ops_PS_7FCA90[0])) }, /* NTW2_CLONE_PS_7FCA90 */
     { 0x504u, ntw2_ops_PS_808040, (uint32_t)(sizeof(ntw2_ops_PS_808040) / sizeof(ntw2_ops_PS_808040[0])) }, /* NTW2_CLONE_PS_808040 */
     { 0x18Au, ntw2_ops_PS_WALK, (uint32_t)(sizeof(ntw2_ops_PS_WALK) / sizeof(ntw2_ops_PS_WALK[0])) }, /* NTW2_CLONE_PS_WALK */
+    { 0x15u, ntw2_ops_SOLVER_617510, (uint32_t)(sizeof(ntw2_ops_SOLVER_617510) / sizeof(ntw2_ops_SOLVER_617510[0])) }, /* NTW2_CLONE_SOLVER_617510 */
+    { 0x8Cu, ntw2_ops_SOLVER_65D740, (uint32_t)(sizeof(ntw2_ops_SOLVER_65D740) / sizeof(ntw2_ops_SOLVER_65D740[0])) }, /* NTW2_CLONE_SOLVER_65D740 */
+    { 0x3DCu, ntw2_ops_SOLVER_51A530, (uint32_t)(sizeof(ntw2_ops_SOLVER_51A530) / sizeof(ntw2_ops_SOLVER_51A530[0])) }, /* NTW2_CLONE_SOLVER_51A530 */
+    { 0xC8u, ntw2_ops_SOLVER_581AE0, (uint32_t)(sizeof(ntw2_ops_SOLVER_581AE0) / sizeof(ntw2_ops_SOLVER_581AE0[0])) }, /* NTW2_CLONE_SOLVER_581AE0 */
+    { 0x6Du, ntw2_ops_SOLVER_576B30, (uint32_t)(sizeof(ntw2_ops_SOLVER_576B30) / sizeof(ntw2_ops_SOLVER_576B30[0])) }, /* NTW2_CLONE_SOLVER_576B30 */
+    { 0x3Du, ntw2_ops_SOLVER_57AFC0, (uint32_t)(sizeof(ntw2_ops_SOLVER_57AFC0) / sizeof(ntw2_ops_SOLVER_57AFC0[0])) }, /* NTW2_CLONE_SOLVER_57AFC0 */
+    { 0x14Bu, ntw2_ops_SOLVER_555CA0, (uint32_t)(sizeof(ntw2_ops_SOLVER_555CA0) / sizeof(ntw2_ops_SOLVER_555CA0[0])) }, /* NTW2_CLONE_SOLVER_555CA0 */
+    { 0x110u, ntw2_ops_SOLVER_18F0A00, (uint32_t)(sizeof(ntw2_ops_SOLVER_18F0A00) / sizeof(ntw2_ops_SOLVER_18F0A00[0])) }, /* NTW2_CLONE_SOLVER_18F0A00 */
+    { 0x393u, ntw2_ops_SOLVER_5373F0, (uint32_t)(sizeof(ntw2_ops_SOLVER_5373F0) / sizeof(ntw2_ops_SOLVER_5373F0[0])) }, /* NTW2_CLONE_SOLVER_5373F0 */
+    { 0xECu, ntw2_ops_SOLVER_18F1200, (uint32_t)(sizeof(ntw2_ops_SOLVER_18F1200) / sizeof(ntw2_ops_SOLVER_18F1200[0])) }, /* NTW2_CLONE_SOLVER_18F1200 */
+    { 0xB3u, ntw2_ops_SOLVER_65D7D0, (uint32_t)(sizeof(ntw2_ops_SOLVER_65D7D0) / sizeof(ntw2_ops_SOLVER_65D7D0[0])) }, /* NTW2_CLONE_SOLVER_65D7D0 */
+    { 0x2A8u, ntw2_ops_SOLVER_51A9A0, (uint32_t)(sizeof(ntw2_ops_SOLVER_51A9A0) / sizeof(ntw2_ops_SOLVER_51A9A0[0])) }, /* NTW2_CLONE_SOLVER_51A9A0 */
 };
 /* Conservative reader ranges and all surviving direct clone edges. */
 static const ntw2_grid_reader_spec ntw2_grid_readers[] = {

@@ -220,6 +220,13 @@ add_dependencies(native_ballistics_query_cache_harness ntw2_module_query_cache n
 
 ntw2_harness(native_formation_slot_harness STD 17 FP strict
   SOURCES native_formation_slot_harness.cpp OBJECTS ntw2_formation_slot LIBS bcrypt)
+ntw2_harness(native_formation_solver_oracle STD 20 FP strict
+  SOURCES native_formation_solver_oracle.cpp "${NTW2_SRC}/formation/native_formation_solver.cpp"
+  INCLUDES "${NTW2_SRC}/formation" LIBS bcrypt)
+ntw2_harness(native_army_solver_chain_oracle STD 20 FP strict
+  SOURCES native_army_solver_chain_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/army/native_army_solver.cpp"
+          "${NTW2_SRC}/formation/native_formation_solver.cpp"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_formation_layout_oracle STD 20 FP strict
   SOURCES native_formation_layout_oracle.cpp OBJECTS ntw2_formation_layout LIBS bcrypt)
 ntw2_harness(native_formation_batch_harness STD 20 FP strict
@@ -394,10 +401,21 @@ if(NTW2_HAVE_IMAGE)
     ntw2_note_registered(ntw2_formation_slot)
     ntw2_note_registered(ntw2_formation_batch)
     ntw2_note_registered(ntw2_formation_runtime)
+    add_test(NAME ntw2_formation_solver
+      COMMAND native_formation_solver_oracle --image "${NTW2_IMAGE_ARG}" --table "${_table}"
+              --cases 2000 --seed 20261018 --bench 0)
+    set_tests_properties(ntw2_formation_solver PROPERTIES LABELS "image;assets" TIMEOUT 3600)
+    ntw2_note_registered(ntw2_formation_solver)
+    add_test(NAME ntw2_army_solver_chain
+      COMMAND native_army_solver_chain_oracle --image "${NTW2_IMAGE_ARG}" --table "${_table}" --cases 300 --seed 20261018)
+    set_tests_properties(ntw2_army_solver_chain PROPERTIES LABELS "image;assets" TIMEOUT 3600)
+    ntw2_note_registered(ntw2_army_solver_chain)
   else()
     ntw2_note_skipped(ntw2_formation_slot "missing native-formation-angle-table-28252.bin")
     ntw2_note_skipped(ntw2_formation_batch "missing native-formation-angle-table-28252.bin")
     ntw2_note_skipped(ntw2_formation_runtime "missing native-formation-angle-table-28252.bin")
+    ntw2_note_skipped(ntw2_formation_solver "missing native-formation-angle-table-28252.bin")
+    ntw2_note_skipped(ntw2_army_solver_chain "missing native-formation-angle-table-28252.bin")
   endif()
 
   set(_layout_args "${NTW2_IMAGE_ARG}" cases=300 seed=20240601)
