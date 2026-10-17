@@ -825,7 +825,7 @@ void Bench(Rng& r, ntw_solver::Workspace& ws) {
     std::printf("\nmicro-benchmark (us per solve, median; limit 0; flag=1 uncapped storm shapes; TSC %.0f MHz; %s; Release x86 /O2 /fp:strict)\n", tsc, pin.c_str());
     std::printf("%-16s %9s %9s %9s | %7s %7s %9s | %9s %8s %9s %7s %7s %6s\n", "scenario", "native", "direct", "simd", "x direct", "x simd",
                 "simd/dir", "evals", "distinct", "W(scans)", "swaps", "iters", "it/m");
-    for (uint32_t m : {240u, 400u, 800u, 1200u}) {   // live capture 28252: 88 units, median 238 men, p90 399, max 404; user units 500-800+
+    for (uint32_t m : {240u, 300u, 400u, 560u, 800u}) {   // live capture 28252: median 238 men, p90 399, max 404; user units 300-800
         for (int scenario : {6, 4, 0}) {   // ring, col2line, turn
             if (m >= 800 && scenario != 4) continue;   // one shape (col2line) at the big sizes
             Fixture f = MakeStorm(r, m, scenario);
@@ -1069,19 +1069,19 @@ int main(int argc, char** argv) {
             failures += CompareCase(f, *ws, st, printed);
         }
     }
-    {   // user-sized formations (500-800+ men) up to kMaxM = 1200: uncapped (limit 0) and a few capped (limit 1)
-        const uint32_t sizes[] = {641, 700, 800, 960, 1100, 1199, 1200};
+    {   // user-sized formations (300-800 men) up to kMaxM = 800: uncapped (limit 0) and a few capped (limit 1)
+        const uint32_t sizes[] = {300, 360, 420, 480, 560, 641, 700, 760, 799, 800};
         for (uint32_t m : sizes)
             for (int k = 0; k < 2; ++k) {
                 Fixture f = MakeFixture(rng, 650000 + m * 2 + k, (int)m);
                 f.limit = 0;
-                if (k == 1) f.limit = (m == 641 || m == 800 || m == 1200) ? 1u : 0u;   // a few at limit 1
-                f.mxcsrMode = (k == 1 && m == 960) ? 1u : 0u;                          // one FTZ|DAZ case
+                if (k == 1) f.limit = (m == 641 || m == 700 || m == 800) ? 1u : 0u;   // a few at limit 1
+                f.mxcsrMode = (k == 1 && m == 760) ? 1u : 0u;                          // one FTZ|DAZ case
                 failures += CompareCase(f, *ws, st, printed);
             }
         // live-shaped high-iteration shapes (men on a grid -> turned / column->line / ring): many swaps per man
         struct Big { uint32_t m; int scenario; };
-        const Big big[] = {{800, 6}, {800, 4}, {1200, 0}, {1200, 4}};   // ring, col2line @800; turn, col2line @1200
+        const Big big[] = {{300, 6}, {400, 4}, {560, 0}, {640, 6}, {800, 0}, {800, 4}};   // ring/col2line/turn across 300-800
         for (const Big& b : big) {
             Fixture f = MakeStorm(rng, b.m, b.scenario);
             failures += CompareCase(f, *ws, st, printed);

@@ -38,10 +38,11 @@
 namespace ntw_solver {
 
 // Largest m (entries per solve) the workspace holds; above it Solve returns kFallback (kReasonTooLarge, native runs).
-// Live capture 28252: 88 units, max 404 men; user battles have units of 500-800+ men, so the bound is 1200.  The workspace is
-// allocated ONCE (CreateWorkspace at activation, never per solve) and is ~11.4 MiB (see WorkspaceBytes(); the two eager cost
-// tables of (kMaxM+4) x (kMaxM+4) floats dominate).
-constexpr uint32_t kMaxM = 1200;
+// Live capture 28252: 88 units, max 404 men; user battles have units of 500-800 men, so the bound is 800 (user decision
+// 2026-10-18; larger formations fall back to the exact native solver). The workspace is allocated ONCE (CreateWorkspace at
+// activation, never per solve) and is ~5.2 MiB (see WorkspaceBytes(); the two eager cost tables of (kMaxM+4) x (kMaxM+4)
+// floats dominate).
+constexpr uint32_t kMaxM = 800;
 
 struct Entry12 {               // live 12-byte entry; 0 = null pointer
     uint32_t man;
