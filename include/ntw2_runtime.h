@@ -33,7 +33,22 @@ extern "C" {
 #define NTW2_ARMY_UNIT_SHADOW 0x40000u /* Opt-in --army-unit-shadow: item 4 Stage A, instrumentation only. Site 18 (ARMY_UPDATE clone) and its 0x581F30 calls (sites 101/103) are bound to owner-thread gates that time each unit update, classify it under the approved compromises (owner-only reasons, RNG draws, foreign-unit witness, command-class census) and measure a frozen-view copy; the native calls run unchanged. Requires a routed tick (PROFILE or a simulation feature); planner writes are measured only with AI_CENSUS. Outside NTW2_ALL. Words: army_unit_words, src/army/native_army_unit.h. */
 #define NTW2_ARMY_UNIT_WORDS 192u /* army_unit_words; layout src/army/native_army_unit.h (Word), labels NTW2_ARMY_UNIT_*_LABELS */
 /* Mask bit 0x80000u is retired (former puppet probe, removed); NTW2_VALID_MASK refuses it and it is never reused. */
-#define NTW2_RESERVED_PUPPET_WORDS 64u /* reserved_puppet_words: former puppet probe row, kept so later rows keep their offsets; always zero */
+#define NTW2_VA_WATCH_WORDS 64u /* va_watch_words: process VA watch (former puppet probe row, same size/offset); layout NTW2_VA_* below */
+#define NTW2_VA_WATCH 0x1u /* ntw2_config::va_watch_flags bit (launcher --va-watch): enable the VA watch sampler; default off, nothing is sampled or written without it */
+#define NTW2_VA_WATCH_FLAGS_VALID 0x1u
+/* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
+   GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
+   NTW2_VA_RING_ENTRIES samples x 4 words (uptime s, avail MiB, largest free region MiB, phase). Written by the monitor,
+   read via the status sequence; the launcher prints the ring after a crash so the VA curve before a load crash is
+   recoverable. Diagnostic only: never touches engine state, never active in a plain launch. */
+#define NTW2_VA_RING_ENTRIES 12u
+#define NTW2_VA_RING_WORDS 4u
+enum ntw2_va_word {
+    NTW2_VA_VERSION, NTW2_VA_SAMPLES, NTW2_VA_AVAIL_LO, NTW2_VA_AVAIL_HI, NTW2_VA_MIN_AVAIL_LO, NTW2_VA_MIN_AVAIL_HI,
+    NTW2_VA_LARGEST_FREE, NTW2_VA_MIN_LARGEST_FREE, NTW2_VA_FREE_REGIONS, NTW2_VA_RESERVED_MIB, NTW2_VA_COMMITTED_MIB,
+    NTW2_VA_IMAGE_MIB, NTW2_VA_MAPPED_MIB, NTW2_VA_MIN_PHASE, NTW2_VA_MIN_UPTIME_S, NTW2_VA_RING_NEXT,
+    NTW2_VA_RING_BASE /* = 16 */
+};
 #define NTW2_ARMY_B0_WORDS 160u /* army_b0_words (NTW2_ARMY_UNIT_SHADOW, Stage B0 qualification); layout src/army/native_army_unit.h (B0Word), labels NTW2_ARMY_B0_LABELS */
 #define NTW2_RESERVED_PUPPET_MOTION_WORDS 32u /* reserved_puppet_motion_words: retired row, always zero */
 #define NTW2_RESERVED_PUPPET_DIVERT_WORDS 32u /* reserved_puppet_divert_words: retired row, always zero */
@@ -347,7 +362,7 @@ typedef struct ntw2_config {
     uint32_t loco_flags;     /* Appended (config grew 36 -> 40 bytes); own field, no other field is reinterpreted. NTW2_LOCO_* flags; nonzero requires NTW2_LOCO. */
     uint32_t brain_flags;    /* Appended at offset 40. NTW2_BRAIN_* flags; nonzero requires BRAIN2. */
     uint32_t collide_flags;  /* Appended at offset 44 (config 44 -> 48 bytes). NTW2_COLLIDE_CONTACT_* flags; nonzero requires COLLIDE; SHADOW and WORKERS are exclusive. */
-    uint32_t reserved48;     /* Offset 48 (config 48 -> 52 bytes): retired (former puppet probe unit count); must be zero. */
+    uint32_t va_watch_flags; /* Offset 48 (config 48 -> 52 bytes; former puppet probe unit count, retired). NTW2_VA_WATCH (launcher --va-watch); 0: off (nothing sampled); other bits refused. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
     uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE / NTW2_AI_POLY* flags (launcher --ai-prepass-census, --ai-presize, --ai-poly-shadow, --ai-poly), NTW2_AI_SPIRAL_CENSUS (--ai-spiral-census) and the spiral cap in metres in bits 16..31 (--ai-spiral-cap-m); 0: off. */
@@ -879,10 +894,10 @@ typedef struct ntw2_status {
        src/army/native_army_unit.h (Word, NTW2_ARMY_UNIT_*_LABELS). Tick-owner writer; a poll is a non-atomic snapshot.
        Nothing here changes a native write. All zero without the feature; reset at activation, retained after stop. */
     uint32_t army_unit_words[NTW2_ARMY_UNIT_WORDS];
-    /* Retired (former puppet probe row, appended after army_unit_words); space kept so every later row keeps its offset.
-       Always zero. */
-    uint32_t reserved_puppet_words[NTW2_RESERVED_PUPPET_WORDS];
-    /* NTW2_ARMY_UNIT_SHADOW, Stage B0 (appended after reserved_puppet_words): qualification observers for an item 4 Stage B (FSM
+    /* VA watch row (appended after army_unit_words; occupies the retired puppet probe row, so every later row keeps
+       its offset). Layout: enum ntw2_va_word; always written, feature-independent. */
+    uint32_t va_watch_words[NTW2_VA_WATCH_WORDS];
+    /* NTW2_ARMY_UNIT_SHADOW, Stage B0 (appended after va_watch_words): qualification observers for an item 4 Stage B (FSM
        steps/transitions through the ARMY_UNIT clone's 58202E gate, formation queue/scratch, recorder pins, RNG member
        bound, own-state bytes, exclusive refusal cost). Layout and labels in src/army/native_army_unit.h (B0Word,
        NTW2_ARMY_B0_LABELS). Tick-owner writer; reads only, no native write. Reset at activation, retained after stop. */
@@ -1264,7 +1279,7 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 }
 static_assert(sizeof(ntw2_config) == 64 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
-              offsetof(ntw2_config, reserved48) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
+              offsetof(ntw2_config, va_watch_flags) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
               offsetof(ntw2_config, ai_ctrl_flags) == 56 && offsetof(ntw2_config, ai_prepass_flags) == 60,
               "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
@@ -1345,15 +1360,16 @@ static_assert(offsetof(ntw2_status,grid_probation_words) + NTW2_GRID_PROBATION_W
               NTW2_GRID_PROBATION_WORDS == 32u + 256u * 8u, "grid probation row appends after collide_contact_words");
 static_assert(offsetof(ntw2_status,ai_async2_route_words) + NTW2_AI_ASYNC2_ROUTE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_unit_words) &&
               NTW2_AI_ASYNC2_ROUTE_WORDS == 65u, "ai_async2 route row appends after grid_probation_words");
-static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_words) &&
+static_assert(offsetof(ntw2_status,army_unit_words) + NTW2_ARMY_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,va_watch_words) &&
               NTW2_ARMY_UNIT_WORDS == 192u && NTW2_ARMY_UNIT_SHADOW == 0x40000u &&
               (NTW2_VALID_MASK & NTW2_ARMY_UNIT_SHADOW) && !(NTW2_ALL & NTW2_ARMY_UNIT_SHADOW),
               "army unit row appends after ai_async2_route_words; its bit is valid and outside NTW2_ALL");
-static_assert(offsetof(ntw2_status,reserved_puppet_words) + NTW2_RESERVED_PUPPET_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_b0_words) &&
-              NTW2_RESERVED_PUPPET_WORDS == 64u && !(NTW2_VALID_MASK & 0x80000u),
-              "retired puppet row keeps its space after army_unit_words; its mask bit stays refused");
+static_assert(offsetof(ntw2_status,va_watch_words) + NTW2_VA_WATCH_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_b0_words) &&
+              NTW2_VA_WATCH_WORDS == 64u && NTW2_VA_RING_BASE + NTW2_VA_RING_ENTRIES * NTW2_VA_RING_WORDS == NTW2_VA_WATCH_WORDS &&
+              !(NTW2_VALID_MASK & 0x80000u),
+              "VA watch row keeps the retired puppet row's space after army_unit_words; the puppet mask bit stays refused");
 static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_motion_words) &&
-              NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after reserved_puppet_words");
+              NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,reserved_puppet_motion_words) + NTW2_RESERVED_PUPPET_MOTION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_divert_words) &&
               offsetof(ntw2_status,reserved_puppet_divert_words) + NTW2_RESERVED_PUPPET_DIVERT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_mover_words) &&
               offsetof(ntw2_status,reserved_puppet_mover_words) + NTW2_RESERVED_PUPPET_MOVER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,reserved_puppet_select_words) &&

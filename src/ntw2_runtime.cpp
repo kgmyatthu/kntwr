@@ -200,6 +200,53 @@ bool VirtualBudget(ULONGLONG reservation=0,bool activation=false,bool post=false
 void PublishMemory() { // lifecycle sequence is held by the monitor
     for(U i=0;i<NTW2_MEMORY_WORDS;++i) ntw2_state.memory_words[i]=memoryWords[i];
 }
+// --va-watch (NTW2_VA_WATCH): opt-in process-VA sampler for load-time crash forensics. Runs on the monitor thread once
+// per second in every phase (the ACTIVE-only memory_words sampler cannot see a battle load). GlobalMemoryStatusEx plus
+// one VirtualQuery walk of user space (a few thousand regions, ~1 ms). Reads only; publishes under the status sequence.
+U vaWords[NTW2_VA_WATCH_WORDS];
+ULONGLONG vaNextSample=0, vaStart=0;
+void VaWatchSample() {
+    if(!(config.va_watch_flags&NTW2_VA_WATCH)) return;
+    const ULONGLONG now=GetTickCount64();
+    if(now<vaNextSample) return;
+    vaNextSample=now+1000;
+    if(!vaStart) vaStart=now;
+    MEMORYSTATUSEX memory={}; memory.dwLength=sizeof(memory);
+    if(!GlobalMemoryStatusEx(&memory)) return;
+    ULONGLONG largestFree=0, reserved=0, committed=0, image=0, mapped=0; U freeRegions=0;
+    MEMORY_BASIC_INFORMATION info;
+    for(U address=0; VirtualQuery(reinterpret_cast<const void*>(address),&info,sizeof(info))==sizeof(info); ) {
+        const ULONGLONG size=info.RegionSize;
+        if(info.State==MEM_FREE) { ++freeRegions; if(size>largestFree) largestFree=size; }
+        else {
+            if(info.State==MEM_COMMIT) committed+=size;
+            reserved+=size;
+            if(info.Type==MEM_IMAGE) image+=size; else if(info.Type==MEM_MAPPED) mapped+=size;
+        }
+        const ULONGLONG next=static_cast<ULONGLONG>(address)+size;
+        if(next>0xFFFFFFFFull) break;
+        address=static_cast<U>(next);
+    }
+    const U uptime=static_cast<U>((now-vaStart)/1000), phase=ntw2_state.phase;
+    const U availMiB=static_cast<U>(memory.ullAvailVirtual>>20), largestMiB=static_cast<U>(largestFree>>20);
+    vaWords[NTW2_VA_VERSION]=1;
+    vaWords[NTW2_VA_AVAIL_LO]=static_cast<U>(memory.ullAvailVirtual); vaWords[NTW2_VA_AVAIL_HI]=static_cast<U>(memory.ullAvailVirtual>>32);
+    if(!vaWords[NTW2_VA_SAMPLES] || memory.ullAvailVirtual<(static_cast<ULONGLONG>(vaWords[NTW2_VA_MIN_AVAIL_LO])|(static_cast<ULONGLONG>(vaWords[NTW2_VA_MIN_AVAIL_HI])<<32))) {
+        vaWords[NTW2_VA_MIN_AVAIL_LO]=vaWords[NTW2_VA_AVAIL_LO]; vaWords[NTW2_VA_MIN_AVAIL_HI]=vaWords[NTW2_VA_AVAIL_HI];
+        vaWords[NTW2_VA_MIN_PHASE]=phase; vaWords[NTW2_VA_MIN_UPTIME_S]=uptime;
+    }
+    vaWords[NTW2_VA_LARGEST_FREE]=largestMiB;
+    if(!vaWords[NTW2_VA_SAMPLES] || largestMiB<vaWords[NTW2_VA_MIN_LARGEST_FREE]) vaWords[NTW2_VA_MIN_LARGEST_FREE]=largestMiB;
+    vaWords[NTW2_VA_FREE_REGIONS]=freeRegions;
+    vaWords[NTW2_VA_RESERVED_MIB]=static_cast<U>(reserved>>20); vaWords[NTW2_VA_COMMITTED_MIB]=static_cast<U>(committed>>20);
+    vaWords[NTW2_VA_IMAGE_MIB]=static_cast<U>(image>>20); vaWords[NTW2_VA_MAPPED_MIB]=static_cast<U>(mapped>>20);
+    U* ring=vaWords+NTW2_VA_RING_BASE+(vaWords[NTW2_VA_RING_NEXT]%NTW2_VA_RING_ENTRIES)*NTW2_VA_RING_WORDS;
+    ring[0]=uptime; ring[1]=availMiB; ring[2]=largestMiB; ring[3]=phase;
+    ++vaWords[NTW2_VA_RING_NEXT]; ++vaWords[NTW2_VA_SAMPLES];
+    StateBegin();
+    for(U i=0;i<NTW2_VA_WATCH_WORDS;++i) ntw2_state.va_watch_words[i]=vaWords[i];
+    StateEnd();
+}
 void Phase(U phase) {
     if (phase!=NTW2_ACTIVE) ntw2_profile_set_active(false);
     StateBegin(); ntw2_state.phase=phase; ntw2_state.error=failure; ntw2_state.error_detail=failureDetail;
@@ -3242,6 +3289,7 @@ DWORD WINAPI Monitor(void*) {
         World candidate; bool asynchronous=false;
         const bool found=FindWorld(candidate,asynchronous);
         StateBegin(); ntw2_state.probe=probe; StateEnd();
+        VaWatchSample(); // no-op unless --va-watch; rate-limited to 1 Hz
         if (Load(&enabled)) {
             // 0x5EE050 recomputes +0x2829C from the playback/unit rate (0x5B3210), not battle lifetime.
             // At >1x the task route can go dormant while this same world keeps running synchronously.
@@ -3372,8 +3420,8 @@ static U StartImpl(void* raw) {
                                    // --ai-spiral-cap-m: the first ring (radius 20) always runs, so a cap below it is refused.
                                    ((next.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT) && (next.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT)<NTW2_AI_SPIRAL_CAP_MIN_M) ||
                                    ((next.ai_prepass_flags&NTW2_AI_POLY_SHADOW) && (next.ai_prepass_flags&NTW2_AI_POLY)))) ||
-        // Offset 48 is retired (former puppet probe unit count) and must stay zero.
-        next.reserved48 ||
+        // --va-watch: diagnostic sampler on the monitor thread; only its enable bit is defined.
+        (next.va_watch_flags&~NTW2_VA_WATCH_FLAGS_VALID) ||
         ((next.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) && !next.main_thread_id) || next.profile_site>NTW2_TIMED_SITES) return BadConfig;
     const LONG before=Load(&life);
     if (before!=Never && before!=Stopped) return BadConfig;
@@ -3404,6 +3452,7 @@ static U StartImpl(void* raw) {
     _InterlockedExchange(&budgetReleasePending,0);
     memoryWords[NTW2_MEM_FLOOR_BYTES]=NTW2_MEMORY_MIN_AVAIL_VIRTUAL;
     memoryNextSample=0; activationCapacity={};
+    memset(vaWords,0,sizeof(vaWords)); vaNextSample=0; vaStart=0;
     collideSampleReady=false; // retained solver words belong to the previous start until the next activation
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
     Brain2Reset(); ntw2_army_unit::Reset();
@@ -3428,6 +3477,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_ALLOCATOR_WORDS;++i) ntw2_state.allocator_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_WORDS;++i) ntw2_state.collide_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_SOURCE_WORDS;++i) ntw2_state.collide_source_words[i]=0;
+    for (U i=0;i<NTW2_VA_WATCH_WORDS;++i) ntw2_state.va_watch_words[i]=0;
     for (U i=0;i<NTW2_BRAIN2_WORDS;++i) ntw2_state.brain2_words[i]=0;
     for (U i=0;i<32;++i) ntw2_state.brain2_reason_words[i]=0;
     for (U i=0;i<80;++i) ntw2_state.brain2_gate_words[i]=0;

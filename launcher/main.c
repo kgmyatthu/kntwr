@@ -190,6 +190,7 @@ typedef struct Options {
     BOOL brain_unit_engage_shadow;  /* --brain-unit-engage-shadow. */
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
+    BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (ntw2_config::va_watch_flags); load-crash forensics only. */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -1140,6 +1141,32 @@ static void print_crash(const ntw2_status *s)
         (unsigned long)c[29], (unsigned long)c[30]);
 }
 
+/* --va-watch (ntw2_status::va_watch_words, layout enum ntw2_va_word). One line of the current sample; `ring` adds the last
+   NTW2_VA_RING_ENTRIES seconds oldest-first (the curve before a crash). Prints nothing when the sampler never ran. */
+static void print_va_watch(const ntw2_status *s, BOOL ring)
+{
+    static const wchar_t *const phases[9] = {L"idle", L"verifying", L"waiting", L"activating", L"active", L"restoring", L"failed", L"stopped", L"?"};
+    const uint32_t *v = s->va_watch_words;
+    unsigned i;
+    if (!v[NTW2_VA_SAMPLES]) return;
+    say(L"va: avail=%lu MiB (min %lu MiB at %lu s, %ls) largest_free=%lu MiB (min %lu) free_regions=%lu reserved=%lu MiB "
+        L"committed=%lu MiB image=%lu MiB mapped=%lu MiB samples=%lu\n",
+        (unsigned long)(((uint64_t)v[NTW2_VA_AVAIL_HI] << 32 | v[NTW2_VA_AVAIL_LO]) >> 20),
+        (unsigned long)(((uint64_t)v[NTW2_VA_MIN_AVAIL_HI] << 32 | v[NTW2_VA_MIN_AVAIL_LO]) >> 20),
+        (unsigned long)v[NTW2_VA_MIN_UPTIME_S], phases[v[NTW2_VA_MIN_PHASE] < 8u ? v[NTW2_VA_MIN_PHASE] : 8u],
+        (unsigned long)v[NTW2_VA_LARGEST_FREE], (unsigned long)v[NTW2_VA_MIN_LARGEST_FREE], (unsigned long)v[NTW2_VA_FREE_REGIONS],
+        (unsigned long)v[NTW2_VA_RESERVED_MIB], (unsigned long)v[NTW2_VA_COMMITTED_MIB], (unsigned long)v[NTW2_VA_IMAGE_MIB],
+        (unsigned long)v[NTW2_VA_MAPPED_MIB], (unsigned long)v[NTW2_VA_SAMPLES]);
+    if (!ring) return;
+    say(L"  va ring (uptime s: avail MiB / largest free MiB / phase), oldest first:");
+    for (i = 0; i < NTW2_VA_RING_ENTRIES; ++i) {
+        const unsigned slot = (v[NTW2_VA_RING_NEXT] + i) % NTW2_VA_RING_ENTRIES;
+        const uint32_t *e = v + NTW2_VA_RING_BASE + slot * NTW2_VA_RING_WORDS;
+        if (i < NTW2_VA_RING_ENTRIES - (v[NTW2_VA_RING_NEXT] < NTW2_VA_RING_ENTRIES ? v[NTW2_VA_RING_NEXT] : NTW2_VA_RING_ENTRIES)) continue;
+        say(L" %lu:%lu/%lu/%ls", (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], phases[e[3] < 8u ? e[3] : 8u]);
+    }
+    say(L"\n");
+}
 /* Live crash hand-off: the faulting thread publishes the record and waits (bounded) for this acknowledgement before it lets the
    game's own handler terminate the process; the 200 ms status poll is the only chance to see the record in a dying process. */
 static void observe_crash(Run *r, const ntw2_status *s)
@@ -4151,18 +4178,18 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, "],\n");
         }
         {
-            static const char *const names[48] = {"formation_words", "query_words", "path_words", "ballistic_words",
+            static const char *const names[49] = {"formation_words", "query_words", "path_words", "ballistic_words",
                                                   "formation_diag", "tick_words", "sim_words", "planner_words", "planner_walk_words",
-                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words", "loco_relink_words", "loco_cw_words", "loco_grid_build_words"};
-            const uint32_t *arrays[48] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
+                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words", "loco_relink_words", "loco_cw_words", "loco_grid_build_words", "va_watch_words"};
+            const uint32_t *arrays[49] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                           s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
-                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words};
-            const unsigned counts[48] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS};
+                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words, s->va_watch_words};
+            const unsigned counts[49] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS, NTW2_VA_WATCH_WORDS};
             unsigned i, j;
-            for (i = 0; i < 48; ++i) {
+            for (i = 0; i < 49; ++i) {
                 sb_fmt(&b, "    \"%s\": [", names[i]);
                 for (j = 0; j < counts[i]; ++j) sb_fmt(&b, "%s%lu", j ? "," : "", (unsigned long)arrays[i][j]);
-                sb_fmt(&b, "]%s\n", i + 1 < 48 ? "," : "");
+                sb_fmt(&b, "]%s\n", i + 1 < 49 ? "," : "");
             }
             sb_put(&b, "  }\n", 4);
         }
@@ -4729,6 +4756,7 @@ static int install_runtime(Run *r)
                          (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.va_watch_flags = r->opt.va_watch ? NTW2_VA_WATCH : 0u;
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
@@ -4959,7 +4987,7 @@ static BOOL stop_then_close_game(Run *r)
 static int monitor(Run *r)
 {
     uint64_t t0 = now_ms(), last_stats = t0, last_receipt = 0, last_profile = 0, first_ok_deadline = t0 + 15000;
-    uint64_t last_trace = 0;
+    uint64_t last_trace = 0, last_va = 0;
     BOOL have_prev = FALSE;
     uint32_t prev_phase = 0, prev_active = 0, prev_gen = 0, prev_err = 0;
     unsigned bad = 0;
@@ -5023,7 +5051,7 @@ static int monitor(Run *r)
             GetExitCodeProcess(r->proc, &r->game_exit);
             r->game_exited = TRUE;
             say(L"Game exited with code 0x%08lX.\n", (unsigned long)r->game_exit);
-            if (r->have_status) { print_status(&r->last, r->opt.mask); print_crash(&r->last); }
+            if (r->have_status) { print_status(&r->last, r->opt.mask); print_crash(&r->last); if (r->opt.va_watch) print_va_watch(&r->last, TRUE); }
             if (r->game_exit != 0) say(L"  (non-zero exit: the runtime state above is the last snapshot taken before exit)\n");
             if (r->opt.mask & (NTW2_PROFILE | NTW2_GRID_CENSUS | NTW2_AI_CENSUS))
                 say(L"Game exited before final capture; using the last periodic profile snapshot (normally <=1.2 s old).\n");
@@ -5079,6 +5107,7 @@ static int monitor(Run *r)
             print_counters(&s);
             last_stats = now_ms();
         }
+        if (r->opt.va_watch && now_ms() - last_va >= 10000) { print_va_watch(&s, FALSE); last_va = now_ms(); }
         if (s.phase == NTW2_FAILED) {
             errsay(L"runtime failure: error=0x%08lX detail=0x%08lX. Requesting stop so original code is restored.\n",
                    (unsigned long)s.error, (unsigned long)s.error_detail);
@@ -5222,6 +5251,8 @@ static void usage(void)
         L"                        plan is compared with the original callback the owner still runs (collide.contact)\n"
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
         L"                        tracker/+0x13C/avoidance effects in contact order; other contacts run the original callback in place\n"
+        L"  --va-watch            diagnostic: sample process VA (avail, largest free region, VirtualQuery walk) once a second in every\n"
+        L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
         L"                        loco = locomotion Stages A/B/C; optional owned grid v2 published at site-13 exit;\n"
         L"                        cannot combine with brain or collide_lod; brain2 v2 can coexist; collide requires --loco-clone --loco-parallel --loco-owned-services and grid\n"
@@ -5417,6 +5448,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--ai-spiral-census")) o->ai_prepass_flags |= NTW2_AI_SPIRAL_CENSUS;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
+        else if (!wcscmp(name, L"--va-watch")) o->va_watch = TRUE;
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
         else if (!wcscmp(name, L"--loco-grid")) o->loco_grid = TRUE;
         else if (!wcscmp(name, L"--loco-grid-verify")) { o->loco_grid_verify = TRUE; o->loco_grid = TRUE; }
@@ -5747,6 +5779,7 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
     r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
                            (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.va_watch_flags = r->opt.va_watch ? NTW2_VA_WATCH : 0u;
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
