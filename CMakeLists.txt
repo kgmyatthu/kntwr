@@ -203,7 +203,7 @@ if(NTW2_BUILD_RUNTIME)
                            src/brain2/native_node.cpp src/brain2/native_node_projection.cpp src/brain2/native_fire.cpp src/brain2/native_finalizer.cpp
                            src/brain2/native_move_node.cpp src/brain2/native_brain_workers.cpp src/brain2/native_unit_brain.cpp
                            src/brain2/native_idle_node.cpp src/brain2/native_action_node.cpp src/army/native_army_unit.cpp src/army/native_army_storm.cpp
-                           src/brain2/native_brain_s0.cpp src/brain2/native_unit_posture_engage.cpp src/ntw2_ai_ctrl_batch.cpp src/ntw2_ai_ctrl_geometry.cpp src/ntw2_planner_prepass.cpp
+                           src/brain2/native_brain_s0.cpp src/brain2/native_brain_locality.cpp src/brain2/native_unit_posture_engage.cpp src/ntw2_ai_ctrl_batch.cpp src/ntw2_ai_ctrl_geometry.cpp src/ntw2_planner_prepass.cpp
                            src/loco/native_sweep.cpp src/loco/native_resolve.cpp src/loco/native_env.cpp
                            src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ntw2_planner_search.cpp
                            src/ntw2_spiral.cpp)

@@ -31,6 +31,7 @@
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
 #include "brain2/native_brain_s0.h"
+#include "brain2/native_brain_locality.h"
 #include "brain2/native_unit_policy.h"
 #include "brain2/native_unit_fatigue.h"
 #include "brain2/native_unit_posture_engage.h"
@@ -609,6 +610,8 @@ static_assert(ntw2_army_storm::kWords==NTW2_ARMY_STORM_WORDS, "army storm status
 // part of epochMask).
 bool StormEpoch() { return (config.va_watch_flags&NTW2_ARMY_STORM_CENSUS)!=0 && Epoch(kRouted); }
 static_assert(ntw2_brain_s0::kWords==NTW2_BRAIN_S0_WORDS, "brain S0 status word contract");
+static_assert(ntw2_brain_locality::kWords==NTW2_BRAIN_S0_WORDS && NTW2_BRAIN_LOC_WORDS==NTW2_BRAIN_S0_WORDS,
+              "brain locality census reuses the S0 status row");
 static_assert(ntw2_unit_policy::kWords==NTW2_BRAIN_UNIT_POLICY_WORDS && ntw2_unit_policy::kHeaderWords==32 &&
               ntw2_unit_policy::kFatigueBase==ntw2_unit_policy::kHeaderWords &&
               ntw2_unit_policy::kFatigueBase+ntw2_unit_fatigue::kWords==ntw2_unit_policy::kPolicyBase &&
@@ -1885,6 +1888,18 @@ static_assert(ntw2_idle_node::kClassCount==NTW2_IDLE_NODE_CLASSES && ntw2_action
 // execution); validation allows only the unit bits next to it, so census is off and the runner is always taken.
 const ntw2_brain2::OccurrenceRunner kS0Runner={&ntw2_brain_s0::BeginStage,&ntw2_brain_s0::EndStage,
                                                &ntw2_brain_s0::RunOccurrence};
+// --brain-locality[-warm|-prefetch|-prefetch2]: the locality census owns the occurrence call (original step exactly once);
+// validation excludes every other brain flag, so census is off and the runner is always taken.
+const ntw2_brain2::OccurrenceRunner kLocalityRunner={&ntw2_brain_locality::BeginStage,&ntw2_brain_locality::EndStage,
+                                                     &ntw2_brain_locality::RunOccurrence};
+constexpr U kLocalityModifiers=NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH|NTW2_BRAIN_LOCALITY_PREFETCH2|NTW2_BRAIN_LOCALITY_MARK;
+constexpr U kLocalityBits=NTW2_BRAIN_LOCALITY|kLocalityModifiers;
+U LocalityMode() {
+    return (config.brain_flags&NTW2_BRAIN_LOCALITY_WARM) ? ntw2_brain_locality::ModeWarm :
+           (config.brain_flags&NTW2_BRAIN_LOCALITY_PREFETCH) ? ntw2_brain_locality::ModePrefetch1 :
+           (config.brain_flags&NTW2_BRAIN_LOCALITY_MARK) ? ntw2_brain_locality::ModeMark :
+           (config.brain_flags&NTW2_BRAIN_LOCALITY_PREFETCH2) ? ntw2_brain_locality::ModePrefetch2 : ntw2_brain_locality::ModeCensus;
+}
 // --brain-unit-* without S0: the shared unit-policy module owns the occurrence call (routes admitted occurrences to BRAIN_U).
 const ntw2_brain2::OccurrenceRunner kUnitRunner={&ntw2_unit_policy::BeginStage,&ntw2_unit_policy::EndStage,
                                                  &ntw2_unit_policy::RunOccurrence};
@@ -1931,6 +1946,9 @@ bool Brain2Start() {
             RecordError(ModuleError,(NTW2_BRAIN2<<24)|0x12); return false;
         }
         ntw2_brain2::SetOccurrenceRunner(&kS0Runner);
+    } else if (config.brain_flags&NTW2_BRAIN_LOCALITY) {
+        if (!ntw2_brain_locality::Start(imageBase,LocalityMode())) { RecordError(ModuleError,(NTW2_BRAIN2<<24)|0x16); return false; }
+        ntw2_brain2::SetOccurrenceRunner(&kLocalityRunner);
     } else if (units) ntw2_brain2::SetOccurrenceRunner(&kUnitRunner);
     return true;
 }
@@ -1957,12 +1975,12 @@ bool BrainUnitStart() {
     return true;
 }
 void Brain2Reset() {
-    ntw2_brain2::Reset(); ntw2_brain_workers::Reset(); ntw2_unit_brain::Reset(); ntw2_brain_s0::Reset();
+    ntw2_brain2::Reset(); ntw2_brain_workers::Reset(); ntw2_unit_brain::Reset(); ntw2_brain_s0::Reset(); ntw2_brain_locality::Reset();
     ntw2_unit_policy::Reset(); ntw2_unit_fatigue::Reset(); ntw2_unit_posture_engage::Reset();
 }
 void Brain2Release() {
     ntw2_brain2::SetStageObserver(nullptr); ntw2_unit_brain::Stop();
-    ntw2_brain2::SetOccurrenceRunner(nullptr); ntw2_brain_s0::Stop();
+    ntw2_brain2::SetOccurrenceRunner(nullptr); ntw2_brain_s0::Stop(); ntw2_brain_locality::Stop();
     ntw2_unit_policy::Stop(); ntw2_unit_fatigue::Stop(); ntw2_unit_posture_engage::Stop();
     ntw2_brain_workers::Stop(); ntw2_brain2::Release();
 }
@@ -2309,6 +2327,12 @@ bool LoadEntries() {
     pathHook=Export("npr_scheduler_hook"); formHook=Export("nfr_manager_hook");
     return pathStorage && pathHook && formHook;
 }
+// The S0 row is shared with --brain-locality (mutually exclusive): the configured feature's module fills it.
+void SnapshotBrainRow() {
+    U* row=const_cast<U*>(ntw2_state.brain_s0_words);
+    if (config.brain_flags&NTW2_BRAIN_LOCALITY) ntw2_brain_locality::Snapshot(row);
+    else ntw2_brain_s0::Snapshot(row);
+}
 // --brain-unit-*: the shared header, the fatigue half and the posture/engage half of brain_unit_policy_words. Only the halves
 // whose feature is configured are published (every other word stays zero from the activation reset).
 void SnapshotUnitPolicy() {
@@ -2591,7 +2615,8 @@ void SampleMemoryStorage() {
     memoryWords[NTW2_MEM_BALLISTICS_BYTES]=records ? sizeof(bal_record)*kProjectileCapacity : 0;
     memoryWords[NTW2_MEM_OTHER_BYTES]=(formation.state ? formation.state[NFR_S_STORAGE_BYTES] : 0)+
         (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0)+
-        ntw2_unit_policy::StorageBytes(); // retained unit-policy storage (allocated once, kept for the process)
+        ntw2_unit_policy::StorageBytes()+ // retained unit-policy storage (allocated once, kept for the process)
+        ntw2_brain_locality::StorageBytes(); // retained locality census storage (allocated once, kept for the process)
     ULONGLONG total=0;
     for(U i=NTW2_MEM_LOCO_BYTES;i<=NTW2_MEM_OTHER_BYTES;++i) total+=memoryWords[i];
     memoryWords[NTW2_MEM_TOTAL_BYTES]=total>UINT32_MAX ? UINT32_MAX : static_cast<U>(total);
@@ -2658,6 +2683,9 @@ bool StartModules() {
     // The unit-policy storage is allocated once and retained for the process: budget it before the first allocation.
     if ((mask & NTW2_BRAIN2) && (config.brain_flags&kUnitBrainBits) && !ntw2_unit_policy::StorageBytes() &&
         !VirtualBudget(ntw2_unit_policy::RequiredStorageBytes())) return false;
+    if ((mask & NTW2_BRAIN2) && (config.brain_flags&NTW2_BRAIN_LOCALITY) && !(config.brain_flags&NTW2_BRAIN_LOCALITY_MARK) &&
+        !ntw2_brain_locality::StorageBytes() &&
+        !VirtualBudget(ntw2_brain_locality::RequiredStorageBytes())) return false;
     if ((mask & NTW2_BRAIN2) && !Brain2Start()) return false;
     if (((mask & (NTW2_PATH|NTW2_BALLISTICS|NTW2_VISUAL|NTW2_COLLIDE|NTW2_LOCO)) || brainParallel || brainUnitPool) &&
         !StartPool()) return false;
@@ -3084,7 +3112,7 @@ void SampleCounters() {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     SnapshotArmyStorm();
-    ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
+    SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
@@ -3244,7 +3272,7 @@ bool Activate(const World& candidate) {
     ntw2_army_unit::Snapshot(const_cast<U*>(ntw2_state.army_unit_words));
     ntw2_army_unit::SnapshotB0(const_cast<U*>(ntw2_state.army_b0_words));
     SnapshotArmyStorm();
-    ntw2_brain_s0::Snapshot(const_cast<U*>(ntw2_state.brain_s0_words));
+    SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
@@ -3439,6 +3467,10 @@ static U StartImpl(void* raw) {
         // --brain-s0 owns the occurrence call (BRAIN_S0 family, census off): it excludes every other brain flag except the
         // unit bits, which it routes (the unit seams ride its runner).
         ((next.brain_flags&NTW2_BRAIN_S0) && (next.brain_flags&~(NTW2_BRAIN_S0|kUnitBrainBits))) ||
+        // --brain-locality owns the occurrence call and its status row: it excludes every other brain flag (S0 included);
+        // exactly one of the warm / prefetch / prefetch2 modifiers may ride it, and they need the base bit.
+        ((next.brain_flags&kLocalityBits) && ((next.brain_flags&~kLocalityBits) || !(next.brain_flags&NTW2_BRAIN_LOCALITY) ||
+         ((next.brain_flags&kLocalityModifiers) & ((next.brain_flags&kLocalityModifiers)-1)))) ||
         // Per-unit brain slices: a shadow bit needs its base bit; every unit bit excludes the census/timing/shadow flags, the
         // Stage 2 worker walk (bypasses the runner) and --brain-unit-shadow (one observer owner).
         (next.brain_flags&NTW2_BRAIN_UNIT_FATIGUE_SHADOW && !(next.brain_flags&NTW2_BRAIN_UNIT_FATIGUE)) ||

@@ -22,6 +22,7 @@
 #include "native_brain2.h"
 #include "native_finalizer.h"
 #include "native_brain_s0.h"
+#include "native_brain_locality.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
@@ -2335,6 +2336,198 @@ static void S0Fixtures(World& world) {
     brain::SetOccurrenceRunner(nullptr); s0::Stop(); s0::Reset();
     ++cases;
 }
+// ---- --brain-locality census (native_brain_locality.h) -----------------------------------------------------------
+// The runner calls the original step exactly once per occurrence and only reads/prefetches: every case compares the
+// complete soldier, nested objects, shared world, FP state and callbacks bit-for-bit against the native step.
+namespace loc = ntw2_brain_locality;
+using LocWords = std::array<U, loc::kWords>;
+static LocWords LocNow() { LocWords w{}; loc::Snapshot(w.data()); return w; }
+static const brain::OccurrenceRunner kLocRunner = {&loc::BeginStage, &loc::EndStage, &loc::RunOccurrence};
+static uint64_t LocPair(const U* p) { return (static_cast<uint64_t>(p[1]) << 32) | p[0]; }
+static const U* LocType(const LocWords& w, U row) { return w.data() + NTW2_BRAIN_LOC_TYPE_BASE + row * NTW2_BRAIN_LOC_TYPE_WORDS; }
+static const U* LocArm(const LocWords& w, U arm) { return w.data() + NTW2_BRAIN_LOC_ARM_BASE + arm * NTW2_BRAIN_LOC_ARM_WORDS; }
+static const U* LocScalars(const LocWords& w) { return w.data() + NTW2_BRAIN_LOC_SCALAR_BASE; }
+static void LocalityInversions() {
+    currentCase = "locality merge-sort inversion count against brute force";
+    uint32_t seed = 12345;
+    const U sizes[] = {0, 1, 2, 3, 7, 64, 1000, 4099};
+    for (U n : sizes) {
+        std::vector<U> v(n), a, b(n);
+        for (U i = 0; i < n; ++i) { seed = seed * 1664525u + 1013904223u; v[i] = (seed >> 16) % 50 + 0x1000; } // many duplicates
+        uint64_t brute = 0;
+        for (U i = 0; i < n; ++i) for (U j = i + 1; j < n; ++j) brute += v[i] > v[j];
+        a = v;
+        Require(loc::InversionCount(a.data(), b.data(), n) == brute, "merge-sort inversions equal the O(n^2) count");
+        ++cases;
+    }
+}
+static void LocalityStart(U mode) {
+    loc::Reset();
+    Require(loc::Start(A(image), mode, 0, 0), "locality census starts: RDTSCP, invariant TSC, storage (every occurrence timed, every stage deep)");
+    brain::Configure(false, false); brain::Reset(); brain::SetOccurrenceRunner(&kLocRunner);
+}
+static void LocalityStop() { brain::SetOccurrenceRunner(nullptr); loc::Stop(); loc::Reset(); }
+static void LocalityFixtures(World& world) {
+    const char* names[] = {"census", "warm-touch", "prefetch1", "prefetch2"};
+    for (U mode = loc::ModeCensus; mode <= loc::ModePrefetch2; ++mode) {
+        currentCase = names[mode];
+        LocalityStart(mode);
+        brain::BeginDispatch();
+        loc::BeginStage(0);
+        std::vector<World> worldBefore(1), worldExpected(1);
+        U count = 0;
+        for (const Spec& spec : kRunSpecs) {
+            Fixture fixture; fixture.Init(world, spec, ++count);
+            const Fixture before = fixture;
+            worldBefore[0] = world;
+            std::vector<Observed> expectedEvents, actualEvents;
+            observations = &expectedEvents; ResetFp(); NativeStep(fixture, count);
+            const FpState expectedFp = CaptureFp();
+            const Fixture expected = fixture; worldExpected[0] = world;
+            fixture = before; world = worldBefore[0];
+            observations = &actualEvents; ResetFp();
+            SerialStep(A(fixture.agent.data()), clones.entries, count);
+            CompareFp(expectedFp);
+            CompareBytes(&expected, &fixture, sizeof(Fixture), "locality runner: complete soldier and nested objects");
+            CompareBytes(&worldExpected[0], &world, sizeof(World), "locality runner: shared world");
+            CompareObservations(expectedEvents, actualEvents);
+            ++cases;
+        }
+        loc::EndStage();
+        const LocWords w = LocNow();
+        Require(w[loc::Version] == loc::kVersion && w[loc::State] == 1 && w[loc::CalibrationSamples] == 2048 &&
+                w[loc::BracketFloorX16] > 0 && w[loc::CalTscKhz] > 100000, "census running, calibrated");
+        Require(w[loc::Stages] == 1 && w[loc::DeepStages] == 1 && LocPair(w.data() + loc::OccurrencesLo) == count &&
+                LocPair(w.data() + loc::MembersLo) == count && w[loc::Timed] == count && w[loc::Unreadable] == 0 && w[loc::Faults] == 0,
+                "one stage, every occurrence a timed member of a deep stage, executed once");
+        Require(LocType(w, 0)[loc::DeepValid] == count && LocType(w, 0)[loc::TimedValid] == count && LocType(w, 16)[loc::TimedValid] == count &&
+                LocType(w, 0)[loc::TimedLinesSum] >= count * 16 && LocType(w, 0)[loc::StageLinesSum] >= 16,
+                "entity hot set covers at least 16 distinct lines per soldier");
+        const U* c0 = LocArm(w, 0); const U* c1 = LocArm(w, 1);
+        if (mode == loc::ModeCensus) Require(c0[0] == count && c1[0] == 0, "census times every occurrence on the single arm");
+        else if (mode == loc::ModeWarm) Require(c0[0] + c1[0] == count && c0[0] > 0 && c1[0] > 0, "A/B arms partition the timed occurrences");
+        if (mode == loc::ModeWarm) Require(LocPair(c1 + 5) > 0 && LocPair(c0 + 5) == 0, "touch cycles recorded on the warm arm only");
+        Require(w[loc::PrefetchIssued] == 0, "no worklist window outside RunWorklist: nothing prefetched");
+        LocalityStop();
+        ++cases;
+    }
+}
+static void NativeWorklist(U manager, U stage) {
+    __try { reinterpret_cast<void (__thiscall*)(U)>(At(0x585d10))(manager); }
+    __except (ReportFault(GetExceptionInformation(), "native worklist", stage)) { std::exit(3); }
+}
+static void OwnerWorklist(U manager, U stage) {
+    __try { brain::RunWorklist(manager, clones.entries); }
+    __except (ReportFault(GetExceptionInformation(), "locality worklist", stage)) { std::exit(3); }
+}
+static void LocalityWorklist(World& world) {
+    const char* names[] = {"census", "warm-touch", "prefetch1", "prefetch2"};
+    static std::array<B, 0x268> manager;
+    static World worldBefore, worldExpected;
+    constexpr U kN = 6, kStages = 6;
+    for (U mode = loc::ModeCensus; mode <= loc::ModePrefetch2; ++mode) {
+        currentCase = names[mode];
+        LocalityStart(mode);
+        for (U stage = 0; stage < kStages; ++stage) {
+            std::array<Fixture, kN> fx;
+            for (U i = 0; i < kN; ++i) fx[i].Init(world, kRunSpecs[i % 5], 700 + stage * 8 + i);
+            std::array<U, kN> list;
+            // even stages walk ascending addresses, odd stages descending
+            for (U i = 0; i < kN; ++i) list[i] = A(fx[(stage & 1) ? kN - 1 - i : i].agent.data());
+            manager.fill(0); Put(manager.data(), 0x260, kN); Put(manager.data(), 0x264, A(list.data()));
+            const std::array<Fixture, kN> before = fx;
+            worldBefore = world;
+            std::vector<Observed> expectedEvents, actualEvents;
+            observations = &expectedEvents; ResetFp();
+            NativeWorklist(A(manager.data()), stage);
+            const FpState expectedFp = CaptureFp();
+            const std::array<Fixture, kN> expected = fx; worldExpected = world;
+            fx = before; world = worldBefore;
+            observations = &actualEvents; ResetFp();
+            OwnerWorklist(A(manager.data()), stage);
+            CompareFp(expectedFp);
+            CompareBytes(&expected, &fx, sizeof(fx), "locality worklist: every soldier and nested object");
+            CompareBytes(&worldExpected, &world, sizeof(World), "locality worklist: shared world");
+            CompareObservations(expectedEvents, actualEvents);
+            ++cases;
+        }
+        const LocWords w = LocNow();
+        const U* sc = LocScalars(w);
+        Require(w[loc::Stages] == kStages && w[loc::DeepStages] == kStages && LocPair(w.data() + loc::MembersLo) == kN * kStages &&
+                w[loc::Timed] == kN * kStages && w[loc::Unreadable] == 0 && w[loc::Faults] == 0, "worklist stages: every member timed once");
+        Require(LocPair(sc + loc::PairsLo) == (kN - 1) * kStages && sc[loc::Ascending] == (kN - 1) * kStages / 2 &&
+                sc[loc::Descending] == (kN - 1) * kStages / 2 && sc[loc::Equal] == 0,
+                "adjacent pairs: ascending stages and descending stages split evenly");
+        Require(LocPair(sc + loc::InversionsLo) == (kStages / 2) * (kN * (kN - 1) / 2) &&
+                LocPair(sc + loc::InversionPairsLo) == kStages * (kN * (kN - 1) / 2),
+                "inversions: descending stages invert every pair, ascending stages none");
+        Require(LocType(w, 0)[loc::DeepValid] == kN * kStages, "every deep-stage member has an entity row");
+        if (mode >= loc::ModePrefetch1) {
+            Require(w[loc::BlocksA] + w[loc::BlocksB] == kStages, "one 64-occurrence block per stage");
+            Require(w[loc::BlocksA] == 0 || w[loc::PrefetchIssued] > 0, "armed blocks prefetch the next worklist entries");
+        } else Require(w[loc::PrefetchIssued] == 0 && w[loc::BlocksA] == 0 && w[loc::BlocksB] == 0, "no prefetch outside the prefetch modes");
+        LocalityStop();
+        ++cases;
+    }
+}
+// --brain-locality-mark: pure pass-through (ETW stage markers only): every real-step fixture is bit-exact against the native step
+// and the module counts nothing but completed stages.
+static void LocalityMark(World& world) {
+    currentCase = "locality mark pass-through";
+    LocalityStart(loc::ModeMark);
+    brain::BeginDispatch();
+    loc::BeginStage(0);
+    std::vector<World> worldBefore(1), worldExpected(1);
+    U count = 0;
+    for (const Spec& spec : kRunSpecs) {
+        Fixture fixture; fixture.Init(world, spec, ++count);
+        const Fixture before = fixture;
+        worldBefore[0] = world;
+        std::vector<Observed> expectedEvents, actualEvents;
+        observations = &expectedEvents; ResetFp(); NativeStep(fixture, count);
+        const FpState expectedFp = CaptureFp();
+        const Fixture expected = fixture; worldExpected[0] = world;
+        fixture = before; world = worldBefore[0];
+        observations = &actualEvents; ResetFp();
+        SerialStep(A(fixture.agent.data()), clones.entries, count);
+        CompareFp(expectedFp);
+        CompareBytes(&expected, &fixture, sizeof(Fixture), "mark runner: complete soldier and nested objects");
+        CompareBytes(&worldExpected[0], &world, sizeof(World), "mark runner: shared world");
+        CompareObservations(expectedEvents, actualEvents);
+        ++cases;
+    }
+    loc::EndStage();
+    const LocWords w = LocNow();
+    Require(w[loc::State] == 1 && w[loc::Configured] == 17 && w[loc::Stages] == 1 && w[loc::CalibrationSamples] == 0,
+            "mark mode running: one completed stage, no calibration");
+    Require(LocPair(w.data() + loc::OccurrencesLo) == 0 && LocPair(w.data() + loc::MembersLo) == 0 && w[loc::Timed] == 0 &&
+            w[loc::Faults] == 0, "pass-through runner counts no occurrence and takes no sample");
+    LocalityStop();
+    ++cases;
+}
+// Diagnostic reads are protected by cached region proofs, which go stale when native code decommits memory mid-stage: prime
+// the proof, decommit the pages, then every diagnostic operation must fault, be contained and be counted (no step runs here).
+static void LocalityFaults() {
+    currentCase = "locality diagnostic reads are fault-contained";
+    LocalityStart(loc::ModeWarm);
+    loc::BeginStage(0);   // clears the region table
+    B* region = static_cast<B*>(VirtualAlloc(nullptr, 0x3000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    Require(region != nullptr, "oracle region");
+    const U entity = A(region);
+    Require(loc::GuardedForTest(0, entity, 0x3000), "region proof primed while committed");
+    Require(loc::GuardedForTest(1, entity, 0) && loc::GuardedForTest(2, entity, 0) && loc::GuardedForTest(3, entity, 0),
+            "diagnostics run clean on live memory");
+    Require(LocNow()[loc::Faults] == 0, "no fault on live memory");
+    Require(VirtualFree(region, 0x3000, MEM_DECOMMIT) != 0, "decommit the proven region");
+    Require(!loc::GuardedForTest(1, entity, 0), "touch of a stale proof faults and is contained");
+    Require(!loc::GuardedForTest(2, entity, 0), "post-step census of a stale proof faults and is contained");
+    Require(!loc::GuardedForTest(3, entity, 0), "chain prefetch of a stale proof faults and is contained");
+    Require(LocNow()[loc::Faults] == 3, "each contained fault is counted once");
+    VirtualFree(region, 0, MEM_RELEASE);
+    loc::EndStage();
+    LocalityStop();
+    ++cases;
+}
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_brain2_oracle Napoleon.exe\n"); return 2; }
     ownerThread = GetCurrentThreadId(); Map(argv[1]);
@@ -2356,6 +2549,11 @@ int main(int argc, char** argv) {
     STAGE(S0Probe());
     STAGE(S0Nesting());
     STAGE(S0Fixtures(world));
+    STAGE(LocalityInversions());
+    STAGE(LocalityFixtures(world));
+    STAGE(LocalityFaults());
+    STAGE(LocalityMark(world));
+    STAGE(LocalityWorklist(world));
     STAGE(CheckLifecycle());
     STAGE(RunCases(world, true, false));
     *vcc = saved; brain::Release();

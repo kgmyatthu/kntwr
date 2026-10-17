@@ -138,6 +138,10 @@ void SetStageObserver(const StageObserver* observer);
 // uninstalls.
 struct OccurrenceRunner { void (*begin)(U manager); void (*end)(); void (*run)(U entity, U cls, U original, const U* cloneEntries); };
 void SetOccurrenceRunner(const OccurrenceRunner* runner);
+// Owner thread, inside an occurrence runner's run(): the address of the current worklist slot (cursor) and the live end of
+// the array (cursor + 4 is the next entry when below end). False outside RunWorklist or when the cursor is not inside the
+// manager's live array (the native loop keeps a stale cursor across a reallocation exactly like 585D10).
+bool WorklistWindow(U* cursor, U* end);
 // Site-6 dispatch witness (owner thread only; RunWorklist calls Begin/End).
 // Begin snapshots the read sets of the current ==1 worklist (replacing any open
 // snapshot); End re-checks only the rows (and slot rows / army entries) that a

@@ -41,6 +41,7 @@
 #include "brain2/native_brain_workers.h"
 #include "brain2/native_unit_brain.h"
 #include "brain2/native_brain_s0.h"
+#include "brain2/native_brain_locality.h"
 #include "brain2/native_unit_policy.h"
 #include "brain2/native_unit_fatigue.h"
 #include "brain2/native_unit_posture_engage.h"
@@ -183,6 +184,11 @@ typedef struct Options {
     BOOL brain_quiet;        /* --brain-quiet: performance mode of --brain-parallel; owner runs the original step, no census/QPC bookkeeping. */
     BOOL brain_unit_shadow;  /* --brain-unit-shadow: per-unit brain Stage A; UnitDecision vs each soldier's native step, shadow only. */
     BOOL brain_s0;           /* --brain-s0: S0 attribution timer (BRAIN_S0 clone family, 1/64 RDTSCP strata); diagnostics only. */
+    BOOL brain_locality;     /* --brain-locality: site-6 locality census (NTW2_BRAIN_LOCALITY); original step unchanged, diagnostics only. */
+    BOOL brain_locality_warm;      /* --brain-locality-warm: cold-vs-warm read-touch A/B (sets --brain-locality). */
+    BOOL brain_locality_prefetch;  /* --brain-locality-prefetch: PREFETCHT0 distance-1 A/B blocks (sets --brain-locality). */
+    BOOL brain_locality_prefetch2; /* --brain-locality-prefetch2: entity lines two ahead, chain lines one ahead (sets --brain-locality). */
+    BOOL brain_locality_mark;      /* --brain-locality-mark: pass-through runner emitting one ETW event per site-6 stage begin/end (sets --brain-locality). */
     BOOL brain_unit_fatigue;        /* --brain-unit-fatigue: S4 per-unit fatigue pair, live (NTW2_BRAIN_UNIT_FATIGUE). */
     BOOL brain_unit_fatigue_shadow; /* --brain-unit-fatigue-shadow: same decision, native results stay, divergence tables (sets both bits). */
     BOOL brain_unit_posture;        /* --brain-unit-posture: S2b per-unit posture, live. */
@@ -1513,6 +1519,175 @@ static void print_brain_s0(const uint32_t *w)
         L"658DEF/658DFB in driver_658C50; 660180/660230 have no step call site; animation select 66B7E0/66B990 "
         L"(fsm.vt+40/+44) in posture_10FC370; 64DE80 internals; other node classes' order calls\n");
 }
+/* --brain-locality census (src/brain2/native_brain_locality.h; analysis/checkpoints/BrainLocality.md). The words share the
+   S0 status row. Step cycles have the in-build bracket floor subtracted. gain = cold mean - warm/prefetched mean (A is
+   the touched or prefetched arm); net = gain - touch cycles (warm only; the prefetch arms include their issue cost in the
+   bracket). ms per stage = per-occurrence cycles x members per stage / TSC rate (uniform occurrence sampling). */
+typedef struct {
+    double stages, deep, members, per_stage, timed, cpm, floor_c, loop_ms, deep_ms, cheap;
+    double n[2], mean[2], se[2], median[2], touch_mean, touch_se;
+    double gain, gain_se, net, net_se, gain_ms, net_ms, touch_ms, cold_ms;
+    double slope, intercept;
+} BrainLocStats;
+static double loc_bin_lo(unsigned b) { return b < 32u ? 32.0 * b : 1024.0 * pow(2.0, (b - 32u) * 6.0 / 32.0); }
+static double loc_median(const uint32_t *h, double n)
+{
+    double cum = 0.0;
+    unsigned b;
+    if (n <= 0.0) return 0.0;
+    for (b = 0; b < NTW2_BRAIN_LOC_HIST_BINS; ++b) {
+        if (h[b] && cum + h[b] >= n / 2.0) {
+            const double lo = loc_bin_lo(b), hi = b + 1u < NTW2_BRAIN_LOC_HIST_BINS ? loc_bin_lo(b + 1u) : lo * 2.0;
+            return lo + (hi - lo) * (n / 2.0 - cum) / h[b];
+        }
+        cum += h[b];
+    }
+    return loc_bin_lo(NTW2_BRAIN_LOC_HIST_BINS - 1u);
+}
+static int brain_loc_stats(const uint32_t *w, BrainLocStats *t)
+{
+    unsigned a, b;
+    double sw = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    memset(t, 0, sizeof *t);
+    t->stages = w[4]; t->deep = w[5]; t->members = (double)s0_u64(w + 8); t->timed = w[10]; t->cpm = w[11];
+    t->floor_c = w[12] / 16.0; t->cheap = w[18] / 16.0;
+    if (!w[4] || t->cpm <= 0.0 || !t->members) return 0;
+    t->per_stage = t->members / t->stages;
+    t->loop_ms = (double)s0_u64(w + 14) / t->cpm / t->stages;
+    t->deep_ms = t->deep > 0.0 ? (double)s0_u64(w + 16) / t->cpm / t->deep : 0.0;
+    for (a = 0; a < NTW2_BRAIN_LOC_ARMS; ++a) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_ARM_BASE + a * NTW2_BRAIN_LOC_ARM_WORDS;
+        const double n = q[0], sum = (double)s0_u64(q + 1), sq = s0_f64(q + 3);
+        double var;
+        t->n[a] = n;
+        if (n <= 0.0) continue;
+        t->mean[a] = sum / n;
+        var = n > 1.0 ? (sq - sum * sum / n) / (n - 1.0) : 0.0;
+        t->se[a] = sqrt(var > 0.0 ? var / n : 0.0);
+        t->median[a] = loc_median(w + NTW2_BRAIN_LOC_HIST_BASE + a * NTW2_BRAIN_LOC_HIST_BINS, n);
+        if (a == 1) {
+            const double ts = (double)s0_u64(q + 5), tq = s0_f64(q + 7);
+            t->touch_mean = ts / n;
+            var = n > 1.0 ? (tq - ts * ts / n) / (n - 1.0) : 0.0;
+            t->touch_se = sqrt(var > 0.0 ? var / n : 0.0);
+        }
+    }
+    t->cold_ms = t->mean[0] * t->per_stage / t->cpm;
+    if (t->n[0] > 0.0 && t->n[1] > 0.0) {
+        t->gain = t->mean[0] - t->mean[1];
+        t->gain_se = sqrt(t->se[0] * t->se[0] + t->se[1] * t->se[1]);
+        t->net = t->gain - t->touch_mean;
+        t->net_se = sqrt(t->gain_se * t->gain_se + t->touch_se * t->touch_se);
+        t->gain_ms = t->gain * t->per_stage / t->cpm;
+        t->net_ms = t->net * t->per_stage / t->cpm;
+        t->touch_ms = t->touch_mean * t->per_stage / t->cpm;
+    }
+    for (b = 0; b < NTW2_BRAIN_LOC_BUCKETS; ++b) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + b * NTW2_BRAIN_LOC_BUCKET_WORDS;
+        const double n = q[0], x = 4.0 * b + 2.0, y = n > 0.0 ? (double)s0_u64(q + 1) / n : 0.0;
+        if (n <= 0.0) continue;
+        sw += n; sx += n * x; sy += n * y; sxx += n * x * x; sxy += n * x * y;
+    }
+    if (sw > 0.0 && sxx * sw - sx * sx > 1e-9) {
+        t->slope = (sxy * sw - sx * sy) / (sxx * sw - sx * sx);
+        t->intercept = (sy - t->slope * sx) / sw;
+    }
+    return 1;
+}
+static const char *loc_mode_name(uint32_t configured)
+{
+    return (configured & 16u) ? "mark (ETW stage markers only)" :
+           (configured & 2u) ? "census + warm-touch A/B" : (configured & 4u) ? "census + prefetch distance 1 A/B" :
+           (configured & 8u) ? "census + prefetch distance 2/1 A/B" : "census";
+}
+static double loc_pct(double a, double b) { return b > 0.0 ? 100.0 * a / b : 0.0; }
+static void print_brain_locality(const uint32_t *w)
+{
+    static const char *const types[] = { NTW2_BRAIN_LOC_TYPE_LABELS };
+    static const char *const states[] = { "not started", "running", "refused: no RDTSCP/invariant TSC", "refused: storage" };
+    static const char *const arms[2][4] = { { "census (all timed)", "cold (B)", "cold (B)", "cold (B)" },
+                                            { "", "warm (A)", "prefetch (A)", "prefetch (A)" } };
+    static const unsigned cut[] = { 6, 12, 16, 20, 24, 32 };
+    static const char *const cutn[] = { "<64 B", "<4 KiB", "<64 KiB", "<1 MiB", "<16 MiB", "any" };
+    const uint32_t *sc = w + NTW2_BRAIN_LOC_SCALAR_BASE, *dh = w + NTW2_BRAIN_LOC_DELTA_BASE, *rh = w + NTW2_BRAIN_LOC_RUN_BASE;
+    BrainLocStats t;
+    const unsigned mode = (w[1] & 2u) ? 1u : (w[1] & 4u) ? 2u : (w[1] & 8u) ? 3u : 0u;
+    double pairs, cum;
+    unsigned r, b;
+    if (!w[1]) return;
+    if (w[1] & 16u) {
+        say(L"  brain locality mark (v%lu, %hs): pass-through runner (no census, touch or TSC), ETW provider {%hs}, event 1 = stage begin, "
+            L"event 2 = stage end, UINT32 payload = 1-based stage ordinal; stages completed %lu\n", (unsigned long)w[0],
+            w[2] < 4 ? states[w[2]] : "?", NTW2_BRAIN_LOC_MARK_GUID_TEXT, (unsigned long)w[4]);
+        return;
+    }
+    say(L"  brain locality census (v%lu, %hs, %hs; strata of (stage, occurrence ordinal): timed 1/%lu, deep stages 1/8, blocks of %lu):\n",
+        (unsigned long)w[0], loc_mode_name(w[1]), w[2] < 4 ? states[w[2]] : "?", 1ul << w[3], (unsigned long)w[30]);
+    if (!brain_loc_stats(w, &t)) { say(L"    no stage yet (stages=%lu, members=%.0f)\n", (unsigned long)w[4], (double)s0_u64(w + 8)); return; }
+    say(L"    stages=%.0f (deep %.0f) members=%.0f (%.1f/stage, max %lu, last %lu) other-class=%.0f timed=%lu unreadable=%lu deep-overflow=%lu; "
+        L"TSC %.1f MHz, bracket floor %.1f+-%.1f cycles\n", t.stages, t.deep, t.members, t.per_stage, (unsigned long)w[25],
+        (unsigned long)w[27], (double)s0_u64(w + 6) - t.members, (unsigned long)w[10], (unsigned long)w[20], (unsigned long)w[21],
+        t.cpm / 1000.0, t.floor_c, w[13] / 16.0);
+    say(L"    runner loop %.3f ms/stage (inclusive of census bookkeeping; deep-stage analysis %.2f ms per deep stage is outside it); "
+        L"post-step cheap path ~%.1f cycles/occurrence (unserialised RDTSC pair, indicative); prefetch lines issued %.0f, touch skipped %lu, "
+        L"VirtualQuery %lu, diagnostic faults contained %lu\n", t.loop_ms, t.deep_ms, t.cheap,
+        (double)(((uint64_t)sc[18] << 32) | w[23]), (unsigned long)w[22], (unsigned long)w[24], (unsigned long)w[26]);
+    pairs = (double)s0_u64(sc);
+    say(L"    worklist adjacency over %.0f consecutive pairs: same 4 KiB page %.2f%%, same 64 B line %.2f%%, same unit %.2f%%, "
+        L"ascending %.2f%% / descending %.2f%% / equal %.2f%%; unit runs %lu (mean run %.1f men)\n", pairs,
+        loc_pct(sc[2], pairs), loc_pct(sc[3], pairs), loc_pct(sc[4], pairs), loc_pct(sc[5], pairs), loc_pct(sc[6], pairs),
+        loc_pct(sc[7], pairs), (unsigned long)sc[8], sc[8] ? pairs / sc[8] : 0.0);
+    say(L"    |E_i - E_(i-1)| cumulative:");
+    for (b = 0, cum = 0.0, r = 0; r < 6; ++r) {
+        for (; b <= cut[r] && b < NTW2_BRAIN_LOC_DELTA_BINS; ++b) cum += dh[b];
+        say(L" %hs %.1f%%", cutn[r], loc_pct(cum, pairs));
+    }
+    say(L"\n    unit run length log2 histogram:");
+    for (b = 0; b < NTW2_BRAIN_LOC_RUN_BINS; ++b) if (rh[b]) say(L" %lu:%lu", 1ul << b, (unsigned long)rh[b]);
+    say(L"\n");
+    if (t.deep > 0.0) {
+        const double invp = (double)s0_u64(sc + 11);
+        say(L"    deep stages (%.0f, %.0f members): entity address span mean %.1f MiB (max %.1f MiB), entity base pages/stage %.0f (max %lu); "
+            L"order inversions %.3f%% of pairs (random 50%%, address-sorted 0%%)\n", t.deep, (double)sc[15],
+            sc[13] / t.deep / 1024.0, sc[14] / 1024.0, sc[16] / t.deep, (unsigned long)sc[17],
+            invp > 0.0 ? 100.0 * (double)s0_u64(sc + 9) / invp : 0.0);
+    }
+    say(L"    mapped hot set per object type (static load map; lines/pages = distinct 64 B lines / 4 KiB pages; stage = per deep stage):\n");
+    say(L"      %-14hs %8hs %9hs %9hs %12hs %11hs %11hs %9hs\n", "object", "present", "lines/man", "pages/man", "stage lines", "stage pages",
+        "max lines", "MiB");
+    for (r = 0; r < NTW2_BRAIN_LOC_TYPES; ++r) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_TYPE_BASE + r * NTW2_BRAIN_LOC_TYPE_WORDS;
+        if (!q[0] && !q[1]) continue;
+        say(L"      %-14hs %7.1f%% %9.2f %9.2f %12.0f %11.0f %11lu %9.2f\n", types[r], loc_pct(q[0], (double)sc[15]),
+            q[1] ? (double)q[2] / q[1] : 0.0, q[1] ? (double)q[3] / q[1] : 0.0, t.deep > 0.0 ? q[4] / t.deep : 0.0,
+            t.deep > 0.0 ? q[5] / t.deep : 0.0, (unsigned long)q[6], t.deep > 0.0 ? q[4] / t.deep * 64.0 / 1048576.0 : 0.0);
+    }
+    say(L"    step cycles, %hs arm: n=%.0f mean %.1f +-%.1f median %.0f cycles (%.0f ns mean) => step %.3f ms/stage (%.1f%% of the runner loop)\n",
+        arms[0][mode], t.n[0], t.mean[0], t.se[0], t.median[0], t.mean[0] / t.cpm * 1e6, t.cold_ms, loc_pct(t.cold_ms, t.loop_ms));
+    say(L"    cost vs hot lines not touched by the previous occurrence (cold arm; bucket width 4 lines):\n");
+    for (b = 0; b < NTW2_BRAIN_LOC_BUCKETS; ++b) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + b * NTW2_BRAIN_LOC_BUCKET_WORDS;
+        const double bn = q[0], bs = (double)s0_u64(q + 1), bq = s0_f64(q + 3);
+        double var;
+        if (bn <= 0.0) continue;
+        var = bn > 1.0 ? (bq - bs * bs / bn) / (bn - 1.0) : 0.0;
+        say(L"      new %2lu-%2lu: n=%8.0f mean %8.1f +-%6.1f cycles\n", (unsigned long)(4 * b), (unsigned long)(4 * b + 3), bn, bs / bn,
+            sqrt(var > 0.0 ? var / bn : 0.0));
+    }
+    say(L"      linear fit: %.1f cycles intercept + %.2f cycles per new line (weighted by n)\n", t.intercept, t.slope);
+    if (mode && t.n[1] > 0.0) {
+        say(L"    A/B (%hs): %hs n=%.0f mean %.1f +-%.1f median %.0f vs %hs n=%.0f mean %.1f +-%.1f median %.0f cycles\n", loc_mode_name(w[1]),
+            arms[1][mode], t.n[1], t.mean[1], t.se[1], t.median[1], arms[0][mode], t.n[0], t.mean[0], t.se[0], t.median[0]);
+        if (mode == 1)
+            say(L"      touch of every mapped hot line: %.1f +-%.1f cycles/occurrence (%.3f ms/stage if every man were touched)\n",
+                t.touch_mean, t.touch_se, t.touch_ms);
+        say(L"      measured miss cost on the mapped set (B - A) = %.1f +-%.1f cycles/occurrence = %.3f ms/stage over %.1f members\n",
+            t.gain, t.gain_se, t.gain_ms, t.per_stage);
+        say(L"      net gain after %hs = %.1f +-%.1f cycles/occurrence = %.3f ms/stage (%.1f%% of the cold step)\n",
+            mode == 1 ? "the touch itself" : "the prefetch issue cost (inside the A bracket)", t.net, t.net_se, t.net_ms,
+            loc_pct(t.net, t.mean[0]));
+    }
+}
 /* --brain-unit-* (src/brain2/native_unit_policy.h header words 0..31 of brain_unit_policy_words; the fatigue half, words
    32..127, is src/brain2/native_unit_fatigue.h). */
 static const char *unit_mode_name(uint32_t modes, unsigned mechanic)
@@ -1753,7 +1928,7 @@ static void print_army_storm(const uint32_t *w)
             (unsigned long)(e[10] & 0x3FFu), (unsigned long)((e[10] >> 10) & 0x3FFu), (unsigned long)((e[10] >> 20) & 0x3FFu));
     }
 }
-static void print_module_words(const ntw2_status *s)
+static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
     const uint32_t *arrays[48] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
@@ -1973,7 +2148,8 @@ static void print_module_words(const ntw2_status *s)
                 }
             }
             print_unit_brain(s->brain_unit_words);
-            print_brain_s0(s->brain_s0_words);
+            if (brain_flags & NTW2_BRAIN_LOCALITY) print_brain_locality(s->brain_s0_words);
+            else print_brain_s0(s->brain_s0_words);
             print_unit_policy(s->brain_unit_policy_words);
             print_unit_fatigue(s->brain_unit_policy_words + 32, s->brain_unit_policy_words);
             print_unit_posture_engage(s->brain_unit_policy_words + 128, s->brain_unit_policy_words);
@@ -2808,6 +2984,57 @@ static void sb_fmt(Sb *b, const char *fmt, ...)
     else if (n < 0) b->oom = TRUE;
 }
 
+static void sb_brain_locality(Sb *b, const uint32_t *w, int requested)
+{
+    static const char *const header[] = { NTW2_BRAIN_LOC_LABEL_HEADER };
+    static const char *const scalars[] = { NTW2_BRAIN_LOC_LABEL_SCALARS };
+    static const char *const types[] = { NTW2_BRAIN_LOC_TYPE_LABELS };
+    static const char *const tw[] = { NTW2_BRAIN_LOC_TYPE_WORD_LABELS };
+    static const char *const armn[] = { "cold", "treated" };
+    BrainLocStats t;
+    unsigned i, k;
+    int ok;
+    if (!requested) { sb_fmt(b, "null"); return; }
+    ok = brain_loc_stats(w, &t);
+    sb_fmt(b, "{\"header\": {");
+    for (i = 0; i < NTW2_BRAIN_LOC_HEADER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", header[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"scalars\": {");
+    for (i = 0; i < NTW2_BRAIN_LOC_SCALAR_WORDS; ++i)
+        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", scalars[i], (unsigned long)w[NTW2_BRAIN_LOC_SCALAR_BASE + i]);
+    sb_fmt(b, "}, \"delta_log2_hist\": [");
+    for (i = 0; i < NTW2_BRAIN_LOC_DELTA_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_DELTA_BASE + i]);
+    sb_fmt(b, "], \"unit_run_log2_hist\": [");
+    for (i = 0; i < NTW2_BRAIN_LOC_RUN_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_RUN_BASE + i]);
+    sb_fmt(b, "], \"types\": {");
+    for (i = 0; i < NTW2_BRAIN_LOC_TYPES; ++i) {
+        sb_fmt(b, "%s\"%s\": {", i ? ", " : "", types[i]);
+        for (k = 0; k < NTW2_BRAIN_LOC_TYPE_WORDS; ++k)
+            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", tw[k], (unsigned long)w[NTW2_BRAIN_LOC_TYPE_BASE + i * NTW2_BRAIN_LOC_TYPE_WORDS + k]);
+        sb_fmt(b, "}");
+    }
+    sb_fmt(b, "}, \"new_line_buckets\": [");
+    for (i = 0; i < NTW2_BRAIN_LOC_BUCKETS; ++i) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + i * NTW2_BRAIN_LOC_BUCKET_WORDS;
+        sb_fmt(b, "%s{\"new_lines_from\": %lu, \"n\": %lu, \"cycles_sum\": %.0f, \"cycles_sq\": %.6g}", i ? ", " : "", (unsigned long)(4 * i),
+               (unsigned long)q[0], (double)s0_u64(q + 1), s0_f64(q + 3));
+    }
+    sb_fmt(b, "], \"arms\": {");
+    for (i = 0; i < NTW2_BRAIN_LOC_ARMS; ++i) {
+        const uint32_t *q = w + NTW2_BRAIN_LOC_ARM_BASE + i * NTW2_BRAIN_LOC_ARM_WORDS;
+        sb_fmt(b, "%s\"%s\": {\"n\": %lu, \"cycles_sum\": %.0f, \"cycles_sq\": %.6g, \"touch_sum\": %.0f, \"touch_sq\": %.6g, \"hist\": [",
+               i ? ", " : "", armn[i], (unsigned long)q[0], (double)s0_u64(q + 1), s0_f64(q + 3), (double)s0_u64(q + 5), s0_f64(q + 7));
+        for (k = 0; k < NTW2_BRAIN_LOC_HIST_BINS; ++k)
+            sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_HIST_BASE + i * NTW2_BRAIN_LOC_HIST_BINS + k]);
+        sb_fmt(b, "]}");
+    }
+    sb_fmt(b, "}, \"estimated\": %s, \"cycles_per_ms\": %.3f, \"members_per_stage\": %.3f, \"loop_ms_per_stage\": %.6f, "
+              "\"cold_step_ms_per_stage\": %.6f, \"cold_mean\": %.3f, \"cold_se\": %.3f, \"cold_median\": %.1f, \"treated_mean\": %.3f, "
+              "\"treated_se\": %.3f, \"treated_median\": %.1f, \"touch_mean\": %.3f, \"touch_se\": %.3f, \"gain_cycles\": %.3f, "
+              "\"gain_se\": %.3f, \"net_cycles\": %.3f, \"net_se\": %.3f, \"gain_ms_per_stage\": %.6f, \"net_ms_per_stage\": %.6f, "
+              "\"cycles_per_new_line\": %.4f, \"intercept_cycles\": %.3f}", ok ? "true" : "false", t.cpm, t.per_stage, t.loop_ms,
+           t.cold_ms, t.mean[0], t.se[0], t.median[0], t.mean[1], t.se[1], t.median[1], t.touch_mean, t.touch_se, t.gain, t.gain_se,
+           t.net, t.net_se, t.gain_ms, t.net_ms, t.slope, t.intercept);
+}
 static void sb_wstr(Sb *b, const wchar_t *s)
 {
     static char u8[MAXP * 4];
@@ -3061,7 +3288,10 @@ static void sb_brain2(Sb *b, const Run *r)
     sb_fmt(b, "}, \"brain_worker_phase_words\": [");
     for (i = 0; i < NTW2_BRAIN_WORKER_PHASE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_worker_phase_words[i]);
-    sb_fmt(b, "], \"requested_s0\": %s, \"brain_s0_words\": [", r->opt.brain_s0 ? "true" : "false");
+    sb_fmt(b, "], \"requested_s0\": %s, \"requested_locality\": %s, \"brain_locality\": ", r->opt.brain_s0 ? "true" : "false",
+           r->opt.brain_locality ? "true" : "false");
+    sb_brain_locality(b, r->last.brain_s0_words, r->opt.brain_locality);
+    sb_fmt(b, ", \"brain_s0_words\": [");
     for (i = 0; i < NTW2_BRAIN_S0_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_s0_words[i]);
     {
@@ -3070,10 +3300,12 @@ static void sb_brain2(Sb *b, const Run *r)
         static const char *const rows[] = { NTW2_BRAIN_S0_ROW_LABELS };
         BrainS0Table t;
         unsigned k;
-        const int ok = brain_s0_table(r->last.brain_s0_words, &t);
+        static const uint32_t zero_words[NTW2_BRAIN_S0_WORDS] = { 0 };
+        const uint32_t *s0w = r->opt.brain_locality ? zero_words : r->last.brain_s0_words;
+        const int ok = brain_s0_table(s0w, &t);
         sb_fmt(b, "], \"brain_s0\": {\"header\": {");
         for (k = 0; k < NTW2_BRAIN_S0_HEADER_WORDS; ++k)
-            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", header[k], (unsigned long)r->last.brain_s0_words[k]);
+            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", header[k], (unsigned long)s0w[k]);
         sb_fmt(b, "}, \"estimated\": %s, \"cycles_per_ms\": %.3f, \"step_ms_per_stage\": %.6f, \"site6_ms_per_stage\": %.6f, "
                   "\"s0_overhead_ms_per_stage\": %.6f, \"rows\": {", ok ? "true" : "false", t.cycles_per_ms, t.step_ms,
                t.site6_ms, t.overhead_ms);
@@ -4004,7 +4236,8 @@ static BOOL write_receipt(Run *r, int exit_code)
                         NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
                         NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u +
                         NTW2_ARMY_B0_WORDS * 64u + NTW2_BRAIN_S0_WORDS * 16u +
-                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + NTW2_BRAIN_UNIT_POLICY_WORDS * 48u + 8192u + 4096u];
+                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + NTW2_BRAIN_UNIT_POLICY_WORDS * 48u +
+                        NTW2_BRAIN_LOC_WORDS * 24u + 16384u + 8192u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -4087,6 +4320,11 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
     sb_fmt(&b, "  \"brain_s0\": %s,\n", r->opt.brain_s0 ? "true" : "false");
+    sb_fmt(&b, "  \"brain_locality\": %s,\n  \"brain_locality_warm\": %s,\n  \"brain_locality_prefetch\": %s,\n  \"brain_locality_prefetch2\": %s,\n"
+               "  \"brain_locality_mark\": %s,\n",
+           r->opt.brain_locality ? "true" : "false", r->opt.brain_locality_warm ? "true" : "false",
+           r->opt.brain_locality_prefetch ? "true" : "false", r->opt.brain_locality_prefetch2 ? "true" : "false",
+           r->opt.brain_locality_mark ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_fatigue\": %s,\n", r->opt.brain_unit_fatigue ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_fatigue_shadow\": %s,\n", r->opt.brain_unit_fatigue_shadow ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_posture\": %s,\n", r->opt.brain_unit_posture ? "true" : "false");
@@ -4803,6 +5041,11 @@ static int install_runtime(Run *r)
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
                          (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
+                         (r->opt.brain_locality ? NTW2_BRAIN_LOCALITY : 0u) |
+                         (r->opt.brain_locality_warm ? NTW2_BRAIN_LOCALITY_WARM : 0u) |
+                         (r->opt.brain_locality_prefetch ? NTW2_BRAIN_LOCALITY_PREFETCH : 0u) |
+                         (r->opt.brain_locality_prefetch2 ? NTW2_BRAIN_LOCALITY_PREFETCH2 : 0u) |
+                         (r->opt.brain_locality_mark ? NTW2_BRAIN_LOCALITY_MARK : 0u) |
                          ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
                          (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
                          ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |
@@ -5092,7 +5335,7 @@ static int monitor(Run *r)
             r->observation_complete = TRUE;
             say(L"Observation bound (%lu s) reached (game pid %lu).\n",
                 (unsigned long)r->opt.observe_s, (unsigned long)r->pid);
-            if (r->have_status) { print_status(&r->last, r->opt.mask); print_counters(&r->last); print_module_words(&r->last); }
+            if (r->have_status) { print_status(&r->last, r->opt.mask); print_counters(&r->last); print_module_words(&r->last, r->cfg.brain_flags); }
             if (!read_profile(r)) say(L"Final profile read unavailable; using the last complete periodic copy if retained.\n");
             profile_ok = write_profile(r);
             if (r->opt.exit_game_after_observe) {
@@ -5296,6 +5539,19 @@ static void usage(void)
         L"                        step runs the BRAIN_S0 clone family (identical code, counting gates around target, drivers,\n"
         L"                        node begin/step, finalizer, order, lookups, stance, path/posture/next-state, fatigue, timers);\n"
         L"                        1/64 deterministic occurrences timed with RDTSCP, calibrated gate cost subtracted (brain_s0_words)\n"
+        L"  --brain-locality      requires brain2; excludes every other --brain-* option (S0 included): site-6 locality census. The original\n"
+        L"                        +0C step runs exactly once per occurrence, unchanged; the runner only loads entity fields after the step\n"
+        L"                        and derives hot cache-line sets from the static load map: worklist address order, unit/page/line\n"
+        L"                        adjacency, distinct lines/pages per object type and per stage, inversion count, and a 1/16 RDTSCP\n"
+        L"                        bracket of the step bucketed by lines not touched by the previous occurrence (reuses brain_s0_words)\n"
+        L"  --brain-locality-warm       sets --brain-locality: on half of the timed occurrences read-touch every mapped hot line first\n"
+        L"                        (touch timed separately): cold-vs-warm step A/B, measured miss cost of the mapped set\n"
+        L"  --brain-locality-prefetch   sets --brain-locality: alternating 64-occurrence blocks issue PREFETCHT0 for the next worklist\n"
+        L"                        entity (entity + chain-object lines, distance 1); B-A = net gain incl. issue cost\n"
+        L"  --brain-locality-prefetch2  sets --brain-locality: entity lines two ahead, chain lines one ahead (software pipeline)\n"
+        L"  --brain-locality-mark       sets --brain-locality: pure pass-through (no census/touch/TSC); one manifest-free ETW event per site-6\n"
+        L"                        stage begin/end (provider {6e1c4a2b-5d3f-4a7e-9b21-c8f0a3d7e514}, Id 1 begin / Id 2 end, UINT32 stage\n"
+        L"                        ordinal) to gate a WPR PMC trace to site-6 windows\n"
         L"  --brain-unit-fatigue  requires brain2; excludes --brain-census/timing/parallel/quiet/unit-shadow and the brain shadows;\n"
         L"                        combines with the other --brain-unit-* options and --brain-s0: S4 per-unit fatigue. One (acc, level) pair\n"
         L"                        per unit generation, initialised from the native unit means and advanced once per stage from the unit's\n"
@@ -5495,6 +5751,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--brain-quiet")) o->brain_quiet = TRUE;
         else if (!wcscmp(name, L"--brain-unit-shadow")) o->brain_unit_shadow = TRUE;
         else if (!wcscmp(name, L"--brain-s0")) o->brain_s0 = TRUE;
+        else if (!wcscmp(name, L"--brain-locality")) o->brain_locality = TRUE;
+        else if (!wcscmp(name, L"--brain-locality-warm")) o->brain_locality = o->brain_locality_warm = TRUE;
+        else if (!wcscmp(name, L"--brain-locality-prefetch")) o->brain_locality = o->brain_locality_prefetch = TRUE;
+        else if (!wcscmp(name, L"--brain-locality-prefetch2")) o->brain_locality = o->brain_locality_prefetch2 = TRUE;
+        else if (!wcscmp(name, L"--brain-locality-mark")) o->brain_locality = o->brain_locality_mark = TRUE;
         else if (!wcscmp(name, L"--brain-unit-fatigue")) o->brain_unit_fatigue = TRUE;
         else if (!wcscmp(name, L"--brain-unit-fatigue-shadow")) o->brain_unit_fatigue = o->brain_unit_fatigue_shadow = TRUE;
         else if (!wcscmp(name, L"--brain-unit-posture")) o->brain_unit_posture = TRUE;
@@ -5684,8 +5945,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow ||
-         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0) && !(o->mask & NTW2_BRAIN2)) {
-        errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow, --brain-s0 and brain shadow options require --features brain2.\n");
+         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0 || o->brain_locality) && !(o->mask & NTW2_BRAIN2)) {
+        errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow, --brain-s0, --brain-locality* and brain shadow options require --features brain2.\n");
         return -1;
     }
     if ((o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage) && !(o->mask & NTW2_BRAIN2)) {
@@ -5715,6 +5976,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     if (o->brain_s0 && (o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow ||
                         o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet || o->brain_unit_shadow)) {
         errsay(L"--brain-s0 owns the site-6 occurrence call and excludes every other --brain-* option except the --brain-unit-* options.\n");
+        return -1;
+    }
+    if (o->brain_locality && (o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow ||
+                              o->brain_finalizer_shadow || o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0 ||
+                              o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage)) {
+        errsay(L"--brain-locality* owns the site-6 occurrence call and excludes every other --brain-* option (including --brain-s0 and --brain-unit-*).\n");
+        return -1;
+    }
+    if ((o->brain_locality_warm ? 1 : 0) + (o->brain_locality_prefetch ? 1 : 0) + (o->brain_locality_prefetch2 ? 1 : 0) +
+        (o->brain_locality_mark ? 1 : 0) > 1) {
+        errsay(L"--brain-locality-warm, --brain-locality-prefetch, --brain-locality-prefetch2 and --brain-locality-mark are exclusive modes.\n");
         return -1;
     }
     if ((o->mask & NTW2_LOCO) && (o->mask & (NTW2_BRAIN | NTW2_COLLIDE_LOD))) {
@@ -5853,6 +6125,11 @@ int wmain(int argc, wchar_t **argv)
                          (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
                          (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
                          (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
+                         (r->opt.brain_locality ? NTW2_BRAIN_LOCALITY : 0u) |
+                         (r->opt.brain_locality_warm ? NTW2_BRAIN_LOCALITY_WARM : 0u) |
+                         (r->opt.brain_locality_prefetch ? NTW2_BRAIN_LOCALITY_PREFETCH : 0u) |
+                         (r->opt.brain_locality_prefetch2 ? NTW2_BRAIN_LOCALITY_PREFETCH2 : 0u) |
+                         (r->opt.brain_locality_mark ? NTW2_BRAIN_LOCALITY_MARK : 0u) |
                          ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
                          (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
                          ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |

@@ -1681,6 +1681,16 @@ U WitnessEnd() {
 void WitnessAbort() { g_witnessOpen = false; }
 U WitnessProbeQueries() { return g_probeQueries; }
 const StageObserver* g_observer;
+U g_workManager, g_workCursor;
+bool WorklistWindow(U* cursor, U* end) {
+    const U manager = g_workManager, at = g_workCursor;
+    if (!manager || !at) return false;
+    const U data = *reinterpret_cast<volatile U*>(manager + 0x264);
+    const U last = data + 4 * *reinterpret_cast<volatile U*>(manager + 0x260);
+    if (at < data || at >= last) return false;
+    *cursor = at; *end = last;
+    return true;
+}
 void SetStageObserver(const StageObserver* observer) { g_observer = observer; }
 void RunWorklist(U manager, const U* cloneEntries) {
     BeginDispatch();
@@ -1689,12 +1699,13 @@ void RunWorklist(U manager, const U* cloneEntries) {
     const StageObserver* const observer = g_observer;
     if (observer) observer->begin(manager);
     const OccurrenceRunner* const runner = g_censusEnabled ? nullptr : g_runner;
-    if (runner) runner->begin(manager);
+    if (runner) { runner->begin(manager); g_workManager = manager; }
     U cursor = *reinterpret_cast<volatile U*>(manager + 0x264);
     U end = cursor + 4 * *reinterpret_cast<volatile U*>(manager + 0x260);
     while (cursor != end) {
         const U entity = *reinterpret_cast<volatile U*>(cursor);
         if (*reinterpret_cast<volatile uint8_t*>(entity + 0x30) == 1) {
+            if (runner) g_workCursor = cursor;
             RunOccurrence(entity, cloneEntries);
             if (observer) observer->observe(entity);
         }
@@ -1702,7 +1713,7 @@ void RunWorklist(U manager, const U* cloneEntries) {
         end = *reinterpret_cast<volatile U*>(manager + 0x264) +
               4 * *reinterpret_cast<volatile U*>(manager + 0x260);
     }
-    if (runner) runner->end();
+    if (runner) { g_workManager = g_workCursor = 0; runner->end(); }
     if (observer) observer->end();
     if (witness) WitnessEnd();
 }

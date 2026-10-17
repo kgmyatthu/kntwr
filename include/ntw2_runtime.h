@@ -103,7 +103,12 @@ enum ntw2_va_word {
 #define NTW2_BRAIN_UNIT_POSTURE_SHADOW 0x1000u /* --brain-unit-posture-shadow (sets 0x800|0x1000). */
 #define NTW2_BRAIN_UNIT_ENGAGE 0x2000u /* --brain-unit-engage: S1c/S3 engage + fire latches, S1a/S2a lookups (src/brain2/native_unit_posture_engage.h). */
 #define NTW2_BRAIN_UNIT_ENGAGE_SHADOW 0x4000u /* --brain-unit-engage-shadow (sets 0x2000|0x4000). */
-#define NTW2_BRAIN_FLAGS_VALID 0x7fffu
+#define NTW2_BRAIN_LOCALITY 0x8000u /* --brain-locality: diagnostics-only site-6 locality census (src/brain2/native_brain_locality.h, analysis/checkpoints/BrainLocality.md). The per-man step still runs the ORIGINAL vt+0C entry exactly once per occurrence; the owner-thread runner only loads entity fields (after the step), derives hot cache-line sets from the static load map and brackets a deterministic 1/16 stratum with serialized RDTSCP. Never writes game memory. Requires BRAIN2; excludes every other NTW2_BRAIN_* flag (including NTW2_BRAIN_S0, whose status row it reuses) except the locality modifier bits below. Words: brain_s0_words (the S0 row, which is empty while S0 is off). */
+#define NTW2_BRAIN_LOCALITY_WARM 0x10000u /* --brain-locality-warm (sets 0x8000|0x10000): on a deterministic half of the timed occurrences every hot line of the occurrence's mapped objects is read-touched (volatile loads, timed separately) before the timed step: cold-vs-warm A/B. Excludes the prefetch bits. */
+#define NTW2_BRAIN_LOCALITY_PREFETCH 0x20000u /* --brain-locality-prefetch (sets 0x8000|0x20000): alternating 64-occurrence blocks issue PREFETCHT0 for the next worklist entity (its entity lines and chain-object lines, distance 1) from the start of each occurrence; B-A = net gain. Excludes the warm and prefetch2 bits. */
+#define NTW2_BRAIN_LOCALITY_PREFETCH2 0x40000u /* --brain-locality-prefetch2 (sets 0x8000|0x40000): as prefetch, but entity lines of the entry two ahead and chain lines of the entry one ahead. Excludes the warm and prefetch bits. */
+#define NTW2_BRAIN_LOCALITY_MARK 0x80000u /* --brain-locality-mark (sets 0x8000|0x80000): pure pass-through runner (no census/touch/TSC; the step is called once) whose stage begin/end emit one manifest-free ETW event each (provider GUID {6e1c4a2b-5d3f-4a7e-9b21-c8f0a3d7e514}, Id 1 begin / Id 2 end, UINT32 stage ordinal; src/brain2/native_brain_locality.h) so a WPR PMC trace can be gated to site-6 windows. Excludes the warm and prefetch bits. */
+#define NTW2_BRAIN_FLAGS_VALID 0xfffffu
 #define NTW2_BRAIN_UNIT_POLICY_WORDS 256u /* brain_unit_policy_words: shared header 0..31 (ntw2_unit_policy), fatigue 32..127 (NTW2_UNIT_FATIGUE_LABELS), posture/engage 128..255 (NTW2_UNIT_POSTURE_ENGAGE_LABELS) */
 #define NTW2_BRAIN_UNIT_WORDS 176u
 #define NTW2_BRAIN_WORKER_WORDS 144u
@@ -910,7 +915,9 @@ typedef struct ntw2_status {
     /* NTW2_BRAIN_S0 attribution timer (appended after army_storm_words): 32 header words (calibration, stages,
        occurrences, site-6 cycles, TSC/QPC span) then 33 mechanic rows x 16 words (calls, sampled calls, nesting counts,
        inclusive/exclusive cycles and per-occurrence second moments). Layout and labels in src/brain2/native_brain_s0.h.
-       Tick-owner writer. Reset at activation, retained after stop. */
+       The same 560 words carry the NTW2_BRAIN_LOCALITY census instead while that flag (mutually exclusive with S0) is set:
+       layout and labels in src/brain2/native_brain_locality.h (NTW2_BRAIN_LOC_*). Tick-owner writer. Reset at activation,
+       retained after stop. */
     uint32_t brain_s0_words[NTW2_BRAIN_S0_WORDS];
     /* NTW2_AI_ASYNC2 deferred schedule (appended after brain_s0_words; ntw2_config::ai_deferred): admissions, busy
        refusals, consumption (on time = at the first seam >= admission tick + K), abandonment, slices and budget hits,
@@ -1356,7 +1363,10 @@ static_assert(offsetof(ntw2_status,node_words) + NTW2_NODE_WORDS * sizeof(uint32
               offsetof(ntw2_status,brain_unit_words) + NTW2_BRAIN_UNIT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,collide_contact_words) &&
               NTW2_AI_ASYNC2 == 0x20000u && (NTW2_VALID_MASK & NTW2_AI_ASYNC2) && !(NTW2_ALL & NTW2_AI_ASYNC2) &&
               NTW2_BRAIN_PARALLEL == 0x10u && NTW2_BRAIN_FINALIZER_SHADOW == 0x20u && NTW2_BRAIN_QUIET == 0x40u &&
-              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_S0 == 0x100u && NTW2_BRAIN_FLAGS_VALID == 0x7fffu &&
+              NTW2_BRAIN_UNIT_SHADOW == 0x80u && NTW2_BRAIN_S0 == 0x100u && NTW2_BRAIN_FLAGS_VALID == 0xfffffu &&
+              NTW2_BRAIN_LOCALITY_MARK == 0x80000u &&
+              NTW2_BRAIN_LOCALITY == 0x8000u && NTW2_BRAIN_LOCALITY_WARM == 0x10000u &&
+              NTW2_BRAIN_LOCALITY_PREFETCH == 0x20000u && NTW2_BRAIN_LOCALITY_PREFETCH2 == 0x40000u &&
               NTW2_BRAIN_UNIT_WORDS == 176u,
               "class shadow and target rows append after the existing fire commit ABI");
 static_assert(offsetof(ntw2_status,collide_contact_words) + NTW2_COLLIDE_CONTACT_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,grid_probation_words) &&

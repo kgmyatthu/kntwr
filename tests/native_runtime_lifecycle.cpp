@@ -191,7 +191,8 @@ static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)=
               NTW2_BRAIN_FINALIZER_SHADOW==32u && NTW2_BRAIN_QUIET==64u && NTW2_BRAIN_UNIT_SHADOW==128u && NTW2_BRAIN_S0==256u &&
               NTW2_BRAIN_UNIT_FATIGUE==512u && NTW2_BRAIN_UNIT_FATIGUE_SHADOW==1024u && NTW2_BRAIN_UNIT_POSTURE==2048u &&
               NTW2_BRAIN_UNIT_POSTURE_SHADOW==4096u && NTW2_BRAIN_UNIT_ENGAGE==8192u && NTW2_BRAIN_UNIT_ENGAGE_SHADOW==16384u &&
-              NTW2_BRAIN_FLAGS_VALID==32767u,
+              NTW2_BRAIN_LOCALITY==32768u && NTW2_BRAIN_LOCALITY_WARM==65536u && NTW2_BRAIN_LOCALITY_PREFETCH==131072u &&
+              NTW2_BRAIN_LOCALITY_PREFETCH2==262144u && NTW2_BRAIN_LOCALITY_MARK==524288u && NTW2_BRAIN_FLAGS_VALID==1048575u,
               "brain flags append without moving existing configuration fields");
 static_assert((NTW2_COLLIDE_CENSUS&NTW2_COLLIDE_LOD_METRES_MASK)==0 &&
               (NTW2_COLLIDE_CENSUS|NTW2_COLLIDE_LOD_METRES_MASK)==UINT32_MAX, "census flag keeps collide_lod_m self-contained");
@@ -2276,7 +2277,7 @@ int main(int argc,char** argv) {
     Check(start(&config)==1,"sequence shadow requires brain2");
     config.enabled_mask=NTW2_BRAIN2; config.brain_flags=16u;
     Check(start(&config)==1,"brain parallel without census or quiet refused");
-    config.brain_flags=0x8000u;
+    config.brain_flags=0x100000u;
     Check(start(&config)==1,"unknown brain flags refused");
     {
         // Per-unit brain slices: every refusal is a pure validation result (no activation).
@@ -2306,6 +2307,25 @@ int main(int argc,char** argv) {
     }
     config.enabled_mask=NTW2_BATCH64; config.brain_flags=NTW2_BRAIN_S0;
     Check(start(&config)==1,"brain S0 requires brain2");
+    {
+        // --brain-locality owns the occurrence call and the S0 status row; its modifiers need the base bit and exclude each other.
+        const U L=NTW2_BRAIN_LOCALITY;
+        const U bad[]={L|NTW2_BRAIN_CENSUS,L|NTW2_BRAIN_TIMING,L|NTW2_BRAIN_NODE_SHADOW,L|NTW2_BRAIN_FIRE_SHADOW,
+                       L|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET,L|NTW2_BRAIN_FINALIZER_SHADOW,L|NTW2_BRAIN_UNIT_SHADOW,L|NTW2_BRAIN_S0,
+                       L|NTW2_BRAIN_UNIT_FATIGUE,L|NTW2_BRAIN_UNIT_POSTURE,L|NTW2_BRAIN_UNIT_ENGAGE,
+                       NTW2_BRAIN_LOCALITY_WARM,NTW2_BRAIN_LOCALITY_PREFETCH,NTW2_BRAIN_LOCALITY_PREFETCH2,
+                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH,L|NTW2_BRAIN_LOCALITY_PREFETCH|NTW2_BRAIN_LOCALITY_PREFETCH2,
+                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH2,
+                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH|NTW2_BRAIN_LOCALITY_PREFETCH2,0x100000u|L,
+                       NTW2_BRAIN_LOCALITY_MARK,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_WARM,
+                       L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_PREFETCH,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_PREFETCH2,
+                       L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_S0,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_CENSUS};
+        config.enabled_mask=NTW2_BRAIN2; config.workers=2;
+        for (unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);++k) { config.brain_flags=bad[k]; Check(start(&config)==1,"locality flag combination refused"); }
+        config.workers=0;
+        config.enabled_mask=NTW2_BATCH64; config.brain_flags=L; Check(start(&config)==1,"locality requires brain2");
+        config.brain_flags=L|NTW2_BRAIN_LOCALITY_WARM; Check(start(&config)==1,"locality warm requires brain2");
+    }
     config.enabled_mask=NTW2_BATCH64; config.brain_flags=NTW2_BRAIN_UNIT_SHADOW;
     Check(start(&config)==1,"unit shadow requires brain2");
     config.enabled_mask=NTW2_BRAIN2;
@@ -2637,6 +2657,28 @@ int main(int argc,char** argv) {
         Check(stop(nullptr)==0,"brain S0 stop drains the owner");
         Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.brain_s0_words[2]==1 &&
               siteCallee(6)==loopOriginal,"brain S0 stop retains its row and restores site 6");
+        // --brain-locality: activation starts the census (CPU check, storage, static line tables, bracket calibration) without any
+        // dispatch; it reuses the S0 status row: version, configured bits (1 census, +2 warm, +4 prefetch, +8 prefetch2), running.
+        {
+            const U locCycles[]={NTW2_BRAIN_LOCALITY,NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_WARM,
+                                 NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_PREFETCH,NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_PREFETCH2,
+                                 NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_MARK};
+            const U configured[]={1u,3u,5u,9u,17u};
+            for (unsigned i=0;i<sizeof(locCycles)/sizeof(locCycles[0]) && !failures;++i) {
+                config.enabled_mask=NTW2_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=locCycles[i];
+                Check(start(&config)==0 && WaitActive(state,NTW2_BRAIN2),"brain locality generation became active");
+                const bool mark=(locCycles[i]&NTW2_BRAIN_LOCALITY_MARK)!=0;   // pass-through: no calibration, no storage
+                Check(ReadState(state,snapshot) && snapshot.brain_s0_words[0]==1 && snapshot.brain_s0_words[1]==configured[i] &&
+                      snapshot.brain_s0_words[2]==1 && snapshot.brain_s0_words[4]==0 && snapshot.brain_s0_words[30]==64 &&
+                      (mark || (snapshot.brain_s0_words[3]==4 && snapshot.brain_s0_words[11]!=0 && snapshot.brain_s0_words[12]!=0 &&
+                                snapshot.brain_s0_words[31]==2048)),
+                      "brain locality published version/configured/running, 1/16 sampling, calibration and no stage");
+                Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"brain locality binds the site-6 dispatcher");
+                Check(stop(nullptr)==0,"brain locality stop drains the owner");
+                Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.brain_s0_words[2]==1 &&
+                      siteCallee(6)==loopOriginal,"brain locality stop retains its row and restores site 6");
+            }
+        }
         // Per-unit fatigue slices: shadow, live, live with S0 and a second shadow cycle. Activation pins the image tables and
         // publishes the unit policy / fatigue rows (modes 1 = shadow, 2 = live; the posture/engage half stays zero); stop restores
         // site 6. A later activation without any unit flag leaves the whole unit row zero.
