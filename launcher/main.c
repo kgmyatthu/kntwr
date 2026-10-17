@@ -207,7 +207,7 @@ typedef struct Options {
     uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
     uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
     uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags) */
-    uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize: NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE (ntw2_config::ai_prepass_flags) */
+    uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -1174,6 +1174,7 @@ static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_
 static const char *const k_ai_ctrl_reuse_metrics[NTW2_AI_CTRL_REUSE_WORDS] = { NTW2_AI_CTRL_REUSE_LABELS };
 static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORDS] = { NTW2_AI_PREPASS_CENSUS_LABELS };
 static const char *const k_ai_prepass_metrics[NTW2_AI_PREPASS_WORDS] = { NTW2_AI_PREPASS_LABELS };
+static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_SPIRAL_LABELS };
 /* --ai-ctrl-* (src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry). */
 static void print_ai_ctrl(const uint32_t *w)
 {
@@ -1242,6 +1243,26 @@ static void print_ai_poly(const uint32_t *w, uint32_t thinks)
     say(L"\n  ai_poly words:");
     for (i = 0; i < NTW2_AI_PREPASS_WORDS; ++i)
         if (w[i]) say(L" %hs=%lu", k_ai_prepass_metrics[i], (unsigned long)w[i]);
+    say(L"\n");
+}
+/* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
+static void print_ai_spiral(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"  ai_spiral: cap=%lu m ladders=%lu spot=%lu clamp=%lu ring=%lu spiral=%lu none=%lu | spirals=%lu found=%lu capped=%lu (%.1f%%) edge=%lu"
+        L" candidates=%lu (%.1f/spiral, max %lu) rings=%lu max_radius=%lu m",
+        (unsigned long)w[1], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6],
+        (unsigned long)w[7], (unsigned long)w[9], (unsigned long)w[12], (unsigned long)w[13], pct(w[13], w[9]), (unsigned long)w[14],
+        (unsigned long)w[10], w[9] ? (double)w[10] / w[9] : 0.0, (unsigned long)w[16], (unsigned long)w[11], (unsigned long)w[15]);
+    say(L"\n  ai_spiral fallback: calls=%lu entries=%lu (E=0:%lu 1:%lu 2:%lu 3-4:%lu 5-8:%lu >8:%lu, max %lu) tail_runs=%lu same_tick=%lu memo=%lu"
+        L" ladders_in_fallback=%lu spirals_in_fallback=%lu",
+        (unsigned long)w[17], (unsigned long)w[24], (unsigned long)w[18], (unsigned long)w[19], (unsigned long)w[20], (unsigned long)w[21],
+        (unsigned long)w[22], (unsigned long)w[23], (unsigned long)w[25], (unsigned long)w[26], (unsigned long)w[27], (unsigned long)w[28],
+        (unsigned long)w[29], (unsigned long)w[30]);
+    say(L"\n  ai_spiral words:");
+    for (i = 0; i < NTW2_AI_SPIRAL_WORDS; ++i)
+        if (w[i]) say(L" %hs=%lu", k_ai_spiral_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
 /* Per-unit brain Stage A agreement table (native_unit_brain.h, version 2). held = this stage's UnitDecision (the
@@ -1898,6 +1919,7 @@ static void print_module_words(const ntw2_status *s)
     print_ai_ctrl(s->ai_ctrl_reuse_words);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
+    print_ai_spiral(s->ai_spiral_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -4085,6 +4107,14 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_prepass_metrics[poly_index], (unsigned long)r->last.ai_prepass_words[poly_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_poly\": null,\n");
+    if (r->have_status && (r->cfg.ai_prepass_flags & NTW2_AI_SPIRAL_BITS)) {
+        unsigned spiral_index;
+        sb_fmt(&b, "  \"ai_spiral\": {\"flags\": %lu, \"requested_cap_m\": %lu", (unsigned long)r->cfg.ai_prepass_flags,
+               (unsigned long)(r->cfg.ai_prepass_flags >> NTW2_AI_SPIRAL_CAP_SHIFT));
+        for (spiral_index = 0; spiral_index < NTW2_AI_SPIRAL_WORDS; ++spiral_index)
+            sb_fmt(&b, ", \"%s\": %lu", k_ai_spiral_metrics[spiral_index], (unsigned long)r->last.ai_spiral_words[spiral_index]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"ai_spiral\": null,\n");
     if (r->have_status) {
         const ntw2_status *s = &r->last;
         sb_put(&b, "  \"last_status\": {\n    \"phase\": ", 32);
@@ -5243,6 +5273,13 @@ static void usage(void)
         L"                        predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
         L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n"
         L"  --ai-poly             same routing; the replacement answers, native on any guard refusal (counted by reason in the ai_poly row)\n"
+        L"  --ai-spiral-census    needs a routed tick, excludes ai_async2: observer placement-ladder census (stage that placed each entry,\n"
+        L"                        0x7FCA90 spiral candidates/rings/exits) and fallback 0x7524A0 entries-per-call / 0x82F3A0 same-tick tail\n"
+        L"                        counts (ai_spiral row); behaviour unchanged. Combines with the other --ai-prepass/--ai-poly options\n"
+        L"  --ai-spiral-cap-m N   AI-ONLY GAMEPLAY DEVIATION. Cap the ladder's last-resort spiral at radius N metres (20..65535; 0 = native\n"
+        L"                        unlimited, the default): rings of radius <= N run, then the native not-found exit. A capped spiral places the\n"
+        L"                        unit at the projection of its ORIGINAL requested point (possibly obstructed, as native does when a ring leaves\n"
+        L"                        the map); it is not left unassigned or retried. Implies --ai-spiral-census\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -5370,6 +5407,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--ai-presize")) o->ai_prepass_flags |= NTW2_AI_PRESIZE;
         else if (!wcscmp(name, L"--ai-poly-shadow")) o->ai_prepass_flags |= NTW2_AI_POLY_SHADOW;
         else if (!wcscmp(name, L"--ai-poly")) o->ai_prepass_flags |= NTW2_AI_POLY;
+        else if (!wcscmp(name, L"--ai-spiral-census")) o->ai_prepass_flags |= NTW2_AI_SPIRAL_CENSUS;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
@@ -5415,6 +5453,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--collide-lod-m")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 100000, &o->collide_lod_m)) { errsay(L"--collide-lod-m must be 1..100000.\n"); return -1; }
+        } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
+            uint32_t cap;
+            NEEDVAL();
+            if (!parse_uint(val, 0, NTW2_AI_SPIRAL_CAP_MASK >> NTW2_AI_SPIRAL_CAP_SHIFT, &cap) || (cap && cap < NTW2_AI_SPIRAL_CAP_MIN_M)) {
+                errsay(L"--ai-spiral-cap-m must be 0 (native unlimited) or 20..65535 (the first spiral ring, radius 20 m, always runs).\n");
+                return -1;
+            }
+            o->ai_prepass_flags = (o->ai_prepass_flags & ~NTW2_AI_SPIRAL_CAP_MASK) | (cap << NTW2_AI_SPIRAL_CAP_SHIFT);
         } else if (!wcscmp(name, L"--profile-site")) {
             uint32_t site;
             NEEDVAL();
@@ -5463,7 +5509,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if (o->ai_prepass_flags && (o->mask & NTW2_AI_ASYNC2)) {
-        errsay(L"--ai-prepass-census / --ai-presize exclude the ai_async2 feature (its think runs on private clones outside a site-34 scope).\n");
+        errsay(L"--ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-* exclude the ai_async2 feature (its think runs on private clones outside a site-34 scope).\n");
         return -1;
     }
     if (((o->ai_prepass_flags & NTW2_AI_POLY_SHADOW) && (o->ai_prepass_flags & NTW2_AI_POLY)) ||

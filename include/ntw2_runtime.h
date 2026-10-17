@@ -287,7 +287,25 @@ enum ntw2_memory_word {
 #define NTW2_AI_PRESIZE 0x2u        /* --ai-presize */
 #define NTW2_AI_POLY_SHADOW 0x4u /* --ai-poly-shadow: native answers every 0x80DCF0 polygon test, ntw2_planner_search compares bit-for-bit (AL, x87 status, MXCSR) */
 #define NTW2_AI_POLY 0x8u        /* --ai-poly: exact SSE replacement of the kind-0 0x10EC150 OBB/polygon kernel, native fallback by reason */
-#define NTW2_AI_PREPASS_FLAGS_VALID 0xFu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones */
+#define NTW2_AI_PREPASS_FLAGS_VALID 0xFFFF001Fu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones; bits 0x10 and 16..31: --ai-spiral-* */
+/* --ai-spiral-census / --ai-spiral-cap-m N (ai_prepass_flags bit 0x10 and bits 16..31; src/ntw2_spiral.h). N metres caps the observer
+   ladder's last-resort placement spiral 0x7FCA90 (native: maxR -1.0, unlimited): rings of radius <= N run, then the native not-found
+   exit is taken. A capped (not-found) spiral places the unit at the 0x7FCFF0 projection of its ORIGINAL requested point (possibly
+   obstructed), exactly as native does when a whole ring leaves the map rectangle; the entry is not left unassigned. N = 0: native
+   unlimited; 1..19 refused (the first ring, radius 20, always runs). Either the census bit or N > 0 routes the observer slot into the
+   PS_* chain, publishes the fallback (0x1343318 slot 16) and controller (0x1349C18 slot 28) counting gates and fills ai_spiral_words.
+   Combines with every other prepass bit. AI-only gameplay deviation when N > 0 (user-approved). */
+#define NTW2_AI_SPIRAL_CENSUS 0x10u
+#define NTW2_AI_SPIRAL_CAP_SHIFT 16u
+#define NTW2_AI_SPIRAL_CAP_MASK 0xFFFF0000u
+#define NTW2_AI_SPIRAL_CAP_MIN_M 20u
+#define NTW2_AI_SPIRAL_BITS (NTW2_AI_SPIRAL_CENSUS | NTW2_AI_SPIRAL_CAP_MASK)
+#define NTW2_AI_SPIRAL_WORDS 32u /* ai_spiral_words (src/ntw2_spiral.h row layout, version 1) */
+#define NTW2_AI_SPIRAL_LABELS \
+    "version", "cap_m", "ladder_calls", "stage_spot", "stage_clamp", "stage_ring", "stage_spiral", "stage_none", "stage_unknown", \
+    "spiral_entries", "spiral_candidates", "spiral_rings", "spiral_found", "spiral_capped", "spiral_edge", "max_radius_m", \
+    "max_candidates", "fallback_calls", "e0", "e1", "e2", "e3_4", "e5_8", "e_gt8", "entries", "max_entries", "tail_runs", \
+    "tail_same_tick", "tail_memo", "ladder_in_fallback", "spiral_in_fallback", "off_thread"
 #define NTW2_AI_PREPASS_WORDS 32u /* ai_prepass_words (src/ntw2_planner_search.h row layout, version 1) */
 #define NTW2_AI_PREPASS_LABELS \
     "version", "mode", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", "shadow_compares", \
@@ -331,7 +349,7 @@ typedef struct ntw2_config {
     uint32_t reserved48;     /* Offset 48 (config 48 -> 52 bytes): retired (former puppet probe unit count); must be zero. */
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify); 0: off. */
-    uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE flags (launcher --ai-prepass-census, --ai-presize); 0: off. */
+    uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE / NTW2_AI_POLY* flags (launcher --ai-prepass-census, --ai-presize, --ai-poly-shadow, --ai-poly), NTW2_AI_SPIRAL_CENSUS (--ai-spiral-census) and the spiral cap in metres in bits 16..31 (--ai-spiral-cap-m); 0: off. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -922,6 +940,11 @@ typedef struct ntw2_status {
        slot routing counts. Written by the thread executing the think; a poll is a non-atomic snapshot. Zero without the bits; reset at
        activation, retained after stop. */
     uint32_t ai_prepass_words[NTW2_AI_PREPASS_WORDS];
+    /* --ai-spiral-census / --ai-spiral-cap-m (appended after ai_prepass_words; src/ntw2_spiral.h, labels NTW2_AI_SPIRAL_LABELS): word 0
+       layout version (1; 0 while the spiral bits are off), the cap, ladder stage counts, spiral entries/candidates/rings/found/capped/
+       edge exits and maxima, fallback observer calls with the entries-per-call histogram and 0x82F3A0 tail/same-tick/memo counts.
+       Written by the thread executing the think; a poll is a non-atomic snapshot. Reset at activation, retained after stop. */
+    uint32_t ai_spiral_words[NTW2_AI_SPIRAL_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1355,12 +1378,13 @@ static_assert(offsetof(ntw2_status,brain_unit_policy_words) + NTW2_BRAIN_UNIT_PO
               NTW2_BRAIN_UNIT_ENGAGE_SHADOW == 0x4000u && (NTW2_BRAIN_FLAGS_VALID & 0x7e00u) == 0x7e00u,
               "brain_unit_policy row appends after loco_grid_build_words; unit flags 0x200..0x4000 are valid brain flags");
 static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_prepass_words) &&
-              offsetof(ntw2_status,ai_prepass_words) + NTW2_AI_PREPASS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              offsetof(ntw2_status,ai_prepass_words) + NTW2_AI_PREPASS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_spiral_words) &&
+              offsetof(ntw2_status,ai_spiral_words) + NTW2_AI_SPIRAL_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
               NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_PREPASS_WORDS == 32u && NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&
-              NTW2_AI_POLY_SHADOW == 0x4u && NTW2_AI_POLY == 0x8u &&
-              (NTW2_AI_PREPASS_FLAGS_VALID & (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)) ==
-                  (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY),
-              "ai_prepass_census row appends after brain_unit_policy_words; ai_prepass_words row is the last status member");
+              NTW2_AI_POLY_SHADOW == 0x4u && NTW2_AI_POLY == 0x8u && NTW2_AI_SPIRAL_CENSUS == 0x10u && NTW2_AI_SPIRAL_WORDS == 32u &&
+              NTW2_AI_SPIRAL_CAP_MASK == (0xFFFFu << NTW2_AI_SPIRAL_CAP_SHIFT) &&
+              NTW2_AI_PREPASS_FLAGS_VALID == (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_SPIRAL_BITS),
+              "ai_prepass_census row appends after brain_unit_policy_words; ai_spiral_words row (after ai_prepass_words) is the last status member");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&
               offsetof(ntw2_grid_census_status, readers) == 40 && offsetof(ntw2_grid_census_status, edges) == 40 + 64 * 1008 &&

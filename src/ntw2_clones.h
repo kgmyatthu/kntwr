@@ -159,6 +159,11 @@ enum ntw2_binding {
        SITE_CALL_40 thunk; poly runs: the bare PS_WALK clone). PS_POLY is the bare host gate bound to PS_WALK's 0x7F1E5A call of 0x80DCF0
        (fastcall ECX=shape, stack polygon, ret 4; no site thunk, no fxsave). */
     NTW2_BIND_PS_WALK_CALL, NTW2_BIND_PS_POLY,
+    /* --ai-spiral-cap-m / --ai-spiral-census (appended; src/ntw2_spiral.h): host thiscall forwarders (ECX + stack, callee cleanup, no FP)
+       inside the PS_* chain. PS_LADDER = PS_6A95A0's 0x6A994F call of 0x6C71D0 (ret 0x14), PS_LADDER_PROBE = PS_6C71D0's three 0x6CC730
+       calls 0x6C7316/0x6C7410/0x6C77E2 (ret 4), PS_SPIRAL = PS_6C71D0's 0x6C79A8 call of 0x7FCA40 (ret 0xC; the cap goes into a private
+       copy of the spec), PS_SPIRAL_PROBE = PS_7FCA90's 0x7FCC59/0x7FCD47 calls of 0x808040 (ret 0x14). */
+    NTW2_BIND_PS_LADDER, NTW2_BIND_PS_LADDER_PROBE, NTW2_BIND_PS_SPIRAL, NTW2_BIND_PS_SPIRAL_PROBE,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {

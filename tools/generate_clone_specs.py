@@ -2505,14 +2505,17 @@ EXPECT_CENSUS.update(PREPASS_EXPECT_CENSUS)
 # PlannerScopeThread). Sources are the existing AI2 'private' extents (with their cold static-init tails) and AI_WALK; unlike AI2 nothing is
 # rebased, NOPped or counted. Only the walk calls change: 808040's call 808492 -> PS_WALK_CALL (census: timed SITE_CALL_40 thunk, poly: PS_WALK)
 # and PS_WALK's 80DCF0 call 7F1E5A -> PS_POLY (bare host gate). 7F6ED0/81C050/7F6F20 projection calls stay original (no walk reachable).
+# --ai-spiral-*: four call groups go through host forwarders (src/ntw2_spiral.h) that call the same PS_* clone entries: PS_6A95A0's
+# 6C71D0 call (PS_LADDER), PS_6C71D0's three 6CC730 calls (PS_LADDER_PROBE) and 7FCA40 call 6C79A8 (PS_SPIRAL, cap on a private spec
+# copy), PS_7FCA90's two 808040 calls (PS_SPIRAL_PROBE). PS_6C71D0/PS_6CC730/PS_7FCA40/PS_808040 are now entered via those forwarders.
 def ps_configs():
     return [
         dict(clone='PS_6A95A0', source='AI2_6A95A0',
-             calls={0x6C71D0: (Clone('PS_6C71D0'), 1, [0x6A994F]), 0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6A9699])},
+             calls={0x6C71D0: (Bind('PS_LADDER'), 1, [0x6A994F]), 0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6A9699])},
              indirect_calls={0x6A96DD, 0x6A990A, 0x6A9916}, expect_rets={0x6A99CE: RET(0xC)}),
         dict(clone='PS_6C71D0', source='AI2_6C71D0',
-             calls={0x6CC730: (Clone('PS_6CC730'), 3, [0x6C7316, 0x6C7410, 0x6C77E2]),
-                    0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6C79A8])},
+             calls={0x6CC730: (Bind('PS_LADDER_PROBE'), 3, [0x6C7316, 0x6C7410, 0x6C77E2]),
+                    0x7FCA40: (Bind('PS_SPIRAL'), 1, [0x6C79A8])},
              indirect_calls=set(), expect_rets={0x6C7AAB: RET(0x14)}),
         dict(clone='PS_6CC730', source='AI2_6CC730',
              calls={0x808550: (Clone('PS_808550'), 1, [0x6CC851])},
@@ -2524,7 +2527,7 @@ def ps_configs():
              calls={0x7FCA90: (Clone('PS_7FCA90'), 1, [0x7FCA7A])},
              indirect_calls=set(), expect_rets={0x7FCA86: RET(0xC)}),
         dict(clone='PS_7FCA90', source='AI2_7FCA90',
-             calls={0x808040: (Clone('PS_808040'), 2, [0x7FCC59, 0x7FCD47])},
+             calls={0x808040: (Bind('PS_SPIRAL_PROBE'), 2, [0x7FCC59, 0x7FCD47])},
              indirect_calls=set(), expect_rets={0x7FCDB9: RET(0xC), 0x7FCE36: RET(0xC)}),
         dict(clone='PS_808040', source='AI2_808040',
              calls={0x7F1D40: (Bind('PS_WALK_CALL'), 1, [0x808492])},
