@@ -57,6 +57,7 @@
 #include "ntw2_planner_prepass.h"
 #include "ntw2_spiral.h"
 
+#include "ntw2_claim_chunk.h"
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
 using Manager = U (__fastcall *)(void*);
@@ -533,7 +534,8 @@ bool PlannerScopeThread(U tid) {
 // The PS_* observer chain's sibling rule: the same scope, but the worker also joins for the --ai-spiral-* bits (the planner's R2 walk
 // routing via PlannerScopeThread stays unchanged for them).
 bool PsScopeThread(U tid) {
-    const bool workerRoute=(config.ai_prepass_flags&(NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY|NTW2_AI_SPIRAL_BITS))!=0;
+    const bool workerRoute=(config.ai_prepass_flags&(NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY|NTW2_AI_SPIRAL_BITS))!=0 ||
+                           (config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK)!=0; // --ai-claim-chunk: the capped fallback claim runs inside the worker's site-34 scope
     return walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)));
 }
 void BeginWalkScope(U planner) {
@@ -2491,6 +2493,8 @@ bool BuildClones() {
     ntw2_army_solver::Bind(delta,bindings); // solver gates (inert until Start: they forward to the originals)
     bindings[NTW2_BIND_TICK_ENTRY]=FnAddress(&TickGate);
     bindings[NTW2_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
+    static_assert(ntw2_claim_chunk::kWords==NTW2_AI_CTRL_REUSE_WORDS-24 && ntw2_ai_ctrl_geometry::kStatusWords<=8, "claim-chunk words fill the B half after the geometry words");
+    ntw2_claim_chunk::Snapshot(row+24); // --ai-claim-chunk: all zero without the bits
     bindings[NTW2_BIND_FORM_MANAGER]=FnAddress(&FormationGate);
     bindings[NTW2_BIND_FORM_ASSIGN]=Export("nfr_assign_hook");
     bindings[NTW2_BIND_BAL_STAGE]=FnAddress(&bal_stage);
@@ -3003,6 +3007,7 @@ bool BuildSlots() {
         for (U i=0;i<ntw2_ai_async2::kPinCount;++i)
             if (pins[i].vtable) AddSlot(pins[i].vtable+4*pins[i].slot,pins[i].original,ntw2_ai_async2::Gate(i));
     }
+    // --ai-claim-chunk: the same fallback slot. With the spiral census the census gate stays in the slot and calls the chunk gate as its native.
     return true;
 }
 U CensusSlotsOwned() { // monitor thread only: census pins currently swapped in (slots are published/restored there)
@@ -3015,7 +3020,7 @@ bool RestoreProtection(Slot& slot) {
     DWORD ignored=0;
     if (!VirtualProtect(reinterpret_cast<void*>(slot.address),4,slot.protection,&ignored)) {
         RecordError(SlotProtection,slot.address); return false;
-    }
+    } else if (config.ai_ctrl_flags & NTW2_AI_CLAIM_CHUNK_MASK) AddSlot(ntw2_claim_chunk::kFallbackSlot,ntw2_claim_chunk::kFallbackOriginal,FnAddress(&ntw2_claim_chunk::Gate));
     slot.protectionDirty=false;
     return true;
 }
@@ -3327,7 +3332,7 @@ bool Activate(const World& candidate) {
         (config.enabled_mask&NTW2_AI_ASYNC) ? FnAddress(&PlannerGate) : aiPlannerClone;
     // --ai-ctrl-*: site 33 runs the AI_CONTROLLER clone, whose rebuild gate is retargeted to the AI_CTRL_REBUILD clone (the census
     // gate keeps counting). Reset -> geometry Configure (registers its retire) precede the first batch.
-    const U aiCtrl=config.ai_ctrl_flags;
+    const U aiCtrl=config.ai_ctrl_flags&NTW2_AI_CTRL_MODE_MASK; // bits 8..15 are --ai-claim-chunk, not an --ai-ctrl mode
     ntw2_ai_ctrl::Reset(aiCtrl,delta,clones.entries[NTW2_CLONE_AI_CTRL_SCORER]);
     ntw2_ai_ctrl_geometry::Reset();
     ntw2_ai_ctrl_geometry::Configure((aiCtrl&NTW2_AI_CTRL_CENSUS)!=0,(aiCtrl&NTW2_AI_CTRL_GEOMETRY)!=0,(aiCtrl&NTW2_AI_CTRL_VERIFY)!=0);
@@ -3358,7 +3363,8 @@ bool Activate(const World& candidate) {
     {
         const ntw2_spiral::Targets targets={clones.entries[NTW2_CLONE_PS_6C71D0],clones.entries[NTW2_CLONE_PS_6CC730],
                                             clones.entries[NTW2_CLONE_PS_7FCA40],clones.entries[NTW2_CLONE_PS_808040],
-                                            V(ntw2_spiral::kFallbackOriginal),V(ntw2_spiral::kControllerOriginal),&PsScopeThread};
+                                            (config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK) ? FnAddress(&ntw2_claim_chunk::Gate) : V(ntw2_spiral::kFallbackOriginal),
+                                            V(ntw2_spiral::kControllerOriginal),&PsScopeThread};
         ntw2_spiral::Configure((config.ai_prepass_flags&NTW2_AI_SPIRAL_BITS)!=0,config.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT,targets);
     }
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
@@ -3395,6 +3401,11 @@ bool Activate(const World& candidate) {
     SnapshotArmySolver();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
+    {
+        const ntw2_claim_chunk::Targets targets={V(ntw2_claim_chunk::kFallbackOriginal),V(ntw2_claim_chunk::kEligible),V(ntw2_claim_chunk::kClaim),
+                                                 V(ntw2_claim_chunk::kPost),V(ntw2_claim_chunk::kWorkingList),&PsScopeThread};
+        ntw2_claim_chunk::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK)>>NTW2_AI_CLAIM_CHUNK_SHIFT,targets);
+    }
     SnapshotAiCtrl();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
@@ -3786,6 +3797,7 @@ static U StartImpl(void* raw) {
     ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
     StateEnd();
     DWORD tid=0;
+    ntw2_claim_chunk::ResetRow();
     HANDLE thread=CreateThread(nullptr,0,Monitor,nullptr,CREATE_SUSPENDED,&tid);
     if (!thread) { RecordError(ThreadError,GetLastError()); CrashRemove(); Phase(NTW2_FAILED); _InterlockedExchange(&life,Failed); return ThreadError; }
     StateBegin(); ntw2_state.monitor_thread=tid; StateEnd();

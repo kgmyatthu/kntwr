@@ -2253,6 +2253,19 @@ int main(int argc,char** argv) {
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-ctrl excludes ai_async2");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-ctrl excludes the controller offload");
     config.ai_ctrl_flags=0;
+    // --ai-claim-chunk N (ai_ctrl_flags bits 8..15): same routed-tick / exclusion rules as the --ai-ctrl modes, composes with them.
+    config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=5u<<NTW2_AI_CLAIM_CHUNK_SHIFT;
+    Check(start(&config)==2,"ai-claim-chunk passes validation and refuses a foreign main image");
+    config.ai_ctrl_flags=255u<<NTW2_AI_CLAIM_CHUNK_SHIFT; Check(start(&config)==2,"ai-claim-chunk 255 passes validation");
+    config.ai_ctrl_flags=(5u<<NTW2_AI_CLAIM_CHUNK_SHIFT)|NTW2_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"ai-claim-chunk combines with an --ai-ctrl mode");
+    config.ai_ctrl_flags=(5u<<NTW2_AI_CLAIM_CHUNK_SHIFT)|NTW2_AI_CTRL_VERIFY; Check(start(&config)==1,"ai-claim-chunk does not relax the --ai-ctrl-verify rule");
+    config.ai_ctrl_flags=(5u<<NTW2_AI_CLAIM_CHUNK_SHIFT)|0x10u; Check(start(&config)==1,"ai-claim-chunk beside an unknown ai_ctrl bit refused");
+    config.ai_ctrl_flags=1u<<16; Check(start(&config)==1,"ai-claim-chunk size does not extend past bit 15");
+    config.ai_ctrl_flags=5u<<NTW2_AI_CLAIM_CHUNK_SHIFT; config.enabled_mask=NTW2_BATCH64;
+    Check(start(&config)==1,"ai-claim-chunk without a routed tick refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-claim-chunk excludes ai_async2");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-claim-chunk excludes the controller offload");
+    config.ai_ctrl_flags=0;
     // --ai-prepass-*: routed tick, no ai_async2, census combines only with presize, known bits only.
     config.enabled_mask=NTW2_AI_ASYNC; config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;
     Check(start(&config)==2,"ai-prepass census passes validation and refuses a foreign main image");

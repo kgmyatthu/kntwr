@@ -270,6 +270,9 @@ ntw2_harness(native_planner_prepass_oracle STD 20 FP strict
 ntw2_harness(native_spiral_oracle STD 20 FP strict
   SOURCES native_spiral_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/ntw2_spiral.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+ntw2_harness(native_claim_chunk_oracle STD 20 FP strict
+  SOURCES native_claim_chunk_oracle.cpp "${NTW2_SRC}/ntw2_claim_chunk.cpp"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_collision_solver_oracle STD 20 FP strict
   SOURCES native_collision_solver_oracle.cpp "${NTW2_SRC}/collision/native_collision_solver.cpp"
           "${NTW2_SRC}/collision/native_contact.cpp"
@@ -457,6 +460,9 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_spiral COMMAND native_spiral_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_spiral PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_spiral)
+  add_test(NAME ntw2_claim_chunk COMMAND native_claim_chunk_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_claim_chunk PROPERTIES LABELS "image" TIMEOUT 300)
+  ntw2_note_registered(ntw2_claim_chunk)
   add_test(NAME ntw2_collision_solver COMMAND native_collision_solver_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_collision_solver PROPERTIES LABELS "image" TIMEOUT 300)
   add_test(NAME ntw2_contact_oracle COMMAND native_contact_oracle "${NTW2_IMAGE_ARG}")

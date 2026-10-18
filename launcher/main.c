@@ -220,7 +220,8 @@ typedef struct Options {
     BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (ntw2_config::ai_deferred) */
     uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
     uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
-    uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags) */
+    uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags bits 0..3) */
+    uint32_t ai_claim_chunk; /* --ai-claim-chunk N (0 = off): ntw2_config::ai_ctrl_flags bits 8..15 */
     uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
@@ -1219,7 +1220,7 @@ static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_S
 static void print_ai_ctrl(const uint32_t *w)
 {
     unsigned i;
-    if (!(w[15] & NTW2_AI_CTRL_FLAGS_VALID)) return;
+    if (!(w[15] & NTW2_AI_CTRL_MODE_MASK)) return;
     say(L"  ai_ctrl: flags=0x%lX latched=0x%lX", (unsigned long)(w[15] & 0xFFu), (unsigned long)(w[15] >> 8));
     for (i = 0; i < 24; ++i)
         if (i != 15) say(L" %hs=%lu", k_ai_ctrl_reuse_metrics[i], (unsigned long)w[i]);
@@ -1286,6 +1287,16 @@ static void print_ai_poly(const uint32_t *w, uint32_t thinks)
     say(L"\n");
 }
 /* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
+static void print_ai_claim_chunk(const uint32_t *w)
+{
+    uint32_t n = w[31] >> 24, resolved = w[28] + w[29] + w[30];
+    if (!n) return;
+    say(L"  ai_claim_chunk: N=%lu calls=%lu entries_seen=%lu claimed=%lu deferred=%lu continuations=%lu continuation_claims=%lu revalidation_drops=%lu"
+        L" untracked=%lu pending_end=%lu max_pending=%lu max_pending_ticks=%lu\n",
+        (unsigned long)n, (unsigned long)w[24], (unsigned long)(w[25] + w[26]), (unsigned long)w[25], (unsigned long)w[26], (unsigned long)w[27],
+        (unsigned long)w[28], (unsigned long)w[29], (unsigned long)w[30], (unsigned long)(w[26] > resolved ? w[26] - resolved : 0),
+        (unsigned long)(w[31] & 0xFFu), (unsigned long)((w[31] >> 8) & 0xFFFFu));
+}
 static void print_ai_spiral(const uint32_t *w)
 {
     unsigned i;
@@ -2241,6 +2252,7 @@ static uint64_t trace_qpc(uint32_t lo, uint32_t hi)
     return (uint64_t)lo | ((uint64_t)hi << 32);
 }
 
+    print_ai_claim_chunk(s->ai_ctrl_reuse_words);
 /* The producer's written count is cumulative across battle/model tick resets.
    Unsigned subtraction also handles its uint32_t rollover. */
 static void append_tick_log(Run *r, const ntw2_trace_ring *p)
@@ -4518,7 +4530,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                    (unsigned long)r->last.ai_deferred_words[defer_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_deferred\": null,\n");
-    if (r->have_status && r->cfg.ai_ctrl_flags) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CTRL_MODE_MASK)) {
         unsigned ctrl_index;
         sb_fmt(&b, "  \"ai_ctrl\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
         for (ctrl_index = 0; ctrl_index < NTW2_AI_CTRL_REUSE_WORDS; ++ctrl_index)
@@ -4555,6 +4567,16 @@ static BOOL write_receipt(Run *r, int exit_code)
                ",\n    \"sequence\": %lu,\n    \"requested_mask\": %lu,\n    \"active_mask\": %lu,\n    \"active\": ",
                (unsigned long)s->sequence, (unsigned long)s->requested_mask, (unsigned long)s->active_mask);
         sb_mask(&b, s->active_mask);
+    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_CHUNK_MASK)) {
+        const uint32_t *cw = r->last.ai_ctrl_reuse_words;
+        const uint32_t cresolved = cw[28] + cw[29] + cw[30];
+        sb_fmt(&b, "  \"ai_claim_chunk\": {\"n\": %lu, \"calls\": %lu, \"entries_seen\": %lu, \"entries_claimed\": %lu, \"entries_deferred\": %lu, "
+                   "\"continuations\": %lu, \"continuation_claims\": %lu, \"revalidation_drops\": %lu, \"untracked\": %lu, \"pending_end\": %lu, "
+                   "\"max_pending\": %lu, \"max_pending_ticks\": %lu},\n",
+               (unsigned long)(r->cfg.ai_ctrl_flags >> NTW2_AI_CLAIM_CHUNK_SHIFT & 0xFFu), (unsigned long)cw[24], (unsigned long)(cw[25] + cw[26]),
+               (unsigned long)cw[25], (unsigned long)cw[26], (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)cw[30],
+               (unsigned long)(cw[26] > cresolved ? cw[26] - cresolved : 0), (unsigned long)(cw[31] & 0xFFu), (unsigned long)((cw[31] >> 8) & 0xFFFFu));
+    } else sb_fmt(&b, "  \"ai_claim_chunk\": null,\n");
         sb_fmt(&b,
                ",\n    \"error\": %lu,\n    \"error_detail\": %lu,\n    \"pid\": %lu,\n    \"image_base\": %lu,\n"
                "    \"root\": %lu,\n    \"model\": %lu,\n    \"generation\": %lu,\n    \"monitor_thread\": %lu,\n"
@@ -5167,7 +5189,7 @@ static int install_runtime(Run *r)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_chunk << NTW2_AI_CLAIM_CHUNK_SHIFT);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
@@ -5806,6 +5828,11 @@ static BOOL parse_features(const wchar_t *s, uint32_t *mask)
     }
     wcscpy_s(buf, 256, s);
     for (tok = buf; tok; tok = next) {
+        L"  --ai-claim-chunk N    AI-ONLY GAMEPLAY DEVIATION (1..255; 0 = native, the default). The planner think's fallback claim (0x7524A0) takes at\n"
+        L"                        most N eligible units per think; the rest stay unassigned and are offered again by the child's next think (one per\n"
+        L"                        tick), so a claim of E units spans ceil(E/N) ticks and the 0x82F3A0 re-plan per unit is spread over them. Needs a\n"
+        L"                        routed tick (e.g. --features all), excludes ai_ctrl/ai_async2/--ai-deferred; combines with --ai-poly and\n"
+        L"                        --ai-spiral-census (ai_claim_chunk row: seen/claimed/deferred, continuation claims, drops, max pending ticks)\n"
         size_t i;
         uint32_t bit = 0;
         next = wcschr(tok, L',');
@@ -5887,6 +5914,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--brain-unit-engage-shadow")) o->brain_unit_engage = o->brain_unit_engage_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl-census")) o->ai_ctrl_flags |= NTW2_AI_CTRL_CENSUS;
         else if (!wcscmp(name, L"--ai-ctrl-histogram")) o->ai_ctrl_flags |= NTW2_AI_CTRL_HISTOGRAM;
+    o->ai_claim_chunk = 0;
         else if (!wcscmp(name, L"--ai-ctrl-geometry")) o->ai_ctrl_flags |= NTW2_AI_CTRL_GEOMETRY;
         else if (!wcscmp(name, L"--ai-ctrl-verify")) o->ai_ctrl_flags |= NTW2_AI_CTRL_VERIFY;
         else if (!wcscmp(name, L"--ai-prepass-census")) o->ai_prepass_flags |= NTW2_AI_PREPASS_CENSUS;
@@ -5996,6 +6024,12 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
        61.5 -> 54.6 ms, p90 97 -> 74, borodino p99 -30 ms; inert on a non-hybrid host). --tick-core-ab opts out. */
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->tick_core_ab) o->tick_pcore = TRUE;
     /* The shipping set also implies the bit-exact slot solver kernel (--army-solver-memo; sv-memo4: perf bad storm-tick
+        } else if (!wcscmp(name, L"--ai-claim-chunk")) {
+            NEEDVAL();
+            if (!parse_uint(val, 0, NTW2_AI_CLAIM_CHUNK_MASK >> NTW2_AI_CLAIM_CHUNK_SHIFT, &o->ai_claim_chunk)) {
+                errsay(L"--ai-claim-chunk must be 0 (native) or 1..255.\n");
+                return -1;
+            }
        site 18 2306 -> 473 ms, ticks >300 ms 5 -> 1; 0 mismatches over 2132 live shadow solves). --army-solver-shadow opts out. */
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
@@ -6072,6 +6106,12 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
         errsay(L"--ai-deferred-k / --ai-deferred-budget require --ai-deferred.\n");
+        return -1;
+    }
+    if (o->ai_claim_chunk && ((o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
+                              !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
+        errsay(L"--ai-claim-chunk needs a routed tick (add profile or a simulation feature, e.g. --features all) and excludes the ai_ctrl and "
+               L"ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
         return -1;
     }
     if ((o->mask & NTW2_BRAIN) && !(o->mask & NTW2_PROFILE)) {
@@ -6297,7 +6337,7 @@ int wmain(int argc, wchar_t **argv)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags;
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_chunk << NTW2_AI_CLAIM_CHUNK_SHIFT);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
 
     if (r->opt.replay[0]) {

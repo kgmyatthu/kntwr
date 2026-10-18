@@ -380,7 +380,7 @@ int main(int argc, char** argv) {
             bindings[NTW2_BIND_AI_CTRL_POINT_DISTANCE] == A(G::DistanceBindingAddress()), "binding addresses published");
     vtableStd[0] = A(At(0x57E910)); vtableAlt[0] = A(reinterpret_cast<void*>(&AltGetter));
     { const B* g = At(0x57E910); Require(g[0] == 0x8b && g[1] == 0x41 && g[2] == 0xf4 && g[3] == 0xc3, "0x57E910 is mov eax,[ecx-0xC]; ret"); }
-    ntw2_ai_ctrl::Reset(NTW2_AI_CTRL_FLAGS_VALID, delta, 0);
+    ntw2_ai_ctrl::Reset(NTW2_AI_CTRL_MODE_MASK, delta, 0);
     TestKernel();
     TestPose();
     TestLiveTables();
