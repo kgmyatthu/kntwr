@@ -4,7 +4,7 @@
 // Diagnostics only: measures where the per-man +0C brain step spends its time so that the per-unit compromise slices
 // are funded or rejected on numbers. No game-state write, no change to what executes:
 //  * every site-6 occurrence of a brain class runs a generator-pinned BRAIN_S0 clone of its +0C entry (66CE00 core,
-//    602EB0/5FCEB0 wrappers) whose candidate decision calls reach the S0_* gates (src/ntw2_clones.h); the gates and the
+//    602EB0/5FCEB0 wrappers) whose candidate decision calls reach the S0_* gates (src/clones/ntw2_clones.h); the gates and the
 //    family are instruction-identical forwarding: each forwards exactly ONE original (or the next BRAIN_S0 clone) with
 //    the original registers, EFLAGS, x87/SSE state, stack arguments and RET n. Artillery/other classes run their
 //    original entry (timed as a whole, inner mechanics untimed).

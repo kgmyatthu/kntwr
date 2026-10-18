@@ -1093,7 +1093,7 @@ static int GridCensusFixture(bool lateEnable,ntw2_start_fn start,ntw2_stop_fn st
 }
 
 // ---- NTW2_AI_CENSUS: pinned vtable-slot gates + AI_CONTROLLER clone-call gate, in the owned (relocated) image --------------------------
-// Same table as src/ntw2_ai_census.cpp, restated here from the audited image scan: delegate replacement virtual 0x6EA520 is slot 19 of five
+// Same table as src/ai/ntw2_ai_census.cpp, restated here from the audited image scan: delegate replacement virtual 0x6EA520 is slot 19 of five
 // vtables, its sibling 0x6B3010 slot 20 of three; observer vtables 0x13432A0/0x1343318 slot 0 hold the `ret 4` no-op 0x44A780; delegate
 // destructors 0x69D710/0x69D750 are slot 0 of 0x13376FC/0x13376AC.
 struct CensusPin { U vtable, slot, original, target; };

@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "ntw2_ai_ctrl_batch.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
 using ntw2_ai_ctrl::U;

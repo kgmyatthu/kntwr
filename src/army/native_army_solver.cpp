@@ -273,7 +273,7 @@ bool Start(const Binding& binding) {
     return true;
 }
 void Stop() {
-    // Called from StopModules (src/ntw2_runtime.cpp), which first waits until tickOwner == 0, so no gate/assign occurrence is live here.
+    // Called from StopModules (src/core/ntw2_runtime.cpp), which first waits until tickOwner == 0, so no gate/assign occurrence is live here.
     g_started = false;
     if (g_ws) ntw_solver::DestroyWorkspace(g_ws);
     g_ws = nullptr;

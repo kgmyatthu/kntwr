@@ -1641,7 +1641,7 @@ SOURCES = [
     ('AI_CTRL_REBUILD', 0x7492F0, 0x7496D6, 'clone'),
     ('AI_CTRL_ASSIGN', 0x749090, 0x74929A, 'clone'),
     ('AI_CTRL_SCORER', 0x7B1270, 0x7B1557, 'clone'),
-    # --ai-prepass-census / --ai-presize (src/ntw2_planner_prepass.h). AI_THINK: node think 7D7BF0 (ret at 7D7C2B; its child call
+    # --ai-prepass-census / --ai-presize (src/ai/ntw2_planner_prepass.h). AI_THINK: node think 7D7BF0 (ret at 7D7C2B; its child call
     # `mov eax,[ecx]; call [eax+28]` at 7D7C1E becomes call PP_CHILD_THINK); reached through the ten node vtables' +10 slot gate.
     # PRESIZE: the only route to 0x559090 is vtable word 0x13247EC = 56A610 (ret 8 at 56A678) -> 551FE0 (call 56A66D, ret C at
     # 5523D8) -> 559090 (call 55208A, ret 8 at 559C06); int3 padding follows each.
@@ -2535,7 +2535,7 @@ EXPECT_CENSUS.update(PREPASS_EXPECT_CENSUS)
 # PlannerScopeThread). Sources are the existing AI2 'private' extents (with their cold static-init tails) and AI_WALK; unlike AI2 nothing is
 # rebased, NOPped or counted. Only the walk calls change: 808040's call 808492 -> PS_WALK_CALL (census: timed SITE_CALL_40 thunk, poly: PS_WALK)
 # and PS_WALK's 80DCF0 call 7F1E5A -> PS_POLY (bare host gate). 7F6ED0/81C050/7F6F20 projection calls stay original (no walk reachable).
-# --ai-spiral-*: four call groups go through host forwarders (src/ntw2_spiral.h) that call the same PS_* clone entries: PS_6A95A0's
+# --ai-spiral-*: four call groups go through host forwarders (src/ai/ntw2_spiral.h) that call the same PS_* clone entries: PS_6A95A0's
 # 6C71D0 call (PS_LADDER), PS_6C71D0's three 6CC730 calls (PS_LADDER_PROBE) and 7FCA40 call 6C79A8 (PS_SPIRAL, cap on a private spec
 # copy), PS_7FCA90's two 808040 calls (PS_SPIRAL_PROBE). PS_6C71D0/PS_6CC730/PS_7FCA40/PS_808040 are now entered via those forwarders.
 def ps_configs():
@@ -2599,7 +2599,7 @@ EXPECT_CALLS.update(PS_EXPECT_CALLS)
 EXPECT_CENSUS.update(PS_EXPECT_CENSUS)
 
 
-# --brain-retarget-jitter / --brain-target-cull (src/ntw2_retarget_jitter.h): pure-retarget copy of the combat node step 0x676FD0; the tracker tick call
+# --brain-retarget-jitter / --brain-target-cull (src/brain/ntw2_retarget_jitter.h): pure-retarget copy of the combat node step 0x676FD0; the tracker tick call
 # 6775C4 (`lea ecx,[ebx+48]; push [ebx+4]; call 6671A0`, callee pops 4, returns the target agent in EAX) goes to the host mirror. Every other call
 # and the three virtual calls stay the original instructions (6770E9 vt+B4 of the neighbour agents, 6778AB / 677EED `call eax` on the order getters).
 def step_configs():

@@ -125,13 +125,13 @@ enum ntw2_binding {
     NTW2_BIND_S0_ORDER_NODE, NTW2_BIND_S0_ORDER_ADJUST, NTW2_BIND_S0_ORDER_PREDICATE, NTW2_BIND_S0_UNIT_ARRIVAL,
     NTW2_BIND_S0_UNIT_MODIFIER, NTW2_BIND_S0_STANCE, NTW2_BIND_S0_PATH, NTW2_BIND_S0_POSTURE, NTW2_BIND_S0_POSTURE_NEXT,
     NTW2_BIND_S0_TIMER_PROVIDER0, NTW2_BIND_S0_TIMER_PROVIDER1,
-    /* --ai-ctrl-* (appended; src/ntw2_ai_ctrl_batch.h): the controller's reuse family (clones AI_CTRL_REBUILD/ASSIGN/SCORER).
+    /* --ai-ctrl-* (appended; src/ai/ntw2_ai_ctrl_batch.h): the controller's reuse family (clones AI_CTRL_REBUILD/ASSIGN/SCORER).
        REFRESH 749135 (`mov eax,[ecx]; call [eax+30]`, ECX=N, plain return): ends an open batch, performs the native refresh, begins
        a batch (P=EBX, N, C=P+68). SCORER 7491A6 (`mov edx,[eax+18]; lea eax,[ebx+68]; push eax; push esi; call edx`; the rewrite
        keeps lea/pushes, the gate loads the slot itself): exact 7B1270 slot -> scorer clone, any other slot ends the batch and runs
        native, RET 8. BATCH_ASSIGN: inserted before the 7CF3F0 call, preserves EAX/ECX/EDX. BATCH_EXIT: inserted at the function exit,
        cdecl void. HISTOGRAM 7B12BC (call 749D90, ECX=out[7], stack C+filter, RET 8). IDENTITY 7B1484 / POINT_DISTANCE 7B1497..7B14DB:
-       geometry gates (src/ntw2_ai_ctrl_geometry.h). */
+       geometry gates (src/ai/ntw2_ai_ctrl_geometry.h). */
     NTW2_BIND_AI_CTRL_REFRESH, NTW2_BIND_AI_CTRL_SCORER, NTW2_BIND_AI_CTRL_BATCH_ASSIGN, NTW2_BIND_AI_CTRL_BATCH_EXIT,
     NTW2_BIND_AI_CTRL_HISTOGRAM, NTW2_BIND_AI_CTRL_IDENTITY, NTW2_BIND_AI_CTRL_POINT_DISTANCE,
     /* Per-unit brain slices (appended; src/brain2/native_unit_policy.h, native_unit_fatigue.h). U_FATIGUE replaces the virtual
@@ -150,7 +150,7 @@ enum ntw2_binding {
     NTW2_BIND_U_POSTURE, NTW2_BIND_U_EVP, NTW2_BIND_U_ENGAGE_CNT, NTW2_BIND_U_DRIVER_ALT, NTW2_BIND_U_UNIT_MODIFIER,
     NTW2_BIND_U_ORDER_PREDICATE, NTW2_BIND_U_UNIT_ARRIVAL, NTW2_BIND_U_NODE_BEGIN, NTW2_BIND_U_NODE_STEP,
     NTW2_BIND_U_PHASE6, NTW2_BIND_U_PHASE7, /* 658FDE / 6590FC own-phase stores (+ the next kept instruction): EDX only, plain RET */
-    /* --ai-prepass-census / --ai-presize (appended; src/ntw2_planner_prepass.h). PP_CHILD_THINK replaces the AI_THINK clone's
+    /* --ai-prepass-census / --ai-presize (appended; src/ai/ntw2_planner_prepass.h). PP_CHILD_THINK replaces the AI_THINK clone's
        `mov eax,[ecx]; call [eax+28]` at 7D7C1E (ECX = child, EDI = node, ESI = index, plain return, the gate makes the original call
        exactly once). PP_RESERVE is inserted into PRESIZE_559090 at 55930E before `mov esi,[esp+194]`, PP_EXIT at 559BFE before the
        epilogue: both preserve every register, EFLAGS and x87/SSE and read the clone frame at the insertion point. */
@@ -159,7 +159,7 @@ enum ntw2_binding {
        SITE_CALL_40 thunk; poly runs: the bare PS_WALK clone). PS_POLY is the bare host gate bound to PS_WALK's 0x7F1E5A call of 0x80DCF0
        (fastcall ECX=shape, stack polygon, ret 4; no site thunk, no fxsave). */
     NTW2_BIND_PS_WALK_CALL, NTW2_BIND_PS_POLY,
-    /* --ai-spiral-cap-m / --ai-spiral-census (appended; src/ntw2_spiral.h): host thiscall forwarders (ECX + stack, callee cleanup, no FP)
+    /* --ai-spiral-cap-m / --ai-spiral-census (appended; src/ai/ntw2_spiral.h): host thiscall forwarders (ECX + stack, callee cleanup, no FP)
        inside the PS_* chain. PS_LADDER = PS_6A95A0's 0x6A994F call of 0x6C71D0 (ret 0x14), PS_LADDER_PROBE = PS_6C71D0's three 0x6CC730
        calls 0x6C7316/0x6C7410/0x6C77E2 (ret 4), PS_SPIRAL = PS_6C71D0's 0x6C79A8 call of 0x7FCA40 (ret 0xC; the cap goes into a private
        copy of the spec), PS_SPIRAL_PROBE = PS_7FCA90's 0x7FCC59/0x7FCD47 calls of 0x808040 (ret 0x14). */
@@ -174,7 +174,7 @@ enum ntw2_binding {
        SOLVER_SHIM replaces 53765A's call of the .aistbl trampoline 18F0D00 in CLONE_SOLVER_5373F0 (same ABI as 502770): naked, replays the
        trampoline's suppression test against the SOLVER_18F0A00 clone's return address, else tail-jumps to SOLVER_SOLVE. */
     NTW2_BIND_SOLVER_ASSIGN, NTW2_BIND_SOLVER_SOLVE, NTW2_BIND_SOLVER_SHIM,
-    /* --brain-retarget-jitter / --brain-target-cull (appended; src/ntw2_retarget_jitter.h): RJ_TRACKER_TICK replaces CLONE_STEP_676FD0's call 6775C4 of the
+    /* --brain-retarget-jitter / --brain-target-cull (appended; src/brain/ntw2_retarget_jitter.h): RJ_TRACKER_TICK replaces CLONE_STEP_676FD0's call 6775C4 of the
        combat node's tracker tick 6671A0 (thiscall ECX = tracker (node+0x48), one stack argument = the agent, ret 4, EAX = target agent or 0): the host mirror. */
     NTW2_BIND_RJ_TRACKER_TICK,
     NTW2_BIND_COUNT

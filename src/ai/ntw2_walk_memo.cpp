@@ -2,7 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <intrin.h>
-#include "ntw2_guard.h"
+#include "core/ntw2_guard.h"
 #include <string.h>
 
 namespace ntw2_walk_memo {

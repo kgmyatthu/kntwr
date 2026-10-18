@@ -1,7 +1,7 @@
 // See ntw2_ai_ctrl_geometry.h.  x86 MSVC host code (naked trampolines + inline asm), owner thread only.
 #include "ntw2_ai_ctrl_geometry.h"
 #include "ntw2_ai_ctrl_batch.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include <cstring>
 
 namespace ntw2_ai_ctrl_geometry {

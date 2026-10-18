@@ -1223,7 +1223,7 @@ static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORD
 static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
 static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
 static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_SPIRAL_LABELS };
-/* --ai-ctrl-* (src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
+/* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
    --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
 static void print_ai_ctrl(const uint32_t *w, uint32_t ai_ctrl_flags)
@@ -1237,7 +1237,7 @@ static void print_ai_ctrl(const uint32_t *w, uint32_t ai_ctrl_flags)
     say(L"\n");
 }
 static double pct(uint32_t part, uint32_t whole) { return whole ? 100.0 * (double)part / (double)whole : 0.0; }
-/* --ai-prepass-census / --ai-presize (src/ntw2_planner_prepass.h): per-think verdict lines, then every nonzero labelled word. */
+/* --ai-prepass-census / --ai-presize (src/ai/ntw2_planner_prepass.h): per-think verdict lines, then every nonzero labelled word. */
 static void print_ai_prepass(const uint32_t *w)
 {
     unsigned i;
@@ -1270,7 +1270,7 @@ static void print_ai_prepass(const uint32_t *w)
         if (i != 63 && w[i]) say(L" %hs=%lu", k_ai_prepass_census_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-poly-shadow / --ai-poly (src/ntw2_planner_search.h): one verdict line, then every nonzero labelled word. */
+/* --ai-poly-shadow / --ai-poly (src/ai/ntw2_planner_search.h): one verdict line, then every nonzero labelled word. */
 static void print_ai_poly(const uint32_t *w, uint32_t thinks)
 {
     unsigned i;
@@ -1296,7 +1296,7 @@ static void print_ai_poly(const uint32_t *w, uint32_t thinks)
         if (w[i]) say(L" %hs=%lu", k_ai_poly_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-record-test-shadow / --ai-record-test (src/ntw2_record_test.h): ai_prepass_words[32..59]; one verdict line, the gain line, every nonzero word. */
+/* --ai-record-test-shadow / --ai-record-test (src/ai/ntw2_record_test.h): ai_prepass_words[32..59]; one verdict line, the gain line, every nonzero word. */
 static void print_ai_record_test(const uint32_t *w)
 {
     unsigned i;
@@ -1323,7 +1323,7 @@ static void print_ai_record_test(const uint32_t *w)
         if (w[i]) say(L" %hs=%lu", k_ai_record_test_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-claim-once[-census] (src/ntw2_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
+/* --ai-claim-once[-census] (src/ai/ntw2_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
 static void print_ai_claim_once(const uint32_t *w)
 {
     if (!w[24]) return;
@@ -1332,14 +1332,14 @@ static void print_ai_claim_once(const uint32_t *w)
         (unsigned long)w[24], (unsigned long)w[25], (double)w[25] / w[24], (unsigned long)(w[30] & 0xFFu), (unsigned long)w[26], (unsigned long)w[27],
         (unsigned long)w[28], (unsigned long)w[29], (unsigned long)((w[30] >> 8) & 0xFFu), (unsigned long)(w[30] >> 16), (unsigned long)w[31]);
 }
-/* --brain-retarget-jitter (src/ntw2_retarget_jitter.h): ai_ctrl_reuse_words[20..23] (tracker_calls, losses, jittered, delay_sum). */
+/* --brain-retarget-jitter (src/brain/ntw2_retarget_jitter.h): ai_ctrl_reuse_words[20..23] (tracker_calls, losses, jittered, delay_sum). */
 static void print_brain_retarget_jitter(const uint32_t *w)
 {
     if (!w[20]) return;
     say(L"  brain_retarget_jitter: tracker_calls=%lu losses=%lu (%.3f%% of calls) jittered=%lu (%.1f%% of losses) delay_sum=%lu mean_delay=%.2f ticks (of the jittered)\n",
         (unsigned long)w[20], (unsigned long)w[21], pct(w[21], w[20]), (unsigned long)w[22], pct(w[22], w[21]), (unsigned long)w[23], w[22] ? (double)w[23] / w[22] : 0.0);
 }
-/* --brain-target-cull[-shadow] (src/ntw2_target_cull.h): ai_ctrl_reuse_words[16..19] (calls, candidates, predicates, packed mismatch/flag bytes). */
+/* --brain-target-cull[-shadow] (src/brain/ntw2_target_cull.h): ai_ctrl_reuse_words[16..19] (calls, candidates, predicates, packed mismatch/flag bytes). */
 static void print_brain_target_cull(const uint32_t *w)
 {
     if (!w[16]) return;
@@ -1348,7 +1348,7 @@ static void print_brain_target_cull(const uint32_t *w)
         (unsigned long)(w[17] > w[18] ? w[17] - w[18] : 0u), pct(w[17] > w[18] ? w[17] - w[18] : 0u, w[17]), (unsigned long)(w[19] >> 24),
         (unsigned long)(w[19] & 0xFFu), (unsigned long)((w[19] >> 8) & 0xFFu), (unsigned long)((w[19] >> 16) & 0xFFu));
 }
-/* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
+/* --ai-spiral-census / --ai-spiral-cap-m (src/ai/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
 static void print_ai_spiral(const uint32_t *w)
 {
     unsigned i;

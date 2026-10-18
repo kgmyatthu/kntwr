@@ -7,9 +7,9 @@
 #include <algorithm>
 #include "ntw2_runtime.h"
 #include "ntw2_profile.h"
-#include "ntw2_guard.h"
-#include "ntw2_clones.h"
-#include "ntw2_ai_census.h"
+#include "core/ntw2_guard.h"
+#include "clones/ntw2_clones.h"
+#include "ai/ntw2_ai_census.h"
 
 extern "C" {
 extern volatile ntw2_status ntw2_state;

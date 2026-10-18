@@ -4,7 +4,7 @@
 
 // --brain-retarget-jitter (ntw2_config::ai_ctrl_flags bit 12, NTW2_AI_RETARGET_JITTER; analysis/native-brain-retarget-jitter.md).  SHARED-SIMULATION
 // GAMEPLAY DEVIATION (user-approved for measurement; both armies, the player included; replays desync vs vanilla; default OFF, never implied by
-// --features all).  Also the host mirror of the combat node's tracker tick 0x6671A0 that --brain-target-cull (src/ntw2_target_cull.h) plugs its
+// --features all).  Also the host mirror of the combat node's tracker tick 0x6671A0 that --brain-target-cull (src/brain/ntw2_target_cull.h) plugs its
 // replacement of the contact-list search 0x553420 into.
 //
 // Native structure [proven by disasm, Steam image 13fcab62...]:

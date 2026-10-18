@@ -55,8 +55,6 @@ set(NTW2_TEST_ASSETS "${_ntw2_default_assets}" CACHE PATH
     "Directory holding the pinned oracle captures (*.bin kits, angle table, replay records). Tests whose capture is missing are not registered.")
 
 set(NTW2_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-# TRANSITIONAL (moves-only commit): the relocated sources still carry their pre-move `#include "ntw2_x.h"` spellings; removed by the include-path commit.
-include_directories(src/core src/clones src/ai src/brain src/profile)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Flag recipes.  Names mirror the validated analysis build scripts these replaced.

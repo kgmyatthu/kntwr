@@ -14,12 +14,12 @@
 #include <math.h>
 #include <cmath>
 #include "ntw2_runtime.h"
-#include "ntw2_clones.h"
-#include "ntw2_profile.h"
-#include "ntw2_ai_census.h"
-#include "ntw2_ai_async2.h"
-#include "ntw2_ai_ctrl_batch.h"
-#include "ntw2_ai_ctrl_geometry.h"
+#include "clones/ntw2_clones.h"
+#include "profile/ntw2_profile.h"
+#include "ai/ntw2_ai_census.h"
+#include "ai/ntw2_ai_async2.h"
+#include "ai/ntw2_ai_ctrl_batch.h"
+#include "ai/ntw2_ai_ctrl_geometry.h"
 #include "ntw2_guard.h"
 #include "native_workload.h"
 #include "worker/native_worker_dispatch.h"
@@ -52,14 +52,14 @@
 #include "loco/native_env.h"
 #include "formation/native_formation_runtime.h"
 #include "path/native_path_runtime.h"
-#include "ntw2_walk_memo.h"
-#include "ntw2_planner_search.h"
-#include "ntw2_record_test.h"
-#include "ntw2_planner_prepass.h"
-#include "ntw2_spiral.h"
-#include "ntw2_claim_once.h"
-#include "ntw2_retarget_jitter.h"
-#include "ntw2_target_cull.h"
+#include "ai/ntw2_walk_memo.h"
+#include "ai/ntw2_planner_search.h"
+#include "ai/ntw2_record_test.h"
+#include "ai/ntw2_planner_prepass.h"
+#include "ai/ntw2_spiral.h"
+#include "ai/ntw2_claim_once.h"
+#include "brain/ntw2_retarget_jitter.h"
+#include "brain/ntw2_target_cull.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -1345,7 +1345,7 @@ __declspec(naked) void ControllerGate() {
     }
 }
 // ===================================================================================================================
-// NTW2_AI_ASYNC2 (src/ntw2_ai_async2.h): site 34 queues the whole planner call and returns; tick end publishes the batch;
+// NTW2_AI_ASYNC2 (src/ai/ntw2_ai_async2.h): site 34 queues the whole planner call and returns; tick end publishes the batch;
 // the worker runs it in the inter-tick window; the next tick start is the non-blocking effect seam; site 33, TICK 57DFDF
 // and the tick-owner delegate gates are blocking structural joins.
 volatile LONG ai2Armed; // generation has AI_ASYNC2; read by the TICK clone's quadtree gate before any other work

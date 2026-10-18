@@ -6,7 +6,7 @@
 //   AI_CTRL_POINT_DISTANCE  region 0x7B1497..0x7B14DB (68 B): pose gather 0x53FBE0/0x80E9D0 of V and 0x76DCD0(R,pose.XZ)
 //                           In EBX=i, caller [ESP+0x24]=V, [ESP+0x18]=R.  Out ST(0)=float32 distance (as native `fld dword`).
 // Everything native computes per (candidate U, list unit V) pair that depends only on V (identity, pose) or on (R, V) (center
-// distance) is computed once per V per open batch (src/ntw2_ai_ctrl_batch.h) and served by list index.  Per-U compares,
+// distance) is computed once per V per open batch (src/ai/ntw2_ai_ctrl_batch.h) and served by list index.  Per-U compares,
 // the region-boundary distance and every integer reduction stay native.  Owner thread only; no allocation; no wall clock.
 // Outside an open batch, with the flags off, or after a verify mismatch latched the feature off, both bindings execute the
 // original instruction sequence's work themselves (same image calls, same order).

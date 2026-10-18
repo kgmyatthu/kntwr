@@ -21,7 +21,7 @@
 //
 // CMake (tests/CMakeLists.txt):
 // ntw2_harness(native_ballistics_runtime_integration STD 20 FP strict
-//   SOURCES native_ballistics_runtime_integration.cpp ../src/ntw2_clones.cpp
+//   SOURCES native_ballistics_runtime_integration.cpp ../src/clones/ntw2_clones.cpp
 //   OBJECTS ntw2_ballistics_query_cache ntw2_ballistics_collision ntw2_worker_dispatch ntw2_ballistics_helpers
 //   INCLUDES ../src LIBS bcrypt)
 #define _CRT_SECURE_NO_WARNINGS
