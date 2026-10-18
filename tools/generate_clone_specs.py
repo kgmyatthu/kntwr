@@ -1733,6 +1733,18 @@ SOURCES = [
     ('SOLVER_18F1200', 0x18F1200, 0x18F12EC, 'clone'),
     ('SOLVER_65D7D0', 0x65D7D0, 0x65D883, 'clone'),
     ('SOLVER_51A9A0', 0x51A9A0, 0x51AC48, 'clone'),
+    # Avoidance bitset enlargement (model+0xC4, stock 0x2004 -> 0x8004 bytes): model ctor 0x506C00, model dtor 0x51F150 and vtable chains.
+    ('AVOID_506C00', 0x506C00, 0x5079B1, 'private'),
+    ('AVOID_51F150', 0x51F150, 0x51F6BF, 'private'),
+    ('AVOID_593BD0', 0x593BD0, 0x595BC0, 'private'),
+    ('AVOID_5472C0', 0x5472C0, 0x54733D, 'private'),
+    ('AVOID_5B9140', 0x5B9140, 0x5B91F5, 'private'),
+    ('AVOID_5B9200', 0x5B9200, 0x5B9317, 'private'),
+    ('AVOID_5A8A60', 0x5A8A60, 0x5A8D97, 'private'),
+    ('AVOID_5A8E60', 0x5A8E60, 0x5A8EAE, 'private'),
+    ('AVOID_5ACE90', 0x5ACE90, 0x5ACEB3, 'private'),
+    ('AVOID_5BD6E0', 0x5BD6E0, 0x5BD6FC, 'private'),
+    ('AVOID_5ACEC0', 0x5ACEC0, 0x5ACF03, 'private'),
 ]
 
 # Allowed unrelocated image-looking operand fields, pinned by source, field VA and value.
@@ -2424,6 +2436,7 @@ def clone_configs():
         *ps_configs(),
         *step_configs(),
         *solver_configs(),
+        *avoid_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2711,6 +2724,123 @@ def solver_extra_checks(image, plans, header_path):
         fail(f'SOLVER_18F0A00: return-address offset of 18F0A96 is {offset!r}, header NTW2_SOLVER_ASSIGN_RET_OFFSET '
              f'{declared.group(1) if declared else None}')
 
+
+
+AVOID_PINS = {
+    0x507485: '6804200000' 'e8b1bcbc00' '83c404' '8984248c000000' '85c0' '7419' '6804200000' '6a00' '50' 'e876bed900',
+    0x5074C1: '8986c4000000',
+    0x51F403: '6804200000' 'ffb7c4000000' 'e803ecd400' '8bb7c0000000' '83c408',
+    0x594AFA: 'e80121f7ff',
+    0x5A8C63: 'e8e864f7ff',
+}
+
+
+def avoid_configs():
+    return [
+        dict(clone='AVOID_506C00', source='AVOID_506C00',
+             site_calls={0x50748A: Bind('AVOID_ALLOC')},
+             run_rewrites={0x50749D: (bytes.fromhex('68042000006a00'), [bytes.fromhex('68048000006a00')])},
+             indirect_calls={0x50783A}, expect_rets={0x5079AE: RET(0x14)}),
+        dict(clone='AVOID_51F150', source='AVOID_51F150',
+             site_calls={0x51F40E: Bind('AVOID_FREE')},
+             run_rewrites={0x51F403: (bytes.fromhex('6804200000ffb7c4000000'), [bytes.fromhex('6804800000ffb7c4000000')])},
+             indirect_calls={0x51F3C5, 0x51F3D5, 0x51F3E5, 0x51F67D}, expect_rets={}),
+        dict(clone='AVOID_593BD0', source='AVOID_593BD0',
+             calls={0x506C00: (Clone('AVOID_506C00'), 1, [0x594AFA])},
+             indirect_calls={0x593c21, 0x593f78, 0x593fa0, 0x593fb2, 0x593fd7, 0x593fee, 0x594005, 0x594085, 0x5940a6, 0x5940bd,
+                             0x5940d4, 0x594154, 0x594160, 0x594175, 0x594188, 0x59419e, 0x5943c5, 0x5943de, 0x5943f6, 0x5944eb,
+                             0x594502, 0x594519, 0x594599, 0x5945a9, 0x5945b6, 0x5945d2, 0x5945ff, 0x594616, 0x59462d, 0x5946ad,
+                             0x594710, 0x59471d, 0x59472f, 0x59475c, 0x594773, 0x59478a, 0x59480a, 0x594888, 0x594895, 0x5948a7,
+                             0x5948d4, 0x5948eb, 0x594902, 0x594982, 0x5949b9, 0x5949c6, 0x5949d8, 0x594a05, 0x594a1c, 0x594a33,
+                             0x594ab3, 0x594b30, 0x594b41, 0x594b4e, 0x594b60, 0x594b8d, 0x594ba4, 0x594bbb, 0x594c3b, 0x594c51,
+                             0x594c5e, 0x594c70, 0x594ce4, 0x594cfb, 0x594d12, 0x594d92, 0x594da8, 0x594db5, 0x594dc7, 0x594e85,
+                             0x594f07, 0x594f1e, 0x594f35, 0x594fa6, 0x594fb6, 0x594fc3, 0x594fd9, 0x595006, 0x59501d, 0x595034,
+                             0x5950b4, 0x5950c4, 0x5950d1, 0x5950e7, 0x59518e, 0x5951a5, 0x5951bc, 0x59523c, 0x5952b1, 0x5952c8,
+                             0x5952df, 0x59535f, 0x5955c9, 0x5955e0, 0x5955f7, 0x595677, 0x595687, 0x595694, 0x5956aa, 0x5956bb,
+                             0x595779, 0x5957db, 0x5957f2, 0x595809, 0x595889, 0x595899, 0x5958a6, 0x5958bc, 0x595958, 0x59596f,
+                             0x595986, 0x595a06, 0x595a16, 0x595a23, 0x595a39, 0x595a66, 0x595a7d, 0x595a94, 0x595b14, 0x595b1c,
+                             0x595b29, 0x595b3f},
+             expect_rets={0x595BBD: RET(0x24)}),
+        dict(clone='AVOID_5472C0', source='AVOID_5472C0',
+             calls={0x593BD0: (Clone('AVOID_593BD0'), 1, [0x547310])},
+             indirect_calls=set(), expect_rets={}),
+        dict(clone='AVOID_5B9140', source='AVOID_5B9140',
+             calls={0x593BD0: (Clone('AVOID_593BD0'), 1, [0x5b91c7])},
+             indirect_calls=set(), expect_rets={0x5b91f4: b'\xc3'}),
+        dict(clone='AVOID_5B9200', source='AVOID_5B9200',
+             calls={0x593BD0: (Clone('AVOID_593BD0'), 1, [0x5b92d3])},
+             indirect_calls=set(), expect_rets={0x5b930c: b'\xc3', 0x5b9316: b'\xc3'}),
+        dict(clone='AVOID_5A8A60', source='AVOID_5A8A60',
+             calls={0x51F150: (Clone('AVOID_51F150'), 1, [0x5A8C63])},
+             indirect_calls={0x5a8aab, 0x5a8b12, 0x5a8b65, 0x5a8b8c, 0x5a8bb9, 0x5a8bc5, 0x5a8bd2, 0x5a8bdc, 0x5a8bed, 0x5a8bfd,
+                             0x5a8c0d, 0x5a8c4c, 0x5a8cbf, 0x5a8ccf, 0x5a8ce3, 0x5a8d12, 0x5a8d22, 0x5a8d2e, 0x5a8d38},
+             expect_rets={}),
+        dict(clone='AVOID_5A8E60', source='AVOID_5A8E60',
+             calls={0x5A8A60: (Clone('AVOID_5A8A60'), 1, [0x5A8E76])},
+             indirect_calls=set(), expect_rets={}),
+        dict(clone='AVOID_5ACE90', source='AVOID_5ACE90',
+             calls={0x5A8E60: (Clone('AVOID_5A8E60'), 1, [0x5ACE93])},
+             indirect_calls=set(), expect_rets={0x5aceb0: RET(4)}),
+        dict(clone='AVOID_5BD6E0', source='AVOID_5BD6E0',
+             calls={0x5A8A60: (Clone('AVOID_5A8A60'), 1, [0x5BD6E7])},
+             indirect_calls=set(), expect_rets={0x5bd6fb: b'\xc3'}),
+        dict(clone='AVOID_5ACEC0', source='AVOID_5ACEC0',
+             calls={0x5BD6E0: (Clone('AVOID_5BD6E0'), 1, [0x5ACECC])},
+             indirect_calls={0x5aceda}, expect_rets={0x5acf00: RET(4)}),
+    ]
+
+
+AVOID_EXPECT_CALLS = {
+    'AVOID_506C00': {0x459E30, 0x4C3920, 0x4F0800, 0x4F0930, 0x4F5500, 0x4F55F0, 0x506700, 0x515340, 0x515CA0, 0x5414C0,
+                     0x549F70, 0x5519B0, 0x58F3B0, 0x595FF0, 0x5A3A80, 0x5A7AE0, 0x61A9C0, 0x61C760, 0x61E430, 0x61E720,
+                     0x61F090, 0x620AD0, 0x688340, 0x6886E0, 0x68E2D0, 0x691300, 0x6918C0, 0x691B40, 0x694CD0, 0x7E1420,
+                     0x7E1540, 0x7E33F0, 0x7E6920, 0x7EF810, 0x801F10, 0x817D20, 0xDB78F0, 0xDB7A90, 0x10A40E0, 0x10D2790,
+                     0x10D3140, 0x12A3320},
+    'AVOID_51F150': {0x444B60, 0x4C5290, 0x5008A0, 0x51F000, 0x520110, 0x527E70, 0x528F30, 0x55C8B0, 0x5A8DB0, 0x5AA350,
+                     0x623C20, 0x69AC20, 0x69B780, 0x69B950, 0x69BA20, 0x7EC760, 0x7ECB00, 0x855B90, 0xFF7E40, 0xFF7EF0,
+                     0xFF7FA0, 0x10A1D00, 0x10A1DB0, 0x10D3180, 0x126E016, 0x127E304, 0x127E3C2},
+    'AVOID_593BD0': {0x444B60, 0x453DB0, 0x45AE00, 0x483DE0, 0x4C5290, 0x4F0430, 0x4F05A0, 0x4F0750, 0x4F0800, 0x4F0910,
+                     0x4F0930, 0x4F0EA0, 0x4F1200, 0x505390, 0x510F10, 0x527E70, 0x5345A0, 0x53FF80, 0x545C20, 0x569710,
+                     0x56CBD0, 0x57D060, 0x587CC0, 0x590020, 0x592990, 0x5929B0, 0x595BC0, 0x595D00, 0x596160, 0x596350,
+                     0x596AA0, 0x5AFA30, 0x5B6670, 0x5D7090, 0x5F7000, 0x611A50, 0x61AC40, 0x64C5F0, 0x66BB40, 0x66BBA0,
+                     0x6AB800, 0x6F0690, 0x7952C0, 0x858770, 0xDA6230, 0xDAC510, 0xDAC990, 0xDACB80, 0xDACDC0, 0xDACE30,
+                     0xDAD030, 0xDAE3A0, 0xDAE500, 0xDB8C00, 0xDF2E40, 0xEAAF20, 0xEB06A0, 0x10586B0, 0x10A40E0, 0x10D3140,
+                     0x10DAB60, 0x10F4670, 0x127E304, 0x127E3C2},
+    'AVOID_5472C0': {0x10D3140, 0x10DAB60, 0x10F4670},
+    'AVOID_5B9140': {0x507A80, 0x51F6C0, 0x522F80, 0x595C70, 0x5A8DA0, 0x5B8FF0, 0x10D3140, 0x10DAB60, 0x10F4670},
+    'AVOID_5B9200': {0x4F0800, 0x4F0930, 0x507A80, 0x51F6C0, 0x522F80, 0x596240, 0xDA5910, 0x10D3140, 0x10DAB60, 0x10F4670},
+    'AVOID_5A8A60': {0x45A100, 0x4F0660, 0x4F0750, 0x4F0930, 0x56CCB0, 0x56CCD0, 0x5A8DA0, 0x5A8FA0, 0x5AA600, 0x5B85F0,
+                     0x5F5F70, 0xDA6F30, 0xE94DC0, 0xFF7EF0, 0x10D30F0, 0x126E016},
+    'AVOID_5A8E60': {0x51F6C0, 0x126E016},
+    'AVOID_5ACE90': {0x126E016},
+    'AVOID_5BD6E0': {0x126E016},
+    'AVOID_5ACEC0': {0x4F0930, 0x126E016},
+}
+AVOID_EXPECT_CENSUS = {
+    'AVOID_506C00': (860, 39, 182, 0),
+    'AVOID_51F150': (430, 18, 66, 1),
+    'AVOID_593BD0': (1937, 79, 154, 0),
+    'AVOID_5472C0': (38, 0, 4, 2),
+    'AVOID_5B9140': (57, 0, 9, 0),
+    'AVOID_5B9200': (94, 1, 12, 0),
+    'AVOID_5A8A60': (252, 3, 23, 1),
+    'AVOID_5A8E60': (26, 1, 3, 1),
+    'AVOID_5ACE90': (12, 0, 1, 0),
+    'AVOID_5BD6E0': (11, 0, 1, 0),
+    'AVOID_5ACEC0': (22, 2, 2, 0),
+}
+EXPECT_CALLS.update(AVOID_EXPECT_CALLS)
+EXPECT_CENSUS.update(AVOID_EXPECT_CENSUS)
+EXPECT_JUMPS['AVOID_51F150'] = {0x51EAC0}
+EXPECT_JUMPS['AVOID_5472C0'] = {0x5B8FF0}
+EXPECT_JUMPS['AVOID_5A8A60'] = {0x49DC60}
+EXPECT_JUMPS['AVOID_5A8E60'] = {0xDA6D60}
+
+def avoid_extra_checks(image):
+    for va, want in AVOID_PINS.items():
+        got = image.read(va, len(want) // 2)
+        if got != bytes.fromhex(want):
+            fail(f'AVOID: pinned bytes at {va:#x} changed: {got.hex()} != {want}')
 
 # ============================================================================================ generation
 
@@ -3240,6 +3370,7 @@ def build_all(image, header_path):
     loco_extra_checks(image, plans, header_path)
     node_projection_extra_checks(image, plans, header_clones, header_path)
     solver_extra_checks(image, plans, header_path)
+    avoid_extra_checks(image)
     manager = plans['MANAGER']
     by_addr = {i.address: i for i, _, _ in manager.instructions}
     if (by_addr[MANAGER_TABLE_JMP].bytes != bytes.fromhex('ff24b5') + u32(MANAGER_TABLE_VA) or

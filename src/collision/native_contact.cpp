@@ -18,6 +18,25 @@ volatile LONG words[WordCount];
 ULONGLONG portTicks, ownerTicks;
 LARGE_INTEGER frequency;
 U stageNumber;
+constexpr U kEnlargedSlots = 16;
+volatile LONG enlargedBlocks[kEnlargedSlots];
+volatile LONG avoidAllocs, avoidFrees, avoidSerialRefusals, avoidActiveBytes;
+
+void RecordEnlargedBlock(U block) {
+    if (!block) return;
+    for (U i = 0; i < kEnlargedSlots; ++i)
+        if (static_cast<U>(_InterlockedCompareExchange(&enlargedBlocks[i], 0, 0)) == block) return;
+    for (U i = 0; i < kEnlargedSlots; ++i)
+        if (_InterlockedCompareExchange(&enlargedBlocks[i], static_cast<LONG>(block), 0) == 0) return;
+    _InterlockedExchange(&enlargedBlocks[0], static_cast<LONG>(block));
+}
+bool ForgetEnlargedBlock(U block) {
+    if (!block) return false;
+    bool found = false;
+    for (U i = 0; i < kEnlargedSlots; ++i)
+        if (_InterlockedCompareExchange(&enlargedBlocks[i], 0, static_cast<LONG>(block)) == static_cast<LONG>(block)) found = true;
+    return found;
+}
 
 template<class T> __forceinline T L(U address, U offset) { return *reinterpret_cast<const volatile T*>(address + offset); }
 __forceinline U Va(U preferred) { return preferred + delta; }
@@ -73,7 +92,9 @@ U StubResult(const Stage& st, U slot, U self, bool& supported) {
     supported = false;
     return 0;
 }
-U ManagerBit(U bits, U serial) { return (L<U>(bits, (serial >> 5) * 4) >> (serial & 31)) & 1; }
+U ManagerBit(U bits, U serial, U serialCap = kStockAvoidSerialCap) {
+    return serial < serialCap ? ((L<U>(bits, (serial >> 5) * 4) >> (serial & 31)) & 1) : 0;
+}
 }
 
 namespace port {
@@ -193,9 +214,10 @@ U Classify(const Stage& st, U r, U s, bool& supported) {
     if (Greater(lead, L<float>(r, 0x144))) return 3;
     return Greater(lead, Mul(sv, st.lead)) ? 3 : 4;
 }
-bool Available(U manager, U a) {
+bool Available(U manager, U a, U serialCap) {
     if (L<B>(a, 0xec) != 1 || L<B>(a, 0xb4) != 0 || L<U>(a, 0x18) != 0) return false;
-    if (ManagerBit(L<U>(manager, 0x90), L<U>(a, 0x2c))) return false;
+    U serial = L<U>(a, 0x2c);
+    if (serial >= serialCap || ManagerBit(L<U>(manager, 0x90), serial, serialCap)) return false;
     U state = L<U>(a, 0x224);
     if (state == 5) return (L<B>(a, 0xef) | L<B>(a, 0xee)) != 1;
     if ((state >= 0xe && state <= 0x14) || state == 4) return false;
@@ -215,8 +237,8 @@ bool Overlap(const Stage& st, U r, U s) {
     float extent = Greater(0, dy) ? L<float>(r, 0x54) : L<float>(s, 0x54);
     return Greater(extent, AbsX87(dy));
 }
-bool Avoid(const Stage& st, U manager, U r, U s, bool& supported) {
-    if (!Available(manager, r) || !Available(manager, s)) return false;
+bool Avoid(const Stage& st, U manager, U r, U s, bool& supported, U serialCap) {
+    if (!Available(manager, r, serialCap) || !Available(manager, s, serialCap)) return false;
     if (L<U>(r, 0x1b8) == 0xd || L<U>(s, 0x1b8) == 0xd) return false;
     U group = L<U>(r, 0x178);
     if (group && group == L<U>(s, 0x178)) return false;
@@ -257,8 +279,10 @@ void PredictBody(const Stage& st, Plan& p, U r, U s) {
         p.flags = flags; p.kind = KindDiffTeam; return;
     }
     if (L<U>(L<U>(r, 0x28), 8) != st.model) { p.flags = flags; p.kind = KindUnsupported; return; }
-    if (ManagerBit(st.avoidBits, L<U>(r, 0x2c))) flags |= FlagBitR;
-    if (ManagerBit(st.avoidBits, L<U>(s, 0x2c))) flags |= FlagBitS;
+    U sr = L<U>(r, 0x2c), ss = L<U>(s, 0x2c), cap = st.avoidSerialCap ? st.avoidSerialCap : kStockAvoidSerialCap;
+    if (sr >= cap || ss >= cap) { p.flags = flags; p.kind = KindSerialOutOfBounds; return; }
+    if (ManagerBit(st.avoidBits, sr, cap)) flags |= FlagBitR;
+    if (ManagerBit(st.avoidBits, ss, cap)) flags |= FlagBitS;
     bool supported = true;
     bool bh = BlocksUnlessLinked(st, r, s), al = BlocksUnlessLinked(st, s, r);
     bool bl = true, avoid = false;
@@ -272,7 +296,7 @@ void PredictBody(const Stage& st, Plan& p, U r, U s) {
     }
     if (avoid) {
         flags |= FlagUsedAvail;
-        if (Avoid(st, st.avoid, r, s, supported)) {
+        if (Avoid(st, st.avoid, r, s, supported, cap)) {
             U fr = L<U>(r, 0x110), fs = L<U>(s, 0x110);
             bool writeS = false;
             if (!(fr & 1) && (fr & 0x800)) { flags |= FlagWriteR; bl = false; }
@@ -325,6 +349,73 @@ void CaptureSide(Side& side, U tracker, U a, U b, uint16_t key) {
 }
 }
 
+void ConfigureAvoidHooks(U image_delta) { delta = image_delta; }
+void ResetAvoidCounters() {
+    _InterlockedExchange(&avoidAllocs, 0);
+    _InterlockedExchange(&avoidFrees, 0);
+    _InterlockedExchange(&avoidSerialRefusals, 0);
+    _InterlockedExchange(&avoidActiveBytes, 0);
+}
+bool IsEnlargedBitset(U bits) {
+    if (!bits) return false;
+    for (U i = 0; i < kEnlargedSlots; ++i)
+        if (static_cast<U>(_InterlockedCompareExchange(&enlargedBlocks[i], 0, 0)) == bits) return true;
+    return false;
+}
+void* __cdecl AllocBitset(U) {
+    using AllocFn = void* (__cdecl*)(U);
+    void* p = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidBitsetBytes);
+    if (p) {
+        memset(p, 0, kAvoidBitsetBytes);
+        RecordEnlargedBlock(static_cast<U>(reinterpret_cast<uintptr_t>(p)));
+        _InterlockedIncrement(&avoidAllocs);
+        _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
+    }
+    return p;
+}
+void __cdecl FreeBitset(void* block, U passedBytes) {
+    U addr = static_cast<U>(reinterpret_cast<uintptr_t>(block));
+    bool enlarged = ForgetEnlargedBlock(addr);
+    U bytes = enlarged ? kAvoidBitsetBytes : passedBytes;
+    using FreeFn = void (__cdecl*)(void*, U);
+    reinterpret_cast<FreeFn>(Va(0x126e016))(block, bytes);
+    if (block) _InterlockedIncrement(&avoidFrees);
+}
+bool AdoptModelBitset(U model) {
+    if (!model) return false;
+    __try {
+        U c4 = L<U>(model, 0xc4);
+        if (!c4) return false;
+        if (IsEnlargedBitset(c4)) {
+            _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
+            if (_InterlockedCompareExchange(&avoidAllocs, 0, 0) == 0) _InterlockedIncrement(&avoidAllocs);
+            return true;
+        }
+        U c8 = L<U>(model, 0xc8), cc = L<U>(model, 0xcc);
+        if (!cc || L<U>(cc, 0x90) != c4 || (c8 && L<U>(c8, 0x90) != c4)) return false;
+        using AllocFn = void* (__cdecl*)(U);
+        using FreeFn = void (__cdecl*)(void*, U);
+        void* fresh = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidBitsetBytes);
+        if (!fresh) return false;
+        memcpy(fresh, reinterpret_cast<const void*>(static_cast<uintptr_t>(c4)), kStockAvoidBitsetBytes);
+        memset(static_cast<B*>(fresh) + kStockAvoidBitsetBytes, 0, kAvoidBitsetBytes - kStockAvoidBitsetBytes);
+        U freshAddr = static_cast<U>(reinterpret_cast<uintptr_t>(fresh));
+        RecordEnlargedBlock(freshAddr);
+        *reinterpret_cast<volatile U*>(model + 0xc4) = freshAddr;
+        *reinterpret_cast<volatile U*>(cc + 0x90) = freshAddr;
+        if (c8) *reinterpret_cast<volatile U*>(c8 + 0x90) = freshAddr;
+        reinterpret_cast<FreeFn>(Va(0x126e016))(reinterpret_cast<void*>(static_cast<uintptr_t>(c4)), kStockAvoidBitsetBytes);
+        _InterlockedIncrement(&avoidAllocs);
+        _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void SampleAvoidWords(U& allocs, U& frees, U& serialRefusals, U& activeBytes) {
+    allocs = static_cast<U>(_InterlockedCompareExchange(&avoidAllocs, 0, 0));
+    frees = static_cast<U>(_InterlockedCompareExchange(&avoidFrees, 0, 0));
+    serialRefusals = static_cast<U>(_InterlockedCompareExchange(&avoidSerialRefusals, 0, 0));
+    activeBytes = static_cast<U>(_InterlockedCompareExchange(&avoidActiveBytes, 0, 0));
+}
 void Start(U image_delta, U requested) {
     delta = image_delta; mode = requested;
     for (U i = 0; i < WordCount; ++i) words[i] = 0;
@@ -343,6 +434,9 @@ bool BeginStage(Stage& st, void* modelPointer) {
         st.avoid = L<U>(st.model, 0xcc); st.combat = L<U>(st.model, 0xc8);
         if (!st.avoid) return false;
         st.avoidBits = L<U>(st.avoid, 0x90);
+        bool enlarged = IsEnlargedBitset(st.avoidBits);
+        st.avoidSerialCap = enlarged ? kAvoidSerialCap : kStockAvoidSerialCap;
+        _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(enlarged ? kAvoidBitsetBytes : (st.avoidBits ? kStockAvoidBitsetBytes : 0u)));
         U table = L<U>(st.avoid, 0);
         words[AvoidVtable] = static_cast<LONG>(table - delta);
         words[AvoidSlot14] = static_cast<LONG>(L<U>(table, 0x14) - delta);
@@ -386,6 +480,7 @@ void CountPlan(const Plan& p) {
     case KindDiffTeam: Bump(OwnerDiffTeam); break;
     case KindForeign: Bump(OwnerForeignClass); break;
     case KindUnsupported: Bump(OwnerUnsupported); break;
+    case KindSerialOutOfBounds: Bump(OwnerUnsupported); _InterlockedIncrement(&avoidSerialRefusals); break;
     default: Bump(OwnerFaults); break;
     }
 }
@@ -501,9 +596,11 @@ bool Replay(const Stage& st, const Plan& p, void* rp, void* sp, Original origina
     // The avoidance predicate read the manager's per-serial bitset; any change since stage entry
     // (for example by an earlier vt+0x14) makes the plan stale: execute the original instead.
     if (p.flags & FlagUsedAvail) {
-        U bits = L<U>(st.avoid, 0x90);
-        if (bits != st.avoidBits || ManagerBit(bits, L<U>(r, 0x2c)) != ((p.flags & FlagBitR) ? 1u : 0u) ||
-            ManagerBit(bits, L<U>(s, 0x2c)) != ((p.flags & FlagBitS) ? 1u : 0u)) {
+        U bits = L<U>(st.avoid, 0x90), cap = st.avoidSerialCap ? st.avoidSerialCap : kStockAvoidSerialCap;
+        U sr = L<U>(r, 0x2c), ss = L<U>(s, 0x2c);
+        if (bits != st.avoidBits || sr >= cap || ss >= cap ||
+            ManagerBit(bits, sr, cap) != ((p.flags & FlagBitR) ? 1u : 0u) ||
+            ManagerBit(bits, ss, cap) != ((p.flags & FlagBitS) ? 1u : 0u)) {
             Bump(ReplayRevalidated); Bump(OwnerCallbacks);
             return original(context, sp, rp);
         }

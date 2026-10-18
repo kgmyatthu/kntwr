@@ -654,7 +654,8 @@ typedef struct ntw2_status {
        20 numeric regions entered, 21 stage calls, 22 maximum returned ID-list length,
        23 timed-site stack overflows (nonzero invalidates census completeness),
        24 0x64CC70 forwarding to a different vt+40 target, 25 other direct vt+44 targets,
-       26 oriented-helper calls; 27..31 reserved. Recursive callbacks inside native callback bodies are
+       26 oriented-helper calls, 27 engine_rebuild_unsafe guards, 28 avoid_bitset_allocs, 29 avoid_bitset_frees,
+       30 avoid_serial_refusals, 31 avoid_bitset_bytes. Recursive callbacks inside native callback bodies are
        included in time, not counted again. Sites 106..109 time query/append/helper/callback respectively.
        Times sum raw QPC deltas before conversion (unlike trace's per-call integer-us rounding).
        All measurements include instrumentation perturbation; 17..19 nest within 13..15, not extra time. */
