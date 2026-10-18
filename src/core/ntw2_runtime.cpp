@@ -3662,6 +3662,7 @@ DWORD WINAPI Monitor(void*) {
         clean=Deactivate();
     for (U i=5;i;--i)
         if ((avoidSlots[i-1].owned || avoidSlots[i-1].protectionDirty) && !SwapSlot(avoidSlots[i-1],false)) clean=false;
+    ntw2_contact::ClearAvoidRegistry();
     if (!AiShutdown()) clean=false;
     if (clean && (config.enabled_mask&NTW2_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context
     CrashRemove();
@@ -3822,7 +3823,7 @@ static U StartImpl(void* raw) {
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
     Brain2Reset(); ntw2_army_unit::Reset(); ntw2_army_storm::Reset(); ntw2_army_solver::Reset();
     CollideLodReset();
-    ntw2_contact::ConfigureAvoidHooks(delta); ntw2_contact::ResetAvoidCounters();
+    ntw2_contact::ConfigureAvoidHooks(delta); ntw2_contact::ClearAvoidRegistry(); ntw2_contact::ResetAvoidCounters();
     memset(const_cast<U*>(visualWords),0,sizeof(visualWords));
     memset(allocatorWords,0,sizeof(allocatorWords));
     _InterlockedExchange(&visualFaulted,0);
