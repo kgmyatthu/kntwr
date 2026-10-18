@@ -5730,8 +5730,9 @@ static void usage(void)
         L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
         L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
-        L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --tick-pcore --army-solver-memo); any explicit\n"
-        L"                        --loco-*/--collide-contact-* (resp. --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census,\n"
+        L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --brain-target-cull --tick-pcore\n"
+        L"                        --army-solver-memo); any explicit\n"
+        L"                        --loco-*/--collide-contact-* (resp. --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census, --brain-target-cull-shadow,\n"
         L"                        --tick-core-ab, --army-solver-shadow) switch replaces those defaults; spell the shipping set as just all\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
@@ -6166,6 +6167,13 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         o->ai_prepass_flags |= NTW2_AI_RECORD_TEST;
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->ai_claim_once_census && !o->ai_deferred)
         o->ai_claim_once = TRUE;
+    /* The shipping set also implies the bit-exact melee target-search replacement (--brain-target-cull; tc-shadow/tc-shadow2:
+       4.7 M compares, 0 mismatches; frontier: brain >80 ms 21 ticks -> 0, brain max 168 -> 49 ms, mean brain -2.4 ms/tick;
+       perf bad / waterloo unchanged at p50). --brain-target-cull-shadow, --ai-ctrl-geometry, ai_ctrl and ai_async2 opt out.
+       --brain-retarget-jitter (NO-GO as a lever, behaviour change) is never implied. */
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->brain_target_cull_shadow &&
+        !(o->ai_ctrl_flags & NTW2_AI_CTRL_GEOMETRY))
+        o->brain_target_cull = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
