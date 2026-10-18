@@ -3495,6 +3495,9 @@ bool Activate(const World& candidate) {
     for (U i=0;i<NTW2_COLLIDE_SOURCE_WORDS;++i) ntw2_state.collide_source_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) ntw2_state.collide_contact_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_LOD_WORDS;++i) ntw2_state.collide_lod_words[i]=0;
+    for (U i=0;i<NTW2_ALLOC_CENSUS_WORDS;++i) ntw2_state.alloc_census_words[i]=0;
+    for (U i=0;i<NTW2_ARENA_WORDS;++i) ntw2_state.arena_words[i]=0;
+    for (U i=0;i<NTW2_OVERLAY_WORDS;++i) ntw2_state.overlay_words[i]=0;
     // Publish all LOCO row metadata with activation, not a later poll.
     if (locoRunning) {
         ntw2_loco::Sample(const_cast<U*>(ntw2_state.loco_words));
@@ -3841,6 +3844,9 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) ntw2_state.ai_prepass_census_words[i]=0;
     for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=0;
     for (U i=0;i<NTW2_AI_SPIRAL_WORDS;++i) ntw2_state.ai_spiral_words[i]=0;
+    for (U i=0;i<NTW2_ALLOC_CENSUS_WORDS;++i) ntw2_state.alloc_census_words[i]=0;
+    for (U i=0;i<NTW2_ARENA_WORDS;++i) ntw2_state.arena_words[i]=0;
+    for (U i=0;i<NTW2_OVERLAY_WORDS;++i) ntw2_state.overlay_words[i]=0;
     ntw2_spiral::ResetRow(); // the poll copies the module row: a session that never activates must not republish the previous one
     ntw2_record_test::Reset();
     ntw2_claim_once::ResetRow();

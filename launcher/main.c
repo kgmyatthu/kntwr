@@ -204,6 +204,9 @@ typedef struct Options {
     BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags NTW2_TICK_CORE_AB) */
     BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (ntw2_config::va_watch_flags NTW2_ARMY_SOLVER_MEMO) */
     BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
+    BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (ntw2_config::va_watch_flags NTW2_ALLOC_CENSUS) */
+    BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown (NTW2_ARENA_RELEASE) */
+    BOOL heap_optimize;      /* --heap-optimize: process-heap / arena optimization (NTW2_HEAP_OPTIMIZE) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -1223,6 +1226,9 @@ static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORD
 static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
 static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
 static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_SPIRAL_LABELS };
+static const char *const k_alloc_census_metrics[32] = { NTW2_ALLOC_CENSUS_LABELS };
+static const char *const k_arena_metrics[NTW2_ARENA_WORDS] = { NTW2_ARENA_LABELS };
+static const char *const k_overlay_metrics[NTW2_OVERLAY_WORDS] = { NTW2_OVERLAY_LABELS };
 /* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
    --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
@@ -2040,6 +2046,37 @@ static void print_army_solver(const uint32_t *w)
             (unsigned long)e[11], (unsigned long)e[12], (unsigned long)e[13], (unsigned long)e[14]);
     }
 }
+static void print_alloc_census(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"alloc_census:\n");
+    for (i = 0; i < 32u; ++i)
+        say(L"  %hs=%lu%ls", k_alloc_census_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
+    for (i = 0; i < 128u; ++i) {
+        const uint32_t *r = w + 32u + i * 8u;
+        if (!r[0] && !r[4]) continue;
+        say(L"  row%lu: callsite=0x%08lX size_class=%lu live_bytes=%lu live_count=%lu allocs=%lu frees=%lu peak_live_bytes=%lu reserved=%lu\n",
+            (unsigned long)i, (unsigned long)r[0], (unsigned long)r[1], (unsigned long)r[2], (unsigned long)r[3],
+            (unsigned long)r[4], (unsigned long)r[5], (unsigned long)r[6], (unsigned long)r[7]);
+    }
+}
+static void print_arena(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"arena:\n");
+    for (i = 0; i < NTW2_ARENA_WORDS; ++i)
+        say(L"  %hs=%lu%ls", k_arena_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
+}
+static void print_overlay(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"overlay:\n");
+    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i)
+        say(L"  %hs=%lu%ls", k_overlay_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
+}
 static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
@@ -2270,6 +2307,9 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_army_storm(s->army_storm_words);
     print_army_solver(s->army_solver_words);
+    print_alloc_census(s->alloc_census_words);
+    print_arena(s->arena_words);
+    print_overlay(s->overlay_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
@@ -3902,6 +3942,57 @@ static void sb_army_solver(Sb *b, const Run *r)
     for (i = 0; i < NTW2_ARMY_SOLVER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+static void sb_alloc_census(Sb *b, const Run *r)
+{
+    const uint32_t *w = r->last.alloc_census_words;
+    unsigned i, first;
+    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & NTW2_ALLOC_CENSUS))) {
+        sb_fmt(b, "  \"alloc_census\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"alloc_census\": {\"words\": {");
+    for (i = 0; i < 32u; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_alloc_census_metrics[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"rows\": [");
+    for (i = 0, first = 1; i < 128u; ++i) {
+        const uint32_t *e = w + 32u + i * 8u;
+        if (!e[0] && !e[4]) continue;
+        sb_fmt(b, "%s{\"callsite_va\": %lu, \"size_class\": %lu, \"live_bytes\": %lu, \"live_count\": %lu, \"allocs\": %lu, \"frees\": %lu, \"peak_live_bytes\": %lu, \"reserved\": %lu}",
+               first ? "" : ", ", (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3],
+               (unsigned long)e[4], (unsigned long)e[5], (unsigned long)e[6], (unsigned long)e[7]);
+        first = 0;
+    }
+    sb_fmt(b, "], \"raw\": [");
+    for (i = 0; i < NTW2_ALLOC_CENSUS_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
+static void sb_arena(Sb *b, const Run *r)
+{
+    const uint32_t *w = r->last.arena_words;
+    unsigned i;
+    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE)))) {
+        sb_fmt(b, "  \"arena\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"arena\": {\"words\": {");
+    for (i = 0; i < NTW2_ARENA_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_arena_metrics[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"raw\": [");
+    for (i = 0; i < NTW2_ARENA_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
+static void sb_overlay(Sb *b, const Run *r)
+{
+    const uint32_t *w = r->last.overlay_words;
+    unsigned i;
+    if (!r->have_status || !w[0]) {
+        sb_fmt(b, "  \"overlay\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"overlay\": {\"words\": {");
+    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_overlay_metrics[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"raw\": [");
+    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -4490,6 +4581,9 @@ static BOOL write_receipt(Run *r, int exit_code)
            (unsigned long)r->opt.ai_prepass_flags);
     sb_fmt(&b, "  \"tick_pcore\": %s,\n", r->opt.tick_pcore ? "true" : "false");
     sb_fmt(&b, "  \"army_solver_memo\": %s,\n", r->opt.army_solver_memo ? "true" : "false");
+    sb_fmt(&b, "  \"alloc_census_requested\": %s,\n", r->opt.alloc_census ? "true" : "false");
+    sb_fmt(&b, "  \"arena_release_requested\": %s,\n", r->opt.arena_release ? "true" : "false");
+    sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
@@ -4546,6 +4640,9 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_army_unit(&b, r);
     sb_army_storm(&b, r);
     sb_army_solver(&b, r);
+    sb_alloc_census(&b, r);
+    sb_arena(&b, r);
+    sb_overlay(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -4693,18 +4790,18 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, "],\n");
         }
         {
-            static const char *const names[49] = {"formation_words", "query_words", "path_words", "ballistic_words",
+            static const char *const names[52] = {"formation_words", "query_words", "path_words", "ballistic_words",
                                                   "formation_diag", "tick_words", "sim_words", "planner_words", "planner_walk_words",
-                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words", "loco_relink_words", "loco_cw_words", "loco_grid_build_words", "va_watch_words"};
-            const uint32_t *arrays[49] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
+                                                  "ai_words", "ai_extra_words", "crash_words", "brain_words", "ai_slice_words", "ai_validation_words", "visual_words", "allocator_words", "ai_slice_site_words", "brain_state_words", "collision_words", "collide_words", "brain2_words", "collide_lod_words", "ai_ctrl_words", "ai_slice_budget_words", "ai_park_words", "loco_words", "loco_gate_words", "loco_service_words", "loco_grid_words", "loco_parallel_words", "sweep_words", "resolve_words", "env_words", "env_target_words", "resolve_frame_words", "loco_owned_words", "loco_owned_detail_words", "loco_owned_phase_words", "loco_owned_load_words", "loco_grid_v2_words", "collide_source_words", "memory_words", "collide_contact_words", "grid_probation_words", "loco_relink_words", "loco_cw_words", "loco_grid_build_words", "va_watch_words", "alloc_census_words", "arena_words", "overlay_words"};
+            const uint32_t *arrays[52] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                           s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
-                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words, s->va_watch_words};
-            const unsigned counts[49] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS, NTW2_VA_WATCH_WORDS};
+                                          s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words, s->va_watch_words, s->alloc_census_words, s->arena_words, s->overlay_words};
+            const unsigned counts[52] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS, NTW2_VA_WATCH_WORDS, NTW2_ALLOC_CENSUS_WORDS, NTW2_ARENA_WORDS, NTW2_OVERLAY_WORDS};
             unsigned i, j;
-            for (i = 0; i < 49; ++i) {
+            for (i = 0; i < 52; ++i) {
                 sb_fmt(&b, "    \"%s\": [", names[i]);
                 for (j = 0; j < counts[i]; ++j) sb_fmt(&b, "%s%lu", j ? "," : "", (unsigned long)arrays[i][j]);
-                sb_fmt(&b, "]%s\n", i + 1 < 49 ? "," : "");
+                sb_fmt(&b, "]%s\n", i + 1 < 52 ? "," : "");
             }
             sb_put(&b, "  }\n", 4);
         }
@@ -5279,7 +5376,9 @@ static int install_runtime(Run *r)
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
-    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
+                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) |
+                             (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
@@ -5760,7 +5859,8 @@ static void usage(void)
         L"                        misses counted without block checksums; phase telemetry in brain_worker_phase_words\n"
         L"                        visual shards main-thread 0x779E60 loop 1, independently of tick epochs\n"
         L"                        ai runs one whole native planner call on its event worker and joins before site 34 returns;\n"
-        L"                        no cross-tick parking or partial-call replay; long native calls still delay the tick\n"
+        L"                        no cross-tick parking or partial-call replay; long native calls still delay the tick\n");
+    say(L"%ls",
         L"  --brain-unit-shadow   requires brain2; excludes --brain-parallel/--brain-quiet: per-unit brain Stage A, shadow only. Before\n"
         L"                        the unchanged site-6 loop pool workers decide every unit from unit-level inputs; after each\n"
         L"                        soldier's native step its decided fields are compared with its unit's decision (brain_unit_words)\n"
@@ -5780,7 +5880,8 @@ static void usage(void)
         L"  --brain-locality-prefetch2  sets --brain-locality: entity lines two ahead, chain lines one ahead (software pipeline)\n"
         L"  --brain-locality-mark       sets --brain-locality: pure pass-through (no census/touch/TSC); one manifest-free ETW event per site-6\n"
         L"                        stage begin/end (provider {6e1c4a2b-5d3f-4a7e-9b21-c8f0a3d7e514}, Id 1 begin / Id 2 end, UINT32 stage\n"
-        L"                        ordinal) to gate a WPR PMC trace to site-6 windows\n"
+        L"                        ordinal) to gate a WPR PMC trace to site-6 windows\n");
+    say(L"%ls",
         L"  --brain-unit-fatigue  requires brain2; excludes --brain-census/timing/parallel/quiet/unit-shadow and the brain shadows;\n"
         L"                        combines with the other --brain-unit-* options and --brain-s0: S4 per-unit fatigue. One (acc, level) pair\n"
         L"                        per unit generation, initialised from the native unit means and advanced once per stage from the unit's\n"
@@ -5794,7 +5895,11 @@ static void usage(void)
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
         L"                        tracker/+0x13C/avoidance effects in contact order; other contacts run the original callback in place\n"
         L"  --va-watch            diagnostic: sample process VA (avail, largest free region, VirtualQuery walk) once a second in every\n"
-        L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n"
+        L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n");
+    say(L"%ls",
+        L"  --alloc-census        diagnostic: process-heap allocation callsite census (alloc_census_words, receipt alloc_census). Default off.\n"
+        L"  --arena-release       release pose/scene 1 MB arena blocks at battle teardown (arena_words, receipt arena). Default off.\n"
+        L"  --heap-optimize       process-heap / arena optimization (arena_words, receipt arena). Default off.\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
         L"                        loco = locomotion Stages A/B/C; optional owned grid v2 published at site-13 exit;\n"
         L"                        cannot combine with brain or collide_lod; brain2 v2 can coexist; collide requires --loco-clone --loco-parallel --loco-owned-services and grid\n"
@@ -5823,7 +5928,8 @@ static void usage(void)
         L"                        its page restored and resumed (grid_probation_words, receipt loco.grid_probation)\n"
         L"  --grid-census         requires loco: opt-in soldier soft-grid reader census (default off; profile not required)\n"
         L"                        private-clone route calls and proven native reader entries per routed tick; occupancy is separate\n"
-        L"                        must be selected before the process first builds resident runtime clones\n"
+        L"                        must be selected before the process first builds resident runtime clones\n");
+    say(L"%ls",
         L"  --army-unit-shadow    requires profile or a simulation feature: item 4 Stage A instrumentation of the army per-unit\n"
         L"                        update (sites 18/101/103): per-unit 0x581F30 cost, owner-only reasons, RNG draws, foreign-unit\n"
         L"                        witness, command classes and projected site-18 time (army_unit_words, receipt army_unit);\n"
@@ -5855,6 +5961,8 @@ static void usage(void)
         L"                        tick start >= admission tick + K; a planner with an outstanding think is refused at site 34\n"
         L"  --ai-deferred-k K     with --ai-deferred: consumption delay in ticks, 1..32 (default 1)\n"
         L"  --ai-deferred-budget B  with --ai-deferred: costed node calls per slice, 1..65535 (default 2)\n"
+        );
+    say(L"%ls",
         L"  --ai-ctrl-census      needs a routed tick (profile or a simulation feature); excludes ai_ctrl/ai_async2: AI controller scoring\n"
         L"                        batches observed (batches, scorer calls, eligible units, histogram repeats, B44/B41 transitions inside\n"
         L"                        a batch); native always executes (ai_ctrl words, one line)\n"
@@ -5870,7 +5978,8 @@ static void usage(void)
         L"                        with --ai-prepass-census; needs a routed tick, excludes ai_async2\n"
         L"  --ai-poly-shadow      needs a routed tick, excludes ai_async2/--ai-prepass-census/--ai-poly: exact-kernel shadow. The native 0x80DCF0 OBB/polygon\n"
         L"                        predicate answers; its SSE replacement (src/ai/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
-        L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n"
+        L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n");
+    say(L"%ls",
         L"  --ai-poly             same routing; the replacement answers, native on any guard refusal (counted by reason in the ai_poly row)\n"
         L"  --ai-record-test-shadow  needs --ai-poly or --ai-poly-shadow (--features all implies --ai-poly), excludes --ai-record-test/--ai-prepass-census: the\n"
         L"                        kernel of --ai-poly extended to the ALTERNATE placement delegate 0x13376AC (slot 0x13376EC = 0x6A99E0 -> 0x6A94B0\n"
@@ -5891,7 +6000,8 @@ static void usage(void)
         L"                        native memo gate). Needs a routed tick (e.g. --features all), excludes ai_ctrl/ai_async2/--ai-deferred; combines with\n"
         L"                        --ai-poly and --ai-spiral-census (ai_claim_once row: entries, masked recomputes, refusals, controller-state hash)\n"
         L"  --ai-claim-once-census  the same claim loop WITHOUT the elision (native recomputes) publishing the same controller-state hash: the native\n"
-        L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n"
+        L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n");
+    say(L"%ls",
         L"  --brain-retarget-jitter  SHARED-SIMULATION GAMEPLAY DEVIATION (both armies, the player included; replays desync vs vanilla; opt-in, NEVER implied by\n"
         L"                        --features all). A soldier whose melee target became invalid this tick no longer re-searches immediately: its\n"
         L"                        search cooldown is set to (agent+0x2C & 0xF) ticks (the engine's own per-man jitter, 0..15), so a target-loss\n"
@@ -5906,7 +6016,8 @@ static void usage(void)
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
-        L"  --collide-lod-m N      far-unit surface separation in world metres, 1..100000 (default 40)\n"
+        L"  --collide-lod-m N      far-unit surface separation in world metres, 1..100000 (default 40)\n");
+    say(L"%ls",
         L"  --collide-census      with profile: enable costly per-pair collision timers (default off; site 5 always timed)\n"
         L"  --observe-seconds N   stop monitoring after N seconds (default: until exit)\n"
         L"  --exit-game-after-observe  after the bound, stop the runtime (confirmed STOPPED, up to 60 s while it\n"
@@ -6051,6 +6162,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--tick-core-ab")) o->tick_core_ab = TRUE;
         else if (!wcscmp(name, L"--army-solver-memo")) o->army_solver_memo = TRUE;
         else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
+        else if (!wcscmp(name, L"--alloc-census")) o->alloc_census = TRUE;
+        else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
+        else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -6490,7 +6604,9 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
-    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
+                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) |
+                             (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
