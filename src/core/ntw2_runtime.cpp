@@ -215,13 +215,17 @@ void PublishMemory() { // lifecycle sequence is held by the monitor
 U vaWords[NTW2_VA_WATCH_WORDS];
 ULONGLONG vaNextSample=0, vaStart=0;
 void VaWatchSample() {
-    if(!(config.va_watch_flags&NTW2_VA_WATCH)) return;
+    if(!(config.va_watch_flags&(NTW2_VA_WATCH|NTW2_HEAP_OPTIMIZE))) return;
     const ULONGLONG now=GetTickCount64();
     if(now<vaNextSample) return;
     vaNextSample=now+1000;
     if(!vaStart) vaStart=now;
     MEMORYSTATUSEX memory={}; memory.dwLength=sizeof(memory);
     if(!GlobalMemoryStatusEx(&memory)) return;
+    if(!(config.va_watch_flags&NTW2_VA_WATCH)) {
+        ntw2_arena_release::OnVaWatch(static_cast<U>(memory.ullAvailVirtual>>20));
+        return;
+    }
     ULONGLONG largestFree=0, reserved=0, committed=0, image=0, mapped=0; U freeRegions=0;
     MEMORY_BASIC_INFORMATION info;
     for(U address=0; VirtualQuery(reinterpret_cast<const void*>(address),&info,sizeof(info))==sizeof(info); ) {
