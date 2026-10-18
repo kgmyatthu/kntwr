@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_planner_prepass.{h,cpp}: the walk key, the gathered-list hash, the ordered query log, the D1 cross-child
+// Oracle for src/ai/ntw2_planner_prepass.{h,cpp}: the walk key, the gathered-list hash, the ordered query log, the D1 cross-child
 // snapshot, the census engine's counting, and the 0x559090 presize clone chain executed in a private relocated image against the
 // native routine. No running game or installed file is modified; only private loader/heap boundaries are supplied.
 #define _CRT_SECURE_NO_WARNINGS

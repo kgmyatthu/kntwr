@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_ai_ctrl_geometry.{h,cpp} against the real supported image mapped privately (0x76DCD0 center distance,
+// Oracle for src/ai/ntw2_ai_ctrl_geometry.{h,cpp} against the real supported image mapped privately (0x76DCD0 center distance,
 // 0x53FBE0 + 0x80E9D0 pose [both branches], 0x57E910 identity getter).  Bit-exact comparison; the two production naked
 // trampolines are exercised through a harness that reproduces the cloned scorer's register/stack contract.
 #define _CRT_SECURE_NO_WARNINGS

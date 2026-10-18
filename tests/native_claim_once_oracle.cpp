@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_claim_once.{h,cpp} (--ai-claim-once) on a private relocated mapping of the owned image.
+// Oracle for src/ai/ntw2_claim_once.{h,cpp} (--ai-claim-once) on a private relocated mapping of the owned image.
 //  * equivalence: whenever no recompute is masked (valid memo, one tailing entry, refusals) the host loop (Gate) performs exactly the call
 //    sequence of the ORIGINAL 0x7524A0 bytes: claimed units in order, row bytes afterwards, one post-loop 0x84B1D0(ctrl, 0); the loop reloads
 //    [L+8] each iteration (a claim callback that appends a row is visited);

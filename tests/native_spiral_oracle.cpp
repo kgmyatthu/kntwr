@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_spiral.{h,cpp} (--ai-spiral-census / --ai-spiral-cap-m) on a private relocated mapping of the owned image:
+// Oracle for src/ai/ntw2_spiral.{h,cpp} (--ai-spiral-census / --ai-spiral-cap-m) on a private relocated mapping of the owned image:
 //  * clone wiring: the four PS_* call groups reach the host forwarders, PS_7FCA40 still calls PS_7FCA90;
 //  * spiral: the forwarder path (PS_7FCA40 -> PS_7FCA90 -> SpiralProbe) equals native 0x7FCA40 byte for byte with N = 0 (candidate
 //    sequence, out record, return, x87/MXCSR), and with a cap N equals native 0x7FCA40 handed spec+0x24 = (float)N; not-found exactly

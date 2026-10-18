@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_retarget_jitter.{h,cpp} (--brain-retarget-jitter and the 0x6671A0 host mirror) on a private relocated mapping of the owned image.
+// Oracle for src/brain/ntw2_retarget_jitter.{h,cpp} (--brain-retarget-jitter and the 0x6671A0 host mirror) on a private relocated mapping of the owned image.
 //  * flag OFF: the mirror (TrackerTick) is bit-identical to the ORIGINAL bytes of 0x6671A0 running in the private mapping with its six call sites
 //    (0x6795A0, 0x63CE00, 0x553420, 0x553220, 0x6C6910, 0x662960) redirected to the same scripted fakes: return value, all 0x20 tracker bytes, the
 //    target agents' +0x474 counters (the real 0x63CE00 / 0x662960 bytes run inside the fakes) and the full call trace (callee, every argument incl. the

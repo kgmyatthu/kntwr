@@ -1,4 +1,4 @@
-// --ai-ctrl-* oracle (src/ntw2_ai_ctrl_batch.{h,cpp}) on the mapped approved image (no game process, no .text patch).
+// --ai-ctrl-* oracle (src/ai/ntw2_ai_ctrl_batch.{h,cpp}) on the mapped approved image (no game process, no .text patch).
 //  1. The seven-counter leaf 0x749D90: the module's exact port (ntw2_ai_ctrl::Histogram) versus the ORIGINAL machine code, byte for
 //     byte over the 28 output bytes: every class/subtype branch x B41/B44 combination x filter values (low byte decides), list
 //     multiplicity/duplicates, empty lists, filter 0 versus 1, deterministic random mixes.

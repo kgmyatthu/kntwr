@@ -1,4 +1,4 @@
-// Oracle for src/ntw2_target_cull.{h,cpp} (--brain-target-cull[-shadow]) on a private relocated mapping of the owned image.
+// Oracle for src/brain/ntw2_target_cull.{h,cpp} (--brain-target-cull[-shadow]) on a private relocated mapping of the owned image.
 //  * Loop: the reordered mirror of 0x553590 against the ORIGINAL 0x553590 bytes on random synthetic units: same candidate pointer, same
 //    *outScore bits, scratch count 0, identical static-guard call sequence; maxDist in {FLT_MAX, 100, 15, 3, 0, NaN}, flag on/off (the real
 //    0x659480 cached branch), empty units / men with no candidates, duplicated candidates (first-index tie-break), equal scores, huge u32

@@ -1,4 +1,4 @@
-// Differential oracle for --ai-record-test-shadow / --ai-record-test (src/ntw2_record_test.{h,cpp} + the alt-scope branch of
+// Differential oracle for --ai-record-test-shadow / --ai-record-test (src/ai/ntw2_record_test.{h,cpp} + the alt-scope branch of
 // ntw2_poly::Gate). The real 0x80DCF0 -> 0x10EC150 closure of a private relocated copy of the supported image answers the reference; the
 // alternate-delegate route is modelled by a fastcall stand-in for the PS_6A99E0 clone chain that forwards to ntw2_poly::Gate exactly the way
 // the clone chain's 0x7F1E5A call does (ECX = shape, stack = polygon). Asserts:
