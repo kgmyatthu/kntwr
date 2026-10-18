@@ -223,6 +223,9 @@ typedef struct Options {
     uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags bits 0..3) */
     BOOL ai_claim_once;      /* --ai-claim-once: ntw2_config::ai_ctrl_flags bit 8 (NTW2_AI_CLAIM_ONCE) */
     BOOL ai_claim_once_census; /* --ai-claim-once-census: bit 9 (NTW2_AI_CLAIM_ONCE_CENSUS) */
+    BOOL brain_target_cull_shadow; /* --brain-target-cull-shadow: bit 10 (NTW2_AI_TARGET_CULL_SHADOW) */
+    BOOL brain_target_cull;  /* --brain-target-cull: bit 11 (NTW2_AI_TARGET_CULL) */
+    BOOL brain_retarget_jitter; /* --brain-retarget-jitter: bit 12 (NTW2_AI_RETARGET_JITTER); opt-in only, never implied by --features all */
     uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
@@ -1214,6 +1217,7 @@ static const char *const k_ai_async2_metrics[NTW2_AI_ASYNC2_WORDS] = { NTW2_AI_A
 static const char *const k_ai_async2_route_metrics[NTW2_AI_ASYNC2_ROUTE_WORDS] = { NTW2_AI_ASYNC2_ROUTE_LABELS };
 static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_AI_DEFERRED_LABELS };
 static const char *const k_ai_ctrl_reuse_metrics[NTW2_AI_CTRL_REUSE_WORDS] = { NTW2_AI_CTRL_REUSE_LABELS };
+static const char *const k_brain_retarget_jitter_metrics[4] = { NTW2_AI_RETARGET_JITTER_LABELS };
 static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORDS] = { NTW2_AI_PREPASS_CENSUS_LABELS };
 static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
 static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
@@ -1323,6 +1327,13 @@ static void print_ai_claim_once(const uint32_t *w)
         L" no_final_tail=%lu hashed_calls=%lu hash=0x%08lX\n",
         (unsigned long)w[24], (unsigned long)w[25], (double)w[25] / w[24], (unsigned long)(w[30] & 0xFFu), (unsigned long)w[26], (unsigned long)w[27],
         (unsigned long)w[28], (unsigned long)w[29], (unsigned long)((w[30] >> 8) & 0xFFu), (unsigned long)(w[30] >> 16), (unsigned long)w[31]);
+}
+/* --brain-retarget-jitter (src/ntw2_retarget_jitter.h): ai_ctrl_reuse_words[20..23] (tracker_calls, losses, jittered, delay_sum). */
+static void print_brain_retarget_jitter(const uint32_t *w)
+{
+    if (!w[20]) return;
+    say(L"  brain_retarget_jitter: tracker_calls=%lu losses=%lu (%.3f%% of calls) jittered=%lu (%.1f%% of losses) delay_sum=%lu mean_delay=%.2f ticks (of the jittered)\n",
+        (unsigned long)w[20], (unsigned long)w[21], pct(w[21], w[20]), (unsigned long)w[22], pct(w[22], w[21]), (unsigned long)w[23], w[22] ? (double)w[23] / w[22] : 0.0);
 }
 /* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
 static void print_ai_spiral(const uint32_t *w)
@@ -2252,6 +2263,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
+    print_brain_retarget_jitter(s->ai_ctrl_reuse_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -4574,6 +4586,20 @@ static BOOL write_receipt(Run *r, int exit_code)
                (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)(cw[30] & 0xFFu), (unsigned long)((cw[30] >> 8) & 0xFFu),
                (unsigned long)(cw[30] >> 16), (unsigned long)cw[31]);
     } else sb_fmt(&b, "  \"ai_claim_once\": null,\n");
+    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_RETARGET_JITTER)) {
+        const uint32_t *jw = r->last.ai_ctrl_reuse_words + 20;
+        unsigned jitter_index;
+        sb_fmt(&b, "  \"brain_retarget_jitter\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
+        for (jitter_index = 0; jitter_index < 4; ++jitter_index)
+            sb_fmt(&b, ", \"%s\": %lu", k_brain_retarget_jitter_metrics[jitter_index], (unsigned long)jw[jitter_index]);
+        sb_fmt(&b, ", \"losses_per_call\": ");
+        sb_ratio(&b, jw[1], jw[0]);
+        sb_fmt(&b, ", \"jittered_share_of_losses\": ");
+        sb_ratio(&b, jw[2], jw[1]);
+        sb_fmt(&b, ", \"mean_delay_ticks\": ");
+        sb_ratio(&b, jw[3], jw[2]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"brain_retarget_jitter\": null,\n");
     if (r->have_status && r->cfg.ai_prepass_flags) {
         unsigned prepass_index;
         sb_fmt(&b, "  \"ai_prepass_census\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
@@ -5225,7 +5251,9 @@ static int install_runtime(Run *r)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u);
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
+                           (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
+                           (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
@@ -5833,6 +5861,17 @@ static void usage(void)
         L"                        --ai-poly and --ai-spiral-census (ai_claim_once row: entries, masked recomputes, refusals, controller-state hash)\n"
         L"  --ai-claim-once-census  the same claim loop WITHOUT the elision (native recomputes) publishing the same controller-state hash: the native\n"
         L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n"
+        L"  --brain-retarget-jitter  SHARED-SIMULATION GAMEPLAY DEVIATION (both armies, the player included; replays desync vs vanilla; opt-in, NEVER implied by\n"
+        L"                        --features all). A soldier whose melee target became invalid this tick no longer re-searches immediately: its\n"
+        L"                        search cooldown is set to (agent+0x2C & 0xF) ticks (the engine's own per-man jitter, 0..15), so a target-loss\n"
+        L"                        wave of searches spreads over 16 ticks; meanwhile the man has no target (walks to its slot or stands, as in the\n"
+        L"                        native 40..55-tick failed-search wait). Forced melee targets (enemy within 3 m), the periodic 64-tick clear and the\n"
+        L"                        failed-search cooldown stay native. Needs a routed tick (e.g. --features all) and excludes ai_ctrl/ai_async2 and\n"
+        L"                        --ai-ctrl-geometry (brain_retarget_jitter row: tracker_calls, losses, jittered, delay_sum)\n"
+        L"  --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay\n"
+        L"                        change. Needs a routed tick, excludes ai_ctrl/ai_async2/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
+        L"  --brain-target-cull-shadow  native answers every target search while the host replacement runs beside it and is compared (mismatch\n"
+        L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -5916,6 +5955,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->ai_ctrl_flags = 0;
     o->ai_claim_once = FALSE;
     o->ai_claim_once_census = FALSE;
+    o->brain_target_cull_shadow = FALSE;
+    o->brain_target_cull = FALSE;
+    o->brain_retarget_jitter = FALSE;
     o->ai_prepass_flags = 0;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
@@ -6029,6 +6071,12 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             o->ai_claim_once = TRUE;
         } else if (!wcscmp(name, L"--ai-claim-once-census")) {
             o->ai_claim_once_census = TRUE;
+        } else if (!wcscmp(name, L"--brain-target-cull-shadow")) {
+            o->brain_target_cull_shadow = TRUE;
+        } else if (!wcscmp(name, L"--brain-target-cull")) {
+            o->brain_target_cull = TRUE;
+        } else if (!wcscmp(name, L"--brain-retarget-jitter")) {
+            o->brain_retarget_jitter = TRUE;
         } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
             uint32_t cap;
             NEEDVAL();
@@ -6121,6 +6169,13 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                              !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
         errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
                L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
+        return -1;
+    }
+    if ((o->brain_target_cull || o->brain_target_cull_shadow || o->brain_retarget_jitter) &&
+        ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & NTW2_AI_CTRL_GEOMETRY) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
+         !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
+        errsay(L"--brain-target-cull / --brain-target-cull-shadow / --brain-retarget-jitter need a routed tick (add profile or a simulation feature, e.g. --features all), "
+               L"exclude the ai_ctrl and ai_async2 features and --ai-ctrl-geometry; --brain-target-cull and --brain-target-cull-shadow are exclusive.\n");
         return -1;
     }
     if (o->ai_prepass_flags && (o->mask & NTW2_AI_ASYNC2)) {
@@ -6399,7 +6454,9 @@ int wmain(int argc, wchar_t **argv)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u);
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
+                           (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
+                           (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
 
     if (r->opt.replay[0]) {
