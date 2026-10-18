@@ -3092,17 +3092,30 @@ int main(int argc,char** argv) {
         for(unsigned k=0;k<2;++k) pAlloc(fakeProvider,nullptr,&outs[k],256u);
         Check(outs[0].ptr!=0 && outs[1].ptr!=0,"hooked provider alloc returns heap blocks");
         pFree(fakeProvider,nullptr,outs[0].ptr);
+        alignas(4) uint8_t fakePf[0x200]={};
+        U sub1=0, sub2=0, oldFree=0x12345678u;
+        sub1=A(&sub2); sub2=0;
+        *reinterpret_cast<U*>(fakePf+0x170)=oldFree;
+        *reinterpret_cast<U*>(fakePf+0x178)=0xC8u;
+        *reinterpret_cast<U*>(fakePf+0x17c)=A(&sub1);
+        *reinterpret_cast<U*>(fakePf+0x184)=0x3E8u;
+        Put(model,0xB4,A(fakePf));
         Check(stop(nullptr)==0,"alloc census stop succeeds");
+        Put(model,0xB4,0);
+        Check(*reinterpret_cast<U*>(fakePf+0x17c)==0u && *reinterpret_cast<U*>(fakePf+0x170)==A(&sub1) && sub2==oldFree,
+              "alloc-fix ReclaimTick splices orphaned pathfinder +0x17C waypoint subnodes back onto +0x170 freelist");
         Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
               "alloc census stop restores provider vtable slots");
         Check(ReadState(state,snapshot) && snapshot.alloc_census_words[8]==0u && snapshot.alloc_census_words[9]==256u &&
               snapshot.alloc_census_words[10]==1u && snapshot.alloc_census_words[13]==512u &&
               snapshot.alloc_census_words[14]==2u && snapshot.alloc_census_words[15]==1u &&
+              snapshot.alloc_census_words[19]==2u && snapshot.alloc_census_words[20]==2u*0x70u &&
+              snapshot.alloc_census_words[21]==1u &&
               snapshot.alloc_census_words[22]==0u && snapshot.alloc_census_words[23]==0u &&
               snapshot.alloc_census_words[32+2]==256u && snapshot.alloc_census_words[32+3]==1u &&
               snapshot.alloc_census_words[32+4]==2u && snapshot.alloc_census_words[32+5]==1u &&
               snapshot.alloc_census_words[32+6]==512u,
-              "alloc census stop retains final live/peak/alloc/free counts and releases storage");
+              "alloc census stop retains final live/peak/alloc/free/fix counts and releases storage");
         HeapFree(GetProcessHeap(),0,reinterpret_cast<void*>(static_cast<uintptr_t>(outs[1].ptr)));
         Replace(At(0x13071a4),oldHeapAlloc); Replace(At(0x13071a8),oldHeapFree);
         config.va_watch_flags=0;

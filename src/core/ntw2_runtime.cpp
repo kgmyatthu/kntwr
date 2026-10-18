@@ -848,6 +848,7 @@ extern "C" __declspec(noinline) U __stdcall LeaveSite(U eax) { // EAX of the exi
         }
         if (frame.site<kBrainFirst+kBrainEntries) brainFamily=frame.family;
     }
+    if (frame.site==6 && (config.va_watch_flags&NTW2_ALLOC_CENSUS)) ntw2_alloc_census::ReclaimTick(world.model);
     if (frame.site==34) EndWalkScope(us);
     if (frame.site==40) { plannerWalkWords[7]+=us; ntw2_prepass::WalkEnd(eax,elapsed,end.QuadPart); }
     if (frame.site==41) {
@@ -2346,8 +2347,10 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         // enter native code during the short activation capture.
         while (Load(&activationCapture.state)==2) Sleep(0);
         U result=0;
-        __try { result=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b); }
-        __finally { _InterlockedDecrement(&gateDepth); }
+        __try {
+            result=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b);
+            if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::ReclaimTick(Address(model));
+        } __finally { _InterlockedDecrement(&gateDepth); }
         return result;
     }
     const U tid=GetCurrentThreadId();
@@ -2416,6 +2419,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         Ai2TickStart(); // one effect seam: service a posted worker call; join only an already-complete batch
         AiBarrier(); // no previous tick is permitted to retain native AI frames
         result=reinterpret_cast<Tick>(privateTick)(model,edx,a,b);
+        if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::ReclaimTick(Address(model));
         Ai2TickEnd(); ai2Published=true; AiBarrier(); // normal completion is included in the tick duration
         QueryPerformanceCounter(&end);
         const U bodyUs=Micro(start.QuadPart,end.QuadPart);
@@ -3359,6 +3363,7 @@ bool StopModules() {
     ntw2_army_storm::Stop();
     ntw2_army_solver::Stop(); // same drain: the final counters stay published
     if (config.va_watch_flags&NTW2_ALLOC_CENSUS) {
+        ntw2_alloc_census::ReclaimTick(world.model);
         ntw2_alloc_census::Stop();
         StateBegin(); ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,0,true); StateEnd();
     }

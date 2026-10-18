@@ -91,7 +91,7 @@ void Stop();
 void Snapshot(volatile U* words, U slotsOwned, bool force = false);
 
 // Phase B accounting helpers for --alloc-fix hooks/clones.
-void RecordFixFreed(U bytes, U siteBit = 1u);
+void RecordFixFreed(U blocks, U bytes, U siteBit = 1u);
+void ReclaimTick(U model);
 U CurrentMode();
-
 } // namespace ntw2_alloc_census

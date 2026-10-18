@@ -45,7 +45,7 @@ struct ThreadSlot {
 constexpr U kPtrBytes = sizeof(PtrSlot) * kPtrCapacity;
 constexpr U kCallsiteBytes = sizeof(CallsiteEntry) * kCallsiteCapacity;
 constexpr U kTotalStorageBytes = kPtrBytes + kCallsiteBytes;
-constexpr U kMaxPtrProbe = 64u;
+constexpr U kMaxPtrProbe = 128u;
 constexpr U kMaxCallsiteProbe = 64u;
 constexpr U kThreadSlots = 512u;
 constexpr ULONGLONG kSampleIntervalMs = 10000ull;
@@ -179,9 +179,9 @@ __forceinline bool FollowsCallFast(U address) {
     return false;
 }
 
-__forceinline void CaptureCallsite(const U* sp, U ret0, U& outCallsiteVa, U& outCaller2Va) {
-    outCallsiteVa = 0;
-    outCaller2Va = 0;
+__forceinline void CaptureCallsiteFast(const U* sp, U ret0, U& outCallsiteVa, U& outNextScanIdx) {
+    outCallsiteVa = ret0 - g_delta;
+    outNextScanIdx = 0u;
     const U stackBase = __readfsdword(0x04);
     const U stackLimit = __readfsdword(0x08);
     const uintptr_t spAddr = reinterpret_cast<uintptr_t>(sp);
@@ -192,30 +192,64 @@ __forceinline void CaptureCallsite(const U* sp, U ret0, U& outCallsiteVa, U& out
         const U callerFF7F20 = sp[5];
         startIdx = IsWrapperRet(callerFF7F20) ? 8u : 5u;
     }
-
-    U found = 0;
-    U rets[3] = {};
-    const U maxIdx = startIdx + 28u;
-    for (U i = startIdx; i < maxIdx && found < 3u; ++i) {
-        if (reinterpret_cast<uintptr_t>(&sp[i + 1]) > stackBase) break;
-        const U w = sp[i];
-        if (w >= g_textBegin && w < g_textEnd) {
-            if (i != startIdx && !FollowsCallFast(w)) continue;
-            const U pref = w - g_delta;
-            if (found > 0 && (IsAllocatorInternalPreferred(pref) || IsWrapperRet(w))) continue;
-            rets[found++] = pref;
-        } else if (g_cloneBase && w - g_cloneBase < g_cloneBytes) {
-            const U origin = ntw2_clone_origin(g_clones, w, nullptr);
+    if (reinterpret_cast<uintptr_t>(&sp[startIdx + 1]) <= stackBase) {
+        const U w0 = sp[startIdx];
+        if (w0 >= g_textBegin && w0 < g_textEnd) {
+            outCallsiteVa = w0 - g_delta;
+            outNextScanIdx = startIdx + 1u;
+            return;
+        }
+        if (g_cloneBase && w0 - g_cloneBase < g_cloneBytes) {
+            const U origin = ntw2_clone_origin(g_clones, w0, nullptr);
             if (origin) {
-                rets[found++] = origin;
+                outCallsiteVa = origin;
+                outNextScanIdx = startIdx + 1u;
+                return;
             }
         }
     }
-    outCallsiteVa = rets[0] ? rets[0] : (ret0 - g_delta);
-    outCaller2Va = rets[1];
+    const U maxIdx = startIdx + 24u;
+    for (U i = startIdx; i < maxIdx; ++i) {
+        if (reinterpret_cast<uintptr_t>(&sp[i + 1]) > stackBase) break;
+        const U w = sp[i];
+        if (w >= g_textBegin && w < g_textEnd && FollowsCallFast(w)) {
+            outCallsiteVa = w - g_delta;
+            outNextScanIdx = i + 1u;
+            return;
+        }
+        if (g_cloneBase && w - g_cloneBase < g_cloneBytes) {
+            const U origin = ntw2_clone_origin(g_clones, w, nullptr);
+            if (origin) {
+                outCallsiteVa = origin;
+                outNextScanIdx = i + 1u;
+                return;
+            }
+        }
+    }
 }
 
-__forceinline U FindOrInsertCallsite(U callsiteVa, U sizeClass, U caller2Va) {
+__forceinline U CaptureCaller2Slow(const U* sp, U nextScanIdx) {
+    if (!nextScanIdx) return 0u;
+    const U stackBase = __readfsdword(0x04);
+    const U maxIdx = nextScanIdx + 28u;
+    for (U i = nextScanIdx; i < maxIdx; ++i) {
+        if (reinterpret_cast<uintptr_t>(&sp[i + 1]) > stackBase) break;
+        const U w = sp[i];
+        if (w >= g_textBegin && w < g_textEnd) {
+            if (!FollowsCallFast(w)) continue;
+            const U pref = w - g_delta;
+            if (IsAllocatorInternalPreferred(pref) || IsWrapperRet(w)) continue;
+            return pref;
+        }
+        if (g_cloneBase && w - g_cloneBase < g_cloneBytes) {
+            const U origin = ntw2_clone_origin(g_clones, w, nullptr);
+            if (origin) return origin;
+        }
+    }
+    return 0u;
+}
+
+__forceinline U FindOrInsertCallsite(U callsiteVa, U sizeClass, const U* sp, U nextScanIdx) {
     const U keyHi = sizeClass + 1u;
     const LONGLONG key = (static_cast<LONGLONG>(keyHi) << 32) | static_cast<LONGLONG>(callsiteVa);
     U idx = ((callsiteVa * 2654435761u) ^ (sizeClass * 0x9E3779B9u)) & kCallsiteMask;
@@ -225,14 +259,18 @@ __forceinline U FindOrInsertCallsite(U callsiteVa, U sizeClass, U caller2Va) {
         const U lo = keyWords[0];
         const U hi = keyWords[1];
         if (lo == callsiteVa && hi == keyHi) {
-            if (caller2Va && !e.caller2_va) e.caller2_va = static_cast<LONG>(caller2Va);
+            if (!e.caller2_va && nextScanIdx) {
+                const U c2 = CaptureCaller2Slow(sp, nextScanIdx);
+                if (c2) e.caller2_va = static_cast<LONG>(c2);
+            }
             return idx;
         }
         if (lo == 0 && hi == 0) {
             const LONGLONG prev = _InterlockedCompareExchange64(&e.key, key, 0);
             if (prev == 0) {
                 _InterlockedIncrement(&g_callsiteUsed);
-                if (caller2Va) e.caller2_va = static_cast<LONG>(caller2Va);
+                const U c2 = CaptureCaller2Slow(sp, nextScanIdx);
+                if (c2) e.caller2_va = static_cast<LONG>(c2);
                 return idx;
             }
             if (prev == key) return idx;
@@ -242,8 +280,9 @@ __forceinline U FindOrInsertCallsite(U callsiteVa, U sizeClass, U caller2Va) {
 }
 
 __forceinline bool InsertPtr(U ptr, U meta) {
-    U idx = HashPtr(ptr) & kPtrMask;
-    for (U probe = 0; probe < kMaxPtrProbe; ++probe, idx = (idx + 1u) & kPtrMask) {
+    const U base = HashPtr(ptr);
+    for (U probe = 0; probe < kMaxPtrProbe; ++probe) {
+        const U idx = (base + ((probe * (probe + 1u)) >> 1)) & kPtrMask;
         const LONG cur = g_ptrs[idx].ptr;
         if (cur == 0 || cur == 1) {
             if (_InterlockedCompareExchange(&g_ptrs[idx].ptr, 2, cur) == cur) {
@@ -258,8 +297,9 @@ __forceinline bool InsertPtr(U ptr, U meta) {
 }
 
 __forceinline bool RemovePtr(U ptr, U& outMeta) {
-    U idx = HashPtr(ptr) & kPtrMask;
-    for (U probe = 0; probe < kMaxPtrProbe; ++probe, idx = (idx + 1u) & kPtrMask) {
+    const U base = HashPtr(ptr);
+    for (U probe = 0; probe < kMaxPtrProbe; ++probe) {
+        const U idx = (base + ((probe * (probe + 1u)) >> 1)) & kPtrMask;
         const LONG cur = g_ptrs[idx].ptr;
         if (cur == 0) return false;
         if (static_cast<U>(cur) == ptr) {
@@ -285,10 +325,10 @@ void RecordAlloc(U ptr, U rawSize, const U* sp, U ret0) {
     ++ntw2::probeDepth;
     __try {
         if (Load(&g_enabled) && g_ptrs && g_callsites) {
-            U callsiteVa = 0, caller2Va = 0;
-            CaptureCallsite(sp, ret0, callsiteVa, caller2Va);
+            U callsiteVa = 0, nextScanIdx = 0;
+            CaptureCallsiteFast(sp, ret0, callsiteVa, nextScanIdx);
             const U sizeClass = SizeClass(rawSize);
-            const U csId = FindOrInsertCallsite(callsiteVa, sizeClass, caller2Va);
+            const U csId = FindOrInsertCallsite(callsiteVa, sizeClass, sp, nextScanIdx);
             if (csId == UINT32_MAX) {
                 _InterlockedIncrement(&g_overflowCount);
             } else {
@@ -624,12 +664,49 @@ void Snapshot(volatile U* words, U slotsOwned, bool force) {
     for (U i = 0; i < NTW2_ALLOC_CENSUS_WORDS; ++i) words[i] = g_snapshot[i];
 }
 
-void RecordFixFreed(U bytes, U siteBit) {
-    _InterlockedIncrement(&g_fixFreedBlocks);
+void RecordFixFreed(U blocks, U bytes, U siteBit) {
+    _InterlockedExchangeAdd(&g_fixFreedBlocks, static_cast<LONG>(blocks));
     _InterlockedExchangeAdd(&g_fixFreedBytes, static_cast<LONG>(bytes));
     _InterlockedOr(&g_fixActiveSites, static_cast<LONG>(siteBit));
 }
 
+// Reclaims waypoint subnodes (`[node + 0x64]`) that `0x008021E0` (at `0x00802553`) and `0x0080ED40` (at `0x0080EEA0`)
+// popped from `[pathfinder + 0x170]` (`0x70`-byte node pool, `0x007E1630`) and that `0x007FE270` (at `0x007FE2E3..0x007FE2EB`)
+// pushed onto the dead freelist `[pathfinder + 0x17C]` (which no instruction in `Napoleon.exe` ever pops from).
+// Splices the `[pathfinder + 0x17C]` freelist chain back onto `[pathfinder + 0x170]` on the tick owner thread.
+void ReclaimTick(U model) {
+    if (Load(&g_mode) != static_cast<LONG>(kModeFix) || !model || model < 0x10000u) return;
+    ++ntw2::probeDepth;
+    __try {
+        const U pf = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(model + 0xB4u));
+        if (pf >= 0x10000u &&
+            *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(pf + 0x178u)) == 0xC8u &&
+            *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(pf + 0x184u)) == 0x3E8u) {
+            const U deadHead = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(pf + 0x17Cu));
+            if (deadHead >= 0x10000u) {
+                U cur = deadHead;
+                U tail = deadHead;
+                U count = 0;
+                constexpr U kMaxChain = 65536u;
+                while (cur >= 0x10000u && count < kMaxChain) {
+                    tail = cur;
+                    ++count;
+                    cur = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(cur));
+                }
+                if (cur == 0u && count > 0u) {
+                    const U oldFreeHead = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(pf + 0x170u));
+                    *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(tail)) = oldFreeHead;
+                    *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(pf + 0x170u)) = deadHead;
+                    *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(pf + 0x17Cu)) = 0u;
+                    RecordFixFreed(count, count * 0x70u, 1u);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _InterlockedIncrement(&g_hookFaults);
+    }
+    --ntw2::probeDepth;
+}
 U CurrentMode() {
     return static_cast<U>(Load(&g_mode));
 }
