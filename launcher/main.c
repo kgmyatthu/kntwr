@@ -1218,6 +1218,7 @@ static const char *const k_ai_async2_route_metrics[NTW2_AI_ASYNC2_ROUTE_WORDS] =
 static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_AI_DEFERRED_LABELS };
 static const char *const k_ai_ctrl_reuse_metrics[NTW2_AI_CTRL_REUSE_WORDS] = { NTW2_AI_CTRL_REUSE_LABELS };
 static const char *const k_brain_retarget_jitter_metrics[4] = { NTW2_AI_RETARGET_JITTER_LABELS };
+static const char *const k_brain_target_cull_metrics[4] = { NTW2_AI_TARGET_CULL_LABELS };
 static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORDS] = { NTW2_AI_PREPASS_CENSUS_LABELS };
 static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
 static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
@@ -1334,6 +1335,15 @@ static void print_brain_retarget_jitter(const uint32_t *w)
     if (!w[20]) return;
     say(L"  brain_retarget_jitter: tracker_calls=%lu losses=%lu (%.3f%% of calls) jittered=%lu (%.1f%% of losses) delay_sum=%lu mean_delay=%.2f ticks (of the jittered)\n",
         (unsigned long)w[20], (unsigned long)w[21], pct(w[21], w[20]), (unsigned long)w[22], pct(w[22], w[21]), (unsigned long)w[23], w[22] ? (double)w[23] / w[22] : 0.0);
+}
+/* --brain-target-cull[-shadow] (src/ntw2_target_cull.h): ai_ctrl_reuse_words[16..19] (calls, candidates, predicates, packed mismatch/flag bytes). */
+static void print_brain_target_cull(const uint32_t *w)
+{
+    if (!w[16]) return;
+    say(L"  brain_target_cull: loops=%lu candidates=%lu (%.1f/loop) predicates=%lu culled=%lu (%.2f%% of candidates; flag searches %lu) mismatches: result=%lu score=%lu scratch=%lu\n",
+        (unsigned long)w[16], (unsigned long)w[17], w[16] ? (double)w[17] / w[16] : 0.0, (unsigned long)w[18],
+        (unsigned long)(w[17] > w[18] ? w[17] - w[18] : 0u), pct(w[17] > w[18] ? w[17] - w[18] : 0u, w[17]), (unsigned long)(w[19] >> 24),
+        (unsigned long)(w[19] & 0xFFu), (unsigned long)((w[19] >> 8) & 0xFFu), (unsigned long)((w[19] >> 16) & 0xFFu));
 }
 /* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
 static void print_ai_spiral(const uint32_t *w)
@@ -2264,6 +2274,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
     print_brain_retarget_jitter(s->ai_ctrl_reuse_words);
+    if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -4600,6 +4611,20 @@ static BOOL write_receipt(Run *r, int exit_code)
         sb_ratio(&b, jw[3], jw[2]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"brain_retarget_jitter\": null,\n");
+    if (r->have_status && (r->cfg.ai_ctrl_flags & (NTW2_AI_TARGET_CULL_SHADOW | NTW2_AI_TARGET_CULL))) {
+        const uint32_t *tw = r->last.ai_ctrl_reuse_words + 16;
+        unsigned cull_index;
+        sb_fmt(&b, "  \"brain_target_cull\": {\"mode\": \"%s\"", (r->cfg.ai_ctrl_flags & NTW2_AI_TARGET_CULL) ? "live" : "shadow");
+        for (cull_index = 0; cull_index < 3; ++cull_index)
+            sb_fmt(&b, ", \"%s\": %lu", k_brain_target_cull_metrics[cull_index], (unsigned long)tw[cull_index]);
+        sb_fmt(&b, ", \"mismatch_result\": %lu, \"mismatch_score\": %lu, \"mismatch_scratch\": %lu, \"flag_searches\": %lu",
+               (unsigned long)(tw[3] & 0xFFu), (unsigned long)((tw[3] >> 8) & 0xFFu), (unsigned long)((tw[3] >> 16) & 0xFFu), (unsigned long)(tw[3] >> 24));
+        sb_fmt(&b, ", \"culled\": %lu, \"culled_share\": ", (unsigned long)(tw[1] > tw[2] ? tw[1] - tw[2] : 0u));
+        sb_ratio(&b, tw[1] > tw[2] ? tw[1] - tw[2] : 0u, tw[1]);
+        sb_fmt(&b, ", \"candidates_per_loop\": ");
+        sb_ratio(&b, tw[1], tw[0]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"brain_target_cull\": null,\n");
     if (r->have_status && r->cfg.ai_prepass_flags) {
         unsigned prepass_index;
         sb_fmt(&b, "  \"ai_prepass_census\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
