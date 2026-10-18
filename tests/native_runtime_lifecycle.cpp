@@ -2290,11 +2290,25 @@ int main(int argc,char** argv) {
     config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|0x10u; Check(start(&config)==1,"ai-claim-once beside an unknown ai_ctrl bit refused");
     config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==2,"ai-claim-once-census passes validation");
     config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==1,"ai-claim-once and its census are exclusive");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE<<2; Check(start(&config)==1,"bits 10..15 are reserved");
+    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER<<1; Check(start(&config)==1,"bits 13..15 are reserved");
     config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE; config.enabled_mask=NTW2_BATCH64;
     Check(start(&config)==1,"ai-claim-once without a routed tick refused");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-claim-once excludes ai_async2");
     config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-claim-once excludes the controller offload");
+    config.ai_ctrl_flags=0;
+    // --brain-target-cull-shadow / --brain-target-cull / --brain-retarget-jitter (bits 10..12): same routed-tick / exclusion rules, compose with the claim bits.
+    config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER;
+    Check(start(&config)==2,"brain-retarget-jitter passes validation and refuses a foreign main image");
+    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL; Check(start(&config)==2,"brain-target-cull passes validation");
+    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL_SHADOW; Check(start(&config)==2,"brain-target-cull-shadow passes validation");
+    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL|NTW2_AI_RETARGET_JITTER|NTW2_AI_CLAIM_ONCE; Check(start(&config)==2,"the brain-step levers compose with each other and the claim bit");
+    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL|NTW2_AI_TARGET_CULL_SHADOW; Check(start(&config)==1,"brain-target-cull and its shadow are exclusive");
+    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER|NTW2_AI_CTRL_GEOMETRY; Check(start(&config)==1,"the brain-step levers exclude the geometry mode (shared status words 16..23)");
+    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER|NTW2_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"brain-retarget-jitter combines with the histogram mode");
+    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER; config.enabled_mask=NTW2_BATCH64;
+    Check(start(&config)==1,"brain-retarget-jitter without a routed tick refused");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"brain-retarget-jitter excludes ai_async2");
+    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"brain-retarget-jitter excludes the controller offload");
     config.ai_ctrl_flags=0;
     // --ai-prepass-*: routed tick, no ai_async2, census combines only with presize, known bits only.
     config.enabled_mask=NTW2_AI_ASYNC; config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;

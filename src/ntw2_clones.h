@@ -174,6 +174,9 @@ enum ntw2_binding {
        SOLVER_SHIM replaces 53765A's call of the .aistbl trampoline 18F0D00 in CLONE_SOLVER_5373F0 (same ABI as 502770): naked, replays the
        trampoline's suppression test against the SOLVER_18F0A00 clone's return address, else tail-jumps to SOLVER_SOLVE. */
     NTW2_BIND_SOLVER_ASSIGN, NTW2_BIND_SOLVER_SOLVE, NTW2_BIND_SOLVER_SHIM,
+    /* --brain-retarget-jitter / --brain-target-cull (appended; src/ntw2_retarget_jitter.h): RJ_TRACKER_TICK replaces CLONE_STEP_676FD0's call 6775C4 of the
+       combat node's tracker tick 6671A0 (thiscall ECX = tracker (node+0x48), one stack argument = the agent, ret 4, EAX = target agent or 0): the host mirror. */
+    NTW2_BIND_RJ_TRACKER_TICK,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -327,6 +330,9 @@ enum ntw2_clone_id {
     NTW2_CLONE_SOLVER_617510, NTW2_CLONE_SOLVER_65D740, NTW2_CLONE_SOLVER_51A530, NTW2_CLONE_SOLVER_581AE0, NTW2_CLONE_SOLVER_576B30,
     NTW2_CLONE_SOLVER_57AFC0, NTW2_CLONE_SOLVER_555CA0, NTW2_CLONE_SOLVER_18F0A00, NTW2_CLONE_SOLVER_5373F0, NTW2_CLONE_SOLVER_18F1200,
     NTW2_CLONE_SOLVER_65D7D0, NTW2_CLONE_SOLVER_51A9A0,
+    /* --brain-retarget-jitter / --brain-target-cull (appended): pure-retarget copy of the combat node step 0x676FD0 (node vtable 0x1333E3C slot +8 -> thunk
+       0x66D750); its only change is the tracker tick call 0x6775C4 -> NTW2_BIND_RJ_TRACKER_TICK. */
+    NTW2_CLONE_STEP_676FD0,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

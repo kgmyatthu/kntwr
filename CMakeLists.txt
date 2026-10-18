@@ -209,6 +209,7 @@ if(NTW2_BUILD_RUNTIME)
                            src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ntw2_planner_search.cpp
                            src/ntw2_spiral.cpp
                            src/ntw2_claim_once.cpp
+                           src/ntw2_retarget_jitter.cpp
                            src/ntw2_record_test.cpp)
   foreach(_s IN LISTS NTW2_RUNTIME_SOURCES)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")

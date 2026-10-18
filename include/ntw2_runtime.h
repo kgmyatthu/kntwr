@@ -295,21 +295,33 @@ enum ntw2_memory_word {
 #define NTW2_AI_CTRL_GEOMETRY 0x4u  /* --ai-ctrl-geometry */
 #define NTW2_AI_CTRL_VERIFY 0x8u    /* --ai-ctrl-verify */
 #define NTW2_AI_CTRL_MODE_MASK 0xFu /* the four --ai-ctrl-* mode bits above */
-/* --ai-claim-once / --ai-claim-once-census (src/ntw2_claim_once.h): bits 8 / 9 of ai_ctrl_flags (bits 10..15 reserved, refused; the two exclude each
+/* --ai-claim-once / --ai-claim-once-census (src/ntw2_claim_once.h): bits 8 / 9 of ai_ctrl_flags (the two exclude each
    other). Not --ai-ctrl modes. ONCE: one 0x82F3A0 placement recompute per fallback claim call instead of one per claimed unit. CENSUS: the same loop
    without the elision, publishing the same controller-state hash (native reference for a bit-exact comparison). Both ride the same routed-tick /
    no-ai_async2 / no-ai_ctrl validation. */
 #define NTW2_AI_CLAIM_ONCE 0x100u
 #define NTW2_AI_CLAIM_ONCE_CENSUS 0x200u
 #define NTW2_AI_CLAIM_BITS (NTW2_AI_CLAIM_ONCE | NTW2_AI_CLAIM_ONCE_CENSUS)
-#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS)
-#define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry, 24..31 --ai-claim-once (ntw2_claim_once::Word) */
+/* --brain-target-cull-shadow / --brain-target-cull / --brain-retarget-jitter (src/ntw2_target_cull.h, src/ntw2_retarget_jitter.h): bits 10 / 11 / 12 of
+   ai_ctrl_flags (bits 13..15 reserved, refused). All three act on the soldier-brain stage's combat node step 0x676FD0 (routed through the step clone
+   CLONE_STEP_676FD0 behind a gate on the node vtable slot 0x1333E44, tick thread inside site 6): TARGET_CULL(_SHADOW) replaces the contact-list search 0x553420
+   (bit-exact; shadow = native answers + compare, the two exclude each other), RETARGET_JITTER delays a lost target's re-search by agent+0x2C & 0xF ticks
+   (SHARED-SIMULATION behaviour change, opt-in only, never implied by --features all). Same routed-tick / no-ai_async2 / no-ai_ctrl validation as the
+   claim bits, and exclusive with NTW2_AI_CTRL_GEOMETRY (which publishes the status words 16..23 the two levers use). */
+#define NTW2_AI_TARGET_CULL_SHADOW 0x400u
+#define NTW2_AI_TARGET_CULL 0x800u
+#define NTW2_AI_RETARGET_JITTER 0x1000u
+#define NTW2_AI_BRAIN_STEP_BITS (NTW2_AI_TARGET_CULL_SHADOW | NTW2_AI_TARGET_CULL | NTW2_AI_RETARGET_JITTER)
+#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS)
+#define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry (--ai-ctrl-geometry) or, without it, 16..19 --brain-target-cull and 20..23 --brain-retarget-jitter (ntw2_retarget_jitter::Word), 24..31 --ai-claim-once (ntw2_claim_once::Word) */
 #define NTW2_AI_CTRL_REUSE_LABELS \
     "batches", "scorer_calls", "eligible", "hist_calls", "hist_served", "hist_mismatch", "b44_b41_transitions_in_batch", \
     "hist_repeat_changed", "end_assign", "end_refresh", "end_callback", "end_exit", "max_scorer_calls_batch", \
     "hist_outside", "hist_first", "flags_latched", \
     "id_calls", "id_served", "pose_served", "dist_calls", "dist_served", "distinct_RV", "dist_mismatch", "boundary_repeat", \
     "claim_calls", "claim_entries", "claim_masked", "claim_calls_masked", "claim_refused_state", "claim_refused_other", "claim_packed", "claim_hash"
+/* Word labels of the two brain-step levers (words 16..19 / 20..23 of the same row; receipt objects brain_target_cull / brain_retarget_jitter). */
+#define NTW2_AI_RETARGET_JITTER_LABELS "tracker_calls", "losses", "jittered", "delay_sum"
 /* --ai-prepass-census / --ai-presize (ntw2_config::ai_prepass_flags; src/ntw2_planner_prepass.h). CENSUS: observation of the AI planner's
    child thinks and covered 0x7F1D40 walks on the thread that executes the think (AI worker under NTW2_AI_ASYNC); native always executes
    once, unchanged. PRESIZE: behaviour-preserving query-local reservation of the 0x559090 hit-pair buffer. Bits 0x4 / 0x8 are reserved
@@ -966,7 +978,8 @@ typedef struct ntw2_status {
        AI worker; a poll is a non-atomic snapshot. All zero without the flag; reset at activation, retained after stop. */
     uint32_t ai_deferred_words[NTW2_AI_DEFERRED_WORDS];
     /* --ai-ctrl-* reuse telemetry (appended after ai_deferred_words; NTW2_AI_CTRL_REUSE_LABELS): words 0..15 batch/histogram (ntw2_ai_ctrl::Word),
-       words 16..31 geometry (ntw2_ai_ctrl_geometry::FillStatus). Tick-owner writer; reset at activation, retained after stop. */
+       words 16..23 geometry (ntw2_ai_ctrl_geometry::FillStatus) or, without --ai-ctrl-geometry, 16..19 --brain-target-cull / 20..23 --brain-retarget-jitter,
+       words 24..31 --ai-claim-once. Tick-owner writer; reset at activation, retained after stop. */
     uint32_t ai_ctrl_reuse_words[NTW2_AI_CTRL_REUSE_WORDS];
     /* LOCO relink apply (--loco-relink-shadow / --loco-relink-workers; appended after ai_ctrl_reuse_words; src/loco/native_loco.h NTW2_LOCO_RELINK_LABELS,
        RelinkWord): mode 0 off / 1 shadow / 2 live, op/batch/flush-cause counts, owner log and apply times, pool dispatches, shadow mismatch counters.
@@ -1452,8 +1465,9 @@ static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeo
 static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&
-              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x30Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
-              NTW2_AI_CLAIM_ONCE == 0x100u && NTW2_AI_CLAIM_ONCE_CENSUS == 0x200u, "ai_ctrl_reuse row appends after ai_deferred_words");
+              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x1F0Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
+              NTW2_AI_CLAIM_ONCE == 0x100u && NTW2_AI_CLAIM_ONCE_CENSUS == 0x200u && NTW2_AI_TARGET_CULL_SHADOW == 0x400u && NTW2_AI_TARGET_CULL == 0x800u &&
+              NTW2_AI_RETARGET_JITTER == 0x1000u, "ai_ctrl_reuse row appends after ai_deferred_words");
 static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_cw_words) &&
               offsetof(ntw2_status,loco_cw_words) + NTW2_LOCO_CW_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_grid_build_words) && NTW2_LOCO_CW_WORDS == 32u &&
               NTW2_LOCO_RELINK_WORDS == 32u && NTW2_LOCO_RELINK_SHADOW == 0x200u && NTW2_LOCO_RELINK_WORKERS == 0x400u, "loco_relink row appends after ai_ctrl_reuse_words");

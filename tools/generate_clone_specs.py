@@ -1685,6 +1685,10 @@ SOURCES = [
     # 'private' like the AI2 sources; nothing rebased): the original 6C71D0 call and the 7FCA40 call go to the existing PS_* clones.
     ('OBS_6A99E0', 0x6A99E0, 0x6A9D31, 'private'),
     ('OBS_6A94B0', 0x6A94B0, 0x6A9593, 'private'),
+    # --brain-retarget-jitter / --brain-target-cull: the combat node's step 0x676FD0 (node vtable 0x1333E3C slot +8 = thunk 0x66D750, `cmp byte
+    # [node+71],0; je 676FD0`). One contiguous span through its out-of-line static-init tails (last jmp 678310, int3 padding from 678315). Pure
+    # retarget copy: only `call 6671A0` (6775C4, the single caller of the tracker tick) goes to the host mirror RJ_TRACKER_TICK.
+    ('STEP_676FD0', 0x676FD0, 0x678315, 'private'),
     # Contact responses (src/collision/native_contact.cpp, analysis/native-contact-response.md): the type-8 callback chain the
     # port transcribes or the owner replays. Pins only: nothing is cloned or patched. Already pinned above and reused:
     # PIN_LOCO_PROJECT 80E9D0, PIN_COLLIDE_RADIUS 81A670, PIN_COLLIDE_BUMP 1318038 (0.5), PIN_COLLIDE_ONE 1318048 (1.0),
@@ -1738,6 +1742,7 @@ HIDDEN_ABS_OK = {
 }
 HIDDEN_ABS_OK['SOLVER_18F1200'] = {0x18F1292: 0x00F25DB4, 0x18F129A: 0x00F25D48}   # [edx+disp]: image-base-relative offsets (edx = PIC base from 18F0200), not pointers
 HIDDEN_ABS_OK['SOLVER_51A9A0'] = {0x51AAB2: 0x01000000}   # mov dword ptr [esp+5Ah],01000000h: packed byte flags written into a stack struct (unrelocated), not a pointer
+HIDDEN_ABS_OK['STEP_676FD0'] = {0x6774C5: 0x01010000}   # mov dword ptr [esp+0A0h],01010000h at 6774BE: packed byte flags of the 659520 request struct, not a pointer
 
 RET = lambda n: bytes([0xC2]) + struct.pack('<H', n)  # noqa: E731
 
@@ -2417,6 +2422,7 @@ def clone_configs():
         *ai_ctrl_configs(),
         *prepass_configs(),
         *ps_configs(),
+        *step_configs(),
         *solver_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
@@ -2591,6 +2597,26 @@ PS_EXPECT_CENSUS = {'PS_6A95A0': (251, 11, 9, 0), 'PS_6C71D0': (471, 53, 16, 0),
                     'PS_808040': (347, 11, 22, 0), 'PS_WALK': (112, 17, 6, 0)}
 EXPECT_CALLS.update(PS_EXPECT_CALLS)
 EXPECT_CENSUS.update(PS_EXPECT_CENSUS)
+
+
+# --brain-retarget-jitter / --brain-target-cull (src/ntw2_retarget_jitter.h): pure-retarget copy of the combat node step 0x676FD0; the tracker tick call
+# 6775C4 (`lea ecx,[ebx+48]; push [ebx+4]; call 6671A0`, callee pops 4, returns the target agent in EAX) goes to the host mirror. Every other call
+# and the three virtual calls stay the original instructions (6770E9 vt+B4 of the neighbour agents, 6778AB / 677EED `call eax` on the order getters).
+def step_configs():
+    return [
+        dict(clone='STEP_676FD0', source='STEP_676FD0',
+             calls={0x6671A0: (Bind('RJ_TRACKER_TICK'), 1, [0x6775C4])},
+             indirect_calls={0x6770E9, 0x6778AB, 0x677EED},
+             expect_rets={s: b'\xc3' for s in (0x6774EC, 0x677573, 0x677B65, 0x677B82, 0x677EA4, 0x677FD2, 0x678116, 0x67813E, 0x67824F, 0x6782A8)}),
+    ]
+
+
+STEP_EXPECT_CALLS = {'STEP_676FD0': {0x10D0900, 0x126DEF6, 0x126DF40, 0x126E299, 0x52EDB0, 0x56DE10, 0x61E9A0, 0x629240, 0x62DF10, 0x639C10,
+                                     0x63BF40, 0x63CE00, 0x63E2E0, 0x6497D0, 0x654A80, 0x655B80, 0x659480, 0x659520, 0x659B70, 0x659DA0, 0x662960,
+                                     0x664100, 0x6669B0, 0x66B9D0, 0x679700, 0x679750, 0x6D03B0, 0x7F6720, 0x80E9D0}}
+STEP_EXPECT_CENSUS = {'STEP_676FD0': (1175, 67, 63, 0)}
+EXPECT_CALLS.update(STEP_EXPECT_CALLS)
+EXPECT_CENSUS.update(STEP_EXPECT_CENSUS)
 
 
 # --army-solver-memo / --army-solver-shadow (src/army/native_army_solver.h): a DEDICATED copy of the flag=1 assignment route, not the

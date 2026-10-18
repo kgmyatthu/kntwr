@@ -58,6 +58,7 @@
 #include "ntw2_planner_prepass.h"
 #include "ntw2_spiral.h"
 #include "ntw2_claim_once.h"
+#include "ntw2_retarget_jitter.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -362,6 +363,7 @@ U siteDepth, siteUs[NTW2_TRACE_SITES], siteCalls[NTW2_TRACE_SITES], siteThis[NTW
 U siteLastUs[NTW2_TRACE_SITES];
 // Sampler gate for --profile-site: the executing thread id while the selected site (index+1) is active, else 0.
 volatile U siteInProgress; U siteGateIndex; U siteGateDepth;
+volatile U brainScopeTid; // --brain-target-cull* / --brain-retarget-jitter: the tick thread's id while it executes site 6 (the soldier-brain stage), else 0
 U siteCallees[NTW2_TIMED_SITES];
 // Tick core census + placement (trace flags bits 3..31; NTW2_TICK_PCORE / NTW2_TICK_CORE_AB). The topology is read once per start
 // from the CPU set information (group 0, processor numbers 0..31: a 32-bit affinity mask); the census state is tick-owner only.
@@ -802,14 +804,14 @@ extern "C" __declspec(noinline) void __stdcall EnterSite(U site, U* returnSlot, 
     if (site==40) ntw2_prepass::WalkBegin(ecx,returnSlot[1],frame.returnAddress,0);
     QueryPerformanceCounter(&frame.start);
     CoreSample(frame.start.QuadPart); // tick core census (trace flags): the class sample costs one processor-number read
-    if (site==6) coreCensus.inSite6=true;
+    if (site==6) { coreCensus.inSite6=true; brainScopeTid=GetCurrentThreadId(); }
 }
 extern "C" __declspec(noinline) U __stdcall LeaveSite(U eax) { // EAX of the exiting callee (SiteExit passes its saved EAX)
     LARGE_INTEGER end;
     QueryPerformanceCounter(&end);
     const SiteFrame& frame=siteStack[--siteDepth];
     CoreSample(end.QuadPart);
-    if (frame.site==6) coreCensus.inSite6=false;
+    if (frame.site==6) { coreCensus.inSite6=false; brainScopeTid=0; }
     if ((config.enabled_mask&(NTW2_GRID_CENSUS|NTW2_AI_CENSUS)) || (config.loco_flags&NTW2_LOCO_GRID_PROBATION))
         ntw2_grid_census_site=siteDepth ? siteStack[siteDepth-1].site+1 : 0;
     const U us=Micro(frame.start.QuadPart,end.QuadPart);
@@ -1462,6 +1464,23 @@ __declspec(naked) void PsAltObserverGate() {
     __asm popad
     __asm popfd
     __asm ret
+}
+// --brain-target-cull* / --brain-retarget-jitter: slot +8 of the combat node vtable 0x1333E3C (0x1333E44 = thunk 0x66D750: `cmp byte [ecx+0x71],0; je 0x676FD0;
+// jmp 0x675710`). Integer-only (EAX and EFLAGS; ECX and the stack are the caller's untouched thiscall frame): on the tick thread inside site 6 the node runs the
+// pure-retarget clone of 0x676FD0 (its tracker tick call bound to ntw2_retarget_jitter::TrackerTick), everywhere else (other threads, outside the stage) the
+// original thunk. fs:[0x24] is TEB.ClientId.UniqueThread (GetCurrentThreadId); brainScopeTid is 0 outside site 6, so it never matches.
+U nodeStepClone, nodeStepOriginal;
+__declspec(naked) void NodeStepGate() {
+    __asm {
+        cmp byte ptr [ecx+0x71], 0
+        jne original
+        mov eax, dword ptr fs:[0x24]
+        cmp eax, dword ptr [brainScopeTid]
+        jne original
+        jmp dword ptr [nodeStepClone]
+    original:
+        jmp dword ptr [nodeStepOriginal]
+    }
 }
 // AI2_WALK 7F1D73: EAX = model in, ESI = static interest tree object (live root model+0xBC) out. A retained read
 // generation replaces exactly this resolution; registers other than ESI and EFLAGS are untouched.
@@ -2341,7 +2360,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     const U modelTick=WordOrZero(Address(model)+0x58);
     const U interval=tickLastStart ? Micro(tickLastStart,start.QuadPart) : 0;
     phaseUs[0]=phaseUs[1]=phaseUs[2]=0;
-    siteDepth=0; brainFamily=kNoFamily;
+    siteDepth=0; brainFamily=kNoFamily; brainScopeTid=0;
     memset(siteUs,0,sizeof(siteUs));
     memset(siteCalls,0,sizeof(siteCalls));
     if (_InterlockedCompareExchange(&tickOwner,static_cast<LONG>(tid),0)!=0) {
@@ -2495,6 +2514,8 @@ void SnapshotAiCtrl() {
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS-16;++i) row[16+i]=i<ntw2_ai_ctrl_geometry::kStatusWords ? geometry[i] : 0;
     static_assert(ntw2_claim_once::kWords==NTW2_AI_CTRL_REUSE_WORDS-24 && ntw2_ai_ctrl_geometry::kStatusWords<=8, "claim-once words fill the B half after the geometry words");
     ntw2_claim_once::Snapshot(row+24); // --ai-claim-once: all zero without the bit
+    static_assert(ntw2_retarget_jitter::kWords==4, "retarget-jitter words fill words 20..23");
+    if (config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER) ntw2_retarget_jitter::Snapshot(row+20); // --brain-retarget-jitter (exclusive with the geometry mode that owns 16..23)
     static_assert(ntw2_prepass::kCensusWords==NTW2_AI_PREPASS_CENSUS_WORDS, "census snapshot writes exactly the status row");
     ntw2_prepass::CensusSnapshot(ntw2_state.ai_prepass_census_words); // --ai-prepass-*: same three poll/stop sites; all zero without the flags
     static_assert(ntw2_poly::kWords==NTW2_AI_POLY_WORDS && ntw2_record_test::kWords==NTW2_AI_RECORD_TEST_WORDS, "poly + record-test rows fill the prepass status row");
@@ -2513,6 +2534,7 @@ bool BuildClones() {
     bindings[NTW2_BIND_AI_CENSUS_REBUILD]=ntw2_ai_census::Gate(6);
     bindings[NTW2_BIND_PS_WALK_CALL]=FnAddress(&PsWalkCall);
     bindings[NTW2_BIND_PS_POLY]=FnAddress(&ntw2_poly::Gate);
+    bindings[NTW2_BIND_RJ_TRACKER_TICK]=FnAddress(&ntw2_retarget_jitter::TrackerTick);
     bindings[NTW2_BIND_PS_LADDER]=FnAddress(&ntw2_spiral::Ladder);
     bindings[NTW2_BIND_PS_LADDER_PROBE]=FnAddress(&ntw2_spiral::LadderProbe);
     bindings[NTW2_BIND_PS_SPIRAL]=FnAddress(&ntw2_spiral::Spiral);
@@ -3014,6 +3036,8 @@ bool BuildSlots() {
         AddSlot(ntw2_spiral::kFallbackSlot,ntw2_spiral::kFallbackOriginal,FnAddress(&ntw2_spiral::FallbackGate));
         AddSlot(ntw2_spiral::kControllerSlot,ntw2_spiral::kControllerOriginal,FnAddress(&ntw2_spiral::ControllerGate));
     } else if (config.ai_ctrl_flags & NTW2_AI_CLAIM_BITS) AddSlot(ntw2_claim_once::kFallbackSlot,ntw2_claim_once::kFallbackOriginal,FnAddress(&ntw2_claim_once::Gate));
+    // --brain-target-cull* / --brain-retarget-jitter: the combat node step slot (0x1333E44 = 0x66D750) -> NodeStepGate (the clone runs only on the tick thread inside site 6).
+    if (config.ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) AddSlot(ntw2_retarget_jitter::kVtableSlot,ntw2_retarget_jitter::kThunk,FnAddress(&NodeStepGate));
     // Keep original entry slots intact in BRAIN2 observe/census mode. Its optional
     // timing is independent of the older profiling-family slot publication.
     if ((config.enabled_mask & NTW2_BRAIN) && !(config.enabled_mask & NTW2_BRAIN2))
@@ -3407,6 +3431,13 @@ bool Activate(const World& candidate) {
         ntw2_claim_once::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE) ? ntw2_claim_once::ModeOnce :
                                    (config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE_CENSUS) ? ntw2_claim_once::ModeCensus : ntw2_claim_once::ModeOff,targets);
     }
+    {
+        // The mirror's search call: --brain-target-cull(-shadow) substitutes its 0x553420 replacement here (same ABI).
+        const ntw2_retarget_jitter::Targets targets={V(ntw2_retarget_jitter::kValid),V(ntw2_retarget_jitter::kClear),V(ntw2_retarget_jitter::kSearch),
+                                                     V(ntw2_retarget_jitter::kSecond),V(ntw2_retarget_jitter::kThird),V(ntw2_retarget_jitter::kAssign)};
+        ntw2_retarget_jitter::Configure((config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER)!=0,targets);
+        nodeStepClone=clones.entries[NTW2_CLONE_STEP_676FD0]; nodeStepOriginal=V(ntw2_retarget_jitter::kThunk);
+    }
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
     siteCallees[6]=(config.enabled_mask&NTW2_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
     siteCallees[13]=(config.enabled_mask&NTW2_LOCO) ? FnAddress(&LocoMoveGate) : V(0x531af0);
@@ -3681,6 +3712,9 @@ static U StartImpl(void* raw) {
         // --ai-ctrl-*: the batch hooks live in the AI_CONTROLLER clone chain behind the routed MANAGER tick, on the tick owner;
         // CENSUS is shadow-only, VERIFY needs a live feature. The offload / async2 controller gates bypass the clone chain.
         (next.ai_ctrl_flags&~NTW2_AI_CTRL_FLAGS_VALID) || (next.ai_ctrl_flags&NTW2_AI_CLAIM_BITS)==NTW2_AI_CLAIM_BITS ||
+        // --brain-target-cull-shadow / --brain-target-cull exclude each other; the brain-step levers share the status words 16..23 with the geometry mode.
+        (next.ai_ctrl_flags&(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL))==(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL) ||
+        ((next.ai_ctrl_flags&NTW2_AI_BRAIN_STEP_BITS) && (next.ai_ctrl_flags&NTW2_AI_CTRL_GEOMETRY)) ||
         (next.ai_ctrl_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&(NTW2_AI_CTRL|NTW2_AI_ASYNC2)) ||
                                 ((next.ai_ctrl_flags&NTW2_AI_CTRL_CENSUS) && (next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))) ||
                                 ((next.ai_ctrl_flags&NTW2_AI_CTRL_VERIFY) && !(next.ai_ctrl_flags&(NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY))))) ||
@@ -3800,6 +3834,7 @@ static U StartImpl(void* raw) {
     ntw2_spiral::ResetRow(); // the poll copies the module row: a session that never activates must not republish the previous one
     ntw2_record_test::Reset();
     ntw2_claim_once::ResetRow();
+    ntw2_retarget_jitter::ResetRow();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;
