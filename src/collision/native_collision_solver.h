@@ -62,6 +62,12 @@ uint32_t StorageBytes();
 void Stop();
 // Executes the entire stage, including the untouched original on preflight refusal.
 uint32_t __fastcall Stage(void* manager);
+// Guards any fallback or non-COLLIDE route to 0x57DC30/SOFT_ACTIVE: when a rebuild tick has
+// max(+0x24C, +0x260) > 0x10020 (the 65,568-bit stack bitmap limit of 0x57DC30), increments
+// RebuildGuards() (and *guardCounter when non-null) and executes the stage with a 131,072-bit
+// bitmap (or the reuse loop above 131,072) instead of calling stageFn.
+uint32_t GuardedStage(void* manager, uint32_t stageFn, uint32_t queryFn, uint32_t freeFn, volatile uint32_t* guardCounter = nullptr);
+uint32_t RebuildGuards();
 void Sample(uint32_t words[WordCount]);
 void SampleSource(uint32_t words[SourceWordCount]);
 // Oracle seam, owner only, between stages: the most recent stage's contact plan rows

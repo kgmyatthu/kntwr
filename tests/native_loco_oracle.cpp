@@ -3380,6 +3380,22 @@ static void OwnedCombinedRestartCase() {
         EqU("activation never faults outside the owner capture", load[loco::OwnedLoadException], 0);
         PrepareStagingFixture(); cur = world; vlog = &world->log; ResetFp();
         Put(world->model.p(), 0x58, U(1));
+        // Real tick order: site 5 (collision, constructor rebuild flag +0x268=1) precedes site 13 (movement).
+        // ReadGridForCollision publishes the initial grid on demand so call 1 runs owned with 0 refusals.
+        std::vector<U> savedFlags;
+        for (auto& agent : world->agents) {
+            savedFlags.push_back(Get<U>(agent->b.p(), 0x38));
+            Put(agent->b.p(), 0x38, U(0));
+        }
+        Put(world->mgr.p(), 0x268, B(1));
+        ntw2_collide::Stage(world->mgr.p());
+        U source[ntw2_collide::SourceWordCount]{};
+        ntw2_collide::SampleSource(source);
+        EqU("first collision stage before site 13 uses on-demand owned CSR", source[ntw2_collide::Source], ntw2_collide::SourceOwned);
+        EqU("first collision stage before site 13 is owned", source[ntw2_collide::OwnedStages], 1);
+        EqU("first collision stage before site 13 has no refusal", source[ntw2_collide::OwnedRefusals], 0);
+        EqU("first collision stage clears rebuild flag", Get<B>(world->mgr.p(), 0x268), 0);
+        for (size_t i = 0; i < world->agents.size(); ++i) Put(world->agents[i]->b.p(), 0x38, savedFlags[i]);
         CallStageModule(world->mgr.p()); FpOk();
         const auto* view = loco::ReadGrid();
         Require(view && view->generation > previousGeneration, "new generation publishes its own grid");
@@ -3392,9 +3408,9 @@ static void OwnedCombinedRestartCase() {
         // virtuals, which are outside the mover fixture's native graph.
         for (auto& agent : world->agents) Put(agent->b.p(), 0x38, U(0));
         ntw2_collide::Stage(world->mgr.p());
-        U source[ntw2_collide::SourceWordCount]{};
         ntw2_collide::SampleSource(source);
         EqU("combined stage uses published owned CSR", source[ntw2_collide::Source], ntw2_collide::SourceOwned);
+        EqU("combined stage completes two owned stages", source[ntw2_collide::OwnedStages], 2);
         EqU("combined stage has no owned input refusal", source[ntw2_collide::OwnedRefusals], 0);
         ntw2_collide::Stop(); CallStop();
         Require(loco::ReadGrid() == nullptr, "stop invalidates published grid");
