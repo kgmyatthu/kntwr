@@ -2273,7 +2273,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
-    print_brain_retarget_jitter(s->ai_ctrl_reuse_words);
+    if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_retarget_jitter(s->ai_ctrl_reuse_words); /* words 20..23 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
