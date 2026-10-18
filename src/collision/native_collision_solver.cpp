@@ -1046,107 +1046,14 @@ void Apply(Job& j) {
     // After numeric commit, native-query fallback for a solver suffix would apply impulses twice.
     // Finish its precomputed owner work instead; sticky ORIGINAL-stage fallback begins next tick.
 }
-constexpr U kEngineRebuildSafeMax=0x10020u;
-constexpr U kGuardRebuildMax=131072u;
-struct NativeQueryContext {
-    U bits[0x2004/4];
-    U reserved;
-    U capacity;
-    U count;
-    uint16_t* ids;
-};
-static_assert(offsetof(NativeQueryContext,capacity)==0x2008 &&
-              offsetof(NativeQueryContext,count)==0x200c &&
-              offsetof(NativeQueryContext,ids)==0x2010,
-              "0x81A790 query context layout");
-U rebuildGuards;
-bool RebuildUnsafe(void* manager) {
-    if (!manager) return false;
-    __try {
-        const U primary=At<U>(manager,0x24c), work=At<U>(manager,0x260);
-        if ((std::max)(primary,work)<=kEngineRebuildSafeMax) return false;
-        if (At<B>(manager,0x268)==1) return true;
-        B* root=At<B*>(manager,0);
-        B* model=root?At<B*>(root,8):nullptr;
-        return model && At<U>(model,0x58)%100==0;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
-__declspec(noinline) U GuardedRebuild(void* manager,U queryFn,U freeFn) {
-    NativeQueryContext ctx={};
-    At<B>(manager,0x268)=0;
-    const U workCount=At<U>(manager,0x260), primaryCount=At<U>(manager,0x24c);
-    if (workCount) {
-        if (workCount<=kGuardRebuildMax && primaryCount<=kGuardRebuildMax) {
-            U seen[kGuardRebuildMax/32]={};
-            U queued=0, next=0, seed=0;
-            do {
-                bool queried=false;
-                if (next<queued) {
-                    B* rec=At<B**>(manager,0x264)[next++];
-                    reinterpret_cast<Query>(queryFn)(rec,&ctx);
-                    queried=true;
-                } else {
-                    const U word=seed>>5, mask=1u<<(seed&31);
-                    if (seed<kGuardRebuildMax && !(seen[word]&mask)) {
-                        seen[word]|=mask;
-                        if (seed<At<U>(manager,0x24c) && next<At<U>(manager,0x260)) {
-                            ++queued;
-                            B* rec=At<B**>(manager,0x250)[seed];
-                            At<B**>(manager,0x264)[next++]=rec;
-                            reinterpret_cast<Query>(queryFn)(rec,&ctx);
-                            queried=true;
-                        }
-                    }
-                    ++seed;
-                }
-                if (queried) {
-                    const U n=ctx.count;
-                    for (U k=0;k<n;++k) {
-                        const U id=ctx.ids[k];
-                        if (id<At<U>(manager,0x24c) && id<kGuardRebuildMax) {
-                            const U word=id>>5, mask=1u<<(id&31);
-                            if (!(seen[word]&mask) && queued<At<U>(manager,0x260)) {
-                                seen[word]|=mask;
-                                At<B**>(manager,0x264)[queued++]=At<B**>(manager,0x250)[id];
-                            }
-                        }
-                    }
-                    for (U k=0;k<n;++k) ctx.bits[ctx.ids[k]>>5]=0;
-                    ctx.count=0;
-                }
-            } while (seed<At<U>(manager,0x260));
-        } else {
-            B** cursor=At<B**>(manager,0x264);
-            B** end=cursor+workCount;
-            while (cursor!=end) {
-                reinterpret_cast<Query>(queryFn)(*cursor,&ctx);
-                for (U k=0;k<ctx.count;++k) ctx.bits[ctx.ids[k]>>5]=0;
-                ctx.count=0;
-                ++cursor;
-                end=At<B**>(manager,0x264)+At<U>(manager,0x260);
-            }
-        }
-    }
-    if (ctx.ids && freeFn) reinterpret_cast<void(__cdecl*)(void*)>(freeFn)(ctx.ids);
-    return 0;
-}
 U Original(void* manager) {
-    return GuardedStage(manager,V(0x57dc30),V(0x81a790),V(0xff7ef0),nullptr);
-}
-}
-U GuardedStage(void* manager,U stageFn,U queryFn,U freeFn,volatile U* guardCounter) {
-    if (RebuildUnsafe(manager)) {
-        ++rebuildGuards;
-        if (guardCounter) ++*guardCounter;
-        return GuardedRebuild(manager,queryFn,freeFn);
-    }
     using StageFn=U (__thiscall*)(void*);
-    return reinterpret_cast<StageFn>(stageFn)(manager);
+    return reinterpret_cast<StageFn>(V(0x57dc30))(manager);
 }
-U RebuildGuards() { return rebuildGuards; }
+}
 bool Start(const Binding& value) {
     Stop(); binding=value; memset(words,0,sizeof(words)); memset(sourceWords,0,sizeof(sourceWords));
-    rebuildGuards=0; faulted=false; diagnosticClaim=0;
+    faulted=false; diagnosticClaim=0;
     ntw2_contact::Start(binding.image_delta,binding.contact_mode);
     QueryPerformanceFrequency(&frequency);
     return true;

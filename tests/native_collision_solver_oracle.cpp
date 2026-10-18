@@ -1522,32 +1522,6 @@ static void OwnedCases(U workers) {
         s.sourceAfter[ntw2_collide::OwnedRefusals] == 1, "missing first publication falls back untouched");
     CompareExact(ref, own, "missing first publication equals the original stage");
     ++cases;
-    currentCase = "rebuild guard above 65568 primary records";
-    {
-        Spec guardSpec = Two(); guardSpec.rebuild = 1; guardSpec.expectedContacts = 1;
-        Fixture guardRef(guardSpec), guardGate(guardSpec), guardFallback(guardSpec);
-        Execute(guardRef, true);
-        volatile U gateGuards = 0;
-        const U beforeGuards = ntw2_collide::RebuildGuards();
-        Put(guardGate.manager.data(), 0x24c, U(0x10021));
-        events = &guardGate.calls; guardGate.calls.clear(); ResetFp();
-        ntw2_collide::GuardedStage(guardGate.manager.data(), 0u, A(At(0x81a790)), A(At(0xff7ef0)), &gateGuards);
-        events = nullptr;
-        Put(guardGate.manager.data(), 0x24c, U(2));
-        Require(gateGuards == 1 && ntw2_collide::RebuildGuards() == beforeGuards + 1,
-            "GuardedStage counts rebuild guard and never calls stageFn above 0x10020");
-        CompareExact(guardRef, guardGate, "GuardedStage rebuild equals original stage");
-        gView = nullptr;
-        Put(guardFallback.manager.data(), 0x24c, U(0x10021));
-        Sampled gs; ExecuteSampled(guardFallback, gs);
-        Put(guardFallback.manager.data(), 0x24c, U(2));
-        Require(gs.after[ntw2_collide::FallbackTicks] == gs.before[ntw2_collide::FallbackTicks] + 1 &&
-            gs.sourceAfter[ntw2_collide::OwnedRefusals] == gs.sourceBefore[ntw2_collide::OwnedRefusals] + 1 &&
-            ntw2_collide::RebuildGuards() == beforeGuards + 2,
-            "Stage fallback above 0x10020 routes through the rebuild guard");
-        CompareExact(guardRef, guardFallback, "Stage guarded fallback equals original stage");
-        ++cases;
-    }
 }
 static void CapacityCases(U workers) {
     currentCase = "activation storage is workload bounded and owned mode allocates no audit storage";

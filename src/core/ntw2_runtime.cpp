@@ -662,15 +662,10 @@ COLLISION_FP_MARKER(CollisionNumericEndGate, CollisionNumericEnd)
 #undef COLLISION_FP_MARKER
 void CollideLodPrepare(void* manager);
 U __fastcall CollisionStageGate(void* manager) {
-    if (Epoch(NTW2_COLLIDE) && !(static_cast<U>(Load(&budgetDisabledMask))&NTW2_COLLIDE)) {
-        const U before=ntw2_collide::RebuildGuards();
-        const U r=ntw2_collide::Stage(manager);
-        collisionWords[27]+=ntw2_collide::RebuildGuards()-before;
-        return r;
-    }
+    if (Epoch(NTW2_COLLIDE) && !(static_cast<U>(Load(&budgetDisabledMask))&NTW2_COLLIDE))
+        return ntw2_collide::Stage(manager);
     if (Epoch(NTW2_COLLIDE_LOD)) CollideLodPrepare(manager);
-    const U target=(Epoch(NTW2_PROFILE) || Epoch(NTW2_COLLIDE_LOD)) ? clones.entries[NTW2_CLONE_SOFT_ACTIVE] : V(0x57dc30);
-    return ntw2_collide::GuardedStage(manager,target,siteCallees[106],V(0xff7ef0),&collisionWords[27]);
+    return reinterpret_cast<Manager>((Epoch(NTW2_PROFILE) || Epoch(NTW2_COLLIDE_LOD)) ? clones.entries[NTW2_CLONE_SOFT_ACTIVE] : V(0x57dc30))(manager);
 }
 // Timed site 13: the ACTIVE clone's call of the army movement loop 0x531AF0 (ECX = manager, plain ret; the result is unused by the caller).
 // Only the tick-owner thread inside a LOCO epoch enters the module; every other caller, tick or generation runs the original loop.

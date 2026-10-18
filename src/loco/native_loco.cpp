@@ -3237,11 +3237,6 @@ bool CaptureGrid(void* manager) {
 const GridView* ReadGrid() { return g_started && g_gridValid ? &g_gridView : nullptr; }
 const GridView* ReadGridForCollision(void* manager) {
     const GridView* view = ReadGrid();
-    // Site 5 precedes site 13 on the first active tick of a generation: publish once on demand
-    // so the initial rebuild stage runs owned. Later ticks consume the site-13 publication with zero extra work.
-    if (!view && !g_stage && g_grid && !g_gridWords[GridCaptures] && !g_gridWords[GridRefusals]) {
-        if (CaptureGrid(manager)) view = &g_gridView;
-    }
     if (!view || g_stage || view->manager != Address(manager)) return nullptr;
     __try {
         const U m = Address(manager), root = D(m), model = root ? D(root + 8) : 0;
