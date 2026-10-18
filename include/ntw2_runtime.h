@@ -381,8 +381,10 @@ enum ntw2_memory_word {
     "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23", "w24", "w25", "w26", "w27", "w28", "w29", "w30", "w31"
 #define NTW2_ARENA_WORDS 32u /* arena_words (src/render/ntw2_arena_release.*): lever 4 + lever 7 counters */
 #define NTW2_ARENA_LABELS \
-    "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15", \
-    "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23", "w24", "w25", "w26", "w27", "w28", "w29", "w30", "w31"
+    "flags_active", "frames_observed", "posed_men_last", "posed_men_peak", "worklist_men_last", "scene_blocks_cur", "scene_blocks_used", "scene_blocks_peak", \
+    "pose0_blocks_cur", "pose1_blocks_cur", "pose_blocks_used", "pose_blocks_peak", "scratch_blocks_cur", "scratch_blocks_used", "scratch_blocks_peak", "quadtree_blocks_cur", \
+    "trim_events", "trim_blocks_freed", "trim_bytes_freed", "teardown_releases", "teardown_scene_blocks", "teardown_pose_blocks", "teardown_scratch_blocks", "teardown_blocks_freed", \
+    "teardown_bytes_freed", "heap_opt_calls", "heap_opt_watermark_calls", "heap_opt_heaps_ok", "heap_opt_avail_before_mb", "heap_opt_avail_after_mb", "heap_opt_reclaimed_kb", "heap_opt_total_us"
 #define NTW2_OVERLAY_WORDS 16u /* overlay_words: lever 6 overlay/driver DLL report */
 #define NTW2_OVERLAY_LABELS \
     "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15"

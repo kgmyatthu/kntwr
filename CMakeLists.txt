@@ -187,7 +187,7 @@ if(NTW2_BUILD_RUNTIME)
     loco/native_sweep.cpp loco/native_resolve.cpp loco/native_env.cpp
     brain2/native_unit_select.cpp brain2/native_unit_policy.cpp brain2/native_unit_fatigue.cpp ai/ntw2_planner_search.cpp
     ai/ntw2_spiral.cpp ai/ntw2_claim_once.cpp brain/ntw2_retarget_jitter.cpp brain/ntw2_target_cull.cpp
-    ai/ntw2_record_test.cpp)
+    ai/ntw2_record_test.cpp render/ntw2_arena_release.cpp)
   get_property(_ntw2_registered GLOBAL PROPERTY NTW2_RUNTIME_DOMAIN_SOURCES)
   set(NTW2_RUNTIME_SOURCES "")
   foreach(_s IN LISTS NTW2_RUNTIME_LINK_ORDER)
