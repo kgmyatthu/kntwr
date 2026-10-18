@@ -385,7 +385,15 @@ enum ntw2_memory_word {
     "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23", "w24", "w25", "w26", "w27", "w28", "w29", "w30", "w31"
 #define NTW2_OVERLAY_WORDS 16u /* overlay_words: lever 6 overlay/driver DLL report */
 #define NTW2_OVERLAY_LABELS \
-    "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15"
+    "version", "total_modules", "foreign_hook_modules", "nv_umd_modules", "splits_low_hole_count", "rtss_base", "rtss_size", "nvspcap_base", \
+    "nvspcap_size", "steam_overlay_base", "steam_overlay_size", "nv_umd_image_bytes", "foreign_hook_image_bytes", "nv_driver_threads", "nv_driver_stack_bytes", "total_foreign_image_stack_bytes"
+enum ntw2_overlay_word {
+    NTW2_OVL_VERSION, NTW2_OVL_TOTAL_MODULES, NTW2_OVL_FOREIGN_HOOK_MODULES, NTW2_OVL_NV_UMD_MODULES,
+    NTW2_OVL_SPLITS_LOW_HOLE_COUNT, NTW2_OVL_RTSS_BASE, NTW2_OVL_RTSS_SIZE, NTW2_OVL_NVSPCAP_BASE,
+    NTW2_OVL_NVSPCAP_SIZE, NTW2_OVL_STEAM_OVERLAY_BASE, NTW2_OVL_STEAM_OVERLAY_SIZE, NTW2_OVL_NV_UMD_IMAGE_BYTES,
+    NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES, NTW2_OVL_NV_DRIVER_THREADS, NTW2_OVL_NV_DRIVER_STACK_BYTES,
+    NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES
+};
 #define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ai/ntw2_planner_search.h row layout, version 1 */
 #define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ai/ntw2_record_test.h row layout, version 1 */
 #define NTW2_AI_PREPASS_WORDS (NTW2_AI_POLY_WORDS + NTW2_AI_RECORD_TEST_WORDS) /* ai_prepass_words */
