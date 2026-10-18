@@ -2,7 +2,7 @@
 // allocator state the kernel replicates (ntw_solver).
 #include "native_army_solver.h"
 #include "formation/native_formation_solver.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include <windows.h>
 #include <intrin.h>
 #include <string.h>

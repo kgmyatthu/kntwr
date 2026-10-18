@@ -5,7 +5,7 @@
 #include <string.h>
 #include <algorithm>
 #include <new>
-#include "ntw2_guard.h"
+#include "core/ntw2_guard.h"
 
 namespace ntw2_army_unit {
 namespace {

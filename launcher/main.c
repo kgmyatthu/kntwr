@@ -51,7 +51,7 @@
 #include "collision/native_contact.h"
 
 #include "ntw2_runtime.h"
-#include "../src/ntw2_profile.h"
+#include "../src/profile/ntw2_profile.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
 #error "ntw2.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."

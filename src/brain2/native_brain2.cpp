@@ -3,7 +3,7 @@
 #include <xmmintrin.h>
 #include <stdint.h>
 #include <string.h>
-#include "../ntw2_clones.h"
+#include "../clones/ntw2_clones.h"
 #include "native_brain2.h"
 #include "native_node.h"
 #include "native_move_node.h"

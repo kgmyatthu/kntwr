@@ -7,7 +7,7 @@
 #include <cstring>
 #include "native_brain_s0.h"
 #include "native_unit_policy.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 static_assert(sizeof(void*) == 4, "the S0 gates are Win32 x86 naked forwarding thunks");
 namespace ntw2_brain_s0 {
 namespace {

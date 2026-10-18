@@ -1,7 +1,7 @@
 #ifndef NTW2_NATIVE_NODE_PROJECTION_H
 #define NTW2_NATIVE_NODE_PROJECTION_H
 #include <stdint.h>
-#include "../ntw2_clones.h"
+#include "../clones/ntw2_clones.h"
 
 // Participant-private reference-node path projection (original 0x7FD070 -> 0x81C080 -> 0x81C050 -> 0x67A790).
 //

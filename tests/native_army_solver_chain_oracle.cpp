@@ -39,7 +39,7 @@
 #include <vector>
 #include "army/native_army_solver.h"
 #include "formation/native_formation_solver.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "native_image_relocation.h"
 
 #pragma comment(lib, "bcrypt.lib")

@@ -43,7 +43,7 @@
 #include "native_ballistics_query_cache.h"
 #include "native_ballistics_abi.h"
 #include "native_worker_dispatch.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #pragma comment(lib, "bcrypt.lib")
 #pragma fenv_access(on)
 static_assert(sizeof(void*) == 4, "native x86 only");

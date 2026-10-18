@@ -18,7 +18,7 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "native_brain2.h"
 #include "native_finalizer.h"
 #include "native_brain_s0.h"

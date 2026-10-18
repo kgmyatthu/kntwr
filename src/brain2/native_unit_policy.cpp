@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "native_unit_policy.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "native_unit_select.h"
 
 namespace ntw2_unit_policy {

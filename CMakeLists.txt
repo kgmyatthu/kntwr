@@ -55,6 +55,8 @@ set(NTW2_TEST_ASSETS "${_ntw2_default_assets}" CACHE PATH
     "Directory holding the pinned oracle captures (*.bin kits, angle table, replay records). Tests whose capture is missing are not registered.")
 
 set(NTW2_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# TRANSITIONAL (moves-only commit): the relocated sources still carry their pre-move `#include "ntw2_x.h"` spellings; removed by the include-path commit.
+include_directories(src/core src/clones src/ai src/brain src/profile)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Flag recipes.  Names mirror the validated analysis build scripts these replaced.
@@ -198,20 +200,20 @@ set(NTW2_EXPORTS_RUNTIME_ABI
 # Missing required runtime sources are a configure error, never a skipped module.
 # ---------------------------------------------------------------------------------------------------------------------
 if(NTW2_BUILD_RUNTIME)
-  set(NTW2_RUNTIME_SOURCES src/ntw2_runtime.cpp src/ntw2_clones.cpp src/ntw2_profile.cpp src/ntw2_ai_census.cpp src/ntw2_ai_async2.cpp src/ntw2_ai_deferred.cpp src/ntw2_walk_memo.cpp
+  set(NTW2_RUNTIME_SOURCES src/core/ntw2_runtime.cpp src/clones/ntw2_clones.cpp src/profile/ntw2_profile.cpp src/ai/ntw2_ai_census.cpp src/ai/ntw2_ai_async2.cpp src/ai/ntw2_ai_deferred.cpp src/ai/ntw2_walk_memo.cpp
                            src/collision/native_collision_solver.cpp src/collision/native_contact.cpp src/brain2/native_brain2.cpp src/loco/native_loco.cpp src/loco/native_move_delta.cpp src/loco/native_relink.cpp src/loco/native_grid_probation.cpp
                            src/brain2/native_node.cpp src/brain2/native_node_projection.cpp src/brain2/native_fire.cpp src/brain2/native_finalizer.cpp
                            src/brain2/native_move_node.cpp src/brain2/native_brain_workers.cpp src/brain2/native_unit_brain.cpp
                            src/brain2/native_idle_node.cpp src/brain2/native_action_node.cpp src/army/native_army_unit.cpp src/army/native_army_storm.cpp
                            src/army/native_army_solver.cpp src/formation/native_formation_solver.cpp
-                           src/brain2/native_brain_s0.cpp src/brain2/native_brain_locality.cpp src/brain2/native_unit_posture_engage.cpp src/ntw2_ai_ctrl_batch.cpp src/ntw2_ai_ctrl_geometry.cpp src/ntw2_planner_prepass.cpp
+                           src/brain2/native_brain_s0.cpp src/brain2/native_brain_locality.cpp src/brain2/native_unit_posture_engage.cpp src/ai/ntw2_ai_ctrl_batch.cpp src/ai/ntw2_ai_ctrl_geometry.cpp src/ai/ntw2_planner_prepass.cpp
                            src/loco/native_sweep.cpp src/loco/native_resolve.cpp src/loco/native_env.cpp
-                           src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ntw2_planner_search.cpp
-                           src/ntw2_spiral.cpp
-                           src/ntw2_claim_once.cpp
-                           src/ntw2_retarget_jitter.cpp
-                           src/ntw2_target_cull.cpp
-                           src/ntw2_record_test.cpp)
+                           src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ai/ntw2_planner_search.cpp
+                           src/ai/ntw2_spiral.cpp
+                           src/ai/ntw2_claim_once.cpp
+                           src/brain/ntw2_retarget_jitter.cpp
+                           src/brain/ntw2_target_cull.cpp
+                           src/ai/ntw2_record_test.cpp)
   foreach(_s IN LISTS NTW2_RUNTIME_SOURCES)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")
       message(FATAL_ERROR "Runtime source ${_s} does not exist yet. Provide it, or configure with -DNTW2_BUILD_RUNTIME=OFF "

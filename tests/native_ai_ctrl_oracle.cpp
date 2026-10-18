@@ -20,8 +20,8 @@
 #include <vector>
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
-#include "ntw2_clones.h"
-#include "ntw2_ai_ctrl_batch.h"
+#include "clones/ntw2_clones.h"
+#include "ai/ntw2_ai_ctrl_batch.h"
 
 using U = uint32_t;
 using B = unsigned char;

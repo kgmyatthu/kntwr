@@ -8,7 +8,7 @@
 #include <malloc.h>
 #include <setjmp.h>
 #include <new>
-#include "../ntw2_clones.h"
+#include "../clones/ntw2_clones.h"
 #include "native_brain2.h"
 #include "native_brain_workers.h"
 #include "native_region_table.h"

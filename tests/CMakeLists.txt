@@ -224,7 +224,7 @@ ntw2_harness(native_formation_solver_oracle STD 20 FP strict
   SOURCES native_formation_solver_oracle.cpp "${NTW2_SRC}/formation/native_formation_solver.cpp"
   INCLUDES "${NTW2_SRC}/formation" LIBS bcrypt)
 ntw2_harness(native_army_solver_chain_oracle STD 20 FP strict
-  SOURCES native_army_solver_chain_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/army/native_army_solver.cpp"
+  SOURCES native_army_solver_chain_oracle.cpp "${NTW2_SRC}/clones/ntw2_clones.cpp" "${NTW2_SRC}/army/native_army_solver.cpp"
           "${NTW2_SRC}/formation/native_formation_solver.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_formation_layout_oracle STD 20 FP strict
@@ -249,38 +249,38 @@ ntw2_harness(native_animation_render_batch_oracle STD 20 FP precise
   SOURCES native_animation_render_batch_oracle.cpp
   OBJECTS ntw2_animation_pose ntw2_animation_render_batch ntw2_worker_dispatch)
 ntw2_harness(native_ballistics_runtime_integration STD 20 FP strict
-  SOURCES native_ballistics_runtime_integration.cpp "${NTW2_SRC}/ntw2_clones.cpp"
+  SOURCES native_ballistics_runtime_integration.cpp "${NTW2_SRC}/clones/ntw2_clones.cpp"
   OBJECTS ntw2_ballistics_query_cache ntw2_ballistics_collision ntw2_worker_dispatch ntw2_ballistics_helpers
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/ballistics" "${NTW2_SRC}/worker" LIBS bcrypt)
 ntw2_harness(native_walk_memo_oracle STD 20 FP strict
-  SOURCES native_walk_memo_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/ntw2_walk_memo.cpp"
+  SOURCES native_walk_memo_oracle.cpp "${NTW2_SRC}/clones/ntw2_clones.cpp" "${NTW2_SRC}/ai/ntw2_walk_memo.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_planner_search_oracle STD 20 FP strict
-  SOURCES native_planner_search_oracle.cpp "${NTW2_SRC}/ntw2_planner_search.cpp" "${NTW2_SRC}/ntw2_record_test.cpp"
+  SOURCES native_planner_search_oracle.cpp "${NTW2_SRC}/ai/ntw2_planner_search.cpp" "${NTW2_SRC}/ai/ntw2_record_test.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_record_test_oracle STD 20 FP strict
-  SOURCES native_record_test_oracle.cpp "${NTW2_SRC}/ntw2_planner_search.cpp" "${NTW2_SRC}/ntw2_record_test.cpp"
+  SOURCES native_record_test_oracle.cpp "${NTW2_SRC}/ai/ntw2_planner_search.cpp" "${NTW2_SRC}/ai/ntw2_record_test.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_ai_ctrl_geometry_oracle STD 20 FP strict
-  SOURCES native_ai_ctrl_geometry_oracle.cpp "${NTW2_SRC}/ntw2_ai_ctrl_geometry.cpp" "${NTW2_SRC}/ntw2_ai_ctrl_batch.cpp"
+  SOURCES native_ai_ctrl_geometry_oracle.cpp "${NTW2_SRC}/ai/ntw2_ai_ctrl_geometry.cpp" "${NTW2_SRC}/ai/ntw2_ai_ctrl_batch.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_ai_ctrl_oracle STD 20 FP strict
-  SOURCES native_ai_ctrl_oracle.cpp "${NTW2_SRC}/ntw2_ai_ctrl_batch.cpp"
+  SOURCES native_ai_ctrl_oracle.cpp "${NTW2_SRC}/ai/ntw2_ai_ctrl_batch.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_planner_prepass_oracle STD 20 FP strict
-  SOURCES native_planner_prepass_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/ntw2_planner_prepass.cpp"
+  SOURCES native_planner_prepass_oracle.cpp "${NTW2_SRC}/clones/ntw2_clones.cpp" "${NTW2_SRC}/ai/ntw2_planner_prepass.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_spiral_oracle STD 20 FP strict
-  SOURCES native_spiral_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/ntw2_spiral.cpp"
+  SOURCES native_spiral_oracle.cpp "${NTW2_SRC}/clones/ntw2_clones.cpp" "${NTW2_SRC}/ai/ntw2_spiral.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_claim_once_oracle STD 20 FP strict
-  SOURCES native_claim_once_oracle.cpp "${NTW2_SRC}/ntw2_claim_once.cpp"
+  SOURCES native_claim_once_oracle.cpp "${NTW2_SRC}/ai/ntw2_claim_once.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_retarget_jitter_oracle STD 20 FP strict
-  SOURCES native_retarget_jitter_oracle.cpp "${NTW2_SRC}/ntw2_retarget_jitter.cpp"
+  SOURCES native_retarget_jitter_oracle.cpp "${NTW2_SRC}/brain/ntw2_retarget_jitter.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_target_cull_oracle STD 20 FP strict
-  SOURCES native_target_cull_oracle.cpp "${NTW2_SRC}/ntw2_target_cull.cpp"
+  SOURCES native_target_cull_oracle.cpp "${NTW2_SRC}/brain/ntw2_target_cull.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_collision_solver_oracle STD 20 FP strict
   SOURCES native_collision_solver_oracle.cpp "${NTW2_SRC}/collision/native_collision_solver.cpp"
@@ -291,7 +291,7 @@ ntw2_harness(native_contact_oracle STD 20 FP strict
   SOURCES native_contact_oracle.cpp "${NTW2_SRC}/collision/native_contact.cpp"
   INCLUDES "${NTW2_SRC}/collision" LIBS bcrypt)
 ntw2_harness(native_brain2_oracle STD 20 FP strict
-  SOURCES native_brain2_oracle.cpp "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+  SOURCES native_brain2_oracle.cpp "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp" "${NTW2_SRC}/brain2/native_fire.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
           "${NTW2_SRC}/brain2/native_move_node.cpp"
@@ -301,7 +301,7 @@ ntw2_harness(native_brain2_oracle STD 20 FP strict
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_brain_workers_oracle STD 20 FP strict
   SOURCES native_brain_workers_oracle.cpp "${NTW2_SRC}/brain2/native_brain_workers.cpp"
-          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp" "${NTW2_SRC}/brain2/native_fire.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
           "${NTW2_SRC}/brain2/native_move_node.cpp"
@@ -310,7 +310,7 @@ ntw2_harness(native_brain_workers_oracle STD 20 FP strict
 # Per-unit brain Stage A: synthetic soldiers/units (no image); links ntw2_brain2::RunWorklist for the observer seam.
 ntw2_harness(native_unit_brain_oracle STD 20 FP strict
   SOURCES native_unit_brain_oracle.cpp "${NTW2_SRC}/brain2/native_unit_brain.cpp"
-          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp" "${NTW2_SRC}/brain2/native_fire.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
           "${NTW2_SRC}/brain2/native_move_node.cpp"
@@ -328,7 +328,7 @@ set_tests_properties(ntw2_army_unit_oracle PROPERTIES LABELS "synthetic;shadow" 
 ntw2_note_registered(ntw2_army_unit_oracle)
 ntw2_harness(native_node_oracle STD 20 FP strict
   SOURCES native_node_oracle.cpp "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
-          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
           "${NTW2_SRC}/brain2/native_move_node.cpp"
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
@@ -337,14 +337,14 @@ ntw2_harness(native_move_node_oracle STD 20 FP strict
   SOURCES native_move_node_oracle.cpp "${NTW2_SRC}/brain2/native_move_node.cpp"
           "${NTW2_SRC}/brain2/native_idle_node.cpp" "${NTW2_SRC}/brain2/native_action_node.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp"
-          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+          "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/brain2/native_fire.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_brain_s0.cpp"
           "${NTW2_SRC}/brain2/native_unit_policy.cpp" "${NTW2_SRC}/brain2/native_unit_select.cpp"
           "${NTW2_SRC}/brain2/native_finalizer.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 # Per-unit posture / engage: the BRAIN_U_* clones and gates against the mapped originals (private relocated image).
 ntw2_harness(native_unit_posture_engage_oracle STD 20 FP strict
-  SOURCES native_unit_posture_engage_oracle.cpp "${NTW2_SRC}/brain2/native_unit_posture_engage.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+  SOURCES native_unit_posture_engage_oracle.cpp "${NTW2_SRC}/brain2/native_unit_posture_engage.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 # Per-unit fatigue (S4): the ported 670F40 arithmetic against the mapped original, unit model, gate ABI, provider through the
 # shared module on a manager/registry fixture.
@@ -356,7 +356,7 @@ ntw2_harness(native_fire_oracle STD 20 FP strict
   SOURCES native_fire_oracle.cpp "${NTW2_SRC}/brain2/native_fire.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/brain2" LIBS bcrypt)
 ntw2_harness(native_loco_oracle STD 20 FP strict
-  SOURCES native_loco_oracle.cpp "${NTW2_SRC}/loco/native_loco.cpp" "${NTW2_SRC}/loco/native_move_delta.cpp" "${NTW2_SRC}/loco/native_relink.cpp" "${NTW2_SRC}/ntw2_clones.cpp"
+  SOURCES native_loco_oracle.cpp "${NTW2_SRC}/loco/native_loco.cpp" "${NTW2_SRC}/loco/native_move_delta.cpp" "${NTW2_SRC}/loco/native_relink.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/loco/native_sweep.cpp" "${NTW2_SRC}/loco/native_resolve.cpp" "${NTW2_SRC}/loco/native_env.cpp"
           "${NTW2_SRC}/collision/native_collision_solver.cpp" "${NTW2_SRC}/collision/native_contact.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco" DEFINES NTW2_LOCO_ORACLE=1 LIBS bcrypt)

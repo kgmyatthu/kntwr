@@ -11,7 +11,7 @@
 #include <vector>
 #include <array>
 #include <utility>
-#include "../ntw2_clones.h"
+#include "../clones/ntw2_clones.h"
 #include "native_loco.h"
 #include "native_sweep.h"
 #include "native_resolve.h"

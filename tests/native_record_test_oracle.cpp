@@ -25,8 +25,8 @@
 #include <vector>
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
-#include "ntw2_planner_search.h"
-#include "ntw2_record_test.h"
+#include "ai/ntw2_planner_search.h"
+#include "ai/ntw2_record_test.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;

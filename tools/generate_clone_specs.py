@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/ntw2_clone_specs.inc: source-pinned private-code construction metadata.
+"""Generate src/clones/ntw2_clone_specs.inc: source-pinned private-code construction metadata.
 
 Build-time only.  Nothing in the generated metadata contains original game code: it holds source spans (VA, size,
 FNV-1a64 hash of the bytes with HIGHLOW relocations normalised to the preferred base 0x400000, sorted relocation
@@ -24,7 +24,7 @@ clone/binding addresses), decoded again, and compared instruction by instruction
 Usage:
   python generate_clone_specs.py [--image PATH] [--output PATH] [--header PATH] [--manifest PATH] [--grid-census PATH]
                                  [--grid-report PATH] [--check]
-Default output: <this tool>/../src/ntw2_clone_specs.inc.  --check compares instead of writing (non-zero on drift).
+Default output: <this tool>/../src/clones/ntw2_clone_specs.inc.  --check compares instead of writing (non-zero on drift).
 The generated tail embeds the reader ranges of analysis/native-grid-reader-census.json (--grid-census) plus every
 surviving direct `call` edge to a reader VA inside the emitted clones; --grid-report lists surviving edges, source
 calls removed by clone rewrites, and ungated internal-call/direct-jump references.
@@ -3659,8 +3659,8 @@ def manifest(image, registry, plans, header_bindings, header_clones):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--image', default=DEFAULT_IMAGE)
-    ap.add_argument('--output', default=str(HERE.parent / 'src' / OUTPUT_NAME))
-    ap.add_argument('--header', default=str(HERE.parent / 'src' / HEADER_NAME))
+    ap.add_argument('--output', default=str(HERE.parent / 'src' / 'clones' / OUTPUT_NAME))
+    ap.add_argument('--header', default=str(HERE.parent / 'src' / 'clones' / HEADER_NAME))
     ap.add_argument('--manifest', default=None, help='optional JSON inspection manifest')
     ap.add_argument('--grid-census', default=str(HERE.parent.parent / 'analysis' / 'native-grid-reader-census.json'))
     ap.add_argument('--grid-report', default=None, help='optional JSON report of surviving/removed reader call edges')

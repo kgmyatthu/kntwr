@@ -23,7 +23,7 @@
 #include <vector>
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
-#include "ntw2_retarget_jitter.h"
+#include "brain/ntw2_retarget_jitter.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;

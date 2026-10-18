@@ -15,9 +15,9 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "ntw2_runtime.h"
-#include "ntw2_planner_prepass.h"
+#include "ai/ntw2_planner_prepass.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;

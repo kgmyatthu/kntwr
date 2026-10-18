@@ -6,7 +6,7 @@
 #include <intrin.h>
 #include <string.h>
 #include "native_unit_fatigue.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 
 namespace ntw2_unit_fatigue {
 // Byte table 0x6711D8 (A+1B8 0..0x4E -> switch class), verified against the mapped image at Start.

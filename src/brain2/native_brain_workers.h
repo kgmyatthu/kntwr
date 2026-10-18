@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "../ntw2_clones.h"
+#include "../clones/ntw2_clones.h"
 
 // BRAIN2 Stage 2: the per-soldier brain decision step (site 6: 0x585D10 -> vt+0x0C) on pool workers.
 //

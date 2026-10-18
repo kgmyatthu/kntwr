@@ -14,9 +14,9 @@
 #include <vector>
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
-#include "ntw2_ai_ctrl_batch.h"
-#include "ntw2_clones.h"
-#include "ntw2_ai_ctrl_geometry.h"
+#include "ai/ntw2_ai_ctrl_batch.h"
+#include "clones/ntw2_clones.h"
+#include "ai/ntw2_ai_ctrl_geometry.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 namespace G = ntw2_ai_ctrl_geometry;

@@ -28,7 +28,7 @@
 #include <initializer_list>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "native_loco.h"
 #include "native_move_delta.h"
 #include "native_sweep.h"

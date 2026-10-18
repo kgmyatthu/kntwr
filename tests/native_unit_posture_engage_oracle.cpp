@@ -25,7 +25,7 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 #include "native_unit_posture_engage.h"
 #pragma fenv_access(on)
 using U = uint32_t;
