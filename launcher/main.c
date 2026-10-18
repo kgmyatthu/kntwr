@@ -5672,8 +5672,9 @@ static void usage(void)
         L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
         L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
-        L"                        --collide-contact-workers --ai-poly --tick-pcore --army-solver-memo); any explicit --loco-*/--collide-contact-* (resp. --ai-poly*/\n"
-        L"                        --ai-prepass-census, --tick-core-ab, --army-solver-shadow) switch replaces those defaults; spell the shipping set as just all\n"
+        L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --tick-pcore --army-solver-memo); any explicit\n"
+        L"                        --loco-*/--collide-contact-* (resp. --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census,\n"
+        L"                        --tick-core-ab, --army-solver-shadow) switch replaces those defaults; spell the shipping set as just all\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
@@ -6077,6 +6078,16 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     /* The shipping set also implies the bit-exact slot solver kernel (--army-solver-memo; sv-memo4: perf bad storm-tick
        site 18 2306 -> 473 ms, ticks >300 ms 5 -> 1; 0 mismatches over 2132 live shadow solves). --army-solver-shadow opts out. */
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
+    /* The shipping set also implies the two planner-tail levers (dx-gate, perf bad: tick p99 132 -> 88 ms, max 618 -> 283, ticks >150 ms
+       28 -> 6, planner sum 26.9 -> 13.7 s; borodino unchanged):
+       - --ai-record-test: the alternate placement delegate 0x13376AC routed into the bit-exact poly kernel (rt-shadow: 304,318 compares,
+         0 mismatches). Needs the poly kernel live, so it follows --ai-poly; --ai-record-test-shadow opts out.
+       - --ai-claim-once (AI-only deviation, user-approved): one placement recompute per fallback claim call (controller-state hash equal
+         to the native-recompute census over 3000 multi-entry calls). --ai-claim-once-census, ai_ctrl, ai_async2 opt out. */
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && (o->ai_prepass_flags & NTW2_AI_POLY) && !(o->ai_prepass_flags & NTW2_AI_RECORD_TEST_SHADOW))
+        o->ai_prepass_flags |= NTW2_AI_RECORD_TEST;
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->ai_claim_once_census && !o->ai_deferred)
+        o->ai_claim_once = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
