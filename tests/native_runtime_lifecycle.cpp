@@ -348,19 +348,6 @@ static void __cdecl TestFree(void* value) {
     if(InterlockedCompareExchange(&allocatorProbeFault,0,0)==2)
         RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);
 }
-static volatile U avoidSizeAllocBytes, avoidSizeFreeBytes;
-static void* avoidSizeNextPtr, *avoidSizeLastPtr, *avoidSizeFreePtr;
-static void* __cdecl TestSizeAllocate(U bytes) {
-    avoidSizeAllocBytes=bytes;
-    void* p=avoidSizeNextPtr; avoidSizeNextPtr=nullptr;
-    if(!p) p=HeapAlloc(GetProcessHeap(),0,bytes ? bytes : 1);
-    avoidSizeLastPtr=p;
-    return p;
-}
-static void __cdecl TestSizeFree(void* value, U bytes) {
-    avoidSizeFreePtr=value; avoidSizeFreeBytes=bytes;
-    if(value) HeapFree(GetProcessHeap(),0,value);
-}
 static bool RedirectImage(U va,const void* destination) {
     uint8_t* entry=reinterpret_cast<uint8_t*>(At(va));
     DWORD old=0,ignored=0;
@@ -2493,9 +2480,7 @@ int main(int argc,char** argv) {
     Put(model,0xB0,A(armyManager)); Put(armyManager,0,A(root)); BindLocoScene(true);
     *At(0x14a418c)=A(engine);
     Check(RedirectImage(0x444b40,reinterpret_cast<const void*>(&TestAllocate)) &&
-          RedirectImage(0xff7ef0,reinterpret_cast<const void*>(&TestFree)) &&
-          RedirectImage(0x10d3140,reinterpret_cast<const void*>(&TestSizeAllocate)) &&
-          RedirectImage(0x126e016,reinterpret_cast<const void*>(&TestSizeFree)),"install owned-image allocation probes");
+          RedirectImage(0xff7ef0,reinterpret_cast<const void*>(&TestFree)),"install owned-image allocation probes");
     Check(InstallAllocatorTlsFixture(),"bind executable CRT TLS lookup to the owned-process TLS block");
     if(child) {
         if(!strcmp(argv[3],"--grid-census")) return GridCensusFixture(false,start,stop,state,config);
@@ -2850,49 +2835,6 @@ int main(int argc,char** argv) {
               *At(0x132b280)==0x5acec0+delta && ReadOnly(At(0x132b280)) &&
               *At(0x132e740)==0x5ace90+delta && ReadOnly(At(0x132e740)),
               "collide stop restores task and avoidance vtable slots and protection");
-        {
-            // Address-reuse across stop and restart:
-            // 1. Activate with a stock 0x2004-byte block at model+0xC4; AdoptModelBitset enlarges it to 0x8014 (0x8004 + trailer) at addr1.
-            // 2. Stop the runtime (destructor vtable slots restored to engine originals).
-            // 3. Simulate the unhooked engine destroying the model (freeing addr1 without ForgetEnlargedBlock) and a new battle
-            //    allocating its stock 0x2004-byte block at the exact same address addr1.
-            // 4. Restart and activate: AdoptModelBitset must NOT trust addr1 as enlarged; it must re-enlarge to a fresh 0x8014 block.
-            static uint8_t avoidMgr[0x100]={}, combatMgr[0x100]={};
-            Put(avoidMgr,0,0x1334234+delta); Put(combatMgr,0,0x1334274+delta);
-            void* stock1=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,0x2004);
-            static_cast<U*>(stock1)[5]=0x13579BDFu;
-            Put(model,0xC4,A(stock1)); Put(avoidMgr,0x90,A(stock1)); Put(combatMgr,0x90,A(stock1));
-            Put(model,0xC8,A(combatMgr)); Put(model,0xCC,A(avoidMgr));
-            avoidSizeAllocBytes=0; avoidSizeFreeBytes=0; avoidSizeLastPtr=nullptr; avoidSizeFreePtr=nullptr;
-            Check(start(&config)==0 && WaitActive(state,NTW2_COLLIDE),"collide activates and adopts stock bitset");
-            U addr1=0; memcpy(&addr1,model+0xC4,4);
-            Check(addr1!=0 && addr1!=A(stock1) && avoidSizeAllocBytes==0x8014u &&
-                  avoidSizeFreePtr==stock1 && avoidSizeFreeBytes==0x2004u &&
-                  *reinterpret_cast<const U*>(addr1+5*4)==0x13579BDFu &&
-                  *reinterpret_cast<const U*>(addr1+0x8004)==0x4E545732u,
-                  "first activation enlarges stock 0x2004 block to 0x8014 and stamps trailer");
-            Check(ReadState(state,snapshot) && snapshot.collision_words[28]==1 && snapshot.collision_words[31]==0x8004u,
-                  "first activation publishes avoid_bitset_allocs=1 and avoid_bitset_bytes=0x8004");
-            Check(stop(nullptr)==0,"stop after first adoption");
-            // Simulate unhooked engine free of addr1 after stop, then a new stock 0x2004 block reusing the exact address addr1
-            // (overwrite the trailer region with non-magic bytes as any intervening heap usage or fresh 0x2004 block would).
-            memset(reinterpret_cast<void*>(addr1),0,0x2004);
-            *reinterpret_cast<U*>(addr1+7*4)=0x2468ACE0u;
-            *reinterpret_cast<U*>(addr1+0x8004)=0u;
-            avoidSizeAllocBytes=0; avoidSizeFreeBytes=0; avoidSizeLastPtr=nullptr; avoidSizeFreePtr=nullptr;
-            Check(start(&config)==0 && WaitActive(state,NTW2_COLLIDE),"collide restarts after unhooked address reuse");
-            U addr2=0; memcpy(&addr2,model+0xC4,4);
-            Check(addr2!=0 && addr2!=addr1 && avoidSizeAllocBytes==0x8014u &&
-                  avoidSizeFreePtr==reinterpret_cast<void*>(addr1) && avoidSizeFreeBytes==0x2004u &&
-                  *reinterpret_cast<const U*>(addr2+7*4)==0x2468ACE0u &&
-                  *reinterpret_cast<const U*>(addr2+0x8004)==0x4E545732u,
-                  "restart re-enlarges a reused address instead of trusting stale registry state");
-            Check(ReadState(state,snapshot) && snapshot.collision_words[28]==1 && snapshot.collision_words[31]==0x8004u,
-                  "restarted activation publishes avoid_bitset_allocs=1 and avoid_bitset_bytes=0x8004");
-            Check(stop(nullptr)==0,"stop after address-reuse cycle");
-            if(addr2) HeapFree(GetProcessHeap(),0,reinterpret_cast<void*>(addr2));
-            Put(model,0xC4,0); Put(model,0xC8,0); Put(model,0xCC,0);
-        }
         struct CollideCycle { U mask; U workers; };
         const CollideCycle cycles[]={{NTW2_COLLIDE,0},{NTW2_COLLIDE|NTW2_PROFILE,2},
                                     {NTW2_BATCH64,0},{NTW2_COLLIDE|NTW2_BRAIN2,3},

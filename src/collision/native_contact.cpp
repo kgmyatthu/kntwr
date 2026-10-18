@@ -40,32 +40,6 @@ bool ForgetEnlargedBlock(U block) {
 
 template<class T> __forceinline T L(U address, U offset) { return *reinterpret_cast<const volatile T*>(address + offset); }
 __forceinline U Va(U preferred) { return preferred + delta; }
-void StampAvoidTrailer(void* p) {
-    U addr = static_cast<U>(reinterpret_cast<uintptr_t>(p));
-    volatile U* t = reinterpret_cast<volatile U*>(static_cast<B*>(p) + kAvoidBitsetBytes);
-    t[0] = kAvoidTrailerMagic;
-    t[1] = addr;
-    t[2] = kAvoidBitsetBytes;
-    t[3] = addr ^ kAvoidBitsetBytes ^ kAvoidTrailerXor;
-}
-void ScrubAvoidTrailer(U bits) {
-    if (!bits) return;
-    __try {
-        volatile U* t = reinterpret_cast<volatile U*>(bits + kAvoidBitsetBytes);
-        if (t[0] == kAvoidTrailerMagic && t[1] == bits && t[2] == kAvoidBitsetBytes &&
-            t[3] == (bits ^ kAvoidBitsetBytes ^ kAvoidTrailerXor)) {
-            t[0] = 0; t[1] = 0; t[2] = 0; t[3] = 0;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-bool HasValidAvoidTrailer(U bits) {
-    if (!bits) return false;
-    __try {
-        const volatile U* t = reinterpret_cast<const volatile U*>(bits + kAvoidBitsetBytes);
-        return t[0] == kAvoidTrailerMagic && t[1] == bits && t[2] == kAvoidBitsetBytes &&
-               t[3] == (bits ^ kAvoidBitsetBytes ^ kAvoidTrailerXor);
-    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
 __forceinline float Add(float a, float b) { return _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(a), _mm_set_ss(b))); }
 __forceinline float Sub(float a, float b) { return _mm_cvtss_f32(_mm_sub_ss(_mm_set_ss(a), _mm_set_ss(b))); }
 __forceinline float Mul(float a, float b) { return _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(a), _mm_set_ss(b))); }
@@ -382,22 +356,17 @@ void ResetAvoidCounters() {
     _InterlockedExchange(&avoidSerialRefusals, 0);
     _InterlockedExchange(&avoidActiveBytes, 0);
 }
-void ClearAvoidRegistry() {
-    for (U i = 0; i < kEnlargedSlots; ++i) _InterlockedExchange(&enlargedBlocks[i], 0);
-}
 bool IsEnlargedBitset(U bits) {
     if (!bits) return false;
     for (U i = 0; i < kEnlargedSlots; ++i)
-        if (static_cast<U>(_InterlockedCompareExchange(&enlargedBlocks[i], 0, 0)) == bits)
-            return HasValidAvoidTrailer(bits);
+        if (static_cast<U>(_InterlockedCompareExchange(&enlargedBlocks[i], 0, 0)) == bits) return true;
     return false;
 }
 void* __cdecl AllocBitset(U) {
     using AllocFn = void* (__cdecl*)(U);
-    void* p = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidAllocBytes);
+    void* p = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidBitsetBytes);
     if (p) {
         memset(p, 0, kAvoidBitsetBytes);
-        StampAvoidTrailer(p);
         RecordEnlargedBlock(static_cast<U>(reinterpret_cast<uintptr_t>(p)));
         _InterlockedIncrement(&avoidAllocs);
         _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
@@ -406,10 +375,8 @@ void* __cdecl AllocBitset(U) {
 }
 void __cdecl FreeBitset(void* block, U passedBytes) {
     U addr = static_cast<U>(reinterpret_cast<uintptr_t>(block));
-    bool inReg = ForgetEnlargedBlock(addr);
-    bool validTrailer = HasValidAvoidTrailer(addr);
-    if (validTrailer) ScrubAvoidTrailer(addr);
-    U bytes = (inReg || validTrailer) ? kAvoidAllocBytes : passedBytes;
+    bool enlarged = ForgetEnlargedBlock(addr);
+    U bytes = enlarged ? kAvoidBitsetBytes : passedBytes;
     using FreeFn = void (__cdecl*)(void*, U);
     reinterpret_cast<FreeFn>(Va(0x126e016))(block, bytes);
     if (block) _InterlockedIncrement(&avoidFrees);
@@ -420,37 +387,24 @@ bool AdoptModelBitset(U model) {
         U c4 = L<U>(model, 0xc4);
         if (!c4) return false;
         if (IsEnlargedBitset(c4)) {
-            // Current-generation enlarged block (in enlargedBlocks AND verified trailer).
             _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
             if (_InterlockedCompareExchange(&avoidAllocs, 0, 0) == 0) _InterlockedIncrement(&avoidAllocs);
             return true;
         }
         U c8 = L<U>(model, 0xc8), cc = L<U>(model, 0xcc);
         if (!cc || L<U>(cc, 0x90) != c4 || (c8 && L<U>(c8, 0x90) != c4)) return false;
-        // Any block not registered in the current generation is re-enlarged: even if a recycled stock
-        // 0x2004 allocation reuses an old address, it is never trusted in place. If the old block is a
-        // surviving enlarged block from a previous generation (valid trailer at +0x8004), copy all 0x8004
-        // bytes so high-serial bits stay intact; otherwise copy the stock 0x2004 prefix and zero the tail.
-        bool prevEnlarged = HasValidAvoidTrailer(c4);
         using AllocFn = void* (__cdecl*)(U);
         using FreeFn = void (__cdecl*)(void*, U);
-        void* fresh = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidAllocBytes);
+        void* fresh = reinterpret_cast<AllocFn>(Va(0x10d3140))(kAvoidBitsetBytes);
         if (!fresh) return false;
-        if (prevEnlarged) {
-            memcpy(fresh, reinterpret_cast<const void*>(static_cast<uintptr_t>(c4)), kAvoidBitsetBytes);
-            ScrubAvoidTrailer(c4);
-        } else {
-            memcpy(fresh, reinterpret_cast<const void*>(static_cast<uintptr_t>(c4)), kStockAvoidBitsetBytes);
-            memset(static_cast<B*>(fresh) + kStockAvoidBitsetBytes, 0, kAvoidBitsetBytes - kStockAvoidBitsetBytes);
-        }
-        StampAvoidTrailer(fresh);
+        memcpy(fresh, reinterpret_cast<const void*>(static_cast<uintptr_t>(c4)), kStockAvoidBitsetBytes);
+        memset(static_cast<B*>(fresh) + kStockAvoidBitsetBytes, 0, kAvoidBitsetBytes - kStockAvoidBitsetBytes);
         U freshAddr = static_cast<U>(reinterpret_cast<uintptr_t>(fresh));
         RecordEnlargedBlock(freshAddr);
         *reinterpret_cast<volatile U*>(model + 0xc4) = freshAddr;
         *reinterpret_cast<volatile U*>(cc + 0x90) = freshAddr;
         if (c8) *reinterpret_cast<volatile U*>(c8 + 0x90) = freshAddr;
-        reinterpret_cast<FreeFn>(Va(0x126e016))(reinterpret_cast<void*>(static_cast<uintptr_t>(c4)),
-                                                prevEnlarged ? kAvoidAllocBytes : kStockAvoidBitsetBytes);
+        reinterpret_cast<FreeFn>(Va(0x126e016))(reinterpret_cast<void*>(static_cast<uintptr_t>(c4)), kStockAvoidBitsetBytes);
         _InterlockedIncrement(&avoidAllocs);
         _InterlockedExchange(&avoidActiveBytes, static_cast<LONG>(kAvoidBitsetBytes));
         return true;

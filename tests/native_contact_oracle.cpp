@@ -657,18 +657,14 @@ static void AvoidBitsetEnlargement(World& w) {
             P(c51f + (0x51f40e - 0x51f150))[0] == 0xe8 &&
             c51f + (0x51f40e - 0x51f150) + 5 + Get<U>(P(c51f + (0x51f40e - 0x51f150)), 1) == Fn(&C::FreeBitset),
         "CLONE_AVOID_51F150 pushes 0x8004 at +0x2B3 and calls FreeBitset at +0x2BE");
-    C::ConfigureAvoidHooks(delta); C::ClearAvoidRegistry(); C::ResetAvoidCounters();
+    C::ConfigureAvoidHooks(delta); C::ResetAvoidCounters();
     recordedSizeAllocBytes = recordedSizeFreeBytes = 0;
     void* block = C::AllocBitset(C::kStockAvoidBitsetBytes);
-    Require(block != nullptr && block == recordedSizeAllocPtr && recordedSizeAllocBytes == C::kAvoidAllocBytes,
-        "AllocBitset allocates 0x8014 bytes (0x8004 + 16-byte trailer) through 0x10D3140");
+    Require(block != nullptr && block == recordedSizeAllocPtr && recordedSizeAllocBytes == C::kAvoidBitsetBytes,
+        "AllocBitset allocates 0x8004 bytes through 0x10D3140");
     bool allZero = true;
     for (U i = 0; i < C::kAvoidBitsetBytes; ++i) if (static_cast<const B*>(block)[i] != 0) { allZero = false; break; }
-    Require(allZero && C::IsEnlargedBitset(A(block)) &&
-            Get<U>(block, C::kAvoidBitsetBytes) == C::kAvoidTrailerMagic &&
-            Get<U>(block, C::kAvoidBitsetBytes + 4) == A(block) &&
-            Get<U>(block, C::kAvoidBitsetBytes + 8) == C::kAvoidBitsetBytes,
-        "AllocBitset zeroes all 0x8004 bytes, stamps the 16-byte trailer, and registers the block");
+    Require(allZero && C::IsEnlargedBitset(A(block)), "AllocBitset zeroes all 0x8004 bytes and registers the block");
     U allocs = 0, frees = 0, refusals = 0, activeBytes = 0;
     C::SampleAvoidWords(allocs, frees, refusals, activeBytes);
     Require(allocs == 1 && frees == 0 && refusals == 0 && activeBytes == C::kAvoidBitsetBytes, "alloc counter and active bytes published");
@@ -704,11 +700,11 @@ static void AvoidBitsetEnlargement(World& w) {
     }
     Put<U>(w.model, 0xc4, 0); Put<U>(w.avoid, 0x90, A(w.avoidBits)); Put<U>(w.combat, 0x90, A(w.combatBits));
     std::memcpy(r, saveR.data(), kAgentBytes); std::memcpy(s, saveS.data(), kAgentBytes);
-    // FreeBitset matches the 0x8014 allocation size even if called with 0x2004, and scrubs the trailer.
+    // FreeBitset matches the 0x8004 allocation size even if called with 0x2004.
     C::FreeBitset(block, C::kStockAvoidBitsetBytes);
     C::SampleAvoidWords(allocs, frees, refusals, activeBytes);
-    Require(recordedSizeFreePtr == block && recordedSizeFreeBytes == C::kAvoidAllocBytes && frees == 1 && !C::IsEnlargedBitset(A(block)),
-        "FreeBitset frees enlarged block with matched size 0x8014");
+    Require(recordedSizeFreePtr == block && recordedSizeFreeBytes == C::kAvoidBitsetBytes && frees == 1 && !C::IsEnlargedBitset(A(block)),
+        "FreeBitset frees enlarged block with matched size 0x8004");
     // AdoptModelBitset upgrades a stock 0x2004-byte block at model+0xC4/+0xC8/+0xCC in place, preserving existing bits.
     void* stock = RecordedSizeAlloc(C::kStockAvoidBitsetBytes);
     std::memset(stock, 0, C::kStockAvoidBitsetBytes);
@@ -721,19 +717,8 @@ static void AvoidBitsetEnlargement(World& w) {
             recordedSizeFreePtr == stock && recordedSizeFreeBytes == C::kStockAvoidBitsetBytes &&
             Get<U>(P(adopted), 17 * 4) == 0xDEADBEEFu && Get<U>(P(adopted), 0x2004) == 0u,
         "AdoptModelBitset copies existing 0x2004 bytes, zeroes tail, updates model+0xC4/avoid+0x90/combat+0x90, and frees stock block with 0x2004");
-    Require(C::AdoptModelBitset(A(w.model)) && Get<U>(w.model, 0xc4) == adopted, "AdoptModelBitset is idempotent in the same generation");
-    // Surviving enlarged block across stop/restart: ClearAvoidRegistry clears the generation registry,
-    // and a later AdoptModelBitset re-enlarges while preserving high-serial bits (> 65,568) via the valid trailer.
-    Put<U>(P(adopted), 2500 * 4, 0xCAFEBABEu);
-    C::ClearAvoidRegistry();
-    Require(!C::IsEnlargedBitset(adopted), "ClearAvoidRegistry invalidates generation registry on stop");
-    Require(C::AdoptModelBitset(A(w.model)), "AdoptModelBitset re-adopts surviving enlarged block after restart");
-    U readopted = Get<U>(w.model, 0xc4);
-    Require(readopted != 0 && readopted != adopted && C::IsEnlargedBitset(readopted) &&
-            recordedSizeFreePtr == P(adopted) && recordedSizeFreeBytes == C::kAvoidAllocBytes &&
-            Get<U>(P(readopted), 17 * 4) == 0xDEADBEEFu && Get<U>(P(readopted), 2500 * 4) == 0xCAFEBABEu,
-        "AdoptModelBitset preserves high-serial bits of a surviving enlarged block across stop/restart");
-    C::FreeBitset(P(readopted), C::kAvoidBitsetBytes);
+    Require(C::AdoptModelBitset(A(w.model)) && Get<U>(w.model, 0xc4) == adopted, "AdoptModelBitset is idempotent");
+    C::FreeBitset(P(adopted), C::kAvoidBitsetBytes);
     Put<U>(w.model, 0xc4, 0); Put<U>(w.avoid, 0x90, A(w.avoidBits)); Put<U>(w.combat, 0x90, A(w.combatBits));
     if (clones.allocation) VirtualFree(clones.allocation, 0, MEM_RELEASE);
 }

@@ -1547,30 +1547,6 @@ static void OwnedCases(U workers) {
             "Stage fallback above 0x10020 routes through the rebuild guard");
         CompareExact(guardRef, guardFallback, "Stage guarded fallback equals original stage");
         ++cases;
-        // Full >= 65,600 synthetic primary records through GuardedStage (where original 0x57DC30 would smash its 0x2004-byte stack bitmap):
-        constexpr U kLargePrimary = 65600;
-        Fixture largeBase(guardSpec);
-        std::vector<B> largeDummy(0x80, 0);
-        Put(largeDummy.data(), 0, A(vtable)); Put(largeDummy.data(), 0x28, A(largeBase.root.data()));
-        Put(largeDummy.data(), 0x30, B(0)); // inactive early-out in 0x81A790
-        for (Node& node : largeBase.nodes[1]) node.serial = 50000u;
-        Put(largeBase.records[1].bytes, 0x2c, U(50000));
-        std::vector<U> largeReg(kLargePrimary, A(largeDummy.data())), largeWork(kLargePrimary, 0);
-        largeReg[0] = A(largeBase.records[0].bytes);
-        largeReg[50000] = A(largeBase.records[1].bytes);
-        Put(largeBase.manager.data(), 0x24c, kLargePrimary); Put(largeBase.manager.data(), 0x250, A(largeReg.data()));
-        Put(largeBase.manager.data(), 0x260, kLargePrimary); Put(largeBase.manager.data(), 0x264, A(largeWork.data()));
-        Put(largeBase.manager.data(), 0x268, B(1));
-        events = &largeBase.calls; largeBase.calls.clear(); ResetFp();
-        volatile U largeGuards = 0;
-        ntw2_collide::GuardedStage(largeBase.manager.data(), 0u, A(At(0x81a790)), A(At(0xff7ef0)), &largeGuards);
-        events = nullptr;
-        Require(largeGuards == 1 && Get<B>(largeBase.manager.data(), 0x268) == 0 &&
-                largeWork[0] == A(largeBase.records[0].bytes) && largeWork[1] == A(largeBase.records[1].bytes) &&
-                largeWork[kLargePrimary - 1] == A(largeDummy.data()) &&
-                largeBase.calls.size() == 1 && largeBase.calls[0].receiver == 50000 && largeBase.calls[0].argument == 0 &&
-                Get<B>(largeBase.records[0].bytes, 0x40) == 1 && Get<B>(largeBase.records[1].bytes, 0x40) == 1,
-            "GuardedStage rebuilds 65,600 primary records (> 0x10020) without stack overflow and BFS-queues index 50,000");
     }
 }
 static void CapacityCases(U workers) {

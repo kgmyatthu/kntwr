@@ -48,8 +48,6 @@ enum Word : U {
 constexpr U kVersion = 1;
 constexpr U kStockAvoidBitsetBytes = 0x2004u, kStockAvoidSerialCap = (kStockAvoidBitsetBytes / 4u) * 32u; // 65,568
 constexpr U kAvoidBitsetBytes = 0x8004u, kAvoidSerialCap = (kAvoidBitsetBytes / 4u) * 32u;               // 262,176 (>= 262,144)
-constexpr U kAvoidTrailerBytes = 16u, kAvoidAllocBytes = kAvoidBitsetBytes + kAvoidTrailerBytes;         // 0x8014 (trailer magic + self-addr + size + xor)
-constexpr U kAvoidTrailerMagic = 0x4E545732u, kAvoidTrailerXor = 0xA5C35A3Cu;
 enum Kind : uint16_t { KindPort, KindDiffTeam, KindForeign, KindUnsupported, KindFault, KindSerialOutOfBounds };
 enum Flag : uint16_t {
     FlagRUnit = 1,        // R+0x1F0 != 0 (S-side tracker appends R's key)
@@ -104,7 +102,6 @@ void Sample(U out[WordCount]);
 //     the call-site hook was installed; idempotent when the block is already enlarged.
 void ConfigureAvoidHooks(U image_delta);
 void ResetAvoidCounters();
-void ClearAvoidRegistry();
 void* __cdecl AllocBitset(U requested_bytes);
 void __cdecl FreeBitset(void* block, U passed_bytes);
 bool IsEnlargedBitset(U bits_address);
