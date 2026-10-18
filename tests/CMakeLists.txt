@@ -288,7 +288,7 @@ ntw2_harness(native_collision_solver_oracle STD 20 FP strict
   OBJECTS ntw2_worker_dispatch
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/collision" "${NTW2_SRC}/worker" LIBS bcrypt)
 ntw2_harness(native_contact_oracle STD 20 FP strict
-  SOURCES native_contact_oracle.cpp "${NTW2_SRC}/collision/native_contact.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
+  SOURCES native_contact_oracle.cpp "${NTW2_SRC}/collision/native_contact.cpp"
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/collision" LIBS bcrypt)
 ntw2_harness(native_brain2_oracle STD 20 FP strict
   SOURCES native_brain2_oracle.cpp "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"

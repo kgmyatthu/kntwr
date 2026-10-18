@@ -32,7 +32,6 @@
 #include <limits>
 #include "native_image_relocation.h"
 #include "native_contact.h"
-#include "clones/ntw2_clones.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
@@ -620,108 +619,6 @@ static void Refusals(World& w) {
     Require(words[C::OwnerFaults] == 1, "fault census");
     std::memcpy(r, saveR.data(), kAgentBytes); std::memcpy(s, saveS.data(), kAgentBytes);
 }
-static U recordedSizeAllocBytes, recordedSizeFreeBytes;
-static void* recordedSizeAllocPtr, *recordedSizeFreePtr;
-static void* __cdecl RecordedSizeAlloc(U bytes) {
-    recordedSizeAllocBytes = bytes;
-    recordedSizeAllocPtr = std::malloc(bytes ? bytes : 1);
-    Require(recordedSizeAllocPtr != nullptr, "recorded size alloc");
-    std::memset(recordedSizeAllocPtr, 0xA5, bytes);
-    return recordedSizeAllocPtr;
-}
-static void __cdecl RecordedSizeFree(void* p, U bytes) {
-    recordedSizeFreePtr = p;
-    recordedSizeFreeBytes = bytes;
-    std::free(p);
-}
-static void AvoidBitsetEnlargement(World& w) {
-    currentCase = "avoidance bitset enlargement (0x8004 bytes = 262,176 serials)";
-    Reset(w); InstallFp();
-    Jump(0x10d3140, Fn(&RecordedSizeAlloc));
-    Jump(0x126e016, Fn(&RecordedSizeFree));
-    Require(FlushInstructionCache(GetCurrentProcess(), image, imageSize) != 0, "flush size alloc/free seams");
-    U bindings[NTW2_BIND_COUNT] = {};
-    for (U i = 0; i < NTW2_BIND_COUNT; ++i) bindings[i] = Va(0x462cb0);
-    bindings[NTW2_BIND_AVOID_ALLOC] = Fn(&C::AllocBitset);
-    bindings[NTW2_BIND_AVOID_FREE] = Fn(&C::FreeBitset);
-    ntw2_clone_set clones = {}; U detail = 0;
-    Require(ntw2_build_clones(A(image), bindings, &clones, &detail) == 0, "ntw2_build_clones succeeds with AVOID clones");
-    U c506 = clones.entries[NTW2_CLONE_AVOID_506C00], c51f = clones.entries[NTW2_CLONE_AVOID_51F150];
-    Require(c506 != 0 && c51f != 0, "AVOID_506C00 and AVOID_51F150 clones emitted");
-    Require(Get<U>(P(c506 + (0x507485 - 0x506c00)), 1) == 0x2004u &&
-            P(c506 + (0x50748a - 0x506c00))[0] == 0xe8 &&
-            c506 + (0x50748a - 0x506c00) + 5 + Get<U>(P(c506 + (0x50748a - 0x506c00)), 1) == Fn(&C::AllocBitset) &&
-            Get<U>(P(c506 + (0x50749d - 0x506c00)), 1) == C::kAvoidBitsetBytes,
-        "CLONE_AVOID_506C00 calls AllocBitset at +0x88A and pushes 0x8004 at +0x89D");
-    Require(Get<U>(P(c51f + (0x51f403 - 0x51f150)), 1) == C::kAvoidBitsetBytes &&
-            P(c51f + (0x51f40e - 0x51f150))[0] == 0xe8 &&
-            c51f + (0x51f40e - 0x51f150) + 5 + Get<U>(P(c51f + (0x51f40e - 0x51f150)), 1) == Fn(&C::FreeBitset),
-        "CLONE_AVOID_51F150 pushes 0x8004 at +0x2B3 and calls FreeBitset at +0x2BE");
-    C::ConfigureAvoidHooks(delta); C::ResetAvoidCounters();
-    recordedSizeAllocBytes = recordedSizeFreeBytes = 0;
-    void* block = C::AllocBitset(C::kStockAvoidBitsetBytes);
-    Require(block != nullptr && block == recordedSizeAllocPtr && recordedSizeAllocBytes == C::kAvoidBitsetBytes,
-        "AllocBitset allocates 0x8004 bytes through 0x10D3140");
-    bool allZero = true;
-    for (U i = 0; i < C::kAvoidBitsetBytes; ++i) if (static_cast<const B*>(block)[i] != 0) { allZero = false; break; }
-    Require(allZero && C::IsEnlargedBitset(A(block)), "AllocBitset zeroes all 0x8004 bytes and registers the block");
-    U allocs = 0, frees = 0, refusals = 0, activeBytes = 0;
-    C::SampleAvoidWords(allocs, frees, refusals, activeBytes);
-    Require(allocs == 1 && frees == 0 && refusals == 0 && activeBytes == C::kAvoidBitsetBytes, "alloc counter and active bytes published");
-    // High serial (>= 65,568) refused on stock 0x2004-byte block and admitted on enlarged 0x8004-byte block.
-    B *r = w.agents[0], *s = w.agents[1];
-    std::vector<B> saveR(r, r + kAgentBytes), saveS(s, s + kAgentBytes);
-    Put<U>(r, 0, landTables[0]); Put<U>(s, 0, landTables[0]);
-    Put<U>(r, 0x28, A(w.env)); Put<U>(s, 0x28, A(w.env));
-    Put<U>(r, 0x44, 1); Put<U>(s, 0x44, 1);
-    Put<U>(r, 0x2c, 70000u); Put<U>(s, 0x2c, 100u);
-    C::Start(delta, C::ModeWorkers); C::Stage st;
-    Require(C::BeginStage(st, w.model) && st.avoidSerialCap == C::kStockAvoidSerialCap, "stock block gets 65,568 serial cap");
-    C::Plan plan; C::Predict(st, plan, r, s); C::CountPlan(plan);
-    C::SampleAvoidWords(allocs, frees, refusals, activeBytes);
-    Require(plan.kind == C::KindSerialOutOfBounds && refusals == 1, "serial 70,000 refused and counted on stock 0x2004-byte block");
-    // Install the enlarged block on w.model and verify serial 70,000 and 200,000 are admitted and bit-exact with 0x629180/0x65FF20/0x6795D0.
-    Put<U>(w.model, 0xc4, A(block)); Put<U>(w.avoid, 0x90, A(block)); Put<U>(w.combat, 0x90, A(block));
-    Require(C::BeginStage(st, w.model) && st.avoidSerialCap == C::kAvoidSerialCap, "enlarged block gets 262,176 serial cap");
-    using AvailFn = B (__thiscall*)(void*, void*);
-    auto origAvail = reinterpret_cast<AvailFn>(Va(0x6795d0));
-    Put<B>(r, 0xec, 1); Put<B>(r, 0xb4, 0); Put<U>(r, 0x18, 0); Put<U>(r, 0x224, 0);
-    for (U testSerial : { 65536u, 65568u, 70000u, 131072u, 262143u, 262175u }) {
-        Put<U>(r, 0x2c, testSerial);
-        U* word = static_cast<U*>(block) + (testSerial >> 5);
-        U mask = 1u << (testSerial & 31);
-        Require(C::port::Available(A(w.avoid), A(r), st.avoidSerialCap) && origAvail(w.avoid, r) == 1, "available before bts above 64k");
-        *word |= mask;
-        Require(!C::port::Available(A(w.avoid), A(r), st.avoidSerialCap) && origAvail(w.avoid, r) == 0, "unavailable after bts above 64k");
-        C::Predict(st, plan, r, s);
-        Require(plan.kind == C::KindPort && (plan.flags & C::FlagBitR) != 0, "Predict observes FlagBitR above 64k");
-        *word &= ~mask;
-        Require(C::port::Available(A(w.avoid), A(r), st.avoidSerialCap) && origAvail(w.avoid, r) == 1, "available after btr above 64k");
-    }
-    Put<U>(w.model, 0xc4, 0); Put<U>(w.avoid, 0x90, A(w.avoidBits)); Put<U>(w.combat, 0x90, A(w.combatBits));
-    std::memcpy(r, saveR.data(), kAgentBytes); std::memcpy(s, saveS.data(), kAgentBytes);
-    // FreeBitset matches the 0x8004 allocation size even if called with 0x2004.
-    C::FreeBitset(block, C::kStockAvoidBitsetBytes);
-    C::SampleAvoidWords(allocs, frees, refusals, activeBytes);
-    Require(recordedSizeFreePtr == block && recordedSizeFreeBytes == C::kAvoidBitsetBytes && frees == 1 && !C::IsEnlargedBitset(A(block)),
-        "FreeBitset frees enlarged block with matched size 0x8004");
-    // AdoptModelBitset upgrades a stock 0x2004-byte block at model+0xC4/+0xC8/+0xCC in place, preserving existing bits.
-    void* stock = RecordedSizeAlloc(C::kStockAvoidBitsetBytes);
-    std::memset(stock, 0, C::kStockAvoidBitsetBytes);
-    static_cast<U*>(stock)[17] = 0xDEADBEEFu;
-    Put<U>(w.model, 0xc4, A(stock)); Put<U>(w.avoid, 0x90, A(stock)); Put<U>(w.combat, 0x90, A(stock));
-    Require(C::AdoptModelBitset(A(w.model)), "AdoptModelBitset upgrades stock model+0xC4 block");
-    U adopted = Get<U>(w.model, 0xc4);
-    Require(adopted != 0 && adopted != A(stock) && C::IsEnlargedBitset(adopted) &&
-            Get<U>(w.avoid, 0x90) == adopted && Get<U>(w.combat, 0x90) == adopted &&
-            recordedSizeFreePtr == stock && recordedSizeFreeBytes == C::kStockAvoidBitsetBytes &&
-            Get<U>(P(adopted), 17 * 4) == 0xDEADBEEFu && Get<U>(P(adopted), 0x2004) == 0u,
-        "AdoptModelBitset copies existing 0x2004 bytes, zeroes tail, updates model+0xC4/avoid+0x90/combat+0x90, and frees stock block with 0x2004");
-    Require(C::AdoptModelBitset(A(w.model)) && Get<U>(w.model, 0xc4) == adopted, "AdoptModelBitset is idempotent");
-    C::FreeBitset(P(adopted), C::kAvoidBitsetBytes);
-    Put<U>(w.model, 0xc4, 0); Put<U>(w.avoid, 0x90, A(w.avoidBits)); Put<U>(w.combat, 0x90, A(w.combatBits));
-    if (clones.allocation) VirtualFree(clones.allocation, 0, MEM_RELEASE);
-}
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: native_contact_oracle <Napoleon.exe>\n"); return 2; }
@@ -743,7 +640,7 @@ int main(int argc, char** argv) {
         if (seed == 1) { StalePlans(world); ThreadDeterminism(world); }
         ++worlds;
     }
-    Build(world, 99); Refusals(world); DistanceEdge(world); AvoidBitsetEnlargement(world);
+    Build(world, 99); Refusals(world); DistanceEdge(world);
     currentCase = "coverage";
     std::printf("plans: port=%u diff=%u foreign=%u unsupported=%u fault=%u writeR=%u writeS=%u avoid=%u usedAvail=%u diffDistance=%u\n",
         totals[C::KindPort], totals[C::KindDiffTeam], totals[C::KindForeign], totals[C::KindUnsupported], totals[C::KindFault],

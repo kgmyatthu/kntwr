@@ -108,7 +108,6 @@ volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
 constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot
 Slot slots[kMaxSlots];
-Slot avoidSlots[5];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
 static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1+1<=kMaxSlots, "slot table holds every possible hook");
 __declspec(align(64)) ntw_pool pool;
@@ -2592,9 +2591,6 @@ bool BuildClones() {
     bindings[NTW2_BIND_PP_RESERVE]=ntw2_prepass::PresizeReserveGateAddress();
     bindings[NTW2_BIND_PP_EXIT]=ntw2_prepass::PresizeExitGateAddress();
     ntw2_loco::Bind(delta,bindings); // before ntw2_build_clones: the module owns its clone bindings
-    ntw2_contact::ConfigureAvoidHooks(delta);
-    bindings[NTW2_BIND_AVOID_ALLOC]=FnAddress(&ntw2_contact::AllocBitset);
-    bindings[NTW2_BIND_AVOID_FREE]=FnAddress(&ntw2_contact::FreeBitset);
     const U siteThunks[NTW2_TIMED_SITES]={
         FnAddress(&SiteCall0), FnAddress(&SiteCall1), FnAddress(&SiteCall2), FnAddress(&SiteCall3),
         FnAddress(&SiteCall4), FnAddress(&SiteCall5), FnAddress(&SiteCall6), FnAddress(&SiteCall7),
@@ -2738,7 +2734,6 @@ bool CaptureWorkloadImpl() {
     if(!memberships) memberships=256;
     if(memberships>maxMemberships) return refuse(10,static_cast<U>(memberships>>8));
     activationCapacity.memberships=static_cast<U>(memberships);
-    if (config.enabled_mask & (NTW2_COLLIDE|NTW2_COLLIDE_LOD)) ntw2_contact::AdoptModelBitset(world.model);
     return true;
 }
 void CaptureWorkload(void* context) {
@@ -3203,8 +3198,6 @@ void SampleCounters() {
     ntw2_state.ai_slice_words[AsThread]=aiThreadId;
     for (U i=0;i<NTW2_BRAIN_WORDS;++i) ntw2_state.brain_words[i]=brainWords[i];
     for (U i=0;i<NTW2_BRAIN_STATE_WORDS;++i) ntw2_state.brain_state_words[i]=brainStateWords[i];
-    ntw2_contact::SampleAvoidWords(const_cast<U&>(collisionWords[28]),const_cast<U&>(collisionWords[29]),
-                                   const_cast<U&>(collisionWords[30]),const_cast<U&>(collisionWords[31]));
     for (U i=0;i<NTW2_COLLISION_WORDS;++i) ntw2_state.collision_words[i]=collisionWords[i];
     // Keep the last completed owned-stage counters after emergency retirement.
     if(!budgetRetired) {
@@ -3507,9 +3500,6 @@ bool Activate(const World& candidate) {
     for (U i=0;i<NTW2_COLLIDE_SOURCE_WORDS;++i) ntw2_state.collide_source_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) ntw2_state.collide_contact_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_LOD_WORDS;++i) ntw2_state.collide_lod_words[i]=0;
-    ntw2_contact::SampleAvoidWords(const_cast<U&>(collisionWords[28]),const_cast<U&>(collisionWords[29]),
-                                   const_cast<U&>(collisionWords[30]),const_cast<U&>(collisionWords[31]));
-    for (U i=0;i<NTW2_COLLISION_WORDS;++i) ntw2_state.collision_words[i]=collisionWords[i];
     // Publish all LOCO row metadata with activation, not a later poll.
     if (locoRunning) {
         ntw2_loco::Sample(const_cast<U*>(ntw2_state.loco_words));
@@ -3593,15 +3583,6 @@ void CadenceSample(U tick) {
 DWORD WINAPI Monitor(void*) {
     if (!LoadEntries()) RecordError(MissingExport,0);
     if (!failure) BuildClones();
-    const bool avoidHooks=!failure && (config.enabled_mask&(NTW2_COLLIDE|NTW2_COLLIDE_LOD))!=0;
-    if (avoidHooks) {
-        avoidSlots[0]={V(0x1320e60),V(0x5472c0),clones.entries[NTW2_CLONE_AVOID_5472C0],0,false,false};
-        avoidSlots[1]={V(0x132e774),V(0x5b9140),clones.entries[NTW2_CLONE_AVOID_5B9140],0,false,false};
-        avoidSlots[2]={V(0x132e768),V(0x5b9200),clones.entries[NTW2_CLONE_AVOID_5B9200],0,false,false};
-        avoidSlots[3]={V(0x132b280),V(0x5acec0),clones.entries[NTW2_CLONE_AVOID_5ACEC0],0,false,false};
-        avoidSlots[4]={V(0x132e740),V(0x5ace90),clones.entries[NTW2_CLONE_AVOID_5ACE90],0,false,false};
-        for (Slot& s:avoidSlots) if (!SwapSlot(s,true)) break;
-    }
     if (!failure && (config.enabled_mask&NTW2_AI_CENSUS)) ntw2_ai_census::SetController(clones.entries[NTW2_CLONE_AI_CONTROLLER],0xBC);
     ntw2_profile_storm_threshold_ms=(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS))) {
@@ -3643,7 +3624,6 @@ DWORD WINAPI Monitor(void*) {
         for (U i=0;i<NTW2_BRAIN_WORDS;++i) brainWords[i]=0;
         for (U i=0;i<NTW2_BRAIN_STATE_WORDS;++i) brainStateWords[i]=0;
         for (U i=0;i<NTW2_COLLISION_WORDS;++i) collisionWords[i]=0;
-        ntw2_contact::ResetAvoidCounters();
         for (LONGLONG& ticks:collisionQpc) ticks=0;
         collisionNumericActive=false;
         Brain2Reset();
@@ -3660,8 +3640,6 @@ DWORD WINAPI Monitor(void*) {
     for (U i=0;i<slotCount;++i) hooks=hooks || slots[i].owned || slots[i].protectionDirty;
     if (hooks || Load(&enabled) || formation.ready || query.ready || path.ready || poolReady)
         clean=Deactivate();
-    for (U i=5;i;--i)
-        if ((avoidSlots[i-1].owned || avoidSlots[i-1].protectionDirty) && !SwapSlot(avoidSlots[i-1],false)) clean=false;
     if (!AiShutdown()) clean=false;
     if (clean && (config.enabled_mask&NTW2_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context
     CrashRemove();
@@ -3670,9 +3648,6 @@ DWORD WINAPI Monitor(void*) {
         StateBegin(); ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
     StateBegin(); // worker joined: final totals
-    ntw2_contact::SampleAvoidWords(const_cast<U&>(collisionWords[28]),const_cast<U&>(collisionWords[29]),
-                                   const_cast<U&>(collisionWords[30]),const_cast<U&>(collisionWords[31]));
-    for (U i=0;i<NTW2_COLLISION_WORDS;++i) ntw2_state.collision_words[i]=collisionWords[i];
     ntw2_ai_async2::Snapshot(ntw2_state.ai_async2_words);
     ntw2_ai_async2::RouteSnapshot(ntw2_state.ai_async2_route_words);
     ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
@@ -3822,7 +3797,6 @@ static U StartImpl(void* raw) {
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
     Brain2Reset(); ntw2_army_unit::Reset(); ntw2_army_storm::Reset(); ntw2_army_solver::Reset();
     CollideLodReset();
-    ntw2_contact::ConfigureAvoidHooks(delta); ntw2_contact::ResetAvoidCounters();
     memset(const_cast<U*>(visualWords),0,sizeof(visualWords));
     memset(allocatorWords,0,sizeof(allocatorWords));
     _InterlockedExchange(&visualFaulted,0);
@@ -3843,7 +3817,6 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_ALLOCATOR_WORDS;++i) ntw2_state.allocator_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_WORDS;++i) ntw2_state.collide_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_SOURCE_WORDS;++i) ntw2_state.collide_source_words[i]=0;
-    for (U i=0;i<NTW2_COLLISION_WORDS;++i) ntw2_state.collision_words[i]=0;
     for (U i=0;i<NTW2_VA_WATCH_WORDS;++i) ntw2_state.va_watch_words[i]=0;
     for (U i=0;i<NTW2_BRAIN2_WORDS;++i) ntw2_state.brain2_words[i]=0;
     for (U i=0;i<32;++i) ntw2_state.brain2_reason_words[i]=0;

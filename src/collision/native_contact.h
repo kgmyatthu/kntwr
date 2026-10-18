@@ -46,9 +46,7 @@ enum Word : U {
     WordCount
 };
 constexpr U kVersion = 1;
-constexpr U kStockAvoidBitsetBytes = 0x2004u, kStockAvoidSerialCap = (kStockAvoidBitsetBytes / 4u) * 32u; // 65,568
-constexpr U kAvoidBitsetBytes = 0x8004u, kAvoidSerialCap = (kAvoidBitsetBytes / 4u) * 32u;               // 262,176 (>= 262,144)
-enum Kind : uint16_t { KindPort, KindDiffTeam, KindForeign, KindUnsupported, KindFault, KindSerialOutOfBounds };
+enum Kind : uint16_t { KindPort, KindDiffTeam, KindForeign, KindUnsupported, KindFault };
 enum Flag : uint16_t {
     FlagRUnit = 1,        // R+0x1F0 != 0 (S-side tracker appends R's key)
     FlagSUnit = 2,        // S+0x1F0 != 0 (R-side tracker appends S's key)
@@ -66,7 +64,7 @@ struct Plan { U trackerR, trackerS; uint16_t keyR, keyS, flags, kind; };
 static_assert(sizeof(Plan) == 16, "plan stays one 16-byte row per contact");
 // Stage-entry constants and identities, captured on the owner by BeginStage.
 struct Stage {
-    U delta, model, avoid, combat, avoidBits, avoidSerialCap;
+    U delta, model, avoid, combat, avoidBits;
     U callback40, thunk44, stubFalse, stubTrue, stubOwner, leaf;
     uint16_t headingBias, angleGate;
     float two, one, angleScale, minDistance, headingFactor, half, dominance, lead;
@@ -92,21 +90,6 @@ void AddPlanTime(U wallUs, U threadUs);
 bool Shadow(const Stage& stage, const Plan& plan, U index, void* r, void* s, Original original, void* context);
 bool Replay(const Stage& stage, const Plan& plan, void* r, void* s, Original original, void* context);
 void Sample(U out[WordCount]);
-// Avoidance bitset (model+0xC4, shared at combat+0x90 and avoid+0x90) enlargement hooks and counters:
-//   * AllocBitset (NTW2_BIND_AVOID_ALLOC, replaces 0x50748A in CLONE_AVOID_506C00): allocates kAvoidBitsetBytes
-//     through 0x10D3140, zeroes the full block, records the block pointer and increments the alloc counter.
-//   * FreeBitset (NTW2_BIND_AVOID_FREE, replaces 0x51F40E in CLONE_AVOID_51F150): frees the block through 0x126E016
-//     with the matched allocation size (kAvoidBitsetBytes if enlarged, else the passed size) and increments the free counter.
-//   * AdoptModelBitset: upgrades an already-constructed model's stock 0x2004-byte block at model+0xC4 (+0xC8/+0xCC->+0x90)
-//     in place to kAvoidBitsetBytes (copying the existing 0x2004 bytes and zeroing the tail) when the model ctor ran before
-//     the call-site hook was installed; idempotent when the block is already enlarged.
-void ConfigureAvoidHooks(U image_delta);
-void ResetAvoidCounters();
-void* __cdecl AllocBitset(U requested_bytes);
-void __cdecl FreeBitset(void* block, U passed_bytes);
-bool IsEnlargedBitset(U bits_address);
-bool AdoptModelBitset(U model);
-void SampleAvoidWords(U& allocs, U& frees, U& serial_refusals, U& active_bytes);
 
 // Decision helpers, exposed for the mapped-original oracle. Addresses are live (relocated).
 namespace port {
@@ -120,9 +103,9 @@ bool Far(U agent, float x, float z);                       // 0x81BD10
 float Facing(const Stage&, U difference);                  // 0x7FA690 (low 16 bits)
 void Facings(const Stage&, U r, U s, float out[4]);        // 0x7E4BB0
 U Classify(const Stage&, U r, U s, bool& supported);       // 0x62F1A0 with mode 0
-bool Available(U manager, U agent, U serial_cap = kStockAvoidSerialCap); // 0x6795D0
+bool Available(U manager, U agent);                        // 0x6795D0
 bool Overlap(const Stage&, U r, U s);                      // 0x7FA590
-bool Avoid(const Stage&, U manager, U r, U s, bool& supported, U serial_cap = kStockAvoidSerialCap); // 0x664010
+bool Avoid(const Stage&, U manager, U r, U s, bool& supported); // 0x664010
 bool TrackerDistance(const Stage&, U a, U b);              // 0x52EDB0 distance gate
 }
 }

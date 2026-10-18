@@ -2815,12 +2815,6 @@ int main(int argc,char** argv) {
         const U boundariesBefore=activationBoundaries;
         Check(WaitActive(state,NTW2_COLLIDE),"collide activates with exact requested mask");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"collide publishes the tick task hook");
-        Check(*At(0x1320e60)!=0x5472c0+delta && ReadOnly(At(0x1320e60)) &&
-              *At(0x132e774)!=0x5b9140+delta && ReadOnly(At(0x132e774)) &&
-              *At(0x132e768)!=0x5b9200+delta && ReadOnly(At(0x132e768)) &&
-              *At(0x132b280)!=0x5acec0+delta && ReadOnly(At(0x132b280)) &&
-              *At(0x132e740)!=0x5ace90+delta && ReadOnly(At(0x132e740)),
-              "collide publishes the five avoidance bitset builder/destructor vtable slots read-only");
         Check(ReadState(state,snapshot) && AllCollideWordsZero(snapshot),"collide counters remain zero without a stage");
         Check(activationBoundaries-boundariesBefore==1 &&
               snapshot.memory_words[NTW2_MEM_PRIMARY_CAPACITY]==256 &&
@@ -2828,13 +2822,7 @@ int main(int argc,char** argv) {
               snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0 && snapshot.memory_words[NTW2_MEM_LOCO_BYTES]==0,
               "standalone collide captures an empty workload once and allocates only native-audit collision storage");
         Check(stop(nullptr)==0,"collide stop drains and joins the pool");
-        Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) &&
-              *At(0x1320e60)==0x5472c0+delta && ReadOnly(At(0x1320e60)) &&
-              *At(0x132e774)==0x5b9140+delta && ReadOnly(At(0x132e774)) &&
-              *At(0x132e768)==0x5b9200+delta && ReadOnly(At(0x132e768)) &&
-              *At(0x132b280)==0x5acec0+delta && ReadOnly(At(0x132b280)) &&
-              *At(0x132e740)==0x5ace90+delta && ReadOnly(At(0x132e740)),
-              "collide stop restores task and avoidance vtable slots and protection");
+        Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"collide stop restores task slot and protection");
         struct CollideCycle { U mask; U workers; };
         const CollideCycle cycles[]={{NTW2_COLLIDE,0},{NTW2_COLLIDE|NTW2_PROFILE,2},
                                     {NTW2_BATCH64,0},{NTW2_COLLIDE|NTW2_BRAIN2,3},

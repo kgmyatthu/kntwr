@@ -2994,11 +2994,6 @@ static void print_collide(const Run *r)
         if (NTW2_COLLIDE_CONTACT_WORDS % 4) say(L"\n");
         say(L"  plan_thread_us = per-chunk QPC occupancy summed over owner+workers (elapsed incl. preemption, not CPU time); plan_thread_us/plan_us = plan parallelism\n");
     }
-    {
-        const uint32_t *cw = r->last.collision_words;
-        say(L"collide.guards: engine_rebuild_unsafe=%lu avoid_bitset_allocs=%lu avoid_bitset_frees=%lu avoid_serial_refusals=%lu avoid_bitset_bytes=%lu\n",
-            (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)cw[30], (unsigned long)cw[31]);
-    }
     say(L"  per solver tick (denominator solver_ticks=%lu, NOT stage_calls=%lu which includes fallbacks):\n",
         (unsigned long)w[1], (unsigned long)w[0]);
     if (w[1]) {
@@ -4248,11 +4243,7 @@ static void sb_collide(Sb *b, const Run *r)
     }
     sb_fmt(b, "}, \"shaped_pairs\": {\"sum\": %lu, \"per_solver_tick\": ", (unsigned long)r->last.collide_words[44]);
     sb_ratio(b, r->last.collide_words[44], r->last.collide_words[1]);
-    sb_fmt(b, "}, \"guards\": {\"engine_rebuild_unsafe\": %lu, \"avoid_bitset_allocs\": %lu, \"avoid_bitset_frees\": %lu, "
-           "\"avoid_serial_refusals\": %lu, \"avoid_bitset_bytes\": %lu}}},\n",
-           (unsigned long)r->last.collision_words[27], (unsigned long)r->last.collision_words[28],
-           (unsigned long)r->last.collision_words[29], (unsigned long)r->last.collision_words[30],
-           (unsigned long)r->last.collision_words[31]);
+    sb_fmt(b, "}}},\n");
 }
 
 static void sb_brain_states(Sb *b, const Run *r)

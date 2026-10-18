@@ -177,10 +177,6 @@ enum ntw2_binding {
     /* --brain-retarget-jitter / --brain-target-cull (appended; src/brain/ntw2_retarget_jitter.h): RJ_TRACKER_TICK replaces CLONE_STEP_676FD0's call 6775C4 of the
        combat node's tracker tick 6671A0 (thiscall ECX = tracker (node+0x48), one stack argument = the agent, ret 4, EAX = target agent or 0): the host mirror. */
     NTW2_BIND_RJ_TRACKER_TICK,
-    /* Avoidance bitset enlargement (model+0xC4, stock 0x2004 bytes -> 0x8004 bytes = 262,144 serials): AVOID_ALLOC replaces
-       0x506C00's allocation call at 0x50748A (cdecl void*(uint32_t); allocates 0x8004 bytes via 0x10D3140 and zeroes them);
-       AVOID_FREE replaces 0x51F150's free call at 0x51F40E (cdecl void(void*, uint32_t); passes the matched size to 0x126E016). */
-    NTW2_BIND_AVOID_ALLOC, NTW2_BIND_AVOID_FREE,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -337,13 +333,6 @@ enum ntw2_clone_id {
     /* --brain-retarget-jitter / --brain-target-cull (appended): pure-retarget copy of the combat node step 0x676FD0 (node vtable 0x1333E3C slot +8 -> thunk
        0x66D750); its only change is the tracker tick call 0x6775C4 -> NTW2_BIND_RJ_TRACKER_TICK. */
     NTW2_CLONE_STEP_676FD0,
-    /* Avoidance bitset enlargement (appended): model constructor 0x506C00..0x5079B1 (0x50748A -> AVOID_ALLOC, 0x50749D push 0x8004),
-       model destructor 0x51F150..0x51F6BF (0x51F403 push 0x8004, 0x51F40E -> AVOID_FREE), the three battle-builder vtable entry
-       points (0x5472C0 at 0x1320E60, 0x5B9140 at 0x132E774, 0x5B9200 at 0x132E768 -> 0x593BD0 -> 0x506C00) and the two root destructor
-       vtable entry points (0x5ACEC0 at 0x132B280 -> 0x5BD6E0 -> 0x5A8A60 -> 0x51F150, and 0x5ACE90 at 0x132E740 -> 0x5A8E60 -> 0x5A8A60 -> 0x51F150). */
-    NTW2_CLONE_AVOID_506C00, NTW2_CLONE_AVOID_51F150,
-    NTW2_CLONE_AVOID_593BD0, NTW2_CLONE_AVOID_5472C0, NTW2_CLONE_AVOID_5B9140, NTW2_CLONE_AVOID_5B9200,
-    NTW2_CLONE_AVOID_5A8A60, NTW2_CLONE_AVOID_5A8E60, NTW2_CLONE_AVOID_5ACE90, NTW2_CLONE_AVOID_5BD6E0, NTW2_CLONE_AVOID_5ACEC0,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and
