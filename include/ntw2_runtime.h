@@ -26,10 +26,10 @@ extern "C" {
 #define NTW2_LOCO 0x4000u /* Locomotion Stages A/B/C (timed site 13 = 0x531AF0); part of the shipping set NTW2_ALL. Refuses BRAIN and COLLIDE_LOD. Coexists with owner-serial BRAIN2. COLLIDE requires CLONE, PARALLEL, OWNED_SERVICES and GRID (or GRID_VERIFY). */
 #define NTW2_GRID_CENSUS 0x8000u /* Opt-in reader edge counts and sampled occupancy; requires LOCO and a main thread id, not PROFILE. */
 #define NTW2_AI_CENSUS 0x10000u /* Opt-in observation of who mutates/destroys the AI planner object graph (ai_census_words): pinned vtable-slot gates, one clone-call gate and sampler ranges. Requires AI_ASYNC and a main thread id; outside NTW2_ALL. */
-#define NTW2_AI_CENSUS_WORDS 768u /* 16 header + 7 targets * (8 + 8 callers * 12) + 3 sample ranges * 8; layout: src/ntw2_ai_census.h */
+#define NTW2_AI_CENSUS_WORDS 768u /* 16 header + 7 targets * (8 + 8 callers * 12) + 3 sample ranges * 8; layout: src/ai/ntw2_ai_census.h */
 #define NTW2_AI_ASYNC2 0x20000u /* Opt-in experimental async think, boundary schedule (ai_async2_words, ai_async2_route_words): site 34 queues the whole planner call and returns; tick end publishes the batch; the AI worker runs it in the inter-tick window through its private walk/observer clone family; the next tick start is a blocking lifetime join (no think crosses into a tick); structural writers join (site 33 controller, TICK 57DFDF quadtree update, delegate replacement/destructor and observer/operation owner-destructor vtable slots; a non-tick owner teardown drains the whole batch first); worker calls of those slots and of 0x83FD00 are marshalled; stop drains before routing ends (servicing or aborting a pending marshal); 5 s watchdog with sticky synchronous fallback. Requires AI_ASYNC; refuses AI_CTRL and AI_CENSUS (same slots/site 33); outside NTW2_ALL. */
-#define NTW2_AI_ASYNC2_WORDS 96u /* layout: src/ntw2_ai_async2.h, labels NTW2_AI_ASYNC2_LABELS */
-#define NTW2_AI_ASYNC2_ROUTE_WORDS 65u /* ai_async2_route_words; layout src/ntw2_ai_async2.h (RouteWord), labels NTW2_AI_ASYNC2_ROUTE_LABELS */
+#define NTW2_AI_ASYNC2_WORDS 96u /* layout: src/ai/ntw2_ai_async2.h, labels NTW2_AI_ASYNC2_LABELS */
+#define NTW2_AI_ASYNC2_ROUTE_WORDS 65u /* ai_async2_route_words; layout src/ai/ntw2_ai_async2.h (RouteWord), labels NTW2_AI_ASYNC2_ROUTE_LABELS */
 #define NTW2_ARMY_UNIT_SHADOW 0x40000u /* Opt-in --army-unit-shadow: item 4 Stage A, instrumentation only. Site 18 (ARMY_UPDATE clone) and its 0x581F30 calls (sites 101/103) are bound to owner-thread gates that time each unit update, classify it under the approved compromises (owner-only reasons, RNG draws, foreign-unit witness, command-class census) and measure a frozen-view copy; the native calls run unchanged. Requires a routed tick (PROFILE or a simulation feature); planner writes are measured only with AI_CENSUS. Outside NTW2_ALL. Words: army_unit_words, src/army/native_army_unit.h. */
 #define NTW2_ARMY_UNIT_WORDS 192u /* army_unit_words; layout src/army/native_army_unit.h (Word), labels NTW2_ARMY_UNIT_*_LABELS */
 /* Mask bit 0x80000u is retired (former puppet probe, removed); NTW2_VALID_MASK refuses it and it is never reused. */
@@ -267,7 +267,7 @@ enum ntw2_memory_word {
    node calls per inter-tick window, passes free) through a private node driver; the next tick start joins only the
    open slice; a finished think is consumed at the first seam >= A + K; while outstanding, its planner's site-34 calls
    are busy refusals. */
-#define NTW2_AI_DEFERRED_WORDS 64u /* ai_deferred_words; layout src/ntw2_ai_async2.h (DeferWord), labels NTW2_AI_DEFERRED_LABELS */
+#define NTW2_AI_DEFERRED_WORDS 64u /* ai_deferred_words; layout src/ai/ntw2_ai_async2.h (DeferWord), labels NTW2_AI_DEFERRED_LABELS */
 #define NTW2_AI_DEFERRED_K_MASK 0xFFu
 #define NTW2_AI_DEFERRED_MAX_K 32u
 #define NTW2_AI_DEFERRED_BUDGET_SHIFT 8u
@@ -286,7 +286,7 @@ enum ntw2_memory_word {
     "consume_hash", "last_consume_tick", "spanned_max", "slices_max", "outstanding", \
     NTW2_AI_DEFERRED_BUCKET_LABELS("spanned"), NTW2_AI_DEFERRED_BUCKET_LABELS("slices"), "slices_over_2ms", \
     "slices_over_4ms", "reserved62", "reserved63"
-/* --ai-ctrl-* (ntw2_config::ai_ctrl_flags; src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): reuse of the AI controller's
+/* --ai-ctrl-* (ntw2_config::ai_ctrl_flags; src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): reuse of the AI controller's
    node-scoring inputs inside one stable scoring batch. Flags select the mode; nonzero requires a routed MANAGER tick (PROFILE or a
    simulation feature) and excludes NTW2_AI_CTRL / NTW2_AI_ASYNC2. CENSUS is shadow-only (native always executes) and excludes
    HISTOGRAM/GEOMETRY; VERIFY (debug sub-mode) requires HISTOGRAM or GEOMETRY. */
@@ -295,14 +295,14 @@ enum ntw2_memory_word {
 #define NTW2_AI_CTRL_GEOMETRY 0x4u  /* --ai-ctrl-geometry */
 #define NTW2_AI_CTRL_VERIFY 0x8u    /* --ai-ctrl-verify */
 #define NTW2_AI_CTRL_MODE_MASK 0xFu /* the four --ai-ctrl-* mode bits above */
-/* --ai-claim-once / --ai-claim-once-census (src/ntw2_claim_once.h): bits 8 / 9 of ai_ctrl_flags (the two exclude each
+/* --ai-claim-once / --ai-claim-once-census (src/ai/ntw2_claim_once.h): bits 8 / 9 of ai_ctrl_flags (the two exclude each
    other). Not --ai-ctrl modes. ONCE: one 0x82F3A0 placement recompute per fallback claim call instead of one per claimed unit. CENSUS: the same loop
    without the elision, publishing the same controller-state hash (native reference for a bit-exact comparison). Both ride the same routed-tick /
    no-ai_async2 / no-ai_ctrl validation. */
 #define NTW2_AI_CLAIM_ONCE 0x100u
 #define NTW2_AI_CLAIM_ONCE_CENSUS 0x200u
 #define NTW2_AI_CLAIM_BITS (NTW2_AI_CLAIM_ONCE | NTW2_AI_CLAIM_ONCE_CENSUS)
-/* --brain-target-cull-shadow / --brain-target-cull / --brain-retarget-jitter (src/ntw2_target_cull.h, src/ntw2_retarget_jitter.h): bits 10 / 11 / 12 of
+/* --brain-target-cull-shadow / --brain-target-cull / --brain-retarget-jitter (src/brain/ntw2_target_cull.h, src/brain/ntw2_retarget_jitter.h): bits 10 / 11 / 12 of
    ai_ctrl_flags (bits 13..15 reserved, refused). All three act on the soldier-brain stage's combat node step 0x676FD0 (routed through the step clone
    CLONE_STEP_676FD0 behind a gate on the node vtable slot 0x1333E44, tick thread inside site 6): TARGET_CULL(_SHADOW) replaces the contact-list search 0x553420
    (bit-exact; shadow = native answers + compare, the two exclude each other), RETARGET_JITTER delays a lost target's re-search by agent+0x2C & 0xF ticks
@@ -323,24 +323,24 @@ enum ntw2_memory_word {
 /* Word labels of the two brain-step levers (words 16..19 / 20..23 of the same row; receipt objects brain_target_cull / brain_retarget_jitter). */
 #define NTW2_AI_RETARGET_JITTER_LABELS "tracker_calls", "losses", "jittered", "delay_sum"
 #define NTW2_AI_TARGET_CULL_LABELS "calls", "candidates", "predicates", "packed"
-/* --ai-prepass-census / --ai-presize (ntw2_config::ai_prepass_flags; src/ntw2_planner_prepass.h). CENSUS: observation of the AI planner's
+/* --ai-prepass-census / --ai-presize (ntw2_config::ai_prepass_flags; src/ai/ntw2_planner_prepass.h). CENSUS: observation of the AI planner's
    child thinks and covered 0x7F1D40 walks on the thread that executes the think (AI worker under NTW2_AI_ASYNC); native always executes
    once, unchanged. PRESIZE: behaviour-preserving query-local reservation of the 0x559090 hit-pair buffer. Bits 0x4 / 0x8 are reserved
    for the prepass shadow / live modes (the sibling child widens NTW2_AI_PREPASS_FLAGS_VALID). Nonzero requires a routed MANAGER tick
    (PROFILE or a simulation feature) and excludes NTW2_AI_ASYNC2; CENSUS excludes every other bit but PRESIZE. Row layout: header of
-   src/ntw2_planner_prepass.h. */
+   src/ai/ntw2_planner_prepass.h. */
 #define NTW2_AI_PREPASS_CENSUS 0x1u /* --ai-prepass-census */
 #define NTW2_AI_PRESIZE 0x2u        /* --ai-presize */
 #define NTW2_AI_POLY_SHADOW 0x4u /* --ai-poly-shadow: native answers every 0x80DCF0 polygon test, ntw2_planner_search compares bit-for-bit (AL, x87 status, MXCSR) */
 #define NTW2_AI_POLY 0x8u        /* --ai-poly: exact SSE replacement of the kind-0 0x10EC150 OBB/polygon kernel, native fallback by reason */
-/* --ai-record-test-shadow / --ai-record-test (src/ntw2_record_test.h): the --ai-poly kernel extended to the ALTERNATE placement delegate
+/* --ai-record-test-shadow / --ai-record-test (src/ai/ntw2_record_test.h): the --ai-poly kernel extended to the ALTERNATE placement delegate
    0x13376AC (slot 16 = 0x6A99E0 -> 0x6A94B0 -> 0x6C71D0 ...), which --ai-poly does not route. Both need POLY_SHADOW or POLY (the same kernel and
    clones), exclude each other and the census, and keep the default observer route's --ai-poly mode independent of their own mode. */
 #define NTW2_AI_RECORD_TEST_SHADOW 0x20u /* --ai-record-test-shadow: native answers every polygon test of the alternate delegate route, the kernel is compared bit-for-bit */
 #define NTW2_AI_RECORD_TEST 0x40u        /* --ai-record-test: the kernel answers the alternate delegate route, native fallback by reason */
 #define NTW2_AI_RECORD_TEST_BITS (NTW2_AI_RECORD_TEST_SHADOW | NTW2_AI_RECORD_TEST)
 #define NTW2_AI_PREPASS_FLAGS_VALID 0xFFFF007Fu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones; bits 0x10 and 16..31: --ai-spiral-*; bits 0x20/0x40: --ai-record-test* */
-/* --ai-spiral-census / --ai-spiral-cap-m N (ai_prepass_flags bit 0x10 and bits 16..31; src/ntw2_spiral.h). N metres caps the observer
+/* --ai-spiral-census / --ai-spiral-cap-m N (ai_prepass_flags bit 0x10 and bits 16..31; src/ai/ntw2_spiral.h). N metres caps the observer
    ladder's last-resort placement spiral 0x7FCA90 (native: maxR -1.0, unlimited): rings of radius <= N run, then the native not-found
    exit is taken. A capped (not-found) spiral places the unit at the 0x7FCFF0 projection of its ORIGINAL requested point (possibly
    obstructed), exactly as native does when a whole ring leaves the map rectangle; the entry is not left unassigned. N = 0: native
@@ -352,7 +352,7 @@ enum ntw2_memory_word {
 #define NTW2_AI_SPIRAL_CAP_MASK 0xFFFF0000u
 #define NTW2_AI_SPIRAL_CAP_MIN_M 20u
 #define NTW2_AI_SPIRAL_BITS (NTW2_AI_SPIRAL_CENSUS | NTW2_AI_SPIRAL_CAP_MASK)
-#define NTW2_AI_SPIRAL_WORDS 32u /* ai_spiral_words (src/ntw2_spiral.h row layout, version 1) */
+#define NTW2_AI_SPIRAL_WORDS 32u /* ai_spiral_words (src/ai/ntw2_spiral.h row layout, version 1) */
 #define NTW2_ARMY_SOLVER_WORDS 519u /* army_solver_words (src/army/native_army_solver.h row layout, version 1): 55 header + 16 x 13 tick table + 16 x 16 solve table */
 #define NTW2_ARMY_SOLVER_LABELS \
     "version", "mode", "started", "ticks", "solves_seen", "solves_flag1", "solved_kernel", "flag0_native", "foreign_native", \
@@ -372,8 +372,8 @@ enum ntw2_memory_word {
     "spiral_entries", "spiral_candidates", "spiral_rings", "spiral_found", "spiral_capped", "spiral_edge", "max_radius_m", \
     "max_candidates", "fallback_calls", "e0", "e1", "e2", "e3_4", "e5_8", "e_gt8", "entries", "max_entries", "tail_runs", \
     "tail_same_tick", "tail_memo", "ladder_in_fallback", "spiral_in_fallback", "off_thread"
-#define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ntw2_planner_search.h row layout, version 1 */
-#define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ntw2_record_test.h row layout, version 1 */
+#define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ai/ntw2_planner_search.h row layout, version 1 */
+#define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ai/ntw2_record_test.h row layout, version 1 */
 #define NTW2_AI_PREPASS_WORDS (NTW2_AI_POLY_WORDS + NTW2_AI_RECORD_TEST_WORDS) /* ai_prepass_words */
 #define NTW2_AI_POLY_LABELS \
     "version", "mode", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", "shadow_compares", \
@@ -878,7 +878,7 @@ typedef struct ntw2_status {
        [caller, kind, count, class0..3, top_site, top_site_count, outside_tick_count, second_site, second_site_count].
        Classes: 0 tick owner, 1 AI worker, 2 main/render, 3 other. Site codes: 0 outside tick, 1 in tick with no timed site, 2+i timed site i.
        Caller kind 0 = RVA in the main image, 1 = offset in the AI_CONTROLLER clone (source VA 0x7C8BD0 + offset), 2 = raw return address.
-       range rows (3, stride 8): [va, end, samples, class0..3]. Rows are in the order of src/ntw2_ai_census.h. */
+       range rows (3, stride 8): [va, end, samples, class0..3]. Rows are in the order of src/ai/ntw2_ai_census.h. */
     uint32_t ai_census_words[NTW2_AI_CENSUS_WORDS];
     /* BRAIN2 v2 service rows: calls, active, unresolved, inactive,
        first-active occurrences, first-unresolved occurrences, QPC ticks low/high.
@@ -920,7 +920,7 @@ typedef struct ntw2_status {
        (NTW2_BRAIN_WORKER_TAIL_LABELS), 128..143 guard-miss attribution (version 3; NTW2_BRAIN_WORKER_GUARD_LABELS).
        Zero without the feature; reset at activation, retained after stop. */
     uint32_t brain_worker_words[NTW2_BRAIN_WORKER_WORDS];
-    /* NTW2_AI_ASYNC2 (appended): live-graph async think telemetry; NTW2_AI_ASYNC2_LABELS order, layout src/ntw2_ai_async2.h.
+    /* NTW2_AI_ASYNC2 (appended): live-graph async think telemetry; NTW2_AI_ASYNC2_LABELS order, layout src/ai/ntw2_ai_async2.h.
        Counters wrap modulo 2^32; written concurrently by tick, worker and gated threads (interlocked), so a poll is a
        non-atomic snapshot. All zero without the feature; reset at activation, retained after stop. */
     uint32_t ai_async2_words[NTW2_AI_ASYNC2_WORDS];
@@ -944,7 +944,7 @@ typedef struct ntw2_status {
        rows report preferred-base VAs, clone rows report the original instruction VA with the clone id in Where.
        Zero without the flag; reset at activation, retained after stop. */
     uint32_t grid_probation_words[NTW2_GRID_PROBATION_WORDS];
-    /* NTW2_AI_ASYNC2 route/boundary row (appended): NTW2_AI_ASYNC2_ROUTE_LABELS order, layout src/ntw2_ai_async2.h
+    /* NTW2_AI_ASYNC2 route/boundary row (appended): NTW2_AI_ASYNC2_ROUTE_LABELS order, layout src/ai/ntw2_ai_async2.h
        (RouteWord). Written by the tick owner, the AI worker (private-clone entry counters, single writer) and gated
        threads; a poll is a non-atomic snapshot. All zero without the feature; reset at activation, retained after stop. */
     uint32_t ai_async2_route_words[NTW2_AI_ASYNC2_ROUTE_WORDS];
@@ -975,7 +975,7 @@ typedef struct ntw2_status {
     /* NTW2_AI_ASYNC2 deferred schedule (appended after brain_s0_words; ntw2_config::ai_deferred): admissions, busy
        refusals, consumption (on time = at the first seam >= admission tick + K), abandonment, slices and budget hits,
        node revalidation, seam joins, per-kind node calls and microseconds, histograms of ticks spanned and slices per
-       think. NTW2_AI_DEFERRED_LABELS order, layout src/ntw2_ai_async2.h (DeferWord). Written by the tick owner and the
+       think. NTW2_AI_DEFERRED_LABELS order, layout src/ai/ntw2_ai_async2.h (DeferWord). Written by the tick owner and the
        AI worker; a poll is a non-atomic snapshot. All zero without the flag; reset at activation, retained after stop. */
     uint32_t ai_deferred_words[NTW2_AI_DEFERRED_WORDS];
     /* --ai-ctrl-* reuse telemetry (appended after ai_deferred_words; NTW2_AI_CTRL_REUSE_LABELS): words 0..15 batch/histogram (ntw2_ai_ctrl::Word),
@@ -1004,21 +1004,21 @@ typedef struct ntw2_status {
        NTW2_UNIT_FATIGUE_LABELS), 128..255 the posture/engage half (src/brain2/native_unit_posture_engage.h
        NTW2_UNIT_POSTURE_ENGAGE_LABELS). Tick-owner writer; reset at activation, retained after stop; all zero without a unit flag. */
     uint32_t brain_unit_policy_words[NTW2_BRAIN_UNIT_POLICY_WORDS];
-    /* --ai-prepass-census / --ai-presize (appended after brain_unit_policy_words; src/ntw2_planner_prepass.h row layout, labels
+    /* --ai-prepass-census / --ai-presize (appended after brain_unit_policy_words; src/ai/ntw2_planner_prepass.h row layout, labels
        NTW2_AI_PREPASS_CENSUS_LABELS): word 0 layout version (1; 0 while the flags are off), think/walk/D1/world-change counters, microsecond
        sums converted from QPC, five think-duration classes, the 0x559090 presize counters (words 55..62), word 63 the latched flags and the
        0x80DCF0 polygon vertex-count histogram (words 64..79) and the 0x808492 observer-route walk count (80).
        Written by the thread that executes the think (AI worker under NTW2_AI_ASYNC); a poll is a non-atomic snapshot. All zero without
        the flags; reset at activation, retained after stop. */
     uint32_t ai_prepass_census_words[NTW2_AI_PREPASS_CENSUS_WORDS];
-    /* --ai-poly-shadow / --ai-poly (appended after ai_prepass_census_words; src/ntw2_planner_search.h): word 0 layout version (1; 0 while the
+    /* --ai-poly-shadow / --ai-poly (appended after ai_prepass_census_words; src/ai/ntw2_planner_search.h): word 0 layout version (1; 0 while the
        poly bits are off), mode, kernel calls, served/refused-by-reason counts, shadow compare mismatches, vertex-count classes and the observer
        slot routing counts. Written by the thread executing the think; a poll is a non-atomic snapshot. Zero without the bits; reset at
-       activation, retained after stop. Words 32..59 (NTW2_AI_RECORD_TEST_WORDS, src/ntw2_record_test.h, labels NTW2_AI_RECORD_TEST_LABELS) are the
+       activation, retained after stop. Words 32..59 (NTW2_AI_RECORD_TEST_WORDS, src/ai/ntw2_record_test.h, labels NTW2_AI_RECORD_TEST_LABELS) are the
        --ai-record-test-shadow / --ai-record-test row of the alternate delegate route: mode, slot routing, kernel calls/served/fallbacks, compares and
        mismatches, vertex sums and timing; zero without those bits. */
     uint32_t ai_prepass_words[NTW2_AI_PREPASS_WORDS];
-    /* --ai-spiral-census / --ai-spiral-cap-m (appended after ai_prepass_words; src/ntw2_spiral.h, labels NTW2_AI_SPIRAL_LABELS): word 0
+    /* --ai-spiral-census / --ai-spiral-cap-m (appended after ai_prepass_words; src/ai/ntw2_spiral.h, labels NTW2_AI_SPIRAL_LABELS): word 0
        layout version (1; 0 while the spiral bits are off), the cap, ladder stage counts, spiral entries/candidates/rings/found/capped/
        edge exits and maxima, fallback observer calls with the entries-per-call histogram and 0x82F3A0 tail/same-tick/memo counts.
        Written by the thread executing the think; a poll is a non-atomic snapshot. Reset at activation, retained after stop. */

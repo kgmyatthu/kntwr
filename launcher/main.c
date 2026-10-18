@@ -51,7 +51,7 @@
 #include "collision/native_contact.h"
 
 #include "ntw2_runtime.h"
-#include "../src/profile/ntw2_profile.h"
+#include "profile/ntw2_profile.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
 #error "ntw2.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
@@ -5869,7 +5869,7 @@ static void usage(void)
         L"  --ai-presize          behaviour-preserving query-local reserve of the 0x559090 hit-pair buffer (vtable word 0x13247EC); may combine\n"
         L"                        with --ai-prepass-census; needs a routed tick, excludes ai_async2\n"
         L"  --ai-poly-shadow      needs a routed tick, excludes ai_async2/--ai-prepass-census/--ai-poly: exact-kernel shadow. The native 0x80DCF0 OBB/polygon\n"
-        L"                        predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
+        L"                        predicate answers; its SSE replacement (src/ai/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
         L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n"
         L"  --ai-poly             same routing; the replacement answers, native on any guard refusal (counted by reason in the ai_poly row)\n"
         L"  --ai-record-test-shadow  needs --ai-poly or --ai-poly-shadow (--features all implies --ai-poly), excludes --ai-record-test/--ai-prepass-census: the\n"
@@ -5899,7 +5899,7 @@ static void usage(void)
         L"                        native 40..55-tick failed-search wait). Forced melee targets (enemy within 3 m), the periodic 64-tick clear and the\n"
         L"                        failed-search cooldown stay native. Needs a routed tick (e.g. --features all) and excludes ai_ctrl/ai_async2 and\n"
         L"                        --ai-ctrl-geometry (brain_retarget_jitter row: tracker_calls, losses, jittered, delay_sum)\n"
-        L"  --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay\n"
+        L"  --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/ntw2_target_cull.h); no gameplay\n"
         L"                        change. Needs a routed tick, excludes ai_ctrl/ai_async2/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
         L"  --brain-target-cull-shadow  native answers every target search while the host replacement runs beside it and is compared (mismatch\n"
         L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
