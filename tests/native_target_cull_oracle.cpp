@@ -200,10 +200,20 @@ static void LoopCase(U unitMenMax,U maxPushMax,float maxDist,bool flag,U guard,b
 using NativeSearch=U(__fastcall*)(U,U,U,U);
 static tc::Targets targets;
 static U W(tc::Word w) { return tc::words[w]; }
-static void SearchCase(tc::Mode mode) {
+static B bigMan[540][0x80]; static U bigPtr[540];
+static void SearchCase(tc::Mode mode,bool big=false) {
     BuildPool(Chance(10));
     const U targetId=1+Below(3);
     BuildUnit(0,targetId,Below(kMen+1),kPush);
+    if(big) { // more candidates than the per-search cache holds: the entries fall back to the per-entry loop
+        const U n=520+Below(16);
+        for(U m=0;m<n;++m) {
+            std::memset(bigMan[m],0,sizeof(bigMan[m])); Put(bigMan[m],0,A(manVtable)); Put(bigMan[m],0x20,8);
+            for(U k=0;k<8;++k) Put(bigMan[m],0x24+4*k,Cn(Below(kPool)));
+            bigPtr[m]=A(bigMan[m]);
+        }
+        Put(unitMem[0],0x2CC,n); Put(unitMem[0],0x2D0,A(bigPtr));
+    }
     const U entries=Below(kUnits);
     std::memset(listEntries,0,sizeof(listEntries));
     for(U e=0;e<entries;++e) {
@@ -264,6 +274,7 @@ int main(int argc,char** argv) {
     constexpr U kSearchCases=30000;
     gPhase=2;
     for(U i=0;i<kSearchCases;++i) { gCase=i; SearchCase(i&1 ? tc::ModeLive : tc::ModeShadow); }
+    for(U i=0;i<400;++i) { gCase=i; SearchCase(i&1 ? tc::ModeLive : tc::ModeShadow,true); }
     // mode off forwards to the original and publishes nothing new
     tc::Configure(tc::ModeOff,targets); tc::ResetRow(); BuildPool(false); BuildUnit(0,1,3,3); std::memset(listHeader,0,sizeof(listHeader));
     ResetScratch(); SetGuard(0);

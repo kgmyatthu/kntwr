@@ -106,6 +106,55 @@ U LoopImpl(U agent, U unit, float maxDist, float* outScore, bool flag, Local& lo
     *outScore = ToFloat(bestInt);
     return best;
 }
+
+// Per-search candidate cache.  0x553420 hands 0x553590 the SAME unit for every list entry (only maxDist differs), the scratch push, the distance, the
+// score and the pure predicates depend on nothing entry-specific, so one search gathers the candidates once and every entry scans the cached array.
+struct Cached { U c; float d, s; U8 flagOk, state; };  // state: 1 score known, 2 predicate evaluated, 4 predicate passed
+constexpr U kCacheMax = 4096;
+Cached cache[kCacheMax];
+
+// Same impure sequence as native per entry (guard, vt+0xB4 push, scratch reset), once.  False: more than kCacheMax candidates, entries fall back to LoopImpl.
+bool Gather(U agent, U unit, bool flag, U& count) {
+    U n = 0, flagOut[8];
+    const U scratch = t.scratch;
+    for (U i = 0; i < Rd(unit + 0x2CC); ++i) {
+        const U man = Rd(Rd(unit + 0x2D0) + 4 * i);
+        Guard();
+        reinterpret_cast<Push>(static_cast<uintptr_t>(Rd(Rd(man) + 0xB4)))(man, 0, scratch);
+        for (U j = 0; j < Rd(scratch + 0xC); ++j) {
+            if (n == kCacheMax) { Wr(scratch + 0xC, 0); return false; }
+            const U c = Rd(Rd(scratch + 0x10) + 4 * j);
+            Cached& e = cache[n++];
+            e.c = c; e.d = Dist(agent, c); e.s = 0.0f; e.state = 0;
+            e.flagOk = !flag || Rd(flagState(c, 0, static_cast<U>(reinterpret_cast<uintptr_t>(flagOut))) + 0xC) != 0;
+        }
+        Wr(scratch + 0xC, 0);
+    }
+    count = n;
+    return true;
+}
+// One entry over the cached candidates: the LoopImpl conjunction, cheapest first, with the score and the predicate memoised per candidate.
+U ScanCached(U agent, U n, float maxDist, float* outScore, Local& local) {
+    U best = 0, bestInt = 0;
+    for (U k = 0; k < n; ++k) {
+        Cached& e = cache[k];
+        ++local.candidates;
+        if (!e.flagOk) continue;
+        if (!_mm_comigt_ss(_mm_set_ss(maxDist), _mm_set_ss(e.d))) continue;
+        if (!(e.state & 1)) { e.s = score(e.c, e.d); e.state |= 1; }
+        if (best && !_mm_comigt_ss(_mm_set_ss(ToFloat(bestInt)), _mm_set_ss(e.s))) continue;
+        if (!(e.state & 2)) {
+            ++local.predicates;
+            e.state |= 2;
+            if (alive(e.c, 0) == 1 && reach(e.c, 0, agent) == 1) e.state |= 4;
+        }
+        if (!(e.state & 4)) continue;
+        best = e.c;
+        bestInt = static_cast<U>(_mm_cvttss_si32(_mm_set_ss(e.s)));
+    }
+    *outScore = ToFloat(bestInt);
+    return best;
+}
 } // namespace
 
 U __stdcall Loop(U agent, U unit, float maxDist, float* outScore, U flag) {
@@ -119,11 +168,11 @@ U __stdcall Loop(U agent, U unit, float maxDist, float* outScore, U flag) {
 }
 
 namespace {
-// One entry's search: live runs the mirror, shadow runs native then mirror and compares (the answer is native's).
-inline U Entry(U agent, U targetUnit, float maxDist, float* outScore, bool flag) {
+// One entry's search: live runs the mirror, shadow runs native then mirror and compares (the answer is native's).  cached >= 0: the search's candidate cache.
+inline U Entry(U agent, U targetUnit, float maxDist, float* outScore, bool flag, int cached) {
+    Local local = {0, 0};
     if (mode == ModeLive) {
-        Local local = {0, 0};
-        const U r = LoopImpl(agent, targetUnit, maxDist, outScore, flag, local);
+        const U r = cached >= 0 ? ScanCached(agent, static_cast<U>(cached), maxDist, outScore, local) : LoopImpl(agent, targetUnit, maxDist, outScore, flag, local);
         census.candidates = Sat(census.candidates, local.candidates);
         census.predicates = Sat(census.predicates, local.predicates);
         ++census.calls;
@@ -131,8 +180,7 @@ inline U Entry(U agent, U targetUnit, float maxDist, float* outScore, bool flag)
     }
     float nativeScore = F(0x7F7FFFFFu), mirrorScore = F(0x7F7FFFFFu);
     const U nativeResult = nativeLoop(agent, targetUnit, maxDist, &nativeScore, flag ? 1u : 0u);
-    Local local = {0, 0};
-    const U mirrorResult = LoopImpl(agent, targetUnit, maxDist, &mirrorScore, flag, local);
+    const U mirrorResult = cached >= 0 ? ScanCached(agent, static_cast<U>(cached), maxDist, &mirrorScore, local) : LoopImpl(agent, targetUnit, maxDist, &mirrorScore, flag, local);
     census.candidates = Sat(census.candidates, local.candidates);
     census.predicates = Sat(census.predicates, local.predicates);
     ++census.calls;
@@ -164,6 +212,8 @@ U __fastcall Search(U list, U, U agent, U targetUnit) {
     if (flag) ++census.flagCalls;
     U entry = Rd(list + 0x10);
     if (entry == Rd(list + 0xC) * 16u + entry) { Publish(); return 0; }
+    int cached = -2;       // -2 not gathered yet, -1 overflow (per-entry loops), >= 0 candidate count
+    bool unlimitedSeen = false;
     do {
         const U kind = Rd(entry + 4);
         if (kind != 0 && kind != 4) {
@@ -171,12 +221,19 @@ U __fastcall Search(U list, U, U agent, U targetUnit) {
             const U targetId = reinterpret_cast<Getter>(static_cast<uintptr_t>(Rd(Rd(targetUnit + 0x10))))(targetUnit + 0x10, 0);
             const U entryId = reinterpret_cast<Getter>(static_cast<uintptr_t>(Rd(Rd(entryUnit + 0x10))))(entryUnit + 0x10, 0);
             const float maxDist = entryId == targetId ? F(Rd(t.maxFloat)) : kindDist(kind);
+            if (cached == -2) { U n = 0; cached = Gather(agent, targetUnit, flag, n) ? static_cast<int>(n) : -1; }
             float entryScore = F(0x7F7FFFFFu);
-            const U r = Entry(agent, targetUnit, maxDist, &entryScore, flag);
-            if (r != 0 && _mm_comigt_ss(_mm_set_ss(ToFloat(bestInt)), _mm_set_ss(entryScore))) {
+            const U r = Entry(agent, targetUnit, maxDist, &entryScore, flag, cached);
+            const bool replaced = r != 0 && _mm_comigt_ss(_mm_set_ss(ToFloat(bestInt)), _mm_set_ss(entryScore));
+            if (unlimitedSeen && mode == ModeShadow && replaced) ++census.mmResult; // the skip theorem below must hold
+            if (replaced) {
                 bestInt = static_cast<U>(_mm_cvttss_si32(_mm_set_ss(entryScore)));
                 bestCandidate = r;
             }
+            // An entry with maxDist = FLT_MAX scans a superset of every later entry's candidates (kind ranges are <= 100) with identical per-candidate scores, so a later
+            // entry's best score is >= this one's and can never pass `score < float(u32 trunc(best))`; live skips them, shadow runs and checks them.
+            if (maxDist == F(Rd(t.maxFloat))) unlimitedSeen = true;
+            if (unlimitedSeen && mode == ModeLive) break;
         }
         entry += 16;
     } while (entry != Rd(list + 0xC) * 16u + Rd(list + 0x10));

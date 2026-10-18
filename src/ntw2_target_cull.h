@@ -29,12 +29,19 @@
 //   dist < maxDist  ->  score s  ->  (best == 0 || float(u32 bestInt) > s)  ->  0x679750  ->  0x679700.
 // A candidate that cannot beat the running best (or lies beyond maxDist) never reaches the alive/reachability/FPATAN predicate; a candidate that
 // would have failed the predicate was never accepted natively either, so the accepted sequence, best, bestInt and *outScore are identical.
+// Search additionally exploits that 0x553420 passes the SAME unit to every entry (see above): the candidates are gathered ONCE per search (guard, vt+0xB4
+// push, scratch reset; distance and flag test cached per candidate, score and predicate memoised lazily), every entry scans the cached array with its own
+// maxDist and running best (more than 4096 candidates fall back to the per-entry loop), and once an entry with maxDist = FLT_MAX (entry unit id == target
+// unit id) has been processed the remaining entries are skipped: their candidates are a subset with identical per-candidate scores, so their best score is >=
+// that entry's and `score < float(u32 trunc(best))` can never hold for them (also for the cvttss2si overflow value 0x80000000 and for the retained best of an
+// earlier entry: either the unlimited entry replaced it with trunc(s*) <= s*, or s* >= float(trunc(s1)) and s' >= s*).  Shadow runs those entries natively and
+// counts any replacement after an unlimited entry as a result mismatch.  The predicates are pure, so memoising one result per candidate per search is exact.
 // Shadow mode runs the native loop and the mirror on the same inputs per entry, answers with the native result and counts mismatches by kind.
 // Search() is the mirror of the whole 0x553420 (its only caller is 0x6671DE inside 0x6671A0); it runs only inside the routed brain-stage clone chain
 // on the tick owner thread, so it needs no thread gate.
 namespace ntw2_target_cull {
 // ai_ctrl_reuse_words[16..19] (NTW2_AI_CTRL_REUSE_LABELS "tc_*"):
-//  0 calls       0x553590 loops run (shadow: compares)
+//  0 calls       entry scans run (one per processed list entry; shadow: compares; live skips the entries after an unlimited one)
 //  1 candidates  candidates visited (scratch entries; saturating)
 //  2 predicates  candidates that reached 0x679750 (live/shadow mirror; saturating).  culled = candidates - predicates - flag skips
 //  3 packed      bits 0..7 result-pointer mismatches, 8..15 score-bit mismatches, 16..23 scratch-residue mismatches (all saturating),
