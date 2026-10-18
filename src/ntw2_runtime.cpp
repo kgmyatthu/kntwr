@@ -59,6 +59,7 @@
 #include "ntw2_spiral.h"
 #include "ntw2_claim_once.h"
 #include "ntw2_retarget_jitter.h"
+#include "ntw2_target_cull.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -2516,6 +2517,8 @@ void SnapshotAiCtrl() {
     ntw2_claim_once::Snapshot(row+24); // --ai-claim-once: all zero without the bit
     static_assert(ntw2_retarget_jitter::kWords==4, "retarget-jitter words fill words 20..23");
     if (config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER) ntw2_retarget_jitter::Snapshot(row+20); // --brain-retarget-jitter (exclusive with the geometry mode that owns 16..23)
+    static_assert(ntw2_target_cull::kWords==4, "target-cull words fill words 16..19");
+    if (config.ai_ctrl_flags&(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL)) ntw2_target_cull::Snapshot(row+16); // --brain-target-cull* (exclusive with the geometry mode that owns 16..23)
     static_assert(ntw2_prepass::kCensusWords==NTW2_AI_PREPASS_CENSUS_WORDS, "census snapshot writes exactly the status row");
     ntw2_prepass::CensusSnapshot(ntw2_state.ai_prepass_census_words); // --ai-prepass-*: same three poll/stop sites; all zero without the flags
     static_assert(ntw2_poly::kWords==NTW2_AI_POLY_WORDS && ntw2_record_test::kWords==NTW2_AI_RECORD_TEST_WORDS, "poly + record-test rows fill the prepass status row");
@@ -3433,8 +3436,15 @@ bool Activate(const World& candidate) {
     }
     {
         // The mirror's search call: --brain-target-cull(-shadow) substitutes its 0x553420 replacement here (same ABI).
-        const ntw2_retarget_jitter::Targets targets={V(ntw2_retarget_jitter::kValid),V(ntw2_retarget_jitter::kClear),V(ntw2_retarget_jitter::kSearch),
+        const bool cull=(config.ai_ctrl_flags&(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL))!=0;
+        const ntw2_retarget_jitter::Targets targets={V(ntw2_retarget_jitter::kValid),V(ntw2_retarget_jitter::kClear),
+                                                     cull ? FnAddress(&ntw2_target_cull::Search) : V(ntw2_retarget_jitter::kSearch),
                                                      V(ntw2_retarget_jitter::kSecond),V(ntw2_retarget_jitter::kThird),V(ntw2_retarget_jitter::kAssign)};
+        namespace tc=ntw2_target_cull;
+        const tc::Targets cullTargets={V(tc::kSearch),V(tc::kLoop),V(tc::kFlagState),V(tc::kAlive),V(tc::kReach),V(tc::kScore),V(tc::kKindDist),V(tc::kSettings),
+                                       V(tc::kScratch),V(tc::kGuard),V(tc::kTlsIndex),V(tc::kInitHeader),V(tc::kAtexit),V(tc::kAtexitArg),V(tc::kInitFooter),
+                                       V(tc::kU32Table),V(tc::kMaxFloat)};
+        tc::Configure((config.ai_ctrl_flags&NTW2_AI_TARGET_CULL) ? tc::ModeLive : (config.ai_ctrl_flags&NTW2_AI_TARGET_CULL_SHADOW) ? tc::ModeShadow : tc::ModeOff,cullTargets);
         ntw2_retarget_jitter::Configure((config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER)!=0,targets);
         nodeStepClone=clones.entries[NTW2_CLONE_STEP_676FD0]; nodeStepOriginal=V(ntw2_retarget_jitter::kThunk);
     }
@@ -3835,6 +3845,7 @@ static U StartImpl(void* raw) {
     ntw2_record_test::Reset();
     ntw2_claim_once::ResetRow();
     ntw2_retarget_jitter::ResetRow();
+    ntw2_target_cull::ResetRow();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;

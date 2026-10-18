@@ -322,6 +322,7 @@ enum ntw2_memory_word {
     "claim_calls", "claim_entries", "claim_masked", "claim_calls_masked", "claim_refused_state", "claim_refused_other", "claim_packed", "claim_hash"
 /* Word labels of the two brain-step levers (words 16..19 / 20..23 of the same row; receipt objects brain_target_cull / brain_retarget_jitter). */
 #define NTW2_AI_RETARGET_JITTER_LABELS "tracker_calls", "losses", "jittered", "delay_sum"
+#define NTW2_AI_TARGET_CULL_LABELS "calls", "candidates", "predicates", "packed"
 /* --ai-prepass-census / --ai-presize (ntw2_config::ai_prepass_flags; src/ntw2_planner_prepass.h). CENSUS: observation of the AI planner's
    child thinks and covered 0x7F1D40 walks on the thread that executes the think (AI worker under NTW2_AI_ASYNC); native always executes
    once, unchanged. PRESIZE: behaviour-preserving query-local reservation of the 0x559090 hit-pair buffer. Bits 0x4 / 0x8 are reserved

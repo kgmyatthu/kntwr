@@ -279,6 +279,9 @@ ntw2_harness(native_claim_once_oracle STD 20 FP strict
 ntw2_harness(native_retarget_jitter_oracle STD 20 FP strict
   SOURCES native_retarget_jitter_oracle.cpp "${NTW2_SRC}/ntw2_retarget_jitter.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+ntw2_harness(native_target_cull_oracle STD 20 FP strict
+  SOURCES native_target_cull_oracle.cpp "${NTW2_SRC}/ntw2_target_cull.cpp"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_collision_solver_oracle STD 20 FP strict
   SOURCES native_collision_solver_oracle.cpp "${NTW2_SRC}/collision/native_collision_solver.cpp"
           "${NTW2_SRC}/collision/native_contact.cpp"
@@ -475,6 +478,9 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_retarget_jitter COMMAND native_retarget_jitter_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_retarget_jitter PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_retarget_jitter)
+  add_test(NAME ntw2_target_cull COMMAND native_target_cull_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_target_cull PROPERTIES LABELS "image" TIMEOUT 300)
+  ntw2_note_registered(ntw2_target_cull)
   add_test(NAME ntw2_collision_solver COMMAND native_collision_solver_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_collision_solver PROPERTIES LABELS "image" TIMEOUT 300)
   add_test(NAME ntw2_contact_oracle COMMAND native_contact_oracle "${NTW2_IMAGE_ARG}")

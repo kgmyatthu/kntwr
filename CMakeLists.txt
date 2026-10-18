@@ -210,6 +210,7 @@ if(NTW2_BUILD_RUNTIME)
                            src/ntw2_spiral.cpp
                            src/ntw2_claim_once.cpp
                            src/ntw2_retarget_jitter.cpp
+                           src/ntw2_target_cull.cpp
                            src/ntw2_record_test.cpp)
   foreach(_s IN LISTS NTW2_RUNTIME_SOURCES)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")
