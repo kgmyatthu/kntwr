@@ -19,13 +19,12 @@ launcher/ tests/ tools/                                                         
 
 34 files moved out of `src/` root; `git mv` only, similarity 100 % (`git diff -M100% --summary 3e661d5 ab93f8f`).
 
-Includes: cross-domain includes are src-rooted (`"clones/ntw2_clones.h"`, `"core/ntw2_guard.h"`, `"ai/ntw2_spiral.h"`);
-same-domain includes stay bare; files that used `../x.h` keep the relative spelling (`"../clones/ntw2_clones.h"`,
-`"../core/native_workload.h"`) because their test targets do not put `src/` on the include path.  `launcher/main.c`
-uses `"../src/profile/ntw2_profile.h"`.  Only `#include` lines and `src/ntw2_*` path mentions in comments changed
-(one launcher help-text string literal that names `src/ntw2_target_cull.h` / `src/ntw2_planner_search` was left alone: it
-is program output, changing it would change `ntw2.exe`).  `include/ntw2_runtime.h` still carries old `src/ntw2_*.h`
-paths in comments (public header deliberately untouched).
+Includes: every cross-module include is src-rooted and carries its domain (`"clones/ntw2_clones.h"`, `"core/ntw2_guard.h"`,
+`"ai/ntw2_spiral.h"`, `"loco/native_sweep.h"`); there is no `../` include left in `src/`, `tests/` or `launcher/`.
+Same-directory includes inside a domain stay bare.  Test targets whose sources include src-rooted headers get `${NTW2_SRC}`
+on their include path.  Legacy bare cross-domain spellings of headers that did not move (a test including `"native_loco.h"` via
+`INCLUDES ${NTW2_SRC}/loco`) are unchanged.  Old `src/ntw2_*` path mentions in comments (`include/ntw2_runtime.h` too; no
+code or ABI change) and in two launcher usage-text lines now name the domain directory.
 
 ## CMake
 
@@ -47,26 +46,35 @@ paths in comments (public header deliberately untouched).
 
 All builds with the bounded runner, Release, Win32, MSVC (VS 18 2026).
 
-1. `before/` = `ntw2_runtime.dll`, `ntw2.exe`, `ntw2_runtime.pdb` built from clean HEAD `3e661d5` in `build/before` (not in
-   the live `build/native`, which was not touched).  `build-before.txt` = its log.
+1. `before/` = `ntw2_runtime.dll`, `ntw2.exe`, `ntw2_runtime.pdb` built from clean HEAD `3e661d5` in a scratch `build/before`
+   (the live `build/native` replay directory was not touched; its `ntw2.exe` was built at 19:27, *before* the 19:53
+   launcher commit `3e661d5`, so it is stale relative to HEAD - its `ntw2_runtime.dll` has the same `.text` as HEAD).
 2. `extract_compile.py` dumps the effective recipe of every `*.vcxproj` (all `ItemDefinitionGroup` settings, per-item
-   metadata, ordered item/object lists = link order, project references) to `before-compile.json` /
-   `after-compile.json`; `compile_diff.py` maps old->new source paths through the git rename map and compares.
-   Result (`compile-diff.txt`): 69 distinct projects / 251 source items identical modulo the moved source paths.
+   metadata, ordered item/object lists = link order, project references); `compile_diff.py` maps old->new source paths
+   through the git rename map of the pure-move commit and compares.  Result (`compile-diff.txt`): 63 of 69 distinct
+   projects identical modulo the moved source paths (object-library intermediate dirs under `src/<domain>/` folded);
+   the other 6 are the test harnesses that gained `<ROOT>/src` on their include path (see commit `d2b7f42`).  All product
+   projects (`ntw2_runtime`, `ntw2`, every object library, payload/module DLLs) are in the identical set.
 3. Warnings: `build-before.txt` vs `build-tidy.txt` (clean `--target ntw2_runtime --target ntw2`): identical set of 27 unique /
    30 total warning lines (file, line, column, code, text).
 4. `pe_section_compare.py` (own PE32 parser): per-section sizes + SHA-256 and attribution of every differing byte
-   (`section-compare.txt`).  `.text`, `.data`, `.fptable`, `.rsrc`, `.reloc` are byte-identical for both images; the only
-   differing section is `.rdata`, and every differing run is the debug directory (timestamps, CodeView GUID, PDB path
-   `build\before` vs `build\tidy`, POGO/repro entries).  Neither image contains a `__FILE__` source-path literal: the
-   only path-like strings (ASCII + UTF-16) are the PDB path, the crash-dump directory and two launcher help-text lines
-   naming `src/ntw2_*`, and all but the PDB path are identical in both images.  The PDB GUID/path and link timestamp are
-   the only differences.
+   (`section-compare.txt`).  `.text` is byte-identical in both images and `.data`, `.fptable`, `.rsrc`, `.reloc` too.  The only
+   differing section is `.rdata`:
+   * `ntw2_runtime.dll`: debug directory only (timestamps, CodeView GUID, PDB path `build\before` vs `build\tidy`).  It
+     contains no `__FILE__` literal; its only path-like strings are the PDB path and the crash-dump directory.
+   * `ntw2.exe`: debug directory entry timestamp (2 bytes) plus exactly two lines of the UTF-16 usage text (the two that named
+     `src/ntw2_planner_search` and `src/ntw2_target_cull.h`).  The text was edited **length-neutrally** (+3 / -3 characters)
+     so nothing after it moves; a length change would shift every later `.rdata` item and, through their addresses, `.text`.
+     The script judges the literal line by line and requires every differing line to name a source path.
 5. `ctest` in `build/tidy`: 51/51 (`ctest-tidy.txt`).  `generate_clone_specs.py --check` and `generate_path_pins.py --check`: exit 0.
 
-Re-run: configure `build/tidy`, build, then
-`python analysis/housekeeping/pe_section_compare.py before/ntw2_runtime.dll <new dll> before/ntw2.exe <new exe>`
-(`before/` is git-ignored: rebuild it from `3e661d5` if needed).
+Re-run: configure `build/tidy` (flags in the task brief), build, then from the repo root
+`python analysis/housekeeping/pe_section_compare.py analysis/housekeeping/before/ntw2_runtime.dll build/tidy/bin/Release/ntw2_runtime.dll analysis/housekeeping/before/ntw2.exe build/tidy/bin/Release/ntw2.exe`.
+`analysis/housekeeping/before/` is git-ignored (binaries): rebuild it from `3e661d5` in a scratch build dir if it is missing.
+The bulky evidence (logs, before/after compile dumps) lives outside the repo in `F:/NTW2/translated_code/analysis/housekeeping/`:
+`build-before.txt`, `build-tidy.txt`, `build-tidy-all.txt`, `ctest-tidy.txt`, `before-compile.json`, `after-compile.json`
+(regenerate with `extract_compile.py <build-dir> <out.json>`; compare with
+`compile_diff.py before-compile.json after-compile.json 3e661d5 ab93f8f`).
 
 ## Commits
 
@@ -76,4 +84,7 @@ Re-run: configure `build/tidy`, build, then
 | `8c9395d` | refactor(layout): cross-domain includes of the moved files src-rooted; transitional include dirs removed; comment path updates |
 | `5962244` | docs(tests): oracle header comments |
 | `fa92098` | build(cmake): per-domain composition |
-| (final) | docs(housekeeping): this directory |
+| `9cfc725` | docs(housekeeping): this directory, first version |
+| `d2b7f42` | refactor(layout): review round - every cross-module include src-rooted (no `../`), `${NTW2_SRC}` on the six test targets that lacked it |
+| `0d06bd3` | refactor(layout): launcher include; old `src/ntw2_*` path mentions in `include/ntw2_runtime.h` and the launcher usage text (length-neutral) |
+| (final) | docs(housekeeping): evidence moved out of the repo, README/scripts refreshed |

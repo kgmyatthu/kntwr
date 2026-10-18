@@ -76,7 +76,8 @@ DEBUG_TYPES = {1: "COFF", 2: "CODEVIEW", 4: "MISC", 9: "BORLAND", 12: "VC_FEATUR
 PATH_RE = re.compile(rb"[ -~]{0,400}(?:[A-Za-z]:[\\/]|[\\/]ntw2[\\/]|\bsrc[\\/])[ -~]{0,400}")
 
 
-WIDE_RE = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
+WIDE_RE = re.compile(rb"(?:[\x09\x0a\x0d\x20-\x7e]\x00){4,}")
+WPATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|[\\/]ntw2[\\/]|\bsrc[\\/])")
 
 
 def diff_runs(a, b):
@@ -116,10 +117,10 @@ def source_paths(pe):
             t = m.group(0)
             if b"ntw2" in t.lower() or b"src" in t.lower():
                 out.append((s["name"], s["rptr"] + m.start(), t.decode("latin1")))
-        for m in WIDE_RE.finditer(raw):  # __FILEW__ / wide literals
-            t = m.group(0).decode("utf-16-le")
-            if re.search(r"(?:[A-Za-z]:[\\/]|[\\/]ntw2[\\/]|\bsrc[\\/])", t):
-                out.append((s["name"] + "(wide)", s["rptr"] + m.start(), t))
+        for m in WIDE_RE.finditer(raw):  # __FILEW__ / wide literals / usage text (only the lines naming a path)
+            for ln in m.group(0).decode("utf-16-le").split("\n"):
+                if WPATH_RE.search(ln):
+                    out.append((s["name"] + "(wide)", s["rptr"] + m.start(), ln.strip()))
     return out
 
 
@@ -141,6 +142,7 @@ def compare(pa, pb, w):
     w("")
     w(f"{'section':9} {'VA':>8} {'vsize':>9} {'rawsize':>9}  {'sha256(before)':16} {'sha256(after)':16}  verdict")
     w("-" * 100)
+    wide_seen = {}
     for sa, sb in zip(A.sections, B.sections):
         ra, rb = A.raw(sa), B.raw(sb)
         ha, hb = hashlib.sha256(ra).hexdigest(), hashlib.sha256(rb).hexdigest()
@@ -169,13 +171,34 @@ def compare(pa, pb, w):
                     ta, tb = ra[cs:ce], rb[cs:ce]
                     if PATH_RE.search(ta) or PATH_RE.search(tb):
                         label = "source/build path string"
-                w(f"    diff {sa['name']}+{s0:#x} (file {fo0:#x}) len {e0 - s0}: "
-                  f"{label or 'UNEXPLAINED'}")
+                        txt = (ta.decode("latin1"), tb.decode("latin1"))
+                if label is None:
+                    # UTF-16 literal (launcher usage text): runs inside one wide string are judged by the decoded LINES that
+                    # differ (an edit of a line shifts the bytes after it inside the literal, so byte runs alone mislead)
+                    for m in WIDE_RE.finditer(ra):
+                        if m.start() <= s0 and e0 <= m.end():
+                            key = (sa["name"], m.start())
+                            if key not in wide_seen:
+                                la = m.group(0).decode("utf-16-le", "replace").split("\n")
+                                lb = rb[m.start():m.end()].decode("utf-16-le", "replace").split("\n")
+                                changed = [(x.strip(), y.strip()) for x, y in zip(la, lb) if x != y]
+                                ok = len(la) == len(lb) and bool(changed) and all(
+                                    WPATH_RE.search(x) or WPATH_RE.search(y) for x, y in changed)
+                                wide_seen[key] = ok
+                                w(f"    UTF-16 literal {sa['name']}+{m.start():#x} len {len(m.group(0))}: "
+                                  f"{len(changed)} differing line(s), {'all name a source path' if ok else 'NOT ALL path lines'}")
+                                for x, y in changed:
+                                    w(f"        before: {x}\n        after : {y}")
+                            if wide_seen[key]:
+                                label = "inside UTF-16 literal whose differing lines only name source paths"
+                            break
+                if not (label or "").startswith("inside UTF-16"):
+                    w(f"    diff {sa['name']}+{s0:#x} (file {fo0:#x}) len {e0 - s0}: {label or 'UNEXPLAINED'}")
                 if label is None:
                     bad.append(f"{sa['name']}+{s0:#x} len {e0 - s0} unexplained")
                     w(f"        before: {ra[s0:e0][:48].hex()}\n        after : {rb[s0:e0][:48].hex()}")
-                elif label.startswith("source/build path"):
-                    w(f"        before: {ta.decode('latin1')}\n        after : {tb.decode('latin1')}")
+                elif label == "source/build path string":
+                    w(f"        before: {txt[0]}\n        after : {txt[1]}")
     # CodeView entries (PDB path/GUID/age) for the record
     for tag, pe in (("before", A), ("after", B)):
         for eo, i, typ, ptr, sz in pe.debug_entries():

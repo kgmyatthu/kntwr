@@ -1,13 +1,13 @@
 === analysis/housekeeping/before/ntw2_runtime.dll
     vs build/tidy/bin/Release/ntw2_runtime.dll
-link timestamp  before 0x6ad4c918  after 0x6ad4cb86   (differs: expected, the linker stamps the build)
+link timestamp  before 0x6ad4c918  after 0x6ad4d0ec   (differs: expected, the linker stamps the build)
 header checksum before 0x00000000  after 0x00000000
 entry RVA 0x83310/0x83310  image base 0x10000000/0x10000000  SizeOfImage 0x724000/0x724000  machine 0x14c/0x14c
 
 section         VA     vsize   rawsize  sha256(before)   sha256(after)     verdict
 ----------------------------------------------------------------------------------------------------
 .text       0x1000    619876    620032  a969d9096f127662 a969d9096f127662  IDENTICAL
-.rdata     0x99000    259812    260096  5d65d634df9206e3 bc4d42c898947917  differs
+.rdata     0x99000    259812    260096  5d65d634df9206e3 2558789d5ce6fabe  differs
     diff .rdata+0x3be5c (file 0xd385c) len 2: debug directory entry 0 header
     diff .rdata+0x3be68 (file 0xd3868) len 1: debug directory entry 0 header
     diff .rdata+0x3be78 (file 0xd3878) len 2: debug directory entry 1 header
@@ -19,7 +19,7 @@ section         VA     vsize   rawsize  sha256(before)   sha256(after)     verdi
 .rsrc     0x719000       480       512  601dfd26e9a80429 601dfd26e9a80429  IDENTICAL
 .reloc    0x71a000     39960     40448  d4dbf13296957914 d4dbf13296957914  IDENTICAL
 CodeView before: GUID 6da4c01d13276541af9716ba84b1f913 age 1 pdb F:\NTW2\translated_code\ntw2\build\before\bin\Release\ntw2_runtime.pdb
-CodeView after: GUID c448479c09906240aa1e17d856112021 age 1 pdb F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2_runtime.pdb
+CodeView after: GUID 716c8f95bc80c14491e0a633c8a261ca age 1 pdb F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2_runtime.pdb
 source/build path strings in before: 3
     .rdata+0xd3d54: F:\NTW2\translated_code\ntw2\build\before\bin\Release\ntw2_runtime.pdb
     .rdata(wide)+0x97f60: F:\NTW2\translated_code\analysis\crashdumps
@@ -31,26 +31,31 @@ source/build path strings in after: 3
 
 === analysis/housekeeping/before/ntw2.exe
     vs build/tidy/bin/Release/ntw2.exe
-link timestamp  before 0x6ad4c919  after 0x6ad4cb87   (differs: expected, the linker stamps the build)
+link timestamp  before 0x6ad4c919  after 0x6ad4d0ed   (differs: expected, the linker stamps the build)
 header checksum before 0x00000000  after 0x00000000
 entry RVA 0x1bf70/0x1bf70  image base 0x400000/0x400000  SizeOfImage 0x2e2000/0x2e2000  machine 0x14c/0x14c
 
 section         VA     vsize   rawsize  sha256(before)   sha256(after)     verdict
 ----------------------------------------------------------------------------------------------------
 .text       0x1000    204233    204288  7c06ecb8032ccb9e 7c06ecb8032ccb9e  IDENTICAL
-.rdata     0x33000    290802    290816  38d9b0b2d735e2ef bdedd8ef5f6c0f53  differs
+.rdata     0x33000    290802    290816  38d9b0b2d735e2ef 5b671bc4a1de1584  differs
+    UTF-16 literal .rdata+0x2b998 len 48056: 2 differing line(s), all name a source path
+        before: predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
+        after : predicate answers; its SSE replacement (src/ai/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
+        before: --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay
+        after : --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/ntw2_target_cull.h); no gameplay
     diff .rdata+0x45a0c (file 0x77c0c) len 2: debug directory entry 0 header
 .data      0x7a000   2494396      2560  63e2d23b26862807 63e2d23b26862807  IDENTICAL
 .fptable  0x2db000       128       512  076a27c79e5ace2a 076a27c79e5ace2a  IDENTICAL
 .rsrc     0x2dc000       480       512  bea97902a7042eca bea97902a7042eca  IDENTICAL
 .reloc    0x2dd000     17456     17920  430c93e899f29b96 430c93e899f29b96  IDENTICAL
 source/build path strings in before: 3
-    .rdata(wide)+0x42228:  file=F:\NTW2\translated_code\analysis\crashdumps\ntw2-%lu-%u.dmp
-    .rdata(wide)+0x66458:                         predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
-    .rdata(wide)+0x6839c:   --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay
+    .rdata(wide)+0x42228: file=F:\NTW2\translated_code\analysis\crashdumps\ntw2-%lu-%u.dmp
+    .rdata(wide)+0x5db98: predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
+    .rdata(wide)+0x5db98: --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay
 source/build path strings in after: 3
-    .rdata(wide)+0x42228:  file=F:\NTW2\translated_code\analysis\crashdumps\ntw2-%lu-%u.dmp
-    .rdata(wide)+0x66458:                         predicate answers; its SSE replacement (src/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
-    .rdata(wide)+0x6839c:   --brain-target-cull   bit-exact host replacement of the soldier-brain melee target search 0x553420 (src/ntw2_target_cull.h); no gameplay
+    .rdata(wide)+0x42228: file=F:\NTW2\translated_code\analysis\crashdumps\ntw2-%lu-%u.dmp
+    .rdata(wide)+0x5db98: predicate answers; its SSE replacement (src/ai/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);
+    .rdata(wide)+0x5db98: --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/ntw2_target_cull.h); no gameplay
 
 VERDICT: FUNCTIONALLY IDENTICAL - .text byte-identical, every other difference attributed to debug-directory / path fields
