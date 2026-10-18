@@ -1,0 +1,19 @@
+# Brain v2 module.
+ntw2_runtime_sources(
+  native_action_node.cpp
+  native_brain2.cpp
+  native_brain_locality.cpp
+  native_brain_s0.cpp
+  native_brain_workers.cpp
+  native_finalizer.cpp
+  native_fire.cpp
+  native_idle_node.cpp
+  native_move_node.cpp
+  native_node.cpp
+  native_node_projection.cpp
+  native_unit_brain.cpp
+  native_unit_fatigue.cpp
+  native_unit_policy.cpp
+  native_unit_posture_engage.cpp
+  native_unit_select.cpp
+)

@@ -1,0 +1,7 @@
+# Pose kernel + render batch adapter (the persistent dispatcher is linked by the final target)
+add_library(ntw2_animation_pose OBJECT native_animation_pose_kernel.cpp)
+add_library(ntw2_animation_render_batch OBJECT native_animation_render_batch.cpp)
+foreach(_t ntw2_animation_pose ntw2_animation_render_batch)
+  target_include_directories(${_t} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" PRIVATE "${NTW2_SRC}/worker")
+  ntw2_host_flags(${_t} 20 precise)
+endforeach()

@@ -84,63 +84,35 @@ function(ntw2_payload_link target)
 endfunction()
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Native module object libraries.  Each module is compiled once; the product DLL and every standalone payload/harness
-# link the same objects.  Object libraries are linked directly into final targets (never through static libraries) so
-# that /EXPORT pragmas inside the objects are always honoured.
+# Source domains.  Each src/<domain>/CMakeLists.txt owns its files: native module object libraries (compiled once; the
+# product DLL and every standalone payload/harness link the same objects, linked directly into final targets - never
+# through static libraries - so that /EXPORT pragmas inside the objects are always honoured) and/or the sources it
+# compiles straight into ntw2_runtime, registered with ntw2_runtime_sources().
 # ---------------------------------------------------------------------------------------------------------------------
+set_property(GLOBAL PROPERTY NTW2_RUNTIME_DOMAIN_SOURCES "")
 
-# Persistent worker dispatcher (import-free, PIC)
-add_library(ntw2_worker_dispatch OBJECT src/worker/native_worker_dispatch.c)
-target_include_directories(ntw2_worker_dispatch PUBLIC src/worker)
-ntw2_pic_flags(ntw2_worker_dispatch)
+# ntw2_runtime_sources(<file>...)  register runtime sources (paths relative to the calling domain directory)
+function(ntw2_runtime_sources)
+  foreach(_f IN LISTS ARGN)
+    set_property(GLOBAL APPEND PROPERTY NTW2_RUNTIME_DOMAIN_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${_f}")
+  endforeach()
+endfunction()
 
-# Ballistics prefix-stage helpers (import-free, PIC)
-add_library(ntw2_ballistics_helpers OBJECT src/ballistics/native_ballistics_helpers.c)
-target_include_directories(ntw2_ballistics_helpers PUBLIC src/ballistics)
-ntw2_pic_flags(ntw2_ballistics_helpers)
-
-# Ballistics direct leaf collision core (import-free, PIC; the sole definition of _fltused in any link that uses it)
-add_library(ntw2_ballistics_collision OBJECT src/ballistics/native_ballistics_collision.cpp)
-target_include_directories(ntw2_ballistics_collision PUBLIC src/ballistics)
-ntw2_pic_cxx_flags(ntw2_ballistics_collision)
-
-# Ballistics query cache hooks (host DLL code).  Receives the address of the existing persistent dispatcher at init, so the
-# dispatcher object is NOT linked into this object library.  Source pins live next to the source (generated once at
-# development time from the pinned image and committed; no runtime or build-time Python).
-add_library(ntw2_ballistics_query_cache OBJECT src/ballistics/native_ballistics_query_cache.cpp)
-target_include_directories(ntw2_ballistics_query_cache PUBLIC src/ballistics PRIVATE src/worker)
-ntw2_host_flags(ntw2_ballistics_query_cache 20 strict)
-
-# Formation: slot assignment, slot generator, batch adapter, runtime hooks
-add_library(ntw2_formation_slot OBJECT src/formation/native_formation_slot.cpp)
-add_library(ntw2_formation_layout OBJECT src/formation/native_formation_layout.cpp)
-add_library(ntw2_formation_batch OBJECT src/formation/native_formation_batch.cpp)
-add_library(ntw2_formation_runtime OBJECT src/formation/native_formation_runtime.cpp)
-foreach(_t ntw2_formation_slot ntw2_formation_layout ntw2_formation_batch ntw2_formation_runtime)
-  target_include_directories(${_t} PUBLIC src/formation PRIVATE src/worker)
-  ntw2_host_flags(${_t} 20 strict)
-endforeach()
-
-# Private path-search workspace and the in-process scheduler owner.
-add_library(ntw2_path OBJECT src/path/native_path_workspace.cpp)
-target_include_directories(ntw2_path PUBLIC src/path)
-ntw2_host_flags(ntw2_path 17 strict)
-add_library(ntw2_path_runtime OBJECT src/path/native_path_runtime.cpp)
-target_include_directories(ntw2_path_runtime PUBLIC src/path PRIVATE src/worker)
-ntw2_host_flags(ntw2_path_runtime 20 strict)
-
-# Animation: pose kernel + render batch adapter (the persistent dispatcher is linked by the final target)
-add_library(ntw2_animation_pose OBJECT src/animation/native_animation_pose_kernel.cpp)
-add_library(ntw2_animation_render_batch OBJECT src/animation/native_animation_render_batch.cpp)
-foreach(_t ntw2_animation_pose ntw2_animation_render_batch)
-  target_include_directories(${_t} PUBLIC src/animation PRIVATE src/worker)
-  ntw2_host_flags(${_t} 20 precise)
-endforeach()
-
-# Render-batch helpers (MASM, position independent: ECX/ESP-relative only)
-add_library(ntw2_render_batch OBJECT src/render/native_render_batch.asm)
-# /Cp: ml.exe upper-cases identifiers by default; the exported names (append_vec3, flush_vec3, batch_contract) are lower case.
-target_compile_options(ntw2_render_batch PRIVATE /Cp)
+add_subdirectory(src/worker)
+add_subdirectory(src/ballistics)
+add_subdirectory(src/formation)
+add_subdirectory(src/path)
+add_subdirectory(src/animation)
+add_subdirectory(src/render)
+add_subdirectory(src/core)
+add_subdirectory(src/clones)
+add_subdirectory(src/profile)
+add_subdirectory(src/ai)
+add_subdirectory(src/brain)
+add_subdirectory(src/brain2)
+add_subdirectory(src/army)
+add_subdirectory(src/collision)
+add_subdirectory(src/loco)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Linker export sets.  Undecorated public names for the decorated MSVC x86 symbols (the same maps the analysis scripts
@@ -198,24 +170,39 @@ set(NTW2_EXPORTS_RUNTIME_ABI
 # Missing required runtime sources are a configure error, never a skipped module.
 # ---------------------------------------------------------------------------------------------------------------------
 if(NTW2_BUILD_RUNTIME)
-  set(NTW2_RUNTIME_SOURCES src/core/ntw2_runtime.cpp src/clones/ntw2_clones.cpp src/profile/ntw2_profile.cpp src/ai/ntw2_ai_census.cpp src/ai/ntw2_ai_async2.cpp src/ai/ntw2_ai_deferred.cpp src/ai/ntw2_walk_memo.cpp
-                           src/collision/native_collision_solver.cpp src/collision/native_contact.cpp src/brain2/native_brain2.cpp src/loco/native_loco.cpp src/loco/native_move_delta.cpp src/loco/native_relink.cpp src/loco/native_grid_probation.cpp
-                           src/brain2/native_node.cpp src/brain2/native_node_projection.cpp src/brain2/native_fire.cpp src/brain2/native_finalizer.cpp
-                           src/brain2/native_move_node.cpp src/brain2/native_brain_workers.cpp src/brain2/native_unit_brain.cpp
-                           src/brain2/native_idle_node.cpp src/brain2/native_action_node.cpp src/army/native_army_unit.cpp src/army/native_army_storm.cpp
-                           src/army/native_army_solver.cpp src/formation/native_formation_solver.cpp
-                           src/brain2/native_brain_s0.cpp src/brain2/native_brain_locality.cpp src/brain2/native_unit_posture_engage.cpp src/ai/ntw2_ai_ctrl_batch.cpp src/ai/ntw2_ai_ctrl_geometry.cpp src/ai/ntw2_planner_prepass.cpp
-                           src/loco/native_sweep.cpp src/loco/native_resolve.cpp src/loco/native_env.cpp
-                           src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ai/ntw2_planner_search.cpp
-                           src/ai/ntw2_spiral.cpp
-                           src/ai/ntw2_claim_once.cpp
-                           src/brain/ntw2_retarget_jitter.cpp
-                           src/brain/ntw2_target_cull.cpp
-                           src/ai/ntw2_record_test.cpp)
-  foreach(_s IN LISTS NTW2_RUNTIME_SOURCES)
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")
-      message(FATAL_ERROR "Runtime source ${_s} does not exist yet. Provide it, or configure with -DNTW2_BUILD_RUNTIME=OFF "
+  # Link order of the runtime's own objects, relative to src/.  The order decides the layout of ntw2_runtime.dll's code
+  # (COMDATs are placed in input order), so it is pinned here instead of following the per-domain registration order.
+  # Every source registered by a domain must appear exactly once.
+  set(NTW2_RUNTIME_LINK_ORDER
+    core/ntw2_runtime.cpp clones/ntw2_clones.cpp profile/ntw2_profile.cpp ai/ntw2_ai_census.cpp ai/ntw2_ai_async2.cpp
+    ai/ntw2_ai_deferred.cpp ai/ntw2_walk_memo.cpp
+    collision/native_collision_solver.cpp collision/native_contact.cpp brain2/native_brain2.cpp loco/native_loco.cpp
+    loco/native_move_delta.cpp loco/native_relink.cpp loco/native_grid_probation.cpp
+    brain2/native_node.cpp brain2/native_node_projection.cpp brain2/native_fire.cpp brain2/native_finalizer.cpp
+    brain2/native_move_node.cpp brain2/native_brain_workers.cpp brain2/native_unit_brain.cpp
+    brain2/native_idle_node.cpp brain2/native_action_node.cpp army/native_army_unit.cpp army/native_army_storm.cpp
+    army/native_army_solver.cpp formation/native_formation_solver.cpp
+    brain2/native_brain_s0.cpp brain2/native_brain_locality.cpp brain2/native_unit_posture_engage.cpp
+    ai/ntw2_ai_ctrl_batch.cpp ai/ntw2_ai_ctrl_geometry.cpp ai/ntw2_planner_prepass.cpp
+    loco/native_sweep.cpp loco/native_resolve.cpp loco/native_env.cpp
+    brain2/native_unit_select.cpp brain2/native_unit_policy.cpp brain2/native_unit_fatigue.cpp ai/ntw2_planner_search.cpp
+    ai/ntw2_spiral.cpp ai/ntw2_claim_once.cpp brain/ntw2_retarget_jitter.cpp brain/ntw2_target_cull.cpp
+    ai/ntw2_record_test.cpp)
+  get_property(_ntw2_registered GLOBAL PROPERTY NTW2_RUNTIME_DOMAIN_SOURCES)
+  set(NTW2_RUNTIME_SOURCES "")
+  foreach(_s IN LISTS NTW2_RUNTIME_LINK_ORDER)
+    if(NOT EXISTS "${NTW2_SRC}/${_s}")
+      message(FATAL_ERROR "Runtime source src/${_s} does not exist yet. Provide it, or configure with -DNTW2_BUILD_RUNTIME=OFF "
                           "to build only the module libraries and tests.")
+    endif()
+    if(NOT "${NTW2_SRC}/${_s}" IN_LIST _ntw2_registered)
+      message(FATAL_ERROR "Runtime source src/${_s} is in NTW2_RUNTIME_LINK_ORDER but not registered by its domain CMakeLists.txt.")
+    endif()
+    list(APPEND NTW2_RUNTIME_SOURCES "${NTW2_SRC}/${_s}")
+  endforeach()
+  foreach(_s IN LISTS _ntw2_registered)
+    if(NOT "${_s}" IN_LIST NTW2_RUNTIME_SOURCES)
+      message(FATAL_ERROR "Runtime source ${_s} is registered by its domain but missing from NTW2_RUNTIME_LINK_ORDER.")
     endif()
   endforeach()
   file(GLOB NTW2_LAUNCHER_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/launcher/*.c"
