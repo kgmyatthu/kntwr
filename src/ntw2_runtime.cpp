@@ -3651,9 +3651,12 @@ static U StartImpl(void* raw) {
         // The storm census times the 0x581F30 calls on the tick owner behind a routed tick; it binds sites 101/103 like the shadow.
         ((next.va_watch_flags&NTW2_ARMY_STORM_CENSUS) && (!(next.enabled_mask&kManagerRouted) || !next.main_thread_id ||
                                                           (next.enabled_mask&NTW2_ARMY_UNIT_SHADOW))) ||
-        // The storm-gated sampler threshold needs the census, the profile sampler and the site-18 gate (profile_site 19).
-        ((next.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK) && (!(next.va_watch_flags&NTW2_ARMY_STORM_CENSUS) ||
-                                                               !(next.enabled_mask&NTW2_PROFILE) || next.profile_site!=19)) ||
+        // The gated sampler threshold needs the profile sampler and a selected site: 18 (profile_site 19, with the census)
+        // or 34 (profile_site 35, planner think tails; the think must run on the gated thread, i.e. without AI_ASYNC).
+        ((next.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK) && (!(next.enabled_mask&NTW2_PROFILE) ||
+            (next.profile_site!=19 && next.profile_site!=35) ||
+            (next.profile_site==19 && !(next.va_watch_flags&NTW2_ARMY_STORM_CENSUS)) ||
+            (next.profile_site==35 && (next.enabled_mask&NTW2_AI_ASYNC)))) ||
         // --tick-pcore / --tick-core-ab place the routed tick body (TickGate's routed path); one placement mode at a time.
         ((next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB)) && (!(next.enabled_mask&kRouted) ||
                                                                        (next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))==(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))) ||

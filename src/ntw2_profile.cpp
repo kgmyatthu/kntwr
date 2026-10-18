@@ -626,8 +626,11 @@ DWORD WINAPI Sampler(void*) {
         const bool attempted = active;
         if (attempted) {
             ntw2_profile.rounds = ntw2_profile.rounds + 1;
+            // --army-storm-sample-ms: only the thread inside the selected site matters; skipping the other ~20 threads
+            // keeps a round near the 5 ms target instead of ~30 ms, so a 500 ms tail yields ~100 samples instead of ~15.
+            const U gatedThread = ntw2_profile_storm_threshold_ms && ntw2_profile_tick_gate ? *ntw2_profile_tick_gate : 0;
             for (U i = 0; i < NTW2_PROFILE_THREADS; ++i)
-                if (threads[i]) Sample(i, context);
+                if (threads[i] && (ntw2_profile_storm_threshold_ms ? ntw2_profile.thread_id[i] == gatedThread : true)) Sample(i, context);
         }
         ReleaseSRWLockExclusive(&sampleLock);
         QueryPerformanceCounter(&end);
