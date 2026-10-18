@@ -2882,8 +2882,9 @@ bool StartModules() {
         if (!ntw2_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)); return false; }
     }
     if (config.va_watch_flags & NTW2_ALLOC_CENSUS) {
-        if (!VirtualBudget(ntw2_alloc_census::RequiredStorageBytes())) return false;
-        const ntw2_alloc_census::Binding binding={imageBase,imageSize,delta,allocCensusRequestedMode ? allocCensusRequestedMode : ntw2_alloc_census::kModeCensus,&clones};
+        const U mode=allocCensusRequestedMode ? allocCensusRequestedMode : ntw2_alloc_census::kModeCensus;
+        if (!VirtualBudget(ntw2_alloc_census::RequiredStorageBytes(mode))) return false;
+        const ntw2_alloc_census::Binding binding={imageBase,imageSize,delta,mode,&clones};
         if (!ntw2_alloc_census::Start(binding)) { RecordError(ModuleError,NTW2_ALLOC_CENSUS); return false; }
     }
     if (mask & NTW2_COLLIDE) {
@@ -3079,7 +3080,8 @@ bool BuildSlots() {
             if (pins[i].vtable) AddSlot(pins[i].vtable+4*pins[i].slot,pins[i].original,ntw2_ai_async2::Gate(i));
     }
     allocCensusSlotFirst=allocCensusSlotEnd=slotCount;
-    if (config.va_watch_flags & NTW2_ALLOC_CENSUS) {
+    if ((config.va_watch_flags & NTW2_ALLOC_CENSUS) &&
+        ((allocCensusRequestedMode ? allocCensusRequestedMode : ntw2_alloc_census::kModeCensus) & ntw2_alloc_census::kModeCensus)) {
         AddSlot(ntw2_alloc_census::kProviderAllocSlot,ntw2_alloc_census::kProviderAllocOriginal,ntw2_alloc_census::AllocGateAddress());
         AddSlot(ntw2_alloc_census::kProviderFreeSlot,ntw2_alloc_census::kProviderFreeOriginal,ntw2_alloc_census::FreeGateAddress());
         allocCensusSlotEnd=slotCount;
@@ -3526,7 +3528,10 @@ bool Activate(const World& candidate) {
     for (U i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) ntw2_state.collide_contact_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_LOD_WORDS;++i) ntw2_state.collide_lod_words[i]=0;
     for (U i=0;i<NTW2_ALLOC_CENSUS_WORDS;++i) ntw2_state.alloc_census_words[i]=0;
-    if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,ntw2_alloc_census::kSlotCount,true);
+    if (config.va_watch_flags&NTW2_ALLOC_CENSUS) {
+        const U mode=allocCensusRequestedMode ? allocCensusRequestedMode : ntw2_alloc_census::kModeCensus;
+        ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,(mode&ntw2_alloc_census::kModeCensus) ? ntw2_alloc_census::kSlotCount : 0u,true);
+    }
     for (U i=0;i<NTW2_ARENA_WORDS;++i) ntw2_state.arena_words[i]=0;
     for (U i=0;i<NTW2_OVERLAY_WORDS;++i) ntw2_state.overlay_words[i]=0;
     // Publish all LOCO row metadata with activation, not a later poll.
@@ -3809,8 +3814,9 @@ static U StartImpl(void* raw) {
         _InterlockedExchange(&life,before); return ThreadError;
     }
     config=next;
+    const U preAllocMode=ntw2_state.alloc_census_words[NTW2_ALLOC_CENSUS_MODE];
     allocCensusRequestedMode=(config.va_watch_flags&NTW2_ALLOC_CENSUS)
-        ? (ntw2_state.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==ntw2_alloc_census::kModeFix ? ntw2_alloc_census::kModeFix : ntw2_alloc_census::kModeCensus)
+        ? ((preAllocMode>=ntw2_alloc_census::kModeCensus && preAllocMode<=ntw2_alloc_census::kModeFixCensus) ? preAllocMode : ntw2_alloc_census::kModeCensus)
         : ntw2_alloc_census::kModeOff;
     ntw2_alloc_census::Reset();
     ntw2_alloc_census::Configure(imageBase,imageSize,delta,allocCensusRequestedMode);

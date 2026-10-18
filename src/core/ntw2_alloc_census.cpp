@@ -252,7 +252,7 @@ __forceinline U CaptureCaller2Slow(const U* sp, U nextScanIdx) {
 __forceinline U FindOrInsertCallsite(U callsiteVa, U sizeClass, const U* sp, U nextScanIdx) {
     const U keyHi = sizeClass + 1u;
     const LONGLONG key = (static_cast<LONGLONG>(keyHi) << 32) | static_cast<LONGLONG>(callsiteVa);
-    U idx = ((callsiteVa * 2654435761u) ^ (sizeClass * 0x9E3779B9u)) & kCallsiteMask;
+    U idx = (((callsiteVa * 2654435761u) >> 19) ^ (sizeClass * 4099u)) & kCallsiteMask;
     for (U probe = 0; probe < kMaxCallsiteProbe; ++probe, idx = (idx + 1u) & kCallsiteMask) {
         CallsiteEntry& e = g_callsites[idx];
         const volatile U* keyWords = reinterpret_cast<const volatile U*>(&e.key);
@@ -314,14 +314,7 @@ __forceinline bool RemovePtr(U ptr, U& outMeta) {
     return false;
 }
 
-void RecordAlloc(U ptr, U rawSize, const U* sp, U ret0) {
-    const U teb = __readfsdword(0x18);
-    ThreadSlot* ts = FindThreadSlot(teb);
-    if (!ts) return;
-    if (_InterlockedCompareExchange(&ts->depth, 1, 0) != 0) {
-        _InterlockedIncrement(&g_reentrantSkips);
-        return;
-    }
+void RecordAllocLocked(U ptr, U rawSize, const U* sp, U ret0) {
     ++ntw2::probeDepth;
     __try {
         if (Load(&g_enabled) && g_ptrs && g_callsites) {
@@ -356,7 +349,6 @@ void RecordAlloc(U ptr, U rawSize, const U* sp, U ret0) {
         _InterlockedIncrement(&g_hookFaults);
     }
     --ntw2::probeDepth;
-    _InterlockedExchange(&ts->depth, 0);
 }
 
 void RecordFree(U ptr) {
@@ -391,18 +383,32 @@ void RecordFree(U ptr) {
     _InterlockedExchange(&ts->depth, 0);
 }
 
+__forceinline bool IsProcessHeapProvider(const void* self) {
+    return self && *reinterpret_cast<const U*>(static_cast<const uint8_t*>(self) + 4u) == 3u;
+}
+
 AllocResult* __fastcall AllocGate(void* self, void* edx, AllocResult* out, U size) {
+    if (!Load(&g_enabled)) {
+        return g_originalAlloc(self, edx, out, size);
+    }
     const U* sp = reinterpret_cast<const U*>(_AddressOfReturnAddress());
     const U ret0 = sp[0];
-    AllocResult* res = g_originalAlloc(self, edx, out, size);
-    if (Load(&g_enabled) && out && out->ptr >= 8u) {
-        RecordAlloc(out->ptr, size, sp, ret0);
+    const U teb = __readfsdword(0x18);
+    ThreadSlot* ts = FindThreadSlot(teb);
+    if (!ts || _InterlockedCompareExchange(&ts->depth, 1, 0) != 0) {
+        if (ts) _InterlockedIncrement(&g_reentrantSkips);
+        return g_originalAlloc(self, edx, out, size);
     }
+    AllocResult* res = g_originalAlloc(self, edx, out, size);
+    if (Load(&g_enabled) && out && out->ptr >= 8u && IsProcessHeapProvider(self)) {
+        RecordAllocLocked(out->ptr, size, sp, ret0);
+    }
+    _InterlockedExchange(&ts->depth, 0);
     return res;
 }
 
 U __fastcall FreeGate(void* self, void* edx, U ptr) {
-    if (Load(&g_enabled) && ptr >= 8u) {
+    if (Load(&g_enabled) && ptr >= 8u && IsProcessHeapProvider(self)) {
         RecordFree(ptr);
     }
     return g_originalFree(self, edx, ptr);
@@ -532,8 +538,8 @@ void BuildSnapshot(U slotsOwned) {
 
 } // namespace
 
-U RequiredStorageBytes() {
-    return kTotalStorageBytes;
+U RequiredStorageBytes(U mode) {
+    return (mode & kModeCensus) ? kTotalStorageBytes : 0u;
 }
 
 U StorageBytes() {
@@ -553,7 +559,7 @@ void Configure(U imageBase, U imageSize, U delta, U mode) {
     g_imageSize = imageSize;
     g_delta = delta;
     g_textBegin = imageBase + 0x1000u;
-    g_textEnd = imageBase + (imageSize > 0x00F06000u ? 0x00F06000u : imageSize);
+    g_textEnd = imageBase + (imageSize > 0x00F068FCu ? 0x00F068FCu : imageSize);
     g_retFF7F20 = 0x00FF7F50u + delta;
     g_originalAlloc = reinterpret_cast<ProviderAllocFn>(static_cast<uintptr_t>(kProviderAllocOriginal + delta));
     g_originalFree = reinterpret_cast<ProviderFreeFn>(static_cast<uintptr_t>(kProviderFreeOriginal + delta));
@@ -589,12 +595,13 @@ bool Start(const Binding& binding) {
         ? static_cast<U>(reinterpret_cast<uintptr_t>(g_clones->allocation)) : 0u;
     g_cloneBytes = g_clones ? g_clones->allocation_bytes : 0u;
 
-    void* mem = VirtualAlloc(nullptr, kTotalStorageBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (!mem) return false;
-    g_storage = mem;
-    g_ptrs = static_cast<PtrSlot*>(mem);
-    g_callsites = reinterpret_cast<CallsiteEntry*>(static_cast<uint8_t*>(mem) + kPtrBytes);
-
+    if (binding.mode & kModeCensus) {
+        void* mem = VirtualAlloc(nullptr, kTotalStorageBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!mem) return false;
+        g_storage = mem;
+        g_ptrs = static_cast<PtrSlot*>(mem);
+        g_callsites = reinterpret_cast<CallsiteEntry*>(static_cast<uint8_t*>(mem) + kPtrBytes);
+    }
     memset(g_threads, 0, sizeof(g_threads));
     _InterlockedExchange(&g_callsiteUsed, 0);
     _InterlockedExchange(&g_overflowCount, 0);
@@ -613,21 +620,23 @@ bool Start(const Binding& binding) {
     g_hasSnapshot = false;
 
     _InterlockedExchange(&g_enabled, 1);
-    BuildSnapshot(kSlotCount);
+    BuildSnapshot((binding.mode & kModeCensus) ? kSlotCount : 0u);
     g_nextSampleTick = GetTickCount64() + kSampleIntervalMs;
     return true;
 }
 
 void Stop() {
     const LONG wasEnabled = _InterlockedExchange(&g_enabled, 0);
-    if (wasEnabled && g_storage) {
-        for (U spin = 0; spin < 5000u; ++spin) {
-            bool busy = false;
-            for (U i = 0; i < kThreadSlots; ++i) {
-                if (Load(&g_threads[i].depth) != 0) { busy = true; break; }
+    if (wasEnabled) {
+        if (g_storage) {
+            for (U spin = 0; spin < 5000u; ++spin) {
+                bool busy = false;
+                for (U i = 0; i < kThreadSlots; ++i) {
+                    if (Load(&g_threads[i].depth) != 0) { busy = true; break; }
+                }
+                if (!busy) break;
+                Sleep(1);
             }
-            if (!busy) break;
-            Sleep(1);
         }
         BuildSnapshot(0u);
         g_snapshot[HEnabled] = 1u;
@@ -675,7 +684,7 @@ void RecordFixFreed(U blocks, U bytes, U siteBit) {
 // pushed onto the dead freelist `[pathfinder + 0x17C]` (which no instruction in `Napoleon.exe` ever pops from).
 // Splices the `[pathfinder + 0x17C]` freelist chain back onto `[pathfinder + 0x170]` on the tick owner thread.
 void ReclaimTick(U model) {
-    if (Load(&g_mode) != static_cast<LONG>(kModeFix) || !model || model < 0x10000u) return;
+    if (!(static_cast<U>(Load(&g_mode)) & kModeFix) || !model || model < 0x10000u) return;
     ++ntw2::probeDepth;
     __try {
         const U pf = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(model + 0xB4u));

@@ -3074,24 +3074,14 @@ int main(int argc,char** argv) {
         Check(Replace(At(0x13071a4),A(reinterpret_cast<void*>(&HeapAlloc))) &&
               Replace(At(0x13071a8),A(reinterpret_cast<void*>(&HeapFree))),"bind HeapAlloc/HeapFree IAT slots for alloc census test");
         config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0; config.va_watch_flags=NTW2_ALLOC_CENSUS;
+        // 1) mode=2 (--alloc-fix alone): zero VirtualAlloc storage, zero vtable slots swapped, ReclaimTick active.
         state->alloc_census_words[NTW2_ALLOC_CENSUS_MODE]=2u;
-        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc census active with mode=2 (--alloc-fix)");
-        Check(ReadOnly(allocSlot) && *allocSlot!=allocOriginal && InRuntime(*allocSlot) &&
-              ReadOnly(freeSlot) && *freeSlot!=freeOriginal && InRuntime(*freeSlot),
-              "alloc census swaps both provider vtable slots to read-only runtime gates");
+        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc-fix alone (mode=2) activates");
+        Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
+              "alloc-fix alone (mode=2) leaves provider vtable slots untouched");
         Check(ReadState(state,snapshot) && snapshot.alloc_census_words[0]==1u && snapshot.alloc_census_words[1]==1u &&
-              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==2u && snapshot.alloc_census_words[3]==(1u<<22) &&
-              snapshot.alloc_census_words[5]==8192u && snapshot.alloc_census_words[22]>0u && snapshot.alloc_census_words[23]==2u,
-              "alloc census publishes header metadata at activation");
-        struct FakeOut { U ptr, owner; } outs[2]={};
-        U fakeProvider[3]={A(At(0x13ede38)),3u,A(GetProcessHeap())};
-        using ProvAlloc = FakeOut* (__fastcall *)(void*,void*,FakeOut*,U);
-        using ProvFree = U (__fastcall *)(void*,void*,U);
-        const auto pAlloc=reinterpret_cast<ProvAlloc>(static_cast<uintptr_t>(*allocSlot));
-        const auto pFree=reinterpret_cast<ProvFree>(static_cast<uintptr_t>(*freeSlot));
-        for(unsigned k=0;k<2;++k) pAlloc(fakeProvider,nullptr,&outs[k],256u);
-        Check(outs[0].ptr!=0 && outs[1].ptr!=0,"hooked provider alloc returns heap blocks");
-        pFree(fakeProvider,nullptr,outs[0].ptr);
+              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==2u && snapshot.alloc_census_words[22]==0u &&
+              snapshot.alloc_census_words[23]==0u,"alloc-fix alone (mode=2) reserves 0 bytes of census storage");
         alignas(4) uint8_t fakePf[0x200]={};
         U sub1=0, sub2=0, oldFree=0x12345678u;
         sub1=A(&sub2); sub2=0;
@@ -3100,22 +3090,45 @@ int main(int argc,char** argv) {
         *reinterpret_cast<U*>(fakePf+0x17c)=A(&sub1);
         *reinterpret_cast<U*>(fakePf+0x184)=0x3E8u;
         Put(model,0xB4,A(fakePf));
-        Check(stop(nullptr)==0,"alloc census stop succeeds");
+        Check(stop(nullptr)==0,"alloc-fix alone (mode=2) stop succeeds");
         Put(model,0xB4,0);
-        Check(*reinterpret_cast<U*>(fakePf+0x17c)==0u && *reinterpret_cast<U*>(fakePf+0x170)==A(&sub1) && sub2==oldFree,
-              "alloc-fix ReclaimTick splices orphaned pathfinder +0x17C waypoint subnodes back onto +0x170 freelist");
+        Check(*reinterpret_cast<U*>(fakePf+0x17c)==0u && *reinterpret_cast<U*>(fakePf+0x170)==A(&sub1) && sub2==oldFree &&
+              ReadState(state,snapshot) && snapshot.alloc_census_words[19]==2u && snapshot.alloc_census_words[20]==2u*0x70u &&
+              snapshot.alloc_census_words[21]==1u,
+              "alloc-fix alone (mode=2) splices orphaned pathfinder +0x17C subnodes onto +0x170 with 0 census storage");
+        // 2) mode=3 (--alloc-fix + --alloc-census): swaps provider slots, tracks Provider[3] only, ignores Provider[0].
+        state->alloc_census_words[NTW2_ALLOC_CENSUS_MODE]=3u;
+        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc census+fix (mode=3) activates");
+        Check(ReadOnly(allocSlot) && *allocSlot!=allocOriginal && InRuntime(*allocSlot) &&
+              ReadOnly(freeSlot) && *freeSlot!=freeOriginal && InRuntime(*freeSlot),
+              "alloc census+fix (mode=3) swaps both provider vtable slots to read-only runtime gates");
+        Check(ReadState(state,snapshot) && snapshot.alloc_census_words[0]==1u && snapshot.alloc_census_words[1]==1u &&
+              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==3u && snapshot.alloc_census_words[3]==(1u<<22) &&
+              snapshot.alloc_census_words[5]==8192u && snapshot.alloc_census_words[22]>0u && snapshot.alloc_census_words[23]==2u,
+              "alloc census+fix (mode=3) publishes header metadata and storage at activation");
+        struct FakeOut { U ptr, owner; } outs[2]={}, luaOut={};
+        U fakeProvider3[3]={A(At(0x13ede38)),3u,A(GetProcessHeap())};
+        U fakeProvider0[3]={A(At(0x13ede38)),0u,A(GetProcessHeap())};
+        using ProvAlloc = FakeOut* (__fastcall *)(void*,void*,FakeOut*,U);
+        using ProvFree = U (__fastcall *)(void*,void*,U);
+        const auto pAlloc=reinterpret_cast<ProvAlloc>(static_cast<uintptr_t>(*allocSlot));
+        const auto pFree=reinterpret_cast<ProvFree>(static_cast<uintptr_t>(*freeSlot));
+        for(unsigned k=0;k<2;++k) pAlloc(fakeProvider3,nullptr,&outs[k],256u);
+        pAlloc(fakeProvider0,nullptr,&luaOut,128u);
+        Check(outs[0].ptr!=0 && outs[1].ptr!=0 && luaOut.ptr!=0,"hooked provider alloc returns heap blocks for Provider[3] and Provider[0]");
+        pFree(fakeProvider3,nullptr,outs[0].ptr);
+        pFree(fakeProvider0,nullptr,luaOut.ptr);
+        Check(stop(nullptr)==0,"alloc census+fix (mode=3) stop succeeds");
         Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
-              "alloc census stop restores provider vtable slots");
+              "alloc census+fix (mode=3) stop restores provider vtable slots");
         Check(ReadState(state,snapshot) && snapshot.alloc_census_words[8]==0u && snapshot.alloc_census_words[9]==256u &&
               snapshot.alloc_census_words[10]==1u && snapshot.alloc_census_words[13]==512u &&
               snapshot.alloc_census_words[14]==2u && snapshot.alloc_census_words[15]==1u &&
-              snapshot.alloc_census_words[19]==2u && snapshot.alloc_census_words[20]==2u*0x70u &&
-              snapshot.alloc_census_words[21]==1u &&
               snapshot.alloc_census_words[22]==0u && snapshot.alloc_census_words[23]==0u &&
               snapshot.alloc_census_words[32+2]==256u && snapshot.alloc_census_words[32+3]==1u &&
               snapshot.alloc_census_words[32+4]==2u && snapshot.alloc_census_words[32+5]==1u &&
               snapshot.alloc_census_words[32+6]==512u,
-              "alloc census stop retains final live/peak/alloc/free/fix counts and releases storage");
+              "alloc census+fix (mode=3) tracks only Provider[3] and releases storage on stop");
         HeapFree(GetProcessHeap(),0,reinterpret_cast<void*>(static_cast<uintptr_t>(outs[1].ptr)));
         Replace(At(0x13071a4),oldHeapAlloc); Replace(At(0x13071a8),oldHeapFree);
         config.va_watch_flags=0;
