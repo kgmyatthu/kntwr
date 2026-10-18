@@ -126,11 +126,11 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,loco_grid_build_words)+NTW2_LOCO_GRID_BUILD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_unit_policy_words) && NTW2_LOCO_GRID_BUILD_WORDS==16u &&
               offsetof(ntw2_status,brain_unit_policy_words)+NTW2_BRAIN_UNIT_POLICY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_census_words) && NTW2_BRAIN_UNIT_POLICY_WORDS==256u &&
               offsetof(ntw2_status,ai_prepass_census_words)+NTW2_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_words) && NTW2_AI_PREPASS_CENSUS_WORDS==82u &&
-              offsetof(ntw2_status,ai_prepass_words)+NTW2_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_spiral_words) && NTW2_AI_PREPASS_WORDS==32u &&
+              offsetof(ntw2_status,ai_prepass_words)+NTW2_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_spiral_words) && NTW2_AI_PREPASS_WORDS==60u && NTW2_AI_POLY_WORDS==32u && NTW2_AI_RECORD_TEST_WORDS==28u &&
               offsetof(ntw2_status,ai_spiral_words)+NTW2_AI_SPIRAL_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_solver_words) && NTW2_AI_SPIRAL_WORDS==32u &&
               offsetof(ntw2_status,army_solver_words)+NTW2_ARMY_SOLVER_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ARMY_SOLVER_WORDS==519u &&
               NTW2_AI_POLY_SHADOW==0x4u && NTW2_AI_POLY==0x8u && NTW2_AI_SPIRAL_CENSUS==0x10u && NTW2_AI_SPIRAL_CAP_SHIFT==16u &&
-              NTW2_AI_PREPASS_FLAGS_VALID==0xFFFF001Fu &&
+              NTW2_AI_RECORD_TEST_SHADOW==0x20u && NTW2_AI_RECORD_TEST==0x40u && NTW2_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
 static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
@@ -1542,6 +1542,35 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
         Check(rowZero && *observerSlot==observerOriginal,"poly row is all zero and the observer slot pristine without the bits");
         Check(stop(nullptr)==0,"stop poly-free generation");
     }
+    // 5b. --ai-record-test-shadow / --ai-record-test (on top of --ai-poly): the alternate delegate slot 0x13376EC (= 0x6A99E0) is published read-only
+    // next to the default observer slot, both restored by stop; words 32..59 of the prepass row publish version 1 and the mode; a generation without
+    // the bits zeroes them.
+    {
+        U* altSlot=At(0x13376ac+4*16); U* observerSlot=At(0x13376fc+4*16);
+        const U altOriginal=0x6A99E0+delta, observerOriginal=0x6A95A0+delta;
+        Check(*altSlot==altOriginal && ReadOnly(altSlot),"alternate delegate slot pristine before the record-test modes");
+        const U modes[2]={NTW2_AI_POLY|NTW2_AI_RECORD_TEST_SHADOW,NTW2_AI_POLY_SHADOW|NTW2_AI_RECORD_TEST};
+        for(U k=0;k<2;++k) {
+            config.ai_prepass_flags=modes[k];
+            Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai record-test mode activates");
+            Check(*altSlot!=altOriginal && InRuntime(*altSlot) && ReadOnly(altSlot),"record-test publishes the read-only alternate delegate gate");
+            Check(*observerSlot!=observerOriginal && InRuntime(*observerSlot),"record-test keeps the poly observer gate");
+            bool published=false;
+            for(U i=0;i<300 && !published;++i) {
+                if(ReadState(state,snapshot) && snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS]==1 && snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS+1]==(k==0?1u:2u)) published=true;
+                else Sleep(10);
+            }
+            Check(published,"record-test row publishes version 1 and its own mode (1 shadow, 2 live)");
+            Check(snapshot.ai_prepass_words[0]==1 && snapshot.ai_prepass_words[1]==(k==0?2u:1u),"record-test leaves the poly row mode independent");
+            Check(stop(nullptr)==0 && *altSlot==altOriginal && ReadOnly(altSlot) && *observerSlot==observerOriginal,"stop restores the alternate delegate and observer slots");
+        }
+        config.ai_prepass_flags=NTW2_AI_POLY;
+        Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai poly without record-test bits activates");
+        bool recordZero=ReadState(state,snapshot);
+        for(unsigned i=0;i<NTW2_AI_RECORD_TEST_WORDS;++i) recordZero=recordZero && !snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS+i];
+        Check(recordZero && *altSlot==altOriginal,"record-test row is zero and the alternate slot pristine without the bits");
+        Check(stop(nullptr)==0,"stop record-test-free generation");
+    }
     // 6. --ai-spiral-census / --ai-spiral-cap-m: the observer slot plus the fallback observer (0x1343318 slot 16) and inline controller
     // (0x1349C18 slot 28) gates are published read-only, the walk-state slot is not (R2 routing unchanged); the row publishes version 1 and the
     // cap; stop restores all three slots and retains the row; a generation without the bits zeroes it.
@@ -2278,7 +2307,14 @@ int main(int argc,char** argv) {
     config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY; Check(start(&config)==1,"ai-poly excludes the census");
     config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW; Check(start(&config)==1,"ai-poly-shadow excludes the census");
     config.ai_prepass_flags=NTW2_AI_PREPASS_FLAGS_VALID+1; Check(start(&config)==1,"ai-prepass unknown flag bit refused");
-    config.ai_prepass_flags=0x20; Check(start(&config)==1,"ai-prepass bit 0x20 refused");
+    config.ai_prepass_flags=0x80; Check(start(&config)==1,"ai-prepass bit 0x80 refused");
+    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST; Check(start(&config)==2,"ai-record-test passes validation with ai-poly");
+    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW|NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==2,"ai-record-test-shadow passes validation with ai-poly-shadow");
+    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST|NTW2_AI_PRESIZE|(200u<<NTW2_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-record-test combines with presize and the spiral cap");
+    config.ai_prepass_flags=NTW2_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test without a poly bit refused");
+    config.ai_prepass_flags=NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow without a poly bit refused");
+    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST|NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow and ai-record-test exclude each other");
+    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY|NTW2_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test excludes the census");
     config.ai_prepass_flags=NTW2_AI_SPIRAL_CENSUS; Check(start(&config)==2,"ai-spiral-census passes validation");
     config.ai_prepass_flags=200u<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 200 passes validation");
     config.ai_prepass_flags=0xFFFFu<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 65535 passes validation");

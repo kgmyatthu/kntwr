@@ -1680,6 +1680,11 @@ SOURCES = [
     ('AI2_7F6ED0', 0x7F6ED0, 0x7F6F12, 'private'),
     ('AI2_7F1CF0', 0x7F1CF0, 0x7F1D38, 'private'),
     ('AI2_809110', 0x809110, 0x8091ED, 'private'),
+    # --ai-record-test*: the ALTERNATE placement delegate 0x13376AC (installed through controller slot +0x50 = 0x6B3010), slot 16 = 0x13376EC =
+    # 0x6A99E0 (ret C at 6A9D2E) -> 0x6A94B0 (ret 14 at 6A9590; per-record loop, 6C71D0 call at 6A9528). Pure-retarget copies (role
+    # 'private' like the AI2 sources; nothing rebased): the original 6C71D0 call and the 7FCA40 call go to the existing PS_* clones.
+    ('OBS_6A99E0', 0x6A99E0, 0x6A9D31, 'private'),
+    ('OBS_6A94B0', 0x6A94B0, 0x6A9593, 'private'),
     # Contact responses (src/collision/native_contact.cpp, analysis/native-contact-response.md): the type-8 callback chain the
     # port transcribes or the owner replays. Pins only: nothing is cloned or patched. Already pinned above and reused:
     # PIN_LOCO_PROJECT 80E9D0, PIN_COLLIDE_RADIUS 81A670, PIN_COLLIDE_BUMP 1318038 (0.5), PIN_COLLIDE_ONE 1318048 (1.0),
@@ -2554,6 +2559,15 @@ def ps_configs():
         dict(clone='PS_WALK', source='AI_WALK',
              calls={0x80DCF0: (Bind('PS_POLY'), 1, [0x7F1E5A])},
              indirect_calls=set(), expect_rets={0x7F1E1A: RET(4), 0x7F1E91: RET(4)}),
+        # --ai-record-test*: alternate delegate 0x13376AC slot 16 (see the source comment): 6A99E0 -> {7FCA40 (6A9AF4) | 6A94B0 (6A9CDA)};
+        # 6A94B0's per-record ladder call 6A9528 enters PS_6C71D0 directly (no PS_LADDER census forwarder). Indirect calls dispatch on
+        # caller-supplied objects (6A9B37/6A9B44/6A9B57 and the child vt+44 at 6A953F).
+        dict(clone='PS_6A99E0', source='OBS_6A99E0',
+             calls={0x7FCA40: (Clone('PS_7FCA40'), 1, [0x6A9AF4]), 0x6A94B0: (Clone('PS_6A94B0'), 1, [0x6A9CDA])},
+             indirect_calls={0x6A9B37, 0x6A9B44, 0x6A9B57}, expect_rets={0x6A9D2E: RET(0xC)}),
+        dict(clone='PS_6A94B0', source='OBS_6A94B0',
+             calls={0x6C71D0: (Clone('PS_6C71D0'), 1, [0x6A9528])},
+             indirect_calls={0x6A953F}, expect_rets={0x6A9590: RET(0x14)}),
     ]
 
 
@@ -2568,9 +2582,12 @@ PS_EXPECT_CALLS = {
     'PS_808040': {0x126DEF6, 0x126DF40, 0x126E299, 0x4C9D40, 0x531E30, 0x5DAC30, 0x5DAC60, 0x6F2040, 0x73F4B0,
                   0x7E1BD0, 0x7E6C30, 0x7FCE80, 0x7FCFF0, 0x81C050, 0x7F6F20},
     'PS_WALK': {0x7EE620, 0x804DD0, 0x808F90, 0x126DEF6, 0x126DF40, 0x126E299},
+    'PS_6A99E0': {0x6C92A0, 0x80E9D0, 0x5187A0, 0x68E7E0, 0x6A7C10, 0x6AE0F0, 0x6A33F0, 0xFF7EF0},
+    'PS_6A94B0': {0x6F2430, 0x68E610, 0x5EFCC0},
 }
 PS_EXPECT_CENSUS = {'PS_6A95A0': (251, 11, 9, 0), 'PS_6C71D0': (471, 53, 16, 0), 'PS_6CC730': (78, 2, 2, 0),
                     'PS_808550': (13, 0, 0, 0), 'PS_7FCA40': (22, 0, 1, 0), 'PS_7FCA90': (260, 12, 8, 0),
+                    'PS_6A99E0': (207, 9, 10, 0), 'PS_6A94B0': (76, 0, 3, 0),
                     'PS_808040': (347, 11, 22, 0), 'PS_WALK': (112, 17, 6, 0)}
 EXPECT_CALLS.update(PS_EXPECT_CALLS)
 EXPECT_CENSUS.update(PS_EXPECT_CENSUS)

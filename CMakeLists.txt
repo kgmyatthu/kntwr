@@ -208,7 +208,8 @@ if(NTW2_BUILD_RUNTIME)
                            src/loco/native_sweep.cpp src/loco/native_resolve.cpp src/loco/native_env.cpp
                            src/brain2/native_unit_select.cpp src/brain2/native_unit_policy.cpp src/brain2/native_unit_fatigue.cpp src/ntw2_planner_search.cpp
                            src/ntw2_spiral.cpp
-                           src/ntw2_claim_chunk.cpp)
+                           src/ntw2_claim_chunk.cpp
+                           src/ntw2_record_test.cpp)
   foreach(_s IN LISTS NTW2_RUNTIME_SOURCES)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_s}")
       message(FATAL_ERROR "Runtime source ${_s} does not exist yet. Provide it, or configure with -DNTW2_BUILD_RUNTIME=OFF "

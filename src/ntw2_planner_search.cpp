@@ -1,4 +1,5 @@
 #include "ntw2_planner_search.h"
+#include "ntw2_record_test.h"
 #include <emmintrin.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -234,40 +235,49 @@ void Calibrate() {
 }
 }
 unsigned char __fastcall Gate(void* shape, void*, void* polygon) {
-    Bump(2);
+    // Inside ntw2_record_test::Entry (the alternate placement delegate 0x13376AC route, --ai-record-test*) the call is accounted into that
+    // module's row and follows ITS mode; everything else (the default observer route, R2/R3 walk sites) keeps this module's row and mode.
+    const bool alt = ntw2_record_test::InScope();
+    if (!alt) Bump(2);
     unsigned char fast = 0; uint32_t v = 0;
-    const bool shadow = gMode == ModeShadow;
+    const bool shadow = alt ? ntw2_record_test::Shadow() : gMode == ModeShadow;
     // Shadow samples every served call; live samples every 32nd served call (by count, never by time): both start from the identical FP
     // state, native runs last on the sampled call and is compared; live then restores the fast path's state and returns the fast AL.
-    const bool sample = shadow || ((gServedCount + 1) & 31u) == 0;
+    const bool sample = shadow || (((alt ? ntw2_record_test::NextServedIndex() : gServedCount) + 1) & 31u) == 0;
     alignas(16) unsigned char initial[512], afterFast[512], afterNative[512];
     if (sample) _fxsave(initial);
     const unsigned __int64 t0 = __rdtsc();
     const Reason why = Evaluate(shape, polygon, &fast, &v);
     const unsigned __int64 t1 = __rdtsc();
-    Account(why, v, fast);
+    if (alt) ntw2_record_test::Account(static_cast<uint32_t>(why), v, fast); else Account(why, v, fast);
     if (why != Served) {
         if (sample) _fxrstor(initial);
         const unsigned __int64 t2 = __rdtsc();
         const unsigned char native = nativeKernel(shape, nullptr, polygon);
-        gFallbackNative += __rdtsc() - t2;
-        Publish();
+        if (alt) { ntw2_record_test::NoteFallbackNative(__rdtsc() - t2); ntw2_record_test::Publish(); }
+        else { gFallbackNative += __rdtsc() - t2; Publish(); }
         return native;
     }
-    ++gServedCount; gServedFast += t1 - t0;
-    if (!sample) { Publish(); return fast; }
+    if (alt) ntw2_record_test::NoteServed(t1 - t0); else { ++gServedCount; gServedFast += t1 - t0; }
+    if (!sample) { if (!alt) Publish(); return fast; }
     _fxsave(afterFast);
     _fxrstor(initial);
     const unsigned __int64 t2 = __rdtsc();
     const unsigned char native = nativeKernel(shape, nullptr, polygon);
     const unsigned __int64 t3 = __rdtsc();
     _fxsave(afterNative);
-    Bump(8);
-    if (native != fast) Bump(9);
-    if (memcmp(afterFast, afterNative, 5)) Bump(10);
-    if (memcmp(afterFast + 24, afterNative + 24, 4)) Bump(11);
-    gSampledNative += t3 - t2; gSampledFast += t1 - t0; ++gSampled;
-    Publish();
+    if (alt) {
+        ntw2_record_test::NoteCompare(native != fast, memcmp(afterFast, afterNative, 5) != 0, memcmp(afterFast + 24, afterNative + 24, 4) != 0,
+                                      t3 - t2, t1 - t0);
+        ntw2_record_test::Publish();
+    } else {
+        Bump(8);
+        if (native != fast) Bump(9);
+        if (memcmp(afterFast, afterNative, 5)) Bump(10);
+        if (memcmp(afterFast + 24, afterNative + 24, 4)) Bump(11);
+        gSampledNative += t3 - t2; gSampledFast += t1 - t0; ++gSampled;
+        Publish();
+    }
     if (shadow) return native;
     _fxrstor(afterFast);
     return fast;

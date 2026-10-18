@@ -317,7 +317,13 @@ enum ntw2_memory_word {
 #define NTW2_AI_PRESIZE 0x2u        /* --ai-presize */
 #define NTW2_AI_POLY_SHADOW 0x4u /* --ai-poly-shadow: native answers every 0x80DCF0 polygon test, ntw2_planner_search compares bit-for-bit (AL, x87 status, MXCSR) */
 #define NTW2_AI_POLY 0x8u        /* --ai-poly: exact SSE replacement of the kind-0 0x10EC150 OBB/polygon kernel, native fallback by reason */
-#define NTW2_AI_PREPASS_FLAGS_VALID 0xFFFF001Fu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones; bits 0x10 and 16..31: --ai-spiral-* */
+/* --ai-record-test-shadow / --ai-record-test (src/ntw2_record_test.h): the --ai-poly kernel extended to the ALTERNATE placement delegate
+   0x13376AC (slot 16 = 0x6A99E0 -> 0x6A94B0 -> 0x6C71D0 ...), which --ai-poly does not route. Both need POLY_SHADOW or POLY (the same kernel and
+   clones), exclude each other and the census, and keep the default observer route's --ai-poly mode independent of their own mode. */
+#define NTW2_AI_RECORD_TEST_SHADOW 0x20u /* --ai-record-test-shadow: native answers every polygon test of the alternate delegate route, the kernel is compared bit-for-bit */
+#define NTW2_AI_RECORD_TEST 0x40u        /* --ai-record-test: the kernel answers the alternate delegate route, native fallback by reason */
+#define NTW2_AI_RECORD_TEST_BITS (NTW2_AI_RECORD_TEST_SHADOW | NTW2_AI_RECORD_TEST)
+#define NTW2_AI_PREPASS_FLAGS_VALID 0xFFFF007Fu /* POLY_SHADOW and POLY exclude each other and CENSUS; both route the observer slot 0x13376FC+0x40 into the PS_* clones; bits 0x10 and 16..31: --ai-spiral-*; bits 0x20/0x40: --ai-record-test* */
 /* --ai-spiral-census / --ai-spiral-cap-m N (ai_prepass_flags bit 0x10 and bits 16..31; src/ntw2_spiral.h). N metres caps the observer
    ladder's last-resort placement spiral 0x7FCA90 (native: maxR -1.0, unlimited): rings of radius <= N run, then the native not-found
    exit is taken. A capped (not-found) spiral places the unit at the 0x7FCFF0 projection of its ORIGINAL requested point (possibly
@@ -350,12 +356,20 @@ enum ntw2_memory_word {
     "spiral_entries", "spiral_candidates", "spiral_rings", "spiral_found", "spiral_capped", "spiral_edge", "max_radius_m", \
     "max_candidates", "fallback_calls", "e0", "e1", "e2", "e3_4", "e5_8", "e_gt8", "entries", "max_entries", "tail_runs", \
     "tail_same_tick", "tail_memo", "ladder_in_fallback", "spiral_in_fallback", "off_thread"
-#define NTW2_AI_PREPASS_WORDS 32u /* ai_prepass_words (src/ntw2_planner_search.h row layout, version 1) */
-#define NTW2_AI_PREPASS_LABELS \
+#define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ntw2_planner_search.h row layout, version 1 */
+#define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ntw2_record_test.h row layout, version 1 */
+#define NTW2_AI_PREPASS_WORDS (NTW2_AI_POLY_WORDS + NTW2_AI_RECORD_TEST_WORDS) /* ai_prepass_words */
+#define NTW2_AI_POLY_LABELS \
     "version", "mode", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", "shadow_compares", \
     "mismatch_al", "mismatch_x87", "mismatch_mxcsr", "true_results", "vertices_sum", "vertices_max", "v_le16", "v_le64", \
     "v_le256", "v_gt256", "observer_routed", "observer_unrouted", "v_le1024", "v_le4096", "v_le16384", "v_le65536", "fall_busy", \
     "served_fast_kcycles", "sampled_native_kcycles", "sampled_fast_kcycles", "sampled_calls", "fallback_native_kcycles", "tsc_per_us"
+#define NTW2_AI_RECORD_TEST_LABELS \
+    "version", "mode", "slot_routed", "slot_unrouted", "calls", "served", "fall_kind", "fall_fp_state", "fall_domain", "fall_walk_cap", \
+    "fall_busy", "shadow_compares", "mismatch_al", "mismatch_x87", "mismatch_mxcsr", "true_results", "vertices_sum", "vertices_max", \
+    "served_fast_kcycles", "sampled_native_kcycles", "sampled_fast_kcycles", "sampled_calls", "fallback_native_kcycles", "tsc_per_us", \
+    "entry_kcycles", "entry_max_us", "v_gt256", "spare"
+#define NTW2_AI_PREPASS_LABELS NTW2_AI_POLY_LABELS, NTW2_AI_RECORD_TEST_LABELS
 #define NTW2_AI_PREPASS_CENSUS_WORDS 82u /* ai_prepass_census_words */
 #define NTW2_AI_PREPASS_CLASS_LABELS(c) c "_thinks", c "_think_us", c "_walk_us"
 #define NTW2_AI_PREPASS_CENSUS_LABELS \
@@ -983,7 +997,9 @@ typedef struct ntw2_status {
     /* --ai-poly-shadow / --ai-poly (appended after ai_prepass_census_words; src/ntw2_planner_search.h): word 0 layout version (1; 0 while the
        poly bits are off), mode, kernel calls, served/refused-by-reason counts, shadow compare mismatches, vertex-count classes and the observer
        slot routing counts. Written by the thread executing the think; a poll is a non-atomic snapshot. Zero without the bits; reset at
-       activation, retained after stop. */
+       activation, retained after stop. Words 32..59 (NTW2_AI_RECORD_TEST_WORDS, src/ntw2_record_test.h, labels NTW2_AI_RECORD_TEST_LABELS) are the
+       --ai-record-test-shadow / --ai-record-test row of the alternate delegate route: mode, slot routing, kernel calls/served/fallbacks, compares and
+       mismatches, vertex sums and timing; zero without those bits. */
     uint32_t ai_prepass_words[NTW2_AI_PREPASS_WORDS];
     /* --ai-spiral-census / --ai-spiral-cap-m (appended after ai_prepass_words; src/ntw2_spiral.h, labels NTW2_AI_SPIRAL_LABELS): word 0
        layout version (1; 0 while the spiral bits are off), the cap, ladder stage counts, spiral entries/candidates/rings/found/capped/
@@ -1451,10 +1467,13 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,ai_spiral_words) + NTW2_AI_SPIRAL_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,army_solver_words) &&
               offsetof(ntw2_status,army_solver_words) + NTW2_ARMY_SOLVER_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
               NTW2_ARMY_SOLVER_WORDS == 519u && NTW2_ARMY_SOLVER_MEMO == 0x10u && NTW2_ARMY_SOLVER_SHADOW == 0x20u &&
-              NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_PREPASS_WORDS == 32u && NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&
+              NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_POLY_WORDS == 32u && NTW2_AI_RECORD_TEST_WORDS == 28u && NTW2_AI_PREPASS_WORDS == 60u &&
+              NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&
               NTW2_AI_POLY_SHADOW == 0x4u && NTW2_AI_POLY == 0x8u && NTW2_AI_SPIRAL_CENSUS == 0x10u && NTW2_AI_SPIRAL_WORDS == 32u &&
+              NTW2_AI_RECORD_TEST_SHADOW == 0x20u && NTW2_AI_RECORD_TEST == 0x40u &&
               NTW2_AI_SPIRAL_CAP_MASK == (0xFFFFu << NTW2_AI_SPIRAL_CAP_SHIFT) &&
-              NTW2_AI_PREPASS_FLAGS_VALID == (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_SPIRAL_BITS),
+              NTW2_AI_PREPASS_FLAGS_VALID == (NTW2_AI_PREPASS_CENSUS | NTW2_AI_PRESIZE | NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_SPIRAL_BITS |
+                                              NTW2_AI_RECORD_TEST_SHADOW | NTW2_AI_RECORD_TEST),
               "ai_prepass_census row appends after brain_unit_policy_words; ai_spiral_words row (after ai_prepass_words) precedes army_solver_words, the last status member");
 static_assert(NTW2_GRID_CENSUS == 0x8000u && (NTW2_VALID_MASK & NTW2_GRID_CENSUS) && !(NTW2_ALL & NTW2_GRID_CENSUS) &&
               sizeof(ntw2_grid_reader_status) == 1008 && sizeof(ntw2_grid_edge_status) == 32 &&

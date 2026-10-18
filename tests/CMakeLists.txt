@@ -256,7 +256,10 @@ ntw2_harness(native_walk_memo_oracle STD 20 FP strict
   SOURCES native_walk_memo_oracle.cpp "${NTW2_SRC}/ntw2_clones.cpp" "${NTW2_SRC}/ntw2_walk_memo.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_planner_search_oracle STD 20 FP strict
-  SOURCES native_planner_search_oracle.cpp "${NTW2_SRC}/ntw2_planner_search.cpp"
+  SOURCES native_planner_search_oracle.cpp "${NTW2_SRC}/ntw2_planner_search.cpp" "${NTW2_SRC}/ntw2_record_test.cpp"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+ntw2_harness(native_record_test_oracle STD 20 FP strict
+  SOURCES native_record_test_oracle.cpp "${NTW2_SRC}/ntw2_planner_search.cpp" "${NTW2_SRC}/ntw2_record_test.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_ai_ctrl_geometry_oracle STD 20 FP strict
   SOURCES native_ai_ctrl_geometry_oracle.cpp "${NTW2_SRC}/ntw2_ai_ctrl_geometry.cpp" "${NTW2_SRC}/ntw2_ai_ctrl_batch.cpp"
@@ -448,6 +451,9 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_planner_search COMMAND native_planner_search_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_planner_search PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_planner_search)
+  add_test(NAME ntw2_record_test COMMAND native_record_test_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_record_test PROPERTIES LABELS "image;shadow" TIMEOUT 300)
+  ntw2_note_registered(ntw2_record_test)
   add_test(NAME ntw2_ai_ctrl_geometry COMMAND native_ai_ctrl_geometry_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_ai_ctrl_geometry PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_ai_ctrl_geometry)
@@ -507,7 +513,7 @@ if(NTW2_HAVE_IMAGE)
   endif()
 else()
   foreach(_t ballistics_query_cache ballistics_runtime_integration formation_slot formation_batch formation_runtime
-             formation_layout path_workspace path_runtime animation_pose animation_render_batch walk_memo ai_ctrl_geometry ai_ctrl_oracle planner_prepass planner_search collision_solver contact_oracle brain2_oracle brain_workers_oracle node_oracle fire_oracle loco_oracle resolve_oracle)
+             formation_layout path_workspace path_runtime animation_pose animation_render_batch walk_memo ai_ctrl_geometry ai_ctrl_oracle planner_prepass planner_search record_test collision_solver contact_oracle brain2_oracle brain_workers_oracle node_oracle fire_oracle loco_oracle resolve_oracle)
     ntw2_note_skipped(ntw2_${_t} "NTW2_TEST_IMAGE not set to an existing Napoleon.exe")
   endforeach()
   if(TARGET native_runtime_lifecycle)

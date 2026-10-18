@@ -54,10 +54,11 @@
 #include "path/native_path_runtime.h"
 #include "ntw2_walk_memo.h"
 #include "ntw2_planner_search.h"
+#include "ntw2_record_test.h"
 #include "ntw2_planner_prepass.h"
 #include "ntw2_spiral.h"
-
 #include "ntw2_claim_chunk.h"
+
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
 using Manager = U (__fastcall *)(void*);
@@ -103,10 +104,10 @@ Module formation, query, path;
 volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
-constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot
+constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot
 Slot slots[kMaxSlots];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
-static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1<=kMaxSlots, "slot table holds every possible hook");
+static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1+1<=kMaxSlots, "slot table holds every possible hook");
 __declspec(align(64)) ntw_pool pool;
 bool poolReady, poolOwned; // ownership also covers an init-unwind whose join needs retrying
 bool collideSampleReady; // current runtime start has initialized solver counters; stop retains final samples
@@ -1437,6 +1438,31 @@ __declspec(naked) void PsObserverGate() {
     __asm popfd
     __asm ret
 }
+// --ai-record-test*: slot 16 of the ALTERNATE placement delegate class 0x13376AC (0x13376EC = 0x6A99E0). Same transparent frame; the routed
+// target is the integer-only scope forwarder ntw2_record_test::Entry (fastcall, ret 0xC like 0x6A99E0), which opens the alt scope around the
+// PS_6A99E0 clone chain. Off the planner thread (main/render spotting, workers outside a think) the original is returned untouched.
+extern "C" U __stdcall PsAltObserverRoute() {
+    const bool routed=PsScopeThread(GetCurrentThreadId());
+    ntw2_record_test::NoteSlot(routed);
+    return routed ? FnAddress(&ntw2_record_test::Entry) : V(0x6A99E0);
+}
+__declspec(naked) void PsAltObserverGate() {
+    __asm lea esp, [esp-4]
+    __asm pushfd
+    __asm pushad
+    __asm mov ebp, esp
+    __asm sub esp, 528
+    __asm and esp, -16
+    __asm fxsave [esp]
+    __asm cld
+    __asm call PsAltObserverRoute
+    __asm mov dword ptr [ebp+36], eax
+    __asm fxrstor [esp]
+    __asm mov esp, ebp
+    __asm popad
+    __asm popfd
+    __asm ret
+}
 // AI2_WALK 7F1D73: EAX = model in, ESI = static interest tree object (live root model+0xBC) out. A retained read
 // generation replaces exactly this resolution; registers other than ESI and EFLAGS are untouched.
 __declspec(naked) void Ai2RootInterest() {
@@ -2467,9 +2493,13 @@ void SnapshotAiCtrl() {
     U geometry[ntw2_ai_ctrl_geometry::kStatusWords];
     ntw2_ai_ctrl_geometry::FillStatus(geometry);
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS-16;++i) row[16+i]=i<ntw2_ai_ctrl_geometry::kStatusWords ? geometry[i] : 0;
+    static_assert(ntw2_claim_chunk::kWords==NTW2_AI_CTRL_REUSE_WORDS-24 && ntw2_ai_ctrl_geometry::kStatusWords<=8, "claim-chunk words fill the B half after the geometry words");
+    ntw2_claim_chunk::Snapshot(row+24); // --ai-claim-chunk: all zero without the bits
     static_assert(ntw2_prepass::kCensusWords==NTW2_AI_PREPASS_CENSUS_WORDS, "census snapshot writes exactly the status row");
     ntw2_prepass::CensusSnapshot(ntw2_state.ai_prepass_census_words); // --ai-prepass-*: same three poll/stop sites; all zero without the flags
-    for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=ntw2_poly::words[i]; // --ai-poly*: all zero without the bits
+    static_assert(ntw2_poly::kWords==NTW2_AI_POLY_WORDS && ntw2_record_test::kWords==NTW2_AI_RECORD_TEST_WORDS, "poly + record-test rows fill the prepass status row");
+    for (U i=0;i<NTW2_AI_POLY_WORDS;++i) ntw2_state.ai_prepass_words[i]=ntw2_poly::words[i]; // --ai-poly*: all zero without the bits
+    for (U i=0;i<NTW2_AI_RECORD_TEST_WORDS;++i) ntw2_state.ai_prepass_words[NTW2_AI_POLY_WORDS+i]=ntw2_record_test::words[i]; // --ai-record-test*: all zero without the bits
     static_assert(ntw2_spiral::kWords==NTW2_AI_SPIRAL_WORDS, "spiral snapshot writes exactly the status row");
     for (U i=0;i<NTW2_AI_SPIRAL_WORDS;++i) ntw2_state.ai_spiral_words[i]=ntw2_spiral::words[i]; // --ai-spiral-*: all zero without the bits
 }
@@ -2493,8 +2523,6 @@ bool BuildClones() {
     ntw2_army_solver::Bind(delta,bindings); // solver gates (inert until Start: they forward to the originals)
     bindings[NTW2_BIND_TICK_ENTRY]=FnAddress(&TickGate);
     bindings[NTW2_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
-    static_assert(ntw2_claim_chunk::kWords==NTW2_AI_CTRL_REUSE_WORDS-24 && ntw2_ai_ctrl_geometry::kStatusWords<=8, "claim-chunk words fill the B half after the geometry words");
-    ntw2_claim_chunk::Snapshot(row+24); // --ai-claim-chunk: all zero without the bits
     bindings[NTW2_BIND_FORM_MANAGER]=FnAddress(&FormationGate);
     bindings[NTW2_BIND_FORM_ASSIGN]=Export("nfr_assign_hook");
     bindings[NTW2_BIND_BAL_STAGE]=FnAddress(&bal_stage);
@@ -2979,10 +3007,13 @@ bool BuildSlots() {
     // --ai-spiral-*: the same PS_* route (its PS_LADDER/PS_SPIRAL forwarders count and cap), plus the fallback observer (0x7524A0) and
     // inline controller (0x826E80) counting gates; no other feature publishes those two words.
     if (config.ai_prepass_flags & (NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW|NTW2_AI_POLY|NTW2_AI_SPIRAL_BITS)) AddSlot(0x13376fc+4*16,0x6a95a0,FnAddress(&PsObserverGate));
+    // --ai-record-test*: the alternate delegate class 0x13376AC, slot 16 (0x13376EC = 0x6A99E0), routed on the planner thread into PS_6A99E0.
+    if (config.ai_prepass_flags & NTW2_AI_RECORD_TEST_BITS) AddSlot(0x13376ac+4*16,0x6a99e0,FnAddress(&PsAltObserverGate));
+    // --ai-claim-chunk: the same fallback slot. With the spiral census the census gate stays in the slot and calls the chunk gate as its native.
     if (config.ai_prepass_flags & NTW2_AI_SPIRAL_BITS) {
         AddSlot(ntw2_spiral::kFallbackSlot,ntw2_spiral::kFallbackOriginal,FnAddress(&ntw2_spiral::FallbackGate));
         AddSlot(ntw2_spiral::kControllerSlot,ntw2_spiral::kControllerOriginal,FnAddress(&ntw2_spiral::ControllerGate));
-    }
+    } else if (config.ai_ctrl_flags & NTW2_AI_CLAIM_CHUNK_MASK) AddSlot(ntw2_claim_chunk::kFallbackSlot,ntw2_claim_chunk::kFallbackOriginal,FnAddress(&ntw2_claim_chunk::Gate));
     // Keep original entry slots intact in BRAIN2 observe/census mode. Its optional
     // timing is independent of the older profiling-family slot publication.
     if ((config.enabled_mask & NTW2_BRAIN) && !(config.enabled_mask & NTW2_BRAIN2))
@@ -3007,7 +3038,6 @@ bool BuildSlots() {
         for (U i=0;i<ntw2_ai_async2::kPinCount;++i)
             if (pins[i].vtable) AddSlot(pins[i].vtable+4*pins[i].slot,pins[i].original,ntw2_ai_async2::Gate(i));
     }
-    // --ai-claim-chunk: the same fallback slot. With the spiral census the census gate stays in the slot and calls the chunk gate as its native.
     return true;
 }
 U CensusSlotsOwned() { // monitor thread only: census pins currently swapped in (slots are published/restored there)
@@ -3020,7 +3050,7 @@ bool RestoreProtection(Slot& slot) {
     DWORD ignored=0;
     if (!VirtualProtect(reinterpret_cast<void*>(slot.address),4,slot.protection,&ignored)) {
         RecordError(SlotProtection,slot.address); return false;
-    } else if (config.ai_ctrl_flags & NTW2_AI_CLAIM_CHUNK_MASK) AddSlot(ntw2_claim_chunk::kFallbackSlot,ntw2_claim_chunk::kFallbackOriginal,FnAddress(&ntw2_claim_chunk::Gate));
+    }
     slot.protectionDirty=false;
     return true;
 }
@@ -3358,6 +3388,10 @@ bool Activate(const World& candidate) {
         siteCallees[44]=polyBits ? FnAddress(&ntw2_poly::Gate) : FnAddress(&ntw2_walk_memo::kernel);
         // Spiral-only runs keep the native walk on the PS_808040 0x808492 call.
         psWalkTarget=polyBits ? clones.entries[NTW2_CLONE_PS_WALK] : (config.ai_prepass_flags&NTW2_AI_PREPASS_CENSUS) ? FnAddress(&SiteCall40) : V(0x7f1d40);
+        // --ai-record-test*: arm after the poly Configure (it calibrates the TSC the record-test row copies); disarmed Entry forwards to 0x6A99E0.
+        const U recordBits=config.ai_prepass_flags&NTW2_AI_RECORD_TEST_BITS;
+        ntw2_record_test::Configure(recordBits==NTW2_AI_RECORD_TEST ? ntw2_record_test::ModeLive : recordBits ? ntw2_record_test::ModeShadow : ntw2_record_test::ModeOff,
+                                    clones.entries[NTW2_CLONE_PS_6A99E0],V(0x6a99e0),ntw2_poly::words[31]);
     }
     // --ai-spiral-*: reset the row and point the forwarders/gates at their callees before BuildSlots publishes the slots.
     {
@@ -3366,6 +3400,11 @@ bool Activate(const World& candidate) {
                                             (config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK) ? FnAddress(&ntw2_claim_chunk::Gate) : V(ntw2_spiral::kFallbackOriginal),
                                             V(ntw2_spiral::kControllerOriginal),&PsScopeThread};
         ntw2_spiral::Configure((config.ai_prepass_flags&NTW2_AI_SPIRAL_BITS)!=0,config.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT,targets);
+    }
+    {
+        const ntw2_claim_chunk::Targets targets={V(ntw2_claim_chunk::kFallbackOriginal),V(ntw2_claim_chunk::kEligible),V(ntw2_claim_chunk::kClaim),
+                                                 V(ntw2_claim_chunk::kPost),V(ntw2_claim_chunk::kWorkingList),&PsScopeThread};
+        ntw2_claim_chunk::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK)>>NTW2_AI_CLAIM_CHUNK_SHIFT,targets);
     }
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
     siteCallees[6]=(config.enabled_mask&NTW2_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
@@ -3401,11 +3440,6 @@ bool Activate(const World& candidate) {
     SnapshotArmySolver();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
-    {
-        const ntw2_claim_chunk::Targets targets={V(ntw2_claim_chunk::kFallbackOriginal),V(ntw2_claim_chunk::kEligible),V(ntw2_claim_chunk::kClaim),
-                                                 V(ntw2_claim_chunk::kPost),V(ntw2_claim_chunk::kWorkingList),&PsScopeThread};
-        ntw2_claim_chunk::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_CHUNK_MASK)>>NTW2_AI_CLAIM_CHUNK_SHIFT,targets);
-    }
     SnapshotAiCtrl();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         ntw2_idle_node::Snapshot(cls,const_cast<U*>(ntw2_state.idle_node_words[cls]));
@@ -3656,7 +3690,10 @@ static U StartImpl(void* raw) {
                                    ((next.ai_prepass_flags&NTW2_AI_PREPASS_CENSUS) && (next.ai_prepass_flags&~(NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE|NTW2_AI_SPIRAL_BITS))) ||
                                    // --ai-spiral-cap-m: the first ring (radius 20) always runs, so a cap below it is refused.
                                    ((next.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT) && (next.ai_prepass_flags>>NTW2_AI_SPIRAL_CAP_SHIFT)<NTW2_AI_SPIRAL_CAP_MIN_M) ||
-                                   ((next.ai_prepass_flags&NTW2_AI_POLY_SHADOW) && (next.ai_prepass_flags&NTW2_AI_POLY)))) ||
+                                   ((next.ai_prepass_flags&NTW2_AI_POLY_SHADOW) && (next.ai_prepass_flags&NTW2_AI_POLY)) ||
+                                   // --ai-record-test*: one mode, and the kernel/clones/walk-state scope are --ai-poly's, so a poly bit is required.
+                                   ((next.ai_prepass_flags&NTW2_AI_RECORD_TEST_SHADOW) && (next.ai_prepass_flags&NTW2_AI_RECORD_TEST)) ||
+                                   ((next.ai_prepass_flags&NTW2_AI_RECORD_TEST_BITS) && !(next.ai_prepass_flags&(NTW2_AI_POLY_SHADOW|NTW2_AI_POLY))))) ||
         // --va-watch / --army-storm-*: the VA watch sampler plus the storm census bit and its sampler threshold (bits 8..15).
         (next.va_watch_flags&~NTW2_VA_WATCH_FLAGS_VALID) ||
         // The storm census times the 0x581F30 calls on the tick owner behind a routed tick; it binds sites 101/103 like the shadow.
@@ -3760,6 +3797,8 @@ static U StartImpl(void* raw) {
     for (U i=0;i<NTW2_AI_PREPASS_WORDS;++i) ntw2_state.ai_prepass_words[i]=0;
     for (U i=0;i<NTW2_AI_SPIRAL_WORDS;++i) ntw2_state.ai_spiral_words[i]=0;
     ntw2_spiral::ResetRow(); // the poll copies the module row: a session that never activates must not republish the previous one
+    ntw2_record_test::Reset();
+    ntw2_claim_chunk::ResetRow();
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;
@@ -3797,7 +3836,6 @@ static U StartImpl(void* raw) {
     ntw2_ai_async2::DeferredSnapshot(ntw2_state.ai_deferred_words);
     StateEnd();
     DWORD tid=0;
-    ntw2_claim_chunk::ResetRow();
     HANDLE thread=CreateThread(nullptr,0,Monitor,nullptr,CREATE_SUSPENDED,&tid);
     if (!thread) { RecordError(ThreadError,GetLastError()); CrashRemove(); Phase(NTW2_FAILED); _InterlockedExchange(&life,Failed); return ThreadError; }
     StateBegin(); ntw2_state.monitor_thread=tid; StateEnd();

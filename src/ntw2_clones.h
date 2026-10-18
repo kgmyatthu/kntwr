@@ -317,6 +317,9 @@ enum ntw2_clone_id {
        {PS_6C71D0 | PS_7FCA40} ... -> PS_808040 -> (PS_WALK_CALL) -> 7F1D40; PS_WALK is the bare 7F1D40 copy whose 80DCF0 call is PS_POLY. */
     NTW2_CLONE_PS_6A95A0, NTW2_CLONE_PS_6C71D0, NTW2_CLONE_PS_6CC730, NTW2_CLONE_PS_808550, NTW2_CLONE_PS_7FCA40,
     NTW2_CLONE_PS_7FCA90, NTW2_CLONE_PS_808040, NTW2_CLONE_PS_WALK,
+    /* --ai-record-test* (appended): the ALTERNATE placement delegate 0x13376AC, slot 16 (0x13376EC) = 0x6A99E0 -> 0x6A94B0 (per-record ladder loop)
+       -> PS_6C71D0 / PS_7FCA40; same pure-retarget contract as the PS_* observer chain above. */
+    NTW2_CLONE_PS_6A99E0, NTW2_CLONE_PS_6A94B0,
     /* --army-solver-memo / --army-solver-shadow (appended; generator solver_configs): dedicated copy of the flag=1 route. R1 slot 0x1331E74:
        617510 -> 65D740 -> 51A530 -> 576B30; second R1 slot 0x1332110 (host gate performs 611CF0's arithmetic): 65D7D0 -> 51A9A0 -> 57AFC0; R2 slot
        0x1325474: 581AE0 -> 576B30; common tail 576B30 -> 57AFC0 -> 555CA0 -> (SOLVER_ASSIGN gate) 18F0A00 -> {5373F0 -> (SOLVER_SHIM), 18F1200 ->
