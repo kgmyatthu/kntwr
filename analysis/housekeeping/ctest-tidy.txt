@@ -1,0 +1,115 @@
+Test project F:/NTW2/translated_code/ntw2/build/tidy
+      Start  1: analysis_memory_denial
+      Start  2: analysis_memory_success
+      Start  3: ntw2_payload_audit_worker_dispatch
+      Start  4: ntw2_payload_audit_ballistics_helpers
+ 1/51 Test  #2: analysis_memory_success ...................   Passed    0.01 sec
+      Start  5: ntw2_payload_audit_ballistics_collision
+ 2/51 Test  #1: analysis_memory_denial ....................   Passed    0.02 sec
+      Start  6: ntw2_payload_audit_render_batch
+ 3/51 Test  #3: ntw2_payload_audit_worker_dispatch ........   Passed    0.02 sec
+ 4/51 Test  #4: ntw2_payload_audit_ballistics_helpers .....   Passed    0.01 sec
+      Start  7: ntw2_module_audit_query_cache
+      Start  8: ntw2_module_audit_formation_runtime
+ 5/51 Test  #5: ntw2_payload_audit_ballistics_collision ...   Passed    0.01 sec
+      Start  9: ntw2_runtime_exports
+ 6/51 Test  #6: ntw2_payload_audit_render_batch ...........   Passed    0.01 sec
+ 7/51 Test  #7: ntw2_module_audit_query_cache .............   Passed    0.01 sec
+      Start 10: ntw2_worker_dispatch_smoke
+      Start 11: ntw2_render_batch_smoke
+ 8/51 Test  #8: ntw2_module_audit_formation_runtime .......   Passed    0.02 sec
+      Start 12: ntw2_ballistics_smoke
+ 9/51 Test  #9: ntw2_runtime_exports ......................   Passed    0.02 sec
+      Start 13: ntw2_ballistics_collision
+10/51 Test #11: ntw2_render_batch_smoke ...................   Passed    0.02 sec
+      Start 14: ntw2_unit_brain_oracle
+11/51 Test #14: ntw2_unit_brain_oracle ....................   Passed    0.02 sec
+      Start 15: ntw2_army_unit_oracle
+12/51 Test #15: ntw2_army_unit_oracle .....................   Passed    0.01 sec
+      Start 16: ntw2_sweep_oracle
+13/51 Test #16: ntw2_sweep_oracle .........................   Passed    0.03 sec
+      Start 17: ntw2_ballistics_query_cache
+14/51 Test #12: ntw2_ballistics_smoke .....................   Passed    0.09 sec
+      Start 18: ntw2_formation_slot
+15/51 Test #17: ntw2_ballistics_query_cache ...............   Passed    0.63 sec
+      Start 19: ntw2_formation_batch
+16/51 Test #18: ntw2_formation_slot .......................   Passed    1.12 sec
+      Start 20: ntw2_formation_runtime
+17/51 Test #13: ntw2_ballistics_collision .................   Passed    1.54 sec
+      Start 21: ntw2_formation_solver
+18/51 Test #10: ntw2_worker_dispatch_smoke ................   Passed    3.71 sec
+      Start 22: ntw2_army_solver_chain
+19/51 Test #20: ntw2_formation_runtime ....................   Passed    3.13 sec
+      Start 23: ntw2_formation_layout
+20/51 Test #19: ntw2_formation_batch ......................   Passed    4.40 sec
+      Start 24: ntw2_path_workspace
+21/51 Test #24: ntw2_path_workspace .......................   Passed    1.37 sec
+      Start 25: ntw2_path_runtime
+22/51 Test #25: ntw2_path_runtime .........................   Passed    0.19 sec
+      Start 26: ntw2_animation_pose
+23/51 Test #26: ntw2_animation_pose .......................   Passed    0.32 sec
+      Start 27: ntw2_animation_render_batch
+24/51 Test #27: ntw2_animation_render_batch ...............   Passed    0.62 sec
+      Start 28: ntw2_ballistics_runtime_integration
+25/51 Test #28: ntw2_ballistics_runtime_integration .......   Passed    0.09 sec
+      Start 29: ntw2_walk_memo
+26/51 Test #29: ntw2_walk_memo ............................   Passed    0.07 sec
+      Start 30: ntw2_planner_search
+27/51 Test #30: ntw2_planner_search .......................   Passed    0.19 sec
+      Start 31: ntw2_record_test
+28/51 Test #31: ntw2_record_test ..........................   Passed    0.06 sec
+      Start 32: ntw2_ai_ctrl_geometry
+29/51 Test #32: ntw2_ai_ctrl_geometry .....................   Passed    0.04 sec
+      Start 33: ntw2_ai_ctrl_oracle
+30/51 Test #33: ntw2_ai_ctrl_oracle .......................   Passed    0.04 sec
+      Start 34: ntw2_planner_prepass
+31/51 Test #34: ntw2_planner_prepass ......................   Passed    0.07 sec
+      Start 35: ntw2_spiral
+32/51 Test #35: ntw2_spiral ...............................   Passed    0.07 sec
+      Start 36: ntw2_claim_once
+33/51 Test #36: ntw2_claim_once ...........................   Passed    0.04 sec
+      Start 37: ntw2_retarget_jitter
+34/51 Test #37: ntw2_retarget_jitter ......................   Passed    0.28 sec
+      Start 38: ntw2_target_cull
+35/51 Test #23: ntw2_formation_layout .....................   Passed    4.29 sec
+      Start 39: ntw2_collision_solver
+36/51 Test #38: ntw2_target_cull ..........................   Passed    0.38 sec
+      Start 40: ntw2_contact_oracle
+37/51 Test #40: ntw2_contact_oracle .......................   Passed    0.15 sec
+      Start 41: ntw2_brain2_oracle
+38/51 Test #39: ntw2_collision_solver .....................   Passed    2.19 sec
+      Start 42: ntw2_brain_workers_oracle
+39/51 Test #41: ntw2_brain2_oracle ........................   Passed    2.03 sec
+      Start 43: ntw2_node_oracle
+40/51 Test #43: ntw2_node_oracle ..........................   Passed    0.09 sec
+      Start 44: ntw2_move_node_oracle
+41/51 Test #44: ntw2_move_node_oracle .....................   Passed    0.18 sec
+      Start 45: ntw2_unit_posture_engage_oracle
+42/51 Test #45: ntw2_unit_posture_engage_oracle ...........   Passed    0.12 sec
+      Start 46: ntw2_unit_fatigue_oracle
+43/51 Test #46: ntw2_unit_fatigue_oracle ..................   Passed    0.08 sec
+      Start 47: ntw2_fire_oracle
+44/51 Test #47: ntw2_fire_oracle ..........................   Passed    0.04 sec
+      Start 48: ntw2_loco_oracle
+45/51 Test #42: ntw2_brain_workers_oracle .................   Passed    0.86 sec
+      Start 49: ntw2_resolve_oracle
+46/51 Test #49: ntw2_resolve_oracle .......................   Passed    0.05 sec
+      Start 50: ntw2_env_oracle
+47/51 Test #50: ntw2_env_oracle ...........................   Passed    0.04 sec
+      Start 51: ntw2_runtime_lifecycle
+48/51 Test #22: ntw2_army_solver_chain ....................   Passed   26.18 sec
+49/51 Test #51: ntw2_runtime_lifecycle ....................   Passed   27.23 sec
+50/51 Test #21: ntw2_formation_solver .....................   Passed   37.45 sec
+51/51 Test #48: ntw2_loco_oracle ..........................   Passed   78.32 sec
+
+100% tests passed out of 51
+
+Label Time Summary:
+assets       =  74.55 sec*proc (8 tests)
+audit        =   0.11 sec*proc (7 tests)
+image        = 192.41 sec*proc (35 tests)
+native       =   5.46 sec*proc (11 tests)
+shadow       =   0.98 sec*proc (14 tests)
+synthetic    =   0.06 sec*proc (3 tests)
+
+Total Test time (real) =  90.03 sec

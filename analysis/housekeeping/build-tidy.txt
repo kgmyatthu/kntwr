@@ -1,0 +1,186 @@
+MSBuild version 18.7.8+1ac568fee for .NET Framework
+
+MSBuild version 18.7.8+1ac568fee for .NET Framework
+
+  Checking File Globs
+  1>Checking Build System
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/path/CMakeLists.txt
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/path/CMakeLists.txt
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/formation/CMakeLists.txt
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/render/CMakeLists.txt
+  Assembling F:\NTW2\translated_code\ntw2\src\render\native_render_batch.asm...
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/formation/CMakeLists.txt
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/worker/CMakeLists.txt
+  native_formation_batch.cpp
+  native_path_runtime.cpp
+F:\NTW2\translated_code\ntw2\src\formation\native_formation_batch.h(185,1): warning C4324: 'ntw_formation_batch::UnitJob': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_batch.vcxproj]
+  (compiling source file '../../../../src/formation/native_formation_batch.cpp')
+  
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/ballistics/CMakeLists.txt
+  native_formation_slot.cpp
+  native_worker_dispatch.c
+  native_ballistics_helpers.c
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/animation/CMakeLists.txt
+F:\NTW2\translated_code\ntw2\src\ballistics\native_ballistics_helpers.c(33,71): warning C4100: 'job': unreferenced parameter [F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_helpers.vcxproj]
+F:\NTW2\translated_code\ntw2\src\ballistics\native_ballistics_helpers.c(33,56): warning C4100: 'item': unreferenced parameter [F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_helpers.vcxproj]
+  native_animation_render_batch.cpp
+  ntw2_worker_dispatch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\worker\ntw2_worker_dispatch.dir\Release\ntw2_worker_dispatch.lib
+  ntw2_ballistics_helpers.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_helpers.dir\Release\ntw2_ballistics_helpers.lib
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/formation/CMakeLists.txt
+  ntw2_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\render\ntw2_render_batch.dir\Release\ntw2_render_batch.lib
+  native_formation_layout.cpp
+  ntw2_formation_slot.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_slot.dir\Release\ntw2_formation_slot.lib
+  ntw2_path_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path_runtime.dir\Release\ntw2_path_runtime.lib
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/formation/CMakeLists.txt
+  native_path_workspace.cpp
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/ballistics/CMakeLists.txt
+  ntw2_animation_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_render_batch.dir\Release\ntw2_animation_render_batch.lib
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/ballistics/CMakeLists.txt
+  native_formation_runtime.cpp
+  ntw2_formation_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_batch.dir\Release\ntw2_formation_batch.lib
+  native_ballistics_collision.cpp
+  Building Custom Rule F:/NTW2/translated_code/ntw2/src/animation/CMakeLists.txt
+  native_ballistics_query_cache.cpp
+  ntw2_formation_layout.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_layout.dir\Release\ntw2_formation_layout.lib
+  native_animation_pose_kernel.cpp
+  ntw2_path.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path.dir\Release\ntw2_path.lib
+  ntw2_ballistics_collision.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_collision.dir\Release\ntw2_ballistics_collision.lib
+F:\NTW2\translated_code\ntw2\src\formation\native_formation_batch.h(185,1): warning C4324: 'ntw_formation_batch::UnitJob': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_runtime.vcxproj]
+  (compiling source file '../../../../src/formation/native_formation_runtime.cpp')
+  
+F:\NTW2\translated_code\ntw2\src\ballistics\native_ballistics_query_cache.cpp(183,1): warning C4324: '`anonymous-namespace'::Cache': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_query_cache.vcxproj]
+  ntw2_formation_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_runtime.dir\Release\ntw2_formation_runtime.lib
+  ntw2_animation_pose.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_pose.dir\Release\ntw2_animation_pose.lib
+  ntw2_ballistics_query_cache.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_query_cache.dir\Release\ntw2_ballistics_query_cache.lib
+  Building Custom Rule F:/NTW2/translated_code/ntw2/CMakeLists.txt
+  ntw2_runtime.cpp
+F:\NTW2\translated_code\ntw2\src\brain2\native_fire.h(40,43): warning C4324: 'ntw2_fire::Snapshot': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  (compiling source file '../../src/core/ntw2_runtime.cpp')
+  
+  ntw2_clones.cpp
+  ntw2_profile.cpp
+  ntw2_ai_census.cpp
+  ntw2_ai_async2.cpp
+  ntw2_ai_deferred.cpp
+  ntw2_walk_memo.cpp
+  native_collision_solver.cpp
+F:\NTW2\translated_code\ntw2\src\collision\native_collision_solver.cpp(312,12): warning C4456: declaration of 'y' hides previous local declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\collision\native_collision_solver.cpp(275,32):
+      see declaration of 'y'
+  
+F:\NTW2\translated_code\ntw2\src\collision\native_collision_solver.cpp(312,33): warning C4456: declaration of 'x' hides previous local declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\collision\native_collision_solver.cpp(275,11):
+      see declaration of 'x'
+  
+  native_contact.cpp
+  native_brain2.cpp
+F:\NTW2\translated_code\ntw2\src\brain2\native_fire.h(40,43): warning C4324: 'ntw2_fire::Snapshot': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  (compiling source file '../../src/brain2/native_brain2.cpp')
+  
+  native_loco.cpp
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(85,1): warning C4324: 'ntw2_loco::`anonymous-namespace'::GridChunkStat': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(134,39): warning C5054: operator '==': deprecated between enumerations of different types [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(141,51): warning C4324: 'ntw2_loco::`anonymous-namespace'::WorkerOccurrence': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(141,74): warning C4324: 'ntw2_loco::`anonymous-namespace'::WorkerOccurrence': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(1443,33): warning C4244: '=': conversion from 'ntw2_loco::`anonymous-namespace'::U' to 'unsigned char', possible loss of data [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_loco.cpp(1444,33): warning C4244: '=': conversion from 'ntw2_loco::`anonymous-namespace'::U' to 'unsigned char', possible loss of data [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  native_move_delta.cpp
+  native_relink.cpp
+  native_grid_probation.cpp
+  native_node.cpp
+F:\NTW2\translated_code\ntw2\src\brain2\native_node.cpp(381,45): warning C5054: operator '+': deprecated between enumerations of different types [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\brain2\native_node.cpp(402,64): warning C5054: operator '+': deprecated between enumerations of different types [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\brain2\native_node.cpp(414,80): warning C5054: operator '+': deprecated between enumerations of different types [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  native_node_projection.cpp
+  native_fire.cpp
+F:\NTW2\translated_code\ntw2\src\brain2\native_fire.h(40,43): warning C4324: 'ntw2_fire::Snapshot': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  (compiling source file '../../src/brain2/native_fire.cpp')
+  
+  native_finalizer.cpp
+  native_move_node.cpp
+  native_brain_workers.cpp
+F:\NTW2\translated_code\ntw2\src\brain2\native_brain_workers.cpp(639,50): warning C4100: 'a': unreferenced parameter [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  Generating Code...
+  Compiling...
+  native_unit_brain.cpp
+  native_idle_node.cpp
+  native_action_node.cpp
+  native_army_unit.cpp
+  native_army_storm.cpp
+  native_army_solver.cpp
+  native_formation_solver.cpp
+  native_brain_s0.cpp
+  native_brain_locality.cpp
+  native_unit_posture_engage.cpp
+  ntw2_ai_ctrl_batch.cpp
+  ntw2_ai_ctrl_geometry.cpp
+  ntw2_planner_prepass.cpp
+F:\NTW2\translated_code\ntw2\src\ai\ntw2_planner_prepass.cpp(400,44): warning C4100: 'node': unreferenced parameter [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  native_sweep.cpp
+F:\NTW2\translated_code\ntw2\src\loco\native_sweep.cpp(427,20): warning C4459: declaration of 'pending' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_sweep.cpp(26,6):
+      see declaration of 'ntw2_sweep::`anonymous-namespace'::pending'
+  
+F:\NTW2\translated_code\ntw2\src\loco\native_sweep.cpp(520,23): warning C4456: declaration of 'p' hides previous local declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_sweep.cpp(487,87):
+      see declaration of 'p'
+  
+  native_resolve.cpp
+F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(671,7): warning C4459: declaration of 'words' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(17,3):
+      see declaration of 'ntw2_resolve::`anonymous-namespace'::words'
+  
+F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(678,25): warning C4459: declaration of 'saved' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(25,11):
+      see declaration of 'ntw2_resolve::`anonymous-namespace'::saved'
+  
+F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(738,54): warning C4389: '==': signed/unsigned mismatch [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+F:\NTW2\translated_code\ntw2\src\loco\native_resolve.cpp(750,22): warning C4389: '!=': signed/unsigned mismatch [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+  native_env.cpp
+F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(285,54): warning C4459: declaration of 'scratch' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(18,64):
+      see declaration of 'ntw2_env::`anonymous-namespace'::scratch'
+  
+F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(332,62): warning C4459: declaration of 'scratch' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(18,64):
+      see declaration of 'ntw2_env::`anonymous-namespace'::scratch'
+  
+F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(333,22): warning C4459: declaration of 'saved' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\ntw2_runtime.vcxproj]
+      F:\NTW2\translated_code\ntw2\src\loco\native_env.cpp(18,28):
+      see declaration of 'ntw2_env::`anonymous-namespace'::saved'
+  
+  native_unit_select.cpp
+  native_unit_policy.cpp
+  native_unit_fatigue.cpp
+  ntw2_planner_search.cpp
+  Generating Code...
+  Compiling...
+  ntw2_spiral.cpp
+  ntw2_claim_once.cpp
+  ntw2_retarget_jitter.cpp
+  ntw2_target_cull.cpp
+  ntw2_record_test.cpp
+  Generating Code...
+     Creating library F:/NTW2/translated_code/ntw2/build/tidy/lib/Release/ntw2_runtime.lib and object F:/NTW2/translated_code/ntw2/build/tidy/lib/Release/ntw2_runtime.exp
+  ntw2_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2_runtime.dll
+MSBuild version 18.7.8+1ac568fee for .NET Framework
+
+  Checking File Globs
+  ntw2_ballistics_collision.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_collision.dir\Release\ntw2_ballistics_collision.lib
+  ntw2_ballistics_helpers.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_helpers.dir\Release\ntw2_ballistics_helpers.lib
+  ntw2_animation_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_render_batch.dir\Release\ntw2_animation_render_batch.lib
+  ntw2_formation_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_batch.dir\Release\ntw2_formation_batch.lib
+  ntw2_ballistics_query_cache.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_query_cache.dir\Release\ntw2_ballistics_query_cache.lib
+  ntw2_formation_layout.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_layout.dir\Release\ntw2_formation_layout.lib
+  ntw2_animation_pose.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_pose.dir\Release\ntw2_animation_pose.lib
+  ntw2_formation_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_runtime.dir\Release\ntw2_formation_runtime.lib
+  ntw2_formation_slot.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_slot.dir\Release\ntw2_formation_slot.lib
+  ntw2_path.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path.dir\Release\ntw2_path.lib
+  ntw2_path_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path_runtime.dir\Release\ntw2_path_runtime.lib
+  ntw2_worker_dispatch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\worker\ntw2_worker_dispatch.dir\Release\ntw2_worker_dispatch.lib
+  ntw2_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\render\ntw2_render_batch.dir\Release\ntw2_render_batch.lib
+  ntw2_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2_runtime.dll
+  Building Custom Rule F:/NTW2/translated_code/ntw2/CMakeLists.txt
+  main.c
+  ntw2.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2.exe
+Owned job peak commitment: 518103040 bytes; hard limit: 2147483648 bytes; child exit: 0.

@@ -1,0 +1,117 @@
+MSBuild version 18.7.8+1ac568fee for .NET Framework
+
+  Checking File Globs
+  ntw2_ballistics_helpers.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_helpers.dir\Release\ntw2_ballistics_helpers.lib
+  ntw2_ballistics_query_cache.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_query_cache.dir\Release\ntw2_ballistics_query_cache.lib
+  ntw2_formation_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_batch.dir\Release\ntw2_formation_batch.lib
+  ntw2_ballistics_collision.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\ballistics\ntw2_ballistics_collision.dir\Release\ntw2_ballistics_collision.lib
+  ntw2_animation_pose.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_pose.dir\Release\ntw2_animation_pose.lib
+  ntw2_animation_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\animation\ntw2_animation_render_batch.dir\Release\ntw2_animation_render_batch.lib
+  ntw2_formation_layout.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_layout.dir\Release\ntw2_formation_layout.lib
+  ntw2_formation_slot.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_slot.dir\Release\ntw2_formation_slot.lib
+  ntw2_path.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path.dir\Release\ntw2_path.lib
+  ntw2_formation_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\formation\ntw2_formation_runtime.dir\Release\ntw2_formation_runtime.lib
+  ntw2_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\render\ntw2_render_batch.dir\Release\ntw2_render_batch.lib
+  ntw2_path_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\path\ntw2_path_runtime.dir\Release\ntw2_path_runtime.lib
+  ntw2_worker_dispatch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\src\worker\ntw2_worker_dispatch.dir\Release\ntw2_worker_dispatch.lib
+  native_army_solver_chain_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_army_solver_chain_oracle.exe
+  native_army_unit_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_army_unit_oracle.exe
+  native_ai_ctrl_geometry_oracle.cpp
+  native_ai_ctrl_oracle.cpp
+  ntw2_payload_worker_dispatch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_worker_dispatch.dll
+  native_animation_oracle_smoke.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_animation_oracle_smoke.exe
+  native_animation_render_batch_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_animation_render_batch_oracle.exe
+  ntw2_payload_ballistics_helpers.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_helpers.dll
+  native_brain2_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_brain2_oracle.exe
+  native_brain_workers_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_brain_workers_oracle.exe
+  native_ballistics_smoke.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_smoke.exe
+  ntw2_module_query_cache.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_query_cache.dll
+  native_ballistics_collision_harness.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_collision_harness.exe
+  native_ballistics_runtime_integration.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_runtime_integration.exe
+  native_collision_solver_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_collision_solver_oracle.exe
+  native_claim_once_oracle.cpp
+  native_contact_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_contact_oracle.exe
+  native_env_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_env_oracle.exe
+  native_fire_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_fire_oracle.exe
+  native_ballistics_query_cache_harness.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_query_cache_harness.exe
+  native_formation_solver_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_solver_oracle.exe
+  native_loco_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_loco_oracle.exe
+  native_move_node_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_move_node_oracle.exe
+  native_node_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_node_oracle.exe
+  native_path_workspace_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_path_workspace_oracle.exe
+  native_planner_search_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_planner_search_oracle.exe
+  native_planner_prepass_oracle.cpp
+  native_record_test_oracle.cpp
+  native_resolve_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_resolve_oracle.exe
+  ntw2_payload_render_batch.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_render_batch.dll
+  native_formation_layout_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_layout_oracle.exe
+F:\NTW2\translated_code\ntw2\tests\native_ai_ctrl_geometry_oracle.cpp(122,1): warning C4731: 'RunIdentity': frame pointer register 'ebp' modified by inline assembly code [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_ai_ctrl_geometry_oracle.vcxproj]
+F:\NTW2\translated_code\ntw2\tests\native_ai_ctrl_geometry_oracle.cpp(143,1): warning C4731: 'RunDistance': frame pointer register 'ebp' modified by inline assembly code [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_ai_ctrl_geometry_oracle.vcxproj]
+  native_formation_batch_harness.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_batch_harness.exe
+  native_formation_slot_harness.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_slot_harness.exe
+  native_retarget_jitter_oracle.cpp
+  native_ai_ctrl_geometry_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ai_ctrl_geometry_oracle.exe
+  native_render_batch_smoke.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_render_batch_smoke.exe
+  native_ai_ctrl_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ai_ctrl_oracle.exe
+  native_path_runtime_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_path_runtime_oracle.exe
+  ntw2_module_formation_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_runtime.dll
+  native_formation_runtime_smoke.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_formation_runtime_smoke.exe
+  ntw2_runtime.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2_runtime.dll
+  native_spiral_oracle.cpp
+  native_sweep_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_sweep_oracle.exe
+  native_target_cull_oracle.cpp
+  native_claim_once_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_claim_once_oracle.exe
+  native_unit_brain_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_unit_brain_oracle.exe
+  native_unit_fatigue_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_unit_fatigue_oracle.exe
+  native_unit_posture_engage_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_unit_posture_engage_oracle.exe
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244: 'initializing': conversion from '_Ty' to '_Ty1', possible loss of data [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         with [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         [ [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:             _Ty=int [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         ] [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         and [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         [ [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:             _Ty1=float [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16): warning C4244:         ] [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+  (compiling source file '../../../tests/native_record_test_oracle.cpp')
+      F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,16):
+      the template instantiation context (the oldest one first) is
+          F:\NTW2\translated_code\ntw2\tests\native_record_test_oracle.cpp(180,70):
+          see reference to function template instantiation 'std::pair<float,float>::pair<int,int,0>(_Other1 &&,_Other2 &&) noexcept' being compiled
+          with
+          [
+              _Other1=int,
+              _Other2=int
+          ]
+              F:\NTW2\translated_code\ntw2\tests\native_record_test_oracle.cpp(180,68):
+              see the first reference to 'std::pair<float,float>::pair' in 'main'
+  
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244: 'initializing': conversion from '_Ty' to '_Ty2', possible loss of data [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         with [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         [ [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:             _Ty=int [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         ] [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         and [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         [ [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:             _Ty2=float [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+F:\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\include\utility(277,54): warning C4244:         ] [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_record_test_oracle.vcxproj]
+  (compiling source file '../../../tests/native_record_test_oracle.cpp')
+  
+  native_walk_memo_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_walk_memo_oracle.exe
+  native_planner_prepass_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_planner_prepass_oracle.exe
+  native_worker_dispatch_smoke.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_worker_dispatch_smoke.exe
+  ntw2_payload_ballistics_collision.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_ballistics_collision.dll
+  ntw2_pe_audit.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\ntw2_pe_audit.exe
+  ntw2.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\Release\ntw2.exe
+  native_runtime_lifecycle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_runtime_lifecycle.exe
+  ntw2_run_limited.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\ntw2_run_limited.exe
+F:\NTW2\translated_code\ntw2\tests\native_spiral_oracle.cpp(160,62): warning C4324: 'Run': structure was padded due to alignment specifier [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_spiral_oracle.vcxproj]
+F:\NTW2\translated_code\ntw2\tests\native_spiral_oracle.cpp(285,68): warning C4459: declaration of 'boxes' hides global declaration [F:\NTW2\translated_code\ntw2\build\tidy\tests\native_spiral_oracle.vcxproj]
+      F:\NTW2\translated_code\ntw2\tests\native_spiral_oracle.cpp(258,64):
+      see declaration of 'boxes'
+  
+  native_retarget_jitter_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_retarget_jitter_oracle.exe
+  native_record_test_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_record_test_oracle.exe
+  native_spiral_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_spiral_oracle.exe
+  native_target_cull_oracle.vcxproj -> F:\NTW2\translated_code\ntw2\build\tidy\bin\tests\Release\native_target_cull_oracle.exe
+Owned job peak commitment: 582344704 bytes; hard limit: 2147483648 bytes; child exit: 0.
