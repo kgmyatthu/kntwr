@@ -205,6 +205,7 @@ typedef struct Options {
     BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (ntw2_config::va_watch_flags NTW2_ARMY_SOLVER_MEMO) */
     BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
     BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (ntw2_config::va_watch_flags NTW2_ALLOC_CENSUS) */
+    BOOL alloc_fix;          /* --alloc-fix: live leak reclamation + process-heap allocation callsite census (NTW2_ALLOC_CENSUS + mode 2) */
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown (NTW2_ARENA_RELEASE) */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / arena optimization (NTW2_HEAP_OPTIMIZE) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -5433,6 +5434,12 @@ static int install_runtime(Run *r)
     r->dll_base = nf.base;
     r->state_addr = r->dll_base + r->dll.state_rva;
     say(L"Runtime loaded at 0x%08lX and verified against the local file.\n", (unsigned long)r->dll_base);
+    if (r->opt.alloc_fix) {
+        uint32_t mode = 2u;
+        SIZE_T nw = 0;
+        WriteProcessMemory(r->proc, (LPVOID)(uintptr_t)(r->state_addr + (uint32_t)offsetof(ntw2_status, alloc_census_words) + 4u * NTW2_ALLOC_CENSUS_MODE),
+                           &mode, sizeof(mode), &nw);
+    }
 
     rc = remote_call(r, r->dll_base + r->dll.start_rva, mem, 30000, &code, &err);
     if (rc != RC_OK) {
@@ -5898,6 +5905,7 @@ static void usage(void)
         L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n");
     say(L"%ls",
         L"  --alloc-census        diagnostic: process-heap allocation callsite census (alloc_census_words, receipt alloc_census). Default off.\n"
+        L"  --alloc-fix           live process-heap leak fix + callsite census (sets --alloc-census mode=2). Default off.\n"
         L"  --arena-release       release pose/scene 1 MB arena blocks at battle teardown (arena_words, receipt arena). Default off.\n"
         L"  --heap-optimize       process-heap / arena optimization (arena_words, receipt arena). Default off.\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
@@ -6163,6 +6171,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--army-solver-memo")) o->army_solver_memo = TRUE;
         else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
         else if (!wcscmp(name, L"--alloc-census")) o->alloc_census = TRUE;
+        else if (!wcscmp(name, L"--alloc-fix")) { o->alloc_census = TRUE; o->alloc_fix = TRUE; }
         else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
