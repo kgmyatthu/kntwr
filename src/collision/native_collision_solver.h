@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "../core/native_workload.h"
+#include "core/native_workload.h"
 
 // Owner-owned lifetime. No original executable instructions are patched.
 namespace ntw2_loco { struct GridView; }

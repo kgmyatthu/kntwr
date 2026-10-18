@@ -11,7 +11,7 @@
 #include <string.h>
 #include "ntw2_runtime.h"
 #include "native_image_relocation.h"
-#include "../src/clones/ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 
 static_assert(NTW2_TRACE_ABI==8u && NTW2_TRACE_ENTRIES==1024u, "trace ABI 8 ring contract");
 static_assert(NTW2_TRACE_SITES==112u && NTW2_TIMED_SITES==110u, "trace site capacity and populated range");

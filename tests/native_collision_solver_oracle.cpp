@@ -46,7 +46,7 @@
 #include <functional>
 #include <memory>
 #include <utility>
-#include "../src/loco/native_owned_grid.h"
+#include "loco/native_owned_grid.h"
 #include "native_image_relocation.h"
 #include "native_collision_solver.h"
 #include "native_contact.h"

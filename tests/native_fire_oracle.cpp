@@ -15,7 +15,7 @@
 #include <vector>
 #include "native_image_relocation.h"
 #include "native_fire.h"
-#include "../src/loco/native_sweep.h"
+#include "loco/native_sweep.h"
 namespace port = ntw2_fire;
 using U = uint32_t;
 using B = uint8_t;

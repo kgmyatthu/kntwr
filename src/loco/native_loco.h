@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#include "../core/native_workload.h"
+#include "core/native_workload.h"
 
 // Keep this order identical to ntw2_loco::Word and the append-only public status.
 #define NTW2_LOCO_WORD_LABELS \

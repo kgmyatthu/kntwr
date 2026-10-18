@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <string.h>
 #include <intrin.h>
-#include "../clones/ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 
 namespace ntw2_grid_probation {
 namespace {

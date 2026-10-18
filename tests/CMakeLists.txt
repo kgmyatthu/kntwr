@@ -286,10 +286,10 @@ ntw2_harness(native_collision_solver_oracle STD 20 FP strict
   SOURCES native_collision_solver_oracle.cpp "${NTW2_SRC}/collision/native_collision_solver.cpp"
           "${NTW2_SRC}/collision/native_contact.cpp"
   OBJECTS ntw2_worker_dispatch
-  INCLUDES "${NTW2_SRC}/collision" "${NTW2_SRC}/worker" LIBS bcrypt)
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/collision" "${NTW2_SRC}/worker" LIBS bcrypt)
 ntw2_harness(native_contact_oracle STD 20 FP strict
   SOURCES native_contact_oracle.cpp "${NTW2_SRC}/collision/native_contact.cpp"
-  INCLUDES "${NTW2_SRC}/collision" LIBS bcrypt)
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/collision" LIBS bcrypt)
 ntw2_harness(native_brain2_oracle STD 20 FP strict
   SOURCES native_brain2_oracle.cpp "${NTW2_SRC}/brain2/native_brain2.cpp" "${NTW2_SRC}/clones/ntw2_clones.cpp"
           "${NTW2_SRC}/brain2/native_node.cpp" "${NTW2_SRC}/brain2/native_node_projection.cpp" "${NTW2_SRC}/brain2/native_fire.cpp"
@@ -362,19 +362,19 @@ ntw2_harness(native_loco_oracle STD 20 FP strict
   INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco" DEFINES NTW2_LOCO_ORACLE=1 LIBS bcrypt)
 ntw2_harness(native_sweep_oracle STD 20 FP strict
   SOURCES native_sweep_oracle.cpp "${NTW2_SRC}/loco/native_sweep.cpp"
-  INCLUDES "${NTW2_SRC}/loco")
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco")
 ntw2_harness(native_resolve_oracle STD 20 FP strict
   SOURCES native_resolve_oracle.cpp "${NTW2_SRC}/loco/native_resolve.cpp" "${NTW2_SRC}/loco/native_sweep.cpp"
-  INCLUDES "${NTW2_SRC}/loco" LIBS bcrypt)
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco" LIBS bcrypt)
 ntw2_harness(native_env_oracle STD 20 FP strict
   SOURCES native_env_oracle.cpp "${NTW2_SRC}/loco/native_env.cpp" "${NTW2_SRC}/loco/native_sweep.cpp"
-  INCLUDES "${NTW2_SRC}/loco" LIBS bcrypt)
+  INCLUDES "${NTW2_SRC}" "${NTW2_SRC}/loco" LIBS bcrypt)
 add_test(NAME ntw2_sweep_oracle COMMAND native_sweep_oracle)
 set_tests_properties(ntw2_sweep_oracle PROPERTIES LABELS "synthetic;shadow" TIMEOUT 60)
 ntw2_note_registered(ntw2_sweep_oracle)
 if(TARGET ntw2_runtime)
   ntw2_harness(native_runtime_lifecycle STD 20 FP strict SOURCES native_runtime_lifecycle.cpp
-    INCLUDES "${CMAKE_SOURCE_DIR}/include")
+    INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include")
   add_dependencies(native_runtime_lifecycle ntw2_runtime)
 endif()
 

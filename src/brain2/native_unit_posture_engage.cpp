@@ -6,7 +6,7 @@
 #include <windows.h>
 #include <string.h>
 #include "native_unit_posture_engage.h"
-#include "../clones/ntw2_clones.h"
+#include "clones/ntw2_clones.h"
 static_assert(sizeof(void*) == 4, "the gates are Win32 x86 naked thunks");
 constexpr const char* kLabels[] = {NTW2_UNIT_POSTURE_ENGAGE_LABELS};
 static_assert(sizeof(kLabels) / sizeof(kLabels[0]) == 128, "status label count");

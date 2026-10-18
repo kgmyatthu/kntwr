@@ -3,7 +3,7 @@
 #include <intrin.h>
 #include <string.h>
 #include "native_fire.h"
-#include "../loco/native_sweep.h"
+#include "loco/native_sweep.h"
 
 static_assert(sizeof(void*) == 4, "sequence port requires the pinned x86 ABI");
 namespace ntw2_fire {

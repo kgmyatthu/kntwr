@@ -5,7 +5,7 @@
 #include <xmmintrin.h>
 #include <algorithm>
 #include <string.h>
-#include "../loco/native_owned_grid.h"
+#include "loco/native_owned_grid.h"
 #include "native_contact.h"
 
 #pragma float_control(precise, on, push)
