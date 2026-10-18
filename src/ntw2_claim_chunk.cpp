@@ -48,9 +48,9 @@ void Latency(U first) {
     const U age = nowTick - first;
     if (nowTick >= first && age > maxTicks) { maxTicks = age; Publish(); }
 }
-void Remove(Observer& o, U index) {
+void Remove(Observer& o, U index) { // order preserving: the table is the FIFO of deferred entries (oldest first)
     --o.count;
-    o.unit[index] = o.unit[o.count]; o.first[index] = o.first[o.count]; o.alive[index] = o.alive[o.count];
+    for (U i = index; i < o.count; ++i) { o.unit[i] = o.unit[i + 1]; o.first[i] = o.first[i + 1]; o.alive[i] = o.alive[i + 1]; }
 }
 Observer* Acquire(U obs) {
     Observer* vacant = nullptr; Observer* idle = nullptr; Observer* oldest = nullptr;
@@ -101,22 +101,45 @@ void EndCall() {
     if (o.count > maxPending) { maxPending = o.count; Publish(); }
 }
 
-// Host mirror of 0x7524A0 (0x7524AB..0x7524FC): same eligibility, same native callees, same order; the cap only stops claiming.
+// Row of `unit` in L, or 0 (L's count and data are read fresh: a claim callback may have appended).
+U FindRow(U list, U unit) {
+    for (U i = 0; i < ReadU(list + 8); ++i) {
+        const U row = ReadU(list + 0xC) + i * 12;
+        if (ReadU(row) == unit) return row;
+    }
+    return 0;
+}
+// 0x7524B6..0x7524D7: row+8 == 0, !0x55AB90(unit), unit+0xB34 != 8. 0x55AB90 is a pure getter (no calls, no stores), so the native
+// reload of the data pointer after it (0x7524C9) cannot observe a change and the row address stays valid.
+bool Claimable(U row) {
+    if (*reinterpret_cast<const volatile unsigned char*>(static_cast<uintptr_t>(row + 8))) return false;
+    if (reinterpret_cast<Eligible>(static_cast<uintptr_t>(target.eligible))(ReadU(row), 0)) return false;
+    return ReadU(ReadU(row) + 0xB34) != 8;
+}
+
+// Host mirror of 0x7524A0 (0x7524AB..0x7524FC): same eligibility, same native callees and post-loop. The cap only stops claiming, and the
+// budget goes to the oldest deferred entries first (FIFO), then to the other eligible rows in L order; with nothing pending and E <= N the
+// call sequence is exactly native's.
 U Run(U obs, U list) {
-    const Eligible blocked = reinterpret_cast<Eligible>(static_cast<uintptr_t>(target.eligible));
     const Claim claim = reinterpret_cast<Claim>(static_cast<uintptr_t>(target.claim));
     const Native1 post = reinterpret_cast<Native1>(static_cast<uintptr_t>(target.post));
     const U controller = obs + 0x78;
     BeginCall(obs);
     Bump(WCalls);
     U claimed = 0;
+    for (U p = 0; p < current->count && claimed < chunk;) {
+        const U unit = current->unit[p];
+        const U row = FindRow(list, unit);
+        if (row && Claimable(row)) {
+            ++claimed;
+            NoteClaim(unit); // removes entry p; the next oldest is now at p
+            claim(obs, 0, row, controller);
+        } else ++p;
+    }
     for (U i = 0; i < ReadU(list + 8); ++i) {            // [L+8] is reloaded every iteration (0x7524E9)
-        U row = ReadU(list + 0xC) + i * 12;
-        if (*reinterpret_cast<const volatile unsigned char*>(static_cast<uintptr_t>(row + 8))) continue;
-        if (blocked(ReadU(row), 0)) continue;
-        row = ReadU(list + 0xC) + i * 12;                 // 0x7524C9 reloads the data pointer after the predicate call
+        const U row = ReadU(list + 0xC) + i * 12;
+        if (!Claimable(row)) continue;
         const U unit = ReadU(row);
-        if (ReadU(unit + 0xB34) == 8) continue;
         if (claimed < chunk) {
             ++claimed;
             NoteClaim(unit);

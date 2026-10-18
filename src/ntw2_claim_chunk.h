@@ -3,8 +3,9 @@
 #include <stdint.h>
 
 // --ai-claim-chunk N (ntw2_config::ai_ctrl_flags bits 8..15): the fallback strategy observer's claim loop (analysis/native-ai-claim-chunk.md).
-// AI-ONLY GAMEPLAY DEVIATION (user-approved): when a planner think's fallback claim would take E > N eligible entries, only the first N are
-// claimed; the other E - N stay unassigned and are offered again by the next think of the same child.
+// AI-ONLY GAMEPLAY DEVIATION (user-approved): when a planner think's fallback claim would take E > N eligible entries, only N are
+// claimed (the entries already deferred by earlier thinks first, oldest first, then the others in L order); the rest stay unassigned and
+// are offered again by the next think of the same child.
 //
 // Native structure [proven by disasm]: child pass 0x751800 builds the working list L = 0x150F6A4 (cap/count/data +4/+8/+0xC; 12-byte records
 // {unit*, oldObserver*, assigned:u8}) as a COPY of the child's unassigned second-list rows (0x7518AA..0x751999), lets the strategy
@@ -19,8 +20,10 @@
 // its own (the native pass filters dead/ineligible rows with 0x55AB80, row+8, 0x55AB90 and unit+0xB34 exactly as for any row).
 //
 // Chunk path: a host re-implementation of the 0x7524A0 loop that calls the same native 0x55AB90 / 0x74F430 / 0x84B1D0 (integer-only, no
-// x87/SSE state touched), claims the first N eligible entries, only counts the rest (0x55AB90 is a pure getter) and runs the post-loop
-// 0x84B1D0 once, as native does after every call. With E <= N it performs exactly the native call sequence. The gate is the vtable slot
+// x87/SSE state touched), claims N eligible entries (oldest deferred first, then L order; a plain prefix cap starved late rows for up to
+// 904 ticks in the first perf-bad run while earlier rows were released and re-offered every tick), only counts the rest (0x55AB90 is a pure
+// getter) and runs the post-loop 0x84B1D0 once, as native does after every call. With nothing deferred and E <= N it performs exactly the
+// native call sequence. The gate is the vtable slot
 // 0x1343318+0x40; it chunks only on the thread executing the site-34 planner update (Targets::scope) and only when `list` is the working
 // list 0x150F6A4 of the child pass; every other call is forwarded to the original.
 //

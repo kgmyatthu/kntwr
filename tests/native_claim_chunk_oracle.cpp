@@ -165,6 +165,32 @@ static void TestCap() {
     std::printf("cap: prefix claims, untouched leftovers, continuation counters verified\n");
 }
 
+static void TestFifo() {
+    // The budget goes to the oldest deferred entries before the rows that precede them in L (a prefix cap would starve late rows
+    // while earlier rows are released and offered again every tick).
+    std::vector<Row> spec(6,Row{0,false,false});
+    Build(spec); Configure(2); SetTick(50);
+    Host(A(obs));
+    Require(sequence==std::vector<U>({Unit(0),Unit(1)}) && W(cc::WDeferred)==4,"call 1: rows 0,1 claimed, 2..5 deferred");
+    for(U i:{0u,1u}) { rows[i*12+8]=0; Put(rows,i*12+4,0); }       // rows 0 and 1 are released again (churn)
+    SetTick(51); sequence.clear();
+    Host(A(obs));
+    Require(sequence==std::vector<U>({Unit(2),Unit(3)}),"call 2: the oldest deferred entries first, not rows 0 and 1");
+    Require(W(cc::WDeferred)==6 && W(cc::WContinuationClaims)==2 && W(cc::WClaimed)==2,"rows 0 and 1 are new deferrals (distinct entries: deferred 6)");
+    SetTick(52); sequence.clear();
+    Host(A(obs));
+    Require(sequence==std::vector<U>({Unit(4),Unit(5)}) && ((W(cc::WPacked)>>8)&0xFFFF)==2,"call 3: entries 4,5 after two ticks (latency 2)");
+    SetTick(53); sequence.clear();
+    Host(A(obs));
+    Require(sequence==std::vector<U>({Unit(0),Unit(1)}) && W(cc::WContinuationClaims)==6 && W(cc::WDrops)==0 &&
+            W(cc::WDeferred)==W(cc::WContinuationClaims)+W(cc::WDrops)+W(cc::WUntracked),"call 4: the released rows are claimed in their deferral order; identity holds");
+    // Mixed: a pending entry that is no longer claimable does not consume the budget.
+    Build(spec); Configure(2); SetTick(60); Host(A(obs));
+    Put(unitMem[2],0xb34,8); SetTick(61); sequence.clear();
+    Host(A(obs));
+    Require(sequence==std::vector<U>({Unit(3),Unit(4)}) && W(cc::WDrops)==1,"a pending entry in state 8 is a drop; the budget goes on to the next oldest");
+    std::printf("fifo: oldest deferred entries claimed first\n");
+}
 static void TestDrops() {
     std::vector<Row> spec(8,Row{0,false,false});
     Build(spec); Configure(2); SetTick(10);
@@ -226,7 +252,7 @@ int main(int argc,char** argv) {
     Jump(0x74F400,Fn(&FakeDetach)); Jump(0x84B1D0,Fn(&FakePost));
     Require(FlushInstructionCache(GetCurrentProcess(),image,imageSize)!=0,"flush image");
     targets={A(At(0x7524A0)),A(At(0x55AB90)),A(At(0x74F430)),Fn(&FakePost),A(list),&Scope};
-    TestEquivalenceCases(); TestCap(); TestDrops(); TestOverflow(); TestGating();
+    TestEquivalenceCases(); TestCap(); TestFifo(); TestDrops(); TestOverflow(); TestGating();
     std::printf("claim chunk oracle: %u checks\n",checks);
     return 0;
 }
