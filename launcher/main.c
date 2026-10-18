@@ -221,7 +221,8 @@ typedef struct Options {
     uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
     uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
     uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags bits 0..3) */
-    uint32_t ai_claim_chunk; /* --ai-claim-chunk N (0 = off): ntw2_config::ai_ctrl_flags bits 8..15 */
+    BOOL ai_claim_once;      /* --ai-claim-once: ntw2_config::ai_ctrl_flags bit 8 (NTW2_AI_CLAIM_ONCE) */
+    BOOL ai_claim_once_census; /* --ai-claim-once-census: bit 9 (NTW2_AI_CLAIM_ONCE_CENSUS) */
     uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
@@ -1314,16 +1315,14 @@ static void print_ai_record_test(const uint32_t *w)
         if (w[i]) say(L" %hs=%lu", k_ai_record_test_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-claim-chunk (src/ntw2_claim_chunk.h): ai_ctrl_reuse_words[24..31] (calls, claimed, deferred, continuations, continuation_claims, drops, untracked, packed). */
-static void print_ai_claim_chunk(const uint32_t *w)
+/* --ai-claim-once[-census] (src/ntw2_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
+static void print_ai_claim_once(const uint32_t *w)
 {
-    uint32_t n = w[31] >> 24, resolved = w[28] + w[29] + w[30];
-    if (!n) return;
-    say(L"  ai_claim_chunk: N=%lu calls=%lu entries_seen=%lu claimed=%lu deferred=%lu continuations=%lu continuation_claims=%lu revalidation_drops=%lu"
-        L" untracked=%lu pending_end=%lu max_pending=%lu max_pending_ticks=%lu\n",
-        (unsigned long)n, (unsigned long)w[24], (unsigned long)(w[25] + w[26]), (unsigned long)w[25], (unsigned long)w[26], (unsigned long)w[27],
-        (unsigned long)w[28], (unsigned long)w[29], (unsigned long)w[30], (unsigned long)(w[26] > resolved ? w[26] - resolved : 0),
-        (unsigned long)(w[31] & 0xFFu), (unsigned long)((w[31] >> 8) & 0xFFFFu));
+    if (!w[24]) return;
+    say(L"  ai_claim_once: calls=%lu entries=%lu (%.2f/call, max %lu) masked_recomputes=%lu calls_masked=%lu refused_state=%lu refused_other=%lu"
+        L" no_final_tail=%lu hashed_calls=%lu hash=0x%08lX\n",
+        (unsigned long)w[24], (unsigned long)w[25], (double)w[25] / w[24], (unsigned long)(w[30] & 0xFFu), (unsigned long)w[26], (unsigned long)w[27],
+        (unsigned long)w[28], (unsigned long)w[29], (unsigned long)((w[30] >> 8) & 0xFFu), (unsigned long)(w[30] >> 16), (unsigned long)w[31]);
 }
 /* --ai-spiral-census / --ai-spiral-cap-m (src/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
 static void print_ai_spiral(const uint32_t *w)
@@ -2252,7 +2251,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
     print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
     print_ai_spiral(s->ai_spiral_words);
-    print_ai_claim_chunk(s->ai_ctrl_reuse_words);
+    print_ai_claim_once(s->ai_ctrl_reuse_words);
     if (s->requested_mask & NTW2_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
@@ -4567,16 +4566,14 @@ static BOOL write_receipt(Run *r, int exit_code)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_ctrl_reuse_metrics[ctrl_index], (unsigned long)r->last.ai_ctrl_reuse_words[ctrl_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_ctrl\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_CHUNK_MASK)) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_BITS)) {
         const uint32_t *cw = r->last.ai_ctrl_reuse_words;
-        const uint32_t cresolved = cw[28] + cw[29] + cw[30];
-        sb_fmt(&b, "  \"ai_claim_chunk\": {\"n\": %lu, \"calls\": %lu, \"entries_seen\": %lu, \"entries_claimed\": %lu, \"entries_deferred\": %lu, "
-                   "\"continuations\": %lu, \"continuation_claims\": %lu, \"revalidation_drops\": %lu, \"untracked\": %lu, \"pending_end\": %lu, "
-                   "\"max_pending\": %lu, \"max_pending_ticks\": %lu},\n",
-               (unsigned long)(r->cfg.ai_ctrl_flags >> NTW2_AI_CLAIM_CHUNK_SHIFT & 0xFFu), (unsigned long)cw[24], (unsigned long)(cw[25] + cw[26]),
-               (unsigned long)cw[25], (unsigned long)cw[26], (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)cw[30],
-               (unsigned long)(cw[26] > cresolved ? cw[26] - cresolved : 0), (unsigned long)(cw[31] & 0xFFu), (unsigned long)((cw[31] >> 8) & 0xFFFFu));
-    } else sb_fmt(&b, "  \"ai_claim_chunk\": null,\n");
+        sb_fmt(&b, "  \"ai_claim_once\": {\"mode\": \"%s\", \"calls\": %lu, \"entries\": %lu, \"masked_recomputes\": %lu, \"calls_masked\": %lu, \"refused_state\": %lu, "
+                   "\"refused_other\": %lu, \"max_entries\": %lu, \"no_final_tail\": %lu, \"hashed_calls\": %lu, \"hash\": %lu},\n",
+               (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_ONCE) ? "once" : "census", (unsigned long)cw[24], (unsigned long)cw[25], (unsigned long)cw[26],
+               (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)(cw[30] & 0xFFu), (unsigned long)((cw[30] >> 8) & 0xFFu),
+               (unsigned long)(cw[30] >> 16), (unsigned long)cw[31]);
+    } else sb_fmt(&b, "  \"ai_claim_once\": null,\n");
     if (r->have_status && r->cfg.ai_prepass_flags) {
         unsigned prepass_index;
         sb_fmt(&b, "  \"ai_prepass_census\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
@@ -5228,7 +5225,7 @@ static int install_runtime(Run *r)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_chunk << NTW2_AI_CLAIM_CHUNK_SHIFT);
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + 64, r->dll_path, plen_bytes);
@@ -5828,11 +5825,13 @@ static void usage(void)
         L"                        unlimited, the default): rings of radius <= N run, then the native not-found exit. A capped spiral places the\n"
         L"                        unit at the projection of its ORIGINAL requested point (possibly obstructed, as native does when a ring leaves\n"
         L"                        the map); it is not left unassigned or retried. Implies --ai-spiral-census\n"
-        L"  --ai-claim-chunk N    AI-ONLY GAMEPLAY DEVIATION (1..255; 0 = native, the default). The planner think's fallback claim (0x7524A0) takes at\n"
-        L"                        most N eligible units per think; the rest stay unassigned and are offered again by the child's next think (one per\n"
-        L"                        tick), so a claim of E units spans ceil(E/N) ticks and the 0x82F3A0 re-plan per unit is spread over them. Needs a\n"
-        L"                        routed tick (e.g. --features all), excludes ai_ctrl/ai_async2/--ai-deferred; combines with --ai-poly and\n"
-        L"                        --ai-spiral-census (ai_claim_chunk row: seen/claimed/deferred, continuation claims, drops, max pending ticks)\n"
+        L"  --ai-claim-once       AI-ONLY GAMEPLAY DEVIATION. One 0x82F3A0 placement recompute per planner fallback claim call instead of one per claimed\n"
+        L"                        unit: every unit is still claimed in the same think as native (none is left without owner/orders across a tick), but\n"
+        L"                        the controller's placement score (+0x720/+0x758) is recomputed only for the last claimed unit (earlier units hit the\n"
+        L"                        native memo gate). Needs a routed tick (e.g. --features all), excludes ai_ctrl/ai_async2/--ai-deferred; combines with\n"
+        L"                        --ai-poly and --ai-spiral-census (ai_claim_once row: entries, masked recomputes, refusals, controller-state hash)\n"
+        L"  --ai-claim-once-census  the same claim loop WITHOUT the elision (native recomputes) publishing the same controller-state hash: the native\n"
+        L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n"
         L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
@@ -5914,7 +5913,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->ai_deferred_k = NTW2_AI_DEFERRED_DEFAULT_K;
     o->ai_deferred_budget = NTW2_AI_DEFERRED_DEFAULT_BUDGET;
     o->ai_ctrl_flags = 0;
-    o->ai_claim_chunk = 0;
+    o->ai_claim_once = FALSE;
+    o->ai_claim_once_census = FALSE;
     o->ai_prepass_flags = 0;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
@@ -6024,12 +6024,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--collide-lod-m")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 100000, &o->collide_lod_m)) { errsay(L"--collide-lod-m must be 1..100000.\n"); return -1; }
-        } else if (!wcscmp(name, L"--ai-claim-chunk")) {
-            NEEDVAL();
-            if (!parse_uint(val, 0, NTW2_AI_CLAIM_CHUNK_MASK >> NTW2_AI_CLAIM_CHUNK_SHIFT, &o->ai_claim_chunk)) {
-                errsay(L"--ai-claim-chunk must be 0 (native) or 1..255.\n");
-                return -1;
-            }
+        } else if (!wcscmp(name, L"--ai-claim-once")) {
+            o->ai_claim_once = TRUE;
+        } else if (!wcscmp(name, L"--ai-claim-once-census")) {
+            o->ai_claim_once_census = TRUE;
         } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
             uint32_t cap;
             NEEDVAL();
@@ -6108,10 +6106,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                L"every --ai-ctrl-* excludes the ai_ctrl and ai_async2 features.\n");
         return -1;
     }
-    if (o->ai_claim_chunk && ((o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
-                              !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
-        errsay(L"--ai-claim-chunk needs a routed tick (add profile or a simulation feature, e.g. --features all) and excludes the ai_ctrl and "
-               L"ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
+    if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
+                             !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
+        errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
+               L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
         return -1;
     }
     if (o->ai_prepass_flags && (o->mask & NTW2_AI_ASYNC2)) {
@@ -6390,7 +6388,7 @@ int wmain(int argc, wchar_t **argv)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_chunk << NTW2_AI_CLAIM_CHUNK_SHIFT);
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
 
     if (r->opt.replay[0]) {
