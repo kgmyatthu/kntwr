@@ -60,6 +60,7 @@
 #include "ai/ntw2_claim_once.h"
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
+#include "core/ntw2_alloc_census.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -106,10 +107,12 @@ Module formation, query, path;
 volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
-constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot
+constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1 + ntw2_alloc_census::kSlotCount; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot + alloc census provider slots
 Slot slots[kMaxSlots];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
-static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1+1<=kMaxSlots, "slot table holds every possible hook");
+U allocCensusSlotFirst, allocCensusSlotEnd; // [first,end) of the alloc census provider slots inside slots[]
+U allocCensusRequestedMode; // 0 = off, 1 = --alloc-census, 2 = --alloc-fix (captured at ntw2_start before status reset)
+static_assert(1+6+1+1+1+kBrainSlotCount+ntw2_ai_census::kPinCount+ntw2_ai_async2::kPinCount+ntw2_prepass::kNodeThinkSlotCount+2+2+2+1+1+ntw2_alloc_census::kSlotCount<=kMaxSlots, "slot table holds every possible hook");
 __declspec(align(64)) ntw_pool pool;
 bool poolReady, poolOwned; // ownership also covers an init-unwind whose join needs retrying
 bool collideSampleReady; // current runtime start has initialized solver counters; stop retains final samples
@@ -845,6 +848,7 @@ extern "C" __declspec(noinline) U __stdcall LeaveSite(U eax) { // EAX of the exi
         }
         if (frame.site<kBrainFirst+kBrainEntries) brainFamily=frame.family;
     }
+    if (frame.site==6 && (config.va_watch_flags&NTW2_ALLOC_CENSUS)) ntw2_alloc_census::ReclaimTick(world.model);
     if (frame.site==34) EndWalkScope(us);
     if (frame.site==40) { plannerWalkWords[7]+=us; ntw2_prepass::WalkEnd(eax,elapsed,end.QuadPart); }
     if (frame.site==41) {
@@ -2343,8 +2347,10 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         // enter native code during the short activation capture.
         while (Load(&activationCapture.state)==2) Sleep(0);
         U result=0;
-        __try { result=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b); }
-        __finally { _InterlockedDecrement(&gateDepth); }
+        __try {
+            result=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b);
+            if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::ReclaimTick(Address(model));
+        } __finally { _InterlockedDecrement(&gateDepth); }
         return result;
     }
     const U tid=GetCurrentThreadId();
@@ -2413,6 +2419,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         Ai2TickStart(); // one effect seam: service a posted worker call; join only an already-complete batch
         AiBarrier(); // no previous tick is permitted to retain native AI frames
         result=reinterpret_cast<Tick>(privateTick)(model,edx,a,b);
+        if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::ReclaimTick(Address(model));
         Ai2TickEnd(); ai2Published=true; AiBarrier(); // normal completion is included in the tick duration
         QueryPerformanceCounter(&end);
         const U bodyUs=Micro(start.QuadPart,end.QuadPart);
@@ -2783,6 +2790,7 @@ void SampleMemoryStorage() {
         (query.state ? query.state[NQC_S_STORAGE_BYTES] : 0)+(pathStorage ? *pathStorage : 0)+
         ntw2_unit_policy::StorageBytes()+ // retained unit-policy storage (allocated once, kept for the process)
         static_cast<U>(ntw2_army_solver::StorageBytes())+ // solver workspace (allocated at ntw2_army_solver::Start, freed at Stop)
+        ntw2_alloc_census::StorageBytes()+ // alloc census open-addressing tables (allocated at Start, freed at Stop)
         ntw2_brain_locality::StorageBytes(); // retained locality census storage (allocated once, kept for the process)
     ULONGLONG total=0;
     for(U i=NTW2_MEM_LOCO_BYTES;i<=NTW2_MEM_OTHER_BYTES;++i) total+=memoryWords[i];
@@ -2872,6 +2880,11 @@ bool StartModules() {
         const ntw2_army_solver::Binding binding={delta,(config.va_watch_flags&NTW2_ARMY_SOLVER_SHADOW) ? ntw2_army_solver::ModeShadow : ntw2_army_solver::ModeMemo,
                                                  clones.entries[NTW2_CLONE_SOLVER_18F0A00]};
         if (!ntw2_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)); return false; }
+    }
+    if (config.va_watch_flags & NTW2_ALLOC_CENSUS) {
+        if (!VirtualBudget(ntw2_alloc_census::RequiredStorageBytes())) return false;
+        const ntw2_alloc_census::Binding binding={imageBase,imageSize,delta,allocCensusRequestedMode ? allocCensusRequestedMode : ntw2_alloc_census::kModeCensus,&clones};
+        if (!ntw2_alloc_census::Start(binding)) { RecordError(ModuleError,NTW2_ALLOC_CENSUS); return false; }
     }
     if (mask & NTW2_COLLIDE) {
         ntw2_collide::Binding binding={delta,&ntw_pool_dispatch,Address(&pool),config.workers};
@@ -3065,11 +3078,22 @@ bool BuildSlots() {
         for (U i=0;i<ntw2_ai_async2::kPinCount;++i)
             if (pins[i].vtable) AddSlot(pins[i].vtable+4*pins[i].slot,pins[i].original,ntw2_ai_async2::Gate(i));
     }
+    allocCensusSlotFirst=allocCensusSlotEnd=slotCount;
+    if (config.va_watch_flags & NTW2_ALLOC_CENSUS) {
+        AddSlot(ntw2_alloc_census::kProviderAllocSlot,ntw2_alloc_census::kProviderAllocOriginal,ntw2_alloc_census::AllocGateAddress());
+        AddSlot(ntw2_alloc_census::kProviderFreeSlot,ntw2_alloc_census::kProviderFreeOriginal,ntw2_alloc_census::FreeGateAddress());
+        allocCensusSlotEnd=slotCount;
+    }
     return true;
 }
 U CensusSlotsOwned() { // monitor thread only: census pins currently swapped in (slots are published/restored there)
     U owned=0;
     for (U i=censusSlotFirst;i<censusSlotEnd && i<slotCount;++i) if (slots[i].owned) ++owned;
+    return owned;
+}
+U AllocCensusSlotsOwned() {
+    U owned=0;
+    for (U i=allocCensusSlotFirst;i<allocCensusSlotEnd && i<slotCount;++i) if (slots[i].owned) ++owned;
     return owned;
 }
 bool RestoreProtection(Slot& slot) {
@@ -3312,6 +3336,7 @@ void SampleCounters() {
     if (config.enabled_mask&NTW2_GRID_CENSUS) ntw2_grid_census_snapshot(&ntw2_state.grid_census);
     if (config.loco_flags&NTW2_LOCO_GRID_PROBATION) ntw2_grid_probation::Snapshot(const_cast<U*>(ntw2_state.grid_probation_words));
     if (config.enabled_mask&NTW2_AI_CENSUS) ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned());
+    if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,AllocCensusSlotsOwned(),false);
     StateEnd();
     RetireBudgetOwned();
 }
@@ -3337,6 +3362,11 @@ bool StopModules() {
     ntw2_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
     ntw2_army_storm::Stop();
     ntw2_army_solver::Stop(); // same drain: the final counters stay published
+    if (config.va_watch_flags&NTW2_ALLOC_CENSUS) {
+        ntw2_alloc_census::ReclaimTick(world.model);
+        ntw2_alloc_census::Stop();
+        StateBegin(); ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,0,true); StateEnd();
+    }
     if (locoRunning) { ntw2_loco::Stop(); locoRunning=false; } // the single participant is the drained tick owner; final counters stay sampled
     if (probationRunning) { // pages restored and handler removed: publish the final detector totals
         ProbationStop();
@@ -3496,6 +3526,7 @@ bool Activate(const World& candidate) {
     for (U i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) ntw2_state.collide_contact_words[i]=0;
     for (U i=0;i<NTW2_COLLIDE_LOD_WORDS;++i) ntw2_state.collide_lod_words[i]=0;
     for (U i=0;i<NTW2_ALLOC_CENSUS_WORDS;++i) ntw2_state.alloc_census_words[i]=0;
+    if (config.va_watch_flags&NTW2_ALLOC_CENSUS) ntw2_alloc_census::Snapshot(ntw2_state.alloc_census_words,ntw2_alloc_census::kSlotCount,true);
     for (U i=0;i<NTW2_ARENA_WORDS;++i) ntw2_state.arena_words[i]=0;
     for (U i=0;i<NTW2_OVERLAY_WORDS;++i) ntw2_state.overlay_words[i]=0;
     // Publish all LOCO row metadata with activation, not a later poll.
@@ -3778,6 +3809,11 @@ static U StartImpl(void* raw) {
         _InterlockedExchange(&life,before); return ThreadError;
     }
     config=next;
+    allocCensusRequestedMode=(config.va_watch_flags&NTW2_ALLOC_CENSUS)
+        ? (ntw2_state.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==ntw2_alloc_census::kModeFix ? ntw2_alloc_census::kModeFix : ntw2_alloc_census::kModeCensus)
+        : ntw2_alloc_census::kModeOff;
+    ntw2_alloc_census::Reset();
+    ntw2_alloc_census::Configure(imageBase,imageSize,delta,allocCensusRequestedMode);
     CpuTopologyInit(); // tick core census + NTW2_TICK_PCORE / NTW2_TICK_CORE_AB masks; no tick is routed before activation
     ntw2_grid_census_reset((config.enabled_mask&NTW2_GRID_CENSUS)!=0); // sampler is stopped; disabled starts publish an all-zero row
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);

@@ -376,9 +376,15 @@ enum ntw2_memory_word {
     "max_candidates", "fallback_calls", "e0", "e1", "e2", "e3_4", "e5_8", "e_gt8", "entries", "max_entries", "tail_runs", \
     "tail_same_tick", "tail_memo", "ladder_in_fallback", "spiral_in_fallback", "off_thread"
 #define NTW2_ALLOC_CENSUS_WORDS 1056u /* alloc_census_words (src/core/ntw2_alloc_census.*): 32 header + 128 rows x 8 (callsite_va, size_class, live_bytes, live_count, allocs, frees, peak_live_bytes, reserved) */
+#define NTW2_ALLOC_CENSUS_HEADER_WORDS 32u
+#define NTW2_ALLOC_CENSUS_ROWS 128u
+#define NTW2_ALLOC_CENSUS_ROW_WORDS 8u
+#define NTW2_ALLOC_CENSUS_MODE 2u /* header word 2: 0 = off, 1 = --alloc-census (diagnostic), 2 = --alloc-fix (live fix + census) */
 #define NTW2_ALLOC_CENSUS_LABELS \
-    "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15", \
-    "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23", "w24", "w25", "w26", "w27", "w28", "w29", "w30", "w31"
+    "version", "enabled", "mode", "ptr_capacity", "ptr_used", "callsite_capacity", "callsite_used", "overflow_count", \
+    "hook_faults", "live_bytes", "live_count", "baseline_bytes", "drift_bytes", "peak_live_bytes", "total_allocs", "total_frees", \
+    "untracked_frees", "reentrant_skips", "samples", "fix_freed_blocks", "fix_freed_bytes", "fix_active_sites", "storage_bytes", "slots_owned", \
+    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
 #define NTW2_ARENA_WORDS 32u /* arena_words (src/render/ntw2_arena_release.*): lever 4 + lever 7 counters */
 #define NTW2_ARENA_LABELS \
     "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15", \

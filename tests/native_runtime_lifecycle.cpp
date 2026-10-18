@@ -3064,6 +3064,62 @@ int main(int argc,char** argv) {
         root[0x2829c]=0;
         config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0;
     }
+    if(!failures) {
+        U* allocSlot=At(0x13ede3c);
+        U* freeSlot=At(0x13ede40);
+        const U allocOriginal=0x00ff8350+delta, freeOriginal=0x00ff7fb0+delta;
+        Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
+              "provider vtable alloc/free slots start read-only with relocated originals");
+        const U oldHeapAlloc=*At(0x13071a4), oldHeapFree=*At(0x13071a8);
+        Check(Replace(At(0x13071a4),A(reinterpret_cast<void*>(&HeapAlloc))) &&
+              Replace(At(0x13071a8),A(reinterpret_cast<void*>(&HeapFree))),"bind HeapAlloc/HeapFree IAT slots for alloc census test");
+        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0; config.va_watch_flags=NTW2_ALLOC_CENSUS;
+        state->alloc_census_words[NTW2_ALLOC_CENSUS_MODE]=2u;
+        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc census active with mode=2 (--alloc-fix)");
+        Check(ReadOnly(allocSlot) && *allocSlot!=allocOriginal && InRuntime(*allocSlot) &&
+              ReadOnly(freeSlot) && *freeSlot!=freeOriginal && InRuntime(*freeSlot),
+              "alloc census swaps both provider vtable slots to read-only runtime gates");
+        Check(ReadState(state,snapshot) && snapshot.alloc_census_words[0]==1u && snapshot.alloc_census_words[1]==1u &&
+              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==2u && snapshot.alloc_census_words[3]==(1u<<22) &&
+              snapshot.alloc_census_words[5]==8192u && snapshot.alloc_census_words[22]>0u && snapshot.alloc_census_words[23]==2u,
+              "alloc census publishes header metadata at activation");
+        struct FakeOut { U ptr, owner; } outs[2]={};
+        U fakeProvider[3]={A(At(0x13ede38)),3u,A(GetProcessHeap())};
+        using ProvAlloc = FakeOut* (__fastcall *)(void*,void*,FakeOut*,U);
+        using ProvFree = U (__fastcall *)(void*,void*,U);
+        const auto pAlloc=reinterpret_cast<ProvAlloc>(static_cast<uintptr_t>(*allocSlot));
+        const auto pFree=reinterpret_cast<ProvFree>(static_cast<uintptr_t>(*freeSlot));
+        for(unsigned k=0;k<2;++k) pAlloc(fakeProvider,nullptr,&outs[k],256u);
+        Check(outs[0].ptr!=0 && outs[1].ptr!=0,"hooked provider alloc returns heap blocks");
+        pFree(fakeProvider,nullptr,outs[0].ptr);
+        alignas(4) uint8_t fakePf[0x200]={};
+        U sub1=0, sub2=0, oldFree=0x12345678u;
+        sub1=A(&sub2); sub2=0;
+        *reinterpret_cast<U*>(fakePf+0x170)=oldFree;
+        *reinterpret_cast<U*>(fakePf+0x178)=0xC8u;
+        *reinterpret_cast<U*>(fakePf+0x17c)=A(&sub1);
+        *reinterpret_cast<U*>(fakePf+0x184)=0x3E8u;
+        Put(model,0xB4,A(fakePf));
+        Check(stop(nullptr)==0,"alloc census stop succeeds");
+        Put(model,0xB4,0);
+        Check(*reinterpret_cast<U*>(fakePf+0x17c)==0u && *reinterpret_cast<U*>(fakePf+0x170)==A(&sub1) && sub2==oldFree,
+              "alloc-fix ReclaimTick splices orphaned pathfinder +0x17C waypoint subnodes back onto +0x170 freelist");
+        Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
+              "alloc census stop restores provider vtable slots");
+        Check(ReadState(state,snapshot) && snapshot.alloc_census_words[8]==0u && snapshot.alloc_census_words[9]==256u &&
+              snapshot.alloc_census_words[10]==1u && snapshot.alloc_census_words[13]==512u &&
+              snapshot.alloc_census_words[14]==2u && snapshot.alloc_census_words[15]==1u &&
+              snapshot.alloc_census_words[19]==2u && snapshot.alloc_census_words[20]==2u*0x70u &&
+              snapshot.alloc_census_words[21]==1u &&
+              snapshot.alloc_census_words[22]==0u && snapshot.alloc_census_words[23]==0u &&
+              snapshot.alloc_census_words[32+2]==256u && snapshot.alloc_census_words[32+3]==1u &&
+              snapshot.alloc_census_words[32+4]==2u && snapshot.alloc_census_words[32+5]==1u &&
+              snapshot.alloc_census_words[32+6]==512u,
+              "alloc census stop retains final live/peak/alloc/free/fix counts and releases storage");
+        HeapFree(GetProcessHeap(),0,reinterpret_cast<void*>(static_cast<uintptr_t>(outs[1].ptr)));
+        Replace(At(0x13071a4),oldHeapAlloc); Replace(At(0x13071a8),oldHeapFree);
+        config.va_watch_flags=0;
+    }
     if(!failures) Check(RunChild(argv[1],argv[2],"--visual-scan-zero"),"visual zero-hit scan refusal scenario (child process) passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--visual-scan-multiple"),"visual multiple-hit scan refusal scenario (child process) passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--visual-stop-conflict"),"visual foreign-value stop refusal scenario (child process) passed");
