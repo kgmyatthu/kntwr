@@ -70,9 +70,18 @@ static std::vector<U> sequence;     // units reaching the controller's slot +0x7
 static U postCalls, postCtrl, postArg;
 static U tails;                     // placement recomputes the fake 0x826E80 performed
 static U appendOnFirst;             // claim callback appends this unit as a new unassigned row at the end of L (index = old count)
-// Scripted 0x826E80: the native control flow around the 0x82F3A0 memo gate (0x826E88..0x826F13, 0x82F6EE..0x82F736): states 6/7 return, the memo
-// gate (!0x55AD60 && last != 0 && last != tick && last + 10 >= tick) returns the cached +0x720 without writing, otherwise +0x724 = tick and the
-// tail runs (modelled: +0x720 = recompute count + 1); +0x758 = result; first use sets the latch.
+// Scripted 0x82F3A0 (0x82F6EE..0x82F736): the ring/heading history advances once per call, then the memo gate (!0x55AD60 && last != 0 &&
+// last != tick && last + 10 >= tick) returns the cached +0x720 without writing, otherwise +0x724 = tick and the tail runs (modelled:
+// +0x720 = recompute count + 1, a pure function of the membership).
+static U __fastcall FakeRecompute(U ctrl,U,U) {
+    void* c=reinterpret_cast<void*>(ctrl);
+    { const U ring=Get(c,0x76c)+1; Put(c,0x76c,ring); Put(c,0x6b0,(ring*257)&0xFFFF); Put(c,0x704,ring%20); Put(c,0x708,ring*3); }
+    const U tick=Get(tickB,0x58), last=Get(c,0x724);
+    const bool blocked=reinterpret_cast<bool(__fastcall*)(U,U)>(static_cast<uintptr_t>(A(At(0x55AD60))))(A(stateObj),0);
+    if(!blocked && last && last!=tick && last+10>=tick) return Get(c,0x720);
+    Put(c,0x724,tick); ++tails; const U result=Get(c,0x76c); Put(c,0x720,result); return result;
+}
+// Scripted 0x826E80 (0x826E88..0x826F13): states 6/7 return; +0x758 = 0x82F3A0(ctrl, 30.0f); first use sets the latch.
 static U __fastcall FakeCtrl70(U ctrl,U,U unit) {
     sequence.push_back(unit);
     if(appendOnFirst && sequence.size()==1) {
@@ -83,13 +92,7 @@ static U __fastcall FakeCtrl70(U ctrl,U,U unit) {
     void* c=reinterpret_cast<void*>(ctrl);
     const U state=Get(reinterpret_cast<void*>(unit),0xb34);
     if(state==6 || state==7) return 0;
-    { const U ring=Get(c,0x76c)+1; Put(c,0x76c,ring); Put(c,0x6b0,(ring*257)&0xFFFF); Put(c,0x704,ring%20); Put(c,0x708,ring*3); } // ring/heading history advances once per entry (native)
-    const U tick=Get(tickB,0x58), last=Get(c,0x724);
-    const bool blocked=reinterpret_cast<bool(__fastcall*)(U,U)>(static_cast<uintptr_t>(A(At(0x55AD60))))(A(stateObj),0);
-    U result;
-    if(!blocked && last && last!=tick && last+10>=tick) result=Get(c,0x720);
-    else { Put(c,0x724,tick); ++tails; result=Get(c,0x76c); Put(c,0x720,result); }   // the score is a pure function of the membership (ring count proxy)
-    Put(c,0x758,result);
+    Put(c,0x758,FakeRecompute(ctrl,0,0x41F00000u));
     Put(c,0x75d,1);
     return 0;
 }
@@ -202,7 +205,8 @@ static void TestMasking() {
 }
 
 static void TestNoFinalTail() {
-    // The predicted last tailing entry stops being eligible after the previous claim: the call masked entries but no tail ran.
+    // The predicted last tailing entry stops being eligible after the previous claim: the call masked entries and no native tail ran, so the
+    // host settles the owed recompute itself (0x82F3A0 with the full membership -> +0x758), exactly what native's last entry would have published.
     std::vector<Row> spec(3,Row{0,false,false});
     Build(spec,100,100,true,2); Configure(true);
     appendOnFirst=0;
@@ -210,9 +214,23 @@ static void TestNoFinalTail() {
     struct Hook { static U __fastcall Fn70(U ctrl,U e,U unit) { if(unit==Unit(0)) { Put(rows,1*12+8,1); Put(rows,2*12+8,1); } return FakeCtrl70(ctrl,e,unit); } };
     for(U& v:vtable) v=Fn(&Hook::Fn70);
     Host(A(obs));
-    Require(Packed(8,0xFF)==1 && W(co::WMasked)==1 && tails==0 && sequence.size()==1,"no tail ran after masking: counted");
-    Require(Ctl(0x724)==100,"original memo restored");
-    std::printf("no-final-tail: memo restored, counted\n");
+    Require(Packed(8,0xFF)==1 && W(co::WMasked)==1 && sequence.size()==1,"no native tail ran after masking: counted");
+    Require(tails==1 && Ctl(0x724)==100 && Ctl(0x758)==Ctl(0x720) && Ctl(0x720)==Ctl(0x76c),"settled: one recompute with the full membership, +0x724 = tick, score published");
+    Require(postCalls==1,"post-loop once");
+    // A masked entry followed by an unmasked tail that ran: nothing owed.
+    Build(spec,100,100,true,2); Configure(true); for(U& v:vtable) v=Fn(&FakeCtrl70); Host(A(obs));
+    Require(Packed(8,0xFF)==0 && tails==1 && sequence.size()==3,"prediction held: no settled recompute");
+    // An unmasked tail (row 0: nothing eligible after it yet), THEN a masked entry (row 1, after rows 1/2 became eligible), then the predicted
+    // tail (row 2) disappears: the last native recompute predates the masked entry, so the owed recompute must still be settled.
+    struct Hook2 { static U __fastcall Fn70(U ctrl,U e,U unit) {
+        if(unit==Unit(0)) { Put(rows,1*12+8,0); Put(rows,2*12+8,0); } // rows 1 and 2 become eligible after row 0's claim
+        if(unit==Unit(1)) { Put(rows,2*12+8,1); }                     // row 2 drops out after row 1's (masked) claim
+        return FakeCtrl70(ctrl,e,unit); } };
+    std::vector<Row> spec3{Row{0,false,false},Row{0,false,true},Row{0,false,true}};
+    Build(spec3,100,100,true,2); Configure(true); for(U& v:vtable) v=Fn(&Hook2::Fn70); Host(A(obs));
+    Require(sequence.size()==2 && W(co::WMasked)==1 && Packed(8,0xFF)==1,"row 0 native tail, row 1 masked, row 2 vanished: owed");
+    Require(tails==2 && Ctl(0x724)==100 && Ctl(0x758)==Ctl(0x76c) && Ctl(0x76c)==3,"settled after the earlier native tail: score reflects both claims");
+    std::printf("no-final-tail: owed recompute settled, score published\n");
 }
 
 static void TestGating() {
@@ -256,7 +274,7 @@ int main(int argc,char** argv) {
     Map(argv[1]);
     Jump(0x74F400,Fn(&FakeDetach)); Jump(0x84B1D0,Fn(&FakePost));
     Require(FlushInstructionCache(GetCurrentProcess(),image,imageSize)!=0,"flush image");
-    targets={A(At(0x7524A0)),A(At(0x55AB90)),A(At(0x74F430)),Fn(&FakePost),A(At(0x55AD60)),A(list),&Scope};
+    targets={A(At(0x7524A0)),A(At(0x55AB90)),A(At(0x74F430)),Fn(&FakePost),A(At(0x55AD60)),Fn(&FakeRecompute),A(list),&Scope};
     TestEquivalence(); TestMasking(); TestCensus(); TestNoFinalTail(); TestGating();
     std::printf("claim once oracle: %u checks\n",checks);
     return 0;

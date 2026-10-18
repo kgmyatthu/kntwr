@@ -36,8 +36,9 @@ namespace ntw2_claim_once {
 //  3 calls_masked  calls with >= 1 masked entry
 //  4 refused_state masking wanted but 0x55AD60 is true (the memo gate cannot hit)
 //  5 refused_other masking wanted but the first-use latch is unset or the tick is unreadable
-//  6 packed        bits 0..7 largest E of one call (saturating), bits 8..15 calls that masked entries but whose predicted last tailing entry
-//                  did not run (the controller kept its previous score; saturating), bits 16..31 calls folded into the hash
+//  6 packed        bits 0..7 largest E of one call (saturating), bits 8..15 calls whose predicted last tailing entry did not run (a claim
+//                  changed a later row's eligibility/state); the host then settled the owed recompute itself exactly as 0x826EE8..0x826EFB
+//                  (0x82F3A0(ctrl, 30.0f) -> ctrl+0x758, full membership; saturating), bits 16..31 calls folded into the hash
 //  7 hash          FNV-1a over the controller state at the end of the first kHashCalls calls with E >= 2: E, heading +0x6B0 (u16), ring index +0x704,
 //                  ring sum +0x708, score cache +0x720, memo tick +0x724, published score +0x758 (read after the claim loop, before 0x84B1D0)
 // Census mode (--ai-claim-once-census) runs the same loop WITHOUT masking and publishes the same hash: native and once runs of the same replay
@@ -57,6 +58,7 @@ struct Targets {
     uint32_t claim;     // 0x74F430 (thiscall ECX = observer, stack: row, controller; ret 8)
     uint32_t post;      // 0x84B1D0 (thiscall ECX = controller, stack: 0; ret 4)
     uint32_t memoState; // 0x55AD60 (thiscall ECX = state object, bool in AL, pure getter)
+    uint32_t recompute; // 0x82F3A0 (thiscall ECX = controller, stack: float; ret 4) for the settled recompute
     uint32_t list;      // relocated 0x150F6A4
     bool (*scope)(uint32_t tid); // thread executing the site-34 planner update
 };
@@ -68,6 +70,6 @@ void Snapshot(volatile uint32_t* out); // out[kWords]
 uint32_t __fastcall Gate(uint32_t self, uint32_t, uint32_t list);
 
 constexpr uint32_t kFallbackSlot = 0x1343318u + 4u * 16u, kFallbackOriginal = 0x7524A0u;
-constexpr uint32_t kEligible = 0x55AB90u, kClaim = 0x74F430u, kPost = 0x84B1D0u, kMemoState = 0x55AD60u;
+constexpr uint32_t kEligible = 0x55AB90u, kClaim = 0x74F430u, kPost = 0x84B1D0u, kMemoState = 0x55AD60u, kRecompute = 0x82F3A0u;
 }
 #endif

@@ -10,7 +10,7 @@ using U = uint32_t;
 volatile U words[kWords];
 
 namespace {
-using Native1 = U(__fastcall*)(U, U, U);          // 0x7524A0(obs, list); 0x84B1D0(ctrl, 0)
+using Native1 = U(__fastcall*)(U, U, U);          // 0x7524A0(obs, list); 0x84B1D0(ctrl, 0); 0x82F3A0(ctrl, 30.0f bits)
 using Getter = bool(__fastcall*)(U, U);           // 0x55AB90(unit), 0x55AD60(stateObject)
 using Claim = U(__fastcall*)(U, U, U, U);         // 0x74F430(obs, row, ctrl)
 
@@ -56,14 +56,9 @@ bool LaterTail(U list, U from) {
     return false;
 }
 
-U Run(U obs, U list) {
+// The loop body; `saved`/`original` are the caller's so the unwind handler in Run can restore the memo word.
+void Loop(U obs, U list, U controller, U memoWord, bool& saved, U& original, U& entries, U& masked, bool& pending) {
     const Claim claim = reinterpret_cast<Claim>(static_cast<uintptr_t>(target.claim));
-    const Native1 post = reinterpret_cast<Native1>(static_cast<uintptr_t>(target.post));
-    const U controller = obs + 0x78, memoWord = controller + 0x724;
-    Bump(WCalls);
-    U entries = 0, masked = 0;
-    bool saved = false, lastTailRan = false;
-    U original = 0;
     for (U i = 0; i < ReadU(list + 8); ++i) {            // [L+8] is reloaded every iteration (0x7524E9)
         const U row = ReadU(list + 0xC) + i * 12;
         if (!Claimable(row)) continue;
@@ -82,17 +77,37 @@ U Run(U obs, U list) {
             }
         }
         if (!mask && saved) { WriteU(memoWord, original); saved = false; }
-        if (mask) ++masked; else if (tails) lastTailRan = true;
+        // `pending`: a masked recompute is owed until an unmasked tailing entry runs after it. The prediction (LaterTail) can be wrong
+        // when a claim changes a later row's eligibility/state, so the owed recompute is settled by Run after the loop.
+        if (mask) { ++masked; pending = true; } else if (tails) pending = false;
         ++entries;
         claim(obs, 0, row, controller);
     }
-    if (saved) WriteU(memoWord, original);
+}
+
+U Run(U obs, U list) {
+    const Native1 post = reinterpret_cast<Native1>(static_cast<uintptr_t>(target.post));
+    const U controller = obs + 0x78, memoWord = controller + 0x724;
+    Bump(WCalls);
+    U entries = 0, masked = 0, original = 0;
+    bool saved = false, pending = false;
+    __try {
+        Loop(obs, list, controller, memoWord, saved, original, entries, masked, pending);
+    } __finally {
+        // Unwinding through a native claim must not leave the temporary memo in the controller (it would mask recomputes for 10 ticks).
+        if (saved) { WriteU(memoWord, original); saved = false; }
+    }
+    if (pending) {
+        // The predicted last tailing entry did not run (or ran masked): settle the owed recompute exactly as 0x826EE8..0x826EFB does
+        // (ECX = ctrl, 30.0f, EAX -> ctrl+0x758). The memo word holds the pre-loop value, which the native gate rejects, so the query runs
+        // with the full membership; the latch +0x75D is already set (masking requires it), so no 0x5D9A20 suffix is owed.
+        const Native1 recompute = reinterpret_cast<Native1>(static_cast<uintptr_t>(target.recompute));
+        WriteU(controller + 0x758, recompute(controller, 0, 0x41F00000u));
+        ++noFinalTail;
+    }
     Bump(WEntries, entries);
     if (entries > maxEntries) maxEntries = entries;
-    if (masked) {
-        Bump(WMasked, masked); Bump(WCallsMasked);
-        if (!lastTailRan) ++noFinalTail;
-    }
+    if (masked) { Bump(WMasked, masked); Bump(WCallsMasked); }
     if (entries >= 2 && hashedCalls < kHashCalls) {
         Fold(entries); Fold(ReadU(controller + 0x6B0) & 0xFFFFu); Fold(ReadU(controller + 0x704)); Fold(ReadU(controller + 0x708));
         Fold(ReadU(controller + 0x720)); Fold(ReadU(controller + 0x724)); Fold(ReadU(controller + 0x758));

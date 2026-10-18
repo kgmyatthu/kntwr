@@ -3403,7 +3403,7 @@ bool Activate(const World& candidate) {
     }
     {
         const ntw2_claim_once::Targets targets={V(ntw2_claim_once::kFallbackOriginal),V(ntw2_claim_once::kEligible),V(ntw2_claim_once::kClaim),V(ntw2_claim_once::kPost),
-                                                V(ntw2_claim_once::kMemoState),V(ntw2_claim_once::kWorkingList),&PsScopeThread};
+                                                V(ntw2_claim_once::kMemoState),V(ntw2_claim_once::kRecompute),V(ntw2_claim_once::kWorkingList),&PsScopeThread};
         ntw2_claim_once::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE) ? ntw2_claim_once::ModeOnce :
                                    (config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE_CENSUS) ? ntw2_claim_once::ModeCensus : ntw2_claim_once::ModeOff,targets);
     }
