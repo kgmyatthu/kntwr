@@ -6150,8 +6150,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     /* The gated sampler is generic in the runtime (entry QPC of the selected --profile-site); the launcher admits site 18
        (with the storm census) and site 34 (planner think tails, no census needed). */
     if (o->army_storm_sample_ms &&
-        (!(o->mask & NTW2_PROFILE) || (o->profile_site != 19u && o->profile_site != 35u) || (o->profile_site == 19u && !o->army_storm_census))) {
-        errsay(L"--army-storm-sample-ms requires --features profile and --profile-site 18 (with --army-storm-census) or --profile-site 34.\n");
+        (!(o->mask & NTW2_PROFILE) || (o->profile_site != 7u && o->profile_site != 19u && o->profile_site != 35u) || (o->profile_site == 19u && !o->army_storm_census))) {
+        errsay(L"--army-storm-sample-ms requires --features profile and --profile-site 18 (with --army-storm-census) , --profile-site 34 or --profile-site 6.\n");
         return -1;
     }
     if ((o->tick_pcore || o->tick_core_ab) &&

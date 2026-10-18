@@ -3703,7 +3703,7 @@ static U StartImpl(void* raw) {
         // The gated sampler threshold needs the profile sampler and a selected site: 18 (profile_site 19, with the census)
         // or 34 (profile_site 35, planner think tails; the think must run on the gated thread, i.e. without AI_ASYNC).
         ((next.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK) && (!(next.enabled_mask&NTW2_PROFILE) ||
-            (next.profile_site!=19 && next.profile_site!=35) ||
+            (next.profile_site!=7 && next.profile_site!=19 && next.profile_site!=35) ||
             (next.profile_site==19 && !(next.va_watch_flags&NTW2_ARMY_STORM_CENSUS)) ||
             (next.profile_site==35 && (next.enabled_mask&NTW2_AI_ASYNC)))) ||
         // --tick-pcore / --tick-core-ab place the routed tick body (TickGate's routed path); one placement mode at a time.
