@@ -321,6 +321,15 @@ typedef struct Run {
     BOOL have_profile;
     TickTrace *trace;
     TickLog tick_log;
+    uint32_t overlay_words[NTW2_OVERLAY_WORDS];
+    struct OverlayMod {
+        wchar_t name[64];
+        uint32_t base, size;
+        BOOL is_nv_umd;
+        BOOL splits_low_hole;
+    } overlay_mods[32];
+    unsigned overlay_mod_count;
+    BOOL have_overlay;
 } Run;
 
 static Run g_run;
@@ -960,6 +969,156 @@ typedef struct RemoteIdent {
     uint32_t ts, size_of_image, checksum, dir_rva, dir_size;
     uint16_t characteristics;
 } RemoteIdent;
+static BOOL path_starts_icase(const wchar_t *p, const wchar_t *prefix)
+{
+    size_t n = wcslen(prefix);
+    return _wcsnicmp(p, prefix, n) == 0;
+}
+
+static BOOL is_nv_umd_module(const wchar_t *name, const wchar_t *path)
+{
+    if (_wcsicmp(name, L"nvd3dum.dll") == 0 || _wcsicmp(name, L"nvgpucomp32.dll") == 0 ||
+        _wcsicmp(name, L"nvppe.dll") == 0 || _wcsicmp(name, L"NvMemMapStorage.dll") == 0 ||
+        _wcsicmp(name, L"nvldumd.dll") == 0 || _wcsicmp(name, L"nvoglv32.dll") == 0 ||
+        _wcsicmp(name, L"nvwgf2um.dll") == 0)
+        return TRUE;
+    if (wcsstr(path, L"\\DriverStore\\") || wcsstr(path, L"\\driverstore\\")) {
+        if (_wcsnicmp(name, L"nv", 2) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL is_foreign_hook_module(const Run *r, const wchar_t *name, const wchar_t *path)
+{
+    if (_wcsicmp(name, GAME_EXE_NAME) == 0 || _wcsicmp(name, RUNTIME_DLL_NAME) == 0) return FALSE;
+    if (_wcsicmp(path, r->exe_path) == 0 || _wcsicmp(path, r->dll_path) == 0) return FALSE;
+    if (r->game_dir[0] && path_starts_icase(path, r->game_dir)) return FALSE;
+    if (is_nv_umd_module(name, path)) return FALSE;
+    if (_wcsicmp(name, L"RTSSHooks.dll") == 0 || _wcsicmp(name, L"nvspcap.dll") == 0 ||
+        _wcsicmp(name, L"gameoverlayrenderer.dll") == 0 || _wcsicmp(name, L"DiscordHook.dll") == 0 ||
+        _wcsicmp(name, L"graphics-hook32.dll") == 0 || _wcsicmp(name, L"fraps32.dll") == 0)
+        return TRUE;
+    if (path_starts_icase(path, L"C:\\Windows\\SysWOW64\\") ||
+        path_starts_icase(path, L"C:\\Windows\\System32\\") ||
+        path_starts_icase(path, L"C:\\Windows\\WinSxS\\"))
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL overlay_mod_cb(const MODULEENTRY32W *me, void *c)
+{
+    Run *r = (Run *)c;
+    uint32_t base = (uint32_t)(uintptr_t)me->modBaseAddr;
+    uint32_t size = me->modBaseSize;
+    BOOL nv_umd = is_nv_umd_module(me->szModule, me->szExePath);
+    BOOL foreign_hook = !nv_umd && is_foreign_hook_module(r, me->szModule, me->szExePath);
+    ++r->overlay_words[NTW2_OVL_TOTAL_MODULES];
+    if (!nv_umd && !foreign_hook) return FALSE;
+    /* A foreign or non-ASLR hook DLL mapped below tbb.dll (0x10000000) splits the lower-256 MiB hole between Napoleon.exe/tbbmalloc.dll and tbb.dll. */
+    {
+        BOOL splits_low = (base >= 0x01580000u && base < 0x10000000u);
+        if (splits_low) ++r->overlay_words[NTW2_OVL_SPLITS_LOW_HOLE_COUNT];
+        if (nv_umd) {
+            ++r->overlay_words[NTW2_OVL_NV_UMD_MODULES];
+            r->overlay_words[NTW2_OVL_NV_UMD_IMAGE_BYTES] += size;
+        } else {
+            ++r->overlay_words[NTW2_OVL_FOREIGN_HOOK_MODULES];
+            r->overlay_words[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] += size;
+        }
+        if (_wcsicmp(me->szModule, L"RTSSHooks.dll") == 0) {
+            r->overlay_words[NTW2_OVL_RTSS_BASE] = base;
+            r->overlay_words[NTW2_OVL_RTSS_SIZE] = size;
+        } else if (_wcsicmp(me->szModule, L"nvspcap.dll") == 0) {
+            r->overlay_words[NTW2_OVL_NVSPCAP_BASE] = base;
+            r->overlay_words[NTW2_OVL_NVSPCAP_SIZE] = size;
+        } else if (_wcsicmp(me->szModule, L"gameoverlayrenderer.dll") == 0) {
+            r->overlay_words[NTW2_OVL_STEAM_OVERLAY_BASE] = base;
+            r->overlay_words[NTW2_OVL_STEAM_OVERLAY_SIZE] = size;
+        }
+        if (r->overlay_mod_count < 32u) {
+            struct OverlayMod *m = &r->overlay_mods[r->overlay_mod_count++];
+            wcsncpy_s(m->name, 64, me->szModule, _TRUNCATE);
+            m->base = base;
+            m->size = size;
+            m->is_nv_umd = nv_umd;
+            m->splits_low_hole = splits_low;
+        }
+    }
+    return FALSE;
+}
+
+typedef LONG (NTAPI *pfn_NtQueryInformationThread)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+static void scan_overlay_threads(Run *r)
+{
+    HANDLE snap;
+    THREADENTRY32 te;
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    pfn_NtQueryInformationThread qit = ntdll ? (pfn_NtQueryInformationThread)GetProcAddress(ntdll, "NtQueryInformationThread") : NULL;
+    uint32_t nv_threads = 0, nv_stack_bytes = 0;
+    if (!r->pid) return;
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    te.dwSize = sizeof te;
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID != r->pid) continue;
+            HANDLE th = OpenThread(THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+            if (!th) th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+            if (th) {
+                PVOID start_addr = NULL;
+                BOOL is_nv = FALSE;
+                if (qit && qit(th, 9 /* ThreadQuerySetWin32StartAddress */, &start_addr, sizeof start_addr, NULL) == 0 && start_addr) {
+                    uint32_t sa = (uint32_t)(uintptr_t)start_addr;
+                    unsigned i;
+                    for (i = 0; i < r->overlay_mod_count; ++i) {
+                        if (r->overlay_mods[i].is_nv_umd && sa >= r->overlay_mods[i].base && sa < r->overlay_mods[i].base + r->overlay_mods[i].size) {
+                            is_nv = TRUE;
+                            break;
+                        }
+                    }
+                }
+                if (is_nv) {
+                    uint32_t reserve_32 = 65536u; /* nvd3dum worker default 64 KiB 32-bit stack reserve */
+                    struct { LONG ExitStatus; uint32_t TebBaseAddress; uint32_t ClientId[2]; uint32_t AffinityMask; LONG Priority; LONG BasePriority; } tbi;
+                    ZeroMemory(&tbi, sizeof tbi);
+                    if (qit && qit(th, 0 /* ThreadBasicInformation */, &tbi, sizeof tbi, NULL) == 0 && tbi.TebBaseAddress) {
+                        uint32_t stack_base = 0, dealloc_stack = 0;
+                        if (remote_read(r->proc, tbi.TebBaseAddress + 4u, &stack_base, 4) &&
+                            remote_read(r->proc, tbi.TebBaseAddress + 0xE0Cu, &dealloc_stack, 4) &&
+                            stack_base > dealloc_stack && (stack_base - dealloc_stack) <= 16u * 1024u * 1024u)
+                            reserve_32 = stack_base - dealloc_stack;
+                    }
+                    ++nv_threads;
+                    /* Every WOW64 thread also reserves a 256 KiB (262,144 B) 64-bit transition stack inside <4 GiB VA. */
+                    nv_stack_bytes += reserve_32 + 262144u;
+                }
+                CloseHandle(th);
+            }
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    r->overlay_words[NTW2_OVL_NV_DRIVER_THREADS] = nv_threads;
+    r->overlay_words[NTW2_OVL_NV_DRIVER_STACK_BYTES] = nv_stack_bytes;
+}
+
+static void print_overlay_report(const Run *r);
+static void capture_overlay_report(Run *r, BOOL print)
+{
+    DWORD err = 0;
+    memset(r->overlay_words, 0, sizeof r->overlay_words);
+    r->overlay_mod_count = 0;
+    r->overlay_words[NTW2_OVL_VERSION] = 1u;
+    module_walk(r->pid, overlay_mod_cb, r, &err);
+    scan_overlay_threads(r);
+    r->overlay_words[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] =
+        r->overlay_words[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] +
+        r->overlay_words[NTW2_OVL_NV_UMD_IMAGE_BYTES] +
+        r->overlay_words[NTW2_OVL_NV_DRIVER_STACK_BYTES];
+    r->have_overlay = TRUE;
+    memcpy(r->last.overlay_words, r->overlay_words, sizeof r->overlay_words);
+    if (print) print_overlay_report(r);
+}
 
 static const wchar_t *read_remote_ident(HANDLE p, uint32_t base, BOOL want_dll, RemoteIdent *out)
 {
@@ -2070,13 +2229,40 @@ static void print_arena(const uint32_t *w)
     for (i = 0; i < NTW2_ARENA_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_arena_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
 }
-static void print_overlay(const uint32_t *w)
+static void print_overlay_words_row(const uint32_t *w)
 {
     unsigned i;
     if (!w[0]) return;
     say(L"overlay:\n");
     for (i = 0; i < NTW2_OVERLAY_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_overlay_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
+}
+static void print_overlay_report(const Run *r)
+{
+    const uint32_t *w = r->overlay_words;
+    unsigned i;
+    if (!r->have_overlay || !w[0]) return;
+    say(L"Overlay / foreign & driver VA report (report-only; unloading an overlay DLL that has hooked Present is unsafe):\n");
+    say(L"  modules=%lu foreign_hook=%lu (%.2f MiB) nv_umd=%lu (%.2f MiB) splits_low_hole=%lu nv_driver_threads=%lu (stack_va=%.2f MiB, incl. 256 KiB WOW64/thread) total_foreign_image_stack=%.2f MiB (%lu B)\n",
+        (unsigned long)w[NTW2_OVL_TOTAL_MODULES],
+        (unsigned long)w[NTW2_OVL_FOREIGN_HOOK_MODULES], (double)w[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[NTW2_OVL_NV_UMD_MODULES], (double)w[NTW2_OVL_NV_UMD_IMAGE_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[NTW2_OVL_SPLITS_LOW_HOLE_COUNT],
+        (unsigned long)w[NTW2_OVL_NV_DRIVER_THREADS], (double)w[NTW2_OVL_NV_DRIVER_STACK_BYTES] / (1024.0 * 1024.0),
+        (double)w[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES]);
+    for (i = 0; i < r->overlay_mod_count; ++i) {
+        const struct OverlayMod *m = &r->overlay_mods[i];
+        say(L"  [%ls] %ls base=0x%08lX..0x%08lX size=%lu KiB (%.2f MiB) splits_low_hole=%ls\n",
+            m->is_nv_umd ? L"nv_umd" : L"foreign_hook", m->name,
+            (unsigned long)m->base, (unsigned long)(m->base + m->size),
+            (unsigned long)(m->size / 1024u), (double)m->size / (1024.0 * 1024.0),
+            m->splits_low_hole ? L"YES" : L"no");
+    }
+}
+static void print_overlay(const uint32_t *w)
+{
+    print_overlay_words_row(w);
 }
 static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
@@ -3982,15 +4168,24 @@ static void sb_arena(Sb *b, const Run *r)
 }
 static void sb_overlay(Sb *b, const Run *r)
 {
-    const uint32_t *w = r->last.overlay_words;
+    const uint32_t *w = r->have_overlay ? r->overlay_words : r->last.overlay_words;
     unsigned i;
-    if (!r->have_status || !w[0]) {
+    if (!w[0]) {
         sb_fmt(b, "  \"overlay\": null,\n");
         return;
     }
-    sb_fmt(b, "  \"overlay\": {\"words\": {");
+    sb_fmt(b, "  \"overlay\": {\"note\": \"report-only; unloading an overlay DLL that has hooked Present is unsafe\", \"words\": {");
     for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_overlay_metrics[i], (unsigned long)w[i]);
-    sb_fmt(b, "}, \"raw\": [");
+    sb_fmt(b, "}, \"modules\": [");
+    for (i = 0; i < r->overlay_mod_count; ++i) {
+        const struct OverlayMod *m = &r->overlay_mods[i];
+        sb_fmt(b, "%s{\"name\": ", i ? ", " : "");
+        sb_wstr(b, m->name);
+        sb_fmt(b, ", \"kind\": \"%s\", \"base\": \"0x%08lX\", \"size\": %lu, \"splits_low_hole\": %s}",
+               m->is_nv_umd ? "nv_umd" : "foreign_hook", (unsigned long)m->base, (unsigned long)m->size,
+               m->splits_low_hole ? "true" : "false");
+    }
+    sb_fmt(b, "], \"raw\": [");
     for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
@@ -5493,6 +5688,7 @@ static BOOL request_stop(Run *r)
         uint64_t t;
         if (read_status(r, &s, &why)) {
             r->last = s;
+            if (r->have_overlay) memcpy(r->last.overlay_words, r->overlay_words, sizeof r->overlay_words);
             r->have_status = TRUE;
             if (s.phase == NTW2_STOPPED) break;
             if (s.phase == NTW2_FAILED) break;
@@ -5536,6 +5732,7 @@ static void observe_status(Run *r, const ntw2_status *s)
     ++r->status_samples;
     observe_crash(r, s);
     r->last = *s;
+    if (r->have_overlay) memcpy(r->last.overlay_words, r->overlay_words, sizeof r->overlay_words);
     r->have_status = TRUE;
 }
 
@@ -5634,6 +5831,7 @@ static int monitor(Run *r)
     mask_str(r->opt.mask, rq, 192);
     say(L"Runtime started (workers=%lu, requested=[%ls]). Monitoring until the game exits%ls.\n", (unsigned long)r->opt.workers, rq,
         r->opt.observe_s ? L" or the observation bound elapses" : L" (Ctrl+C stops the runtime, not the game)");
+    capture_overlay_report(r, TRUE);
     for (;;) {
         ntw2_status s;
         DWORD w;
@@ -5726,6 +5924,7 @@ static int monitor(Run *r)
                             (unsigned long)s.memory_words[NTW2_MEM_BUDGET_REFUSALS]);
                     else say(L"Runtime ACTIVE but PARTIAL: not every requested feature is active.\n");
                 }
+                capture_overlay_report(r, TRUE);
                 break;
             case NTW2_RESTORING: say(L"Runtime restoring original code ...\n"); break;
             case NTW2_FAILED: errsay(L"runtime reported FAILED.\n"); break;
