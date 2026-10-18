@@ -72,7 +72,8 @@ U Run(U obs, U list) {
         if (mode == ModeOnce && tails && LaterTail(list, i + 1)) {
             const U last = saved ? original : ReadU(memoWord);
             U tick, stateObject;
-            if (!ReadGate(controller, &tick, &stateObject) || tick < 2 || !ReadU(controller + 0x75D)) Bump(WRefusedOther);
+            const bool latched = *reinterpret_cast<const volatile unsigned char*>(static_cast<uintptr_t>(controller + 0x75D)) != 0; // byte, as 0x826EF4 tests it
+            if (!ReadGate(controller, &tick, &stateObject) || tick < 2 || !latched) Bump(WRefusedOther);
             else if (reinterpret_cast<Getter>(static_cast<uintptr_t>(target.memoState))(stateObject, 0)) Bump(WRefusedState);
             else if (last == 0 || last == tick || last + 10 < tick) { // native would recompute here
                 if (!saved) { original = last; saved = true; }
