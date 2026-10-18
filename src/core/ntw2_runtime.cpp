@@ -61,6 +61,7 @@
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "core/ntw2_alloc_census.h"
+#include "render/ntw2_arena_release.h"
 
 using U = uint32_t;
 using Init = U (__stdcall *)(void*);
@@ -254,6 +255,7 @@ void VaWatchSample() {
     U* ring=vaWords+NTW2_VA_RING_BASE+(vaWords[NTW2_VA_RING_NEXT]%NTW2_VA_RING_ENTRIES)*NTW2_VA_RING_WORDS;
     ring[0]=uptime; ring[1]=availMiB; ring[2]=largestMiB; ring[3]=phase;
     ++vaWords[NTW2_VA_RING_NEXT]; ++vaWords[NTW2_VA_SAMPLES];
+    ntw2_arena_release::OnVaWatch(availMiB);
     StateBegin();
     for(U i=0;i<NTW2_VA_WATCH_WORDS;++i) ntw2_state.va_watch_words[i]=vaWords[i];
     StateEnd();
@@ -3332,6 +3334,7 @@ void SampleCounters() {
     ntw2_brain2::DiagSnapshot(const_cast<U*>(ntw2_state.brain2_reason_words),const_cast<U*>(ntw2_state.brain2_gate_words));
     for (U i=0;i<32;++i) ntw2_state.visual_words[i]=visualWords[i];
     PublishAllocatorStatus();
+    ntw2_arena_release::Sample(const_cast<U*>(ntw2_state.arena_words));
     // The tick-only histogram follows whichever thread currently executes the tick (gate word = that thread id).
     if (config.enabled_mask&NTW2_GRID_CENSUS) ntw2_grid_census_snapshot(&ntw2_state.grid_census);
     if (config.loco_flags&NTW2_LOCO_GRID_PROBATION) ntw2_grid_probation::Snapshot(const_cast<U*>(ntw2_state.grid_probation_words));
@@ -3357,6 +3360,7 @@ bool StopModules() {
             Sleep(1);
         }
     }
+    ntw2_arena_release::Stop();
     SampleCounters();
     ntw2_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     ntw2_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
@@ -3574,6 +3578,7 @@ bool Activate(const World& candidate) {
     StateEnd();
     for (U i=0;i<slotCount;++i)
         if (!slots[i].owned && !SwapSlot(slots[i],true)) { Deactivate(); return false; }
+    if (!ntw2_arena_release::Start(imageBase,config.va_watch_flags,world.root,config.main_thread_id)) { RecordError(SlotConflict,0x1340aacu); Deactivate(); return false; }
     World now; bool asynchronous=false;
     if (!FindWorld(now,asynchronous) || !SameWorld(world,now) ||
         ((config.enabled_mask&kSimulation) && !asynchronous)) {
