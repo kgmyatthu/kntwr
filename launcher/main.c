@@ -1223,13 +1223,16 @@ static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORD
 static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
 static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
 static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_SPIRAL_LABELS };
-/* --ai-ctrl-* (src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry). */
-static void print_ai_ctrl(const uint32_t *w)
+/* --ai-ctrl-* (src/ntw2_ai_ctrl_batch.h, src/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
+   Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
+   --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
+static void print_ai_ctrl(const uint32_t *w, uint32_t ai_ctrl_flags)
 {
+    const unsigned count = (ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) ? 16u : 24u;
     unsigned i;
     if (!(w[15] & NTW2_AI_CTRL_MODE_MASK)) return;
     say(L"  ai_ctrl: flags=0x%lX latched=0x%lX", (unsigned long)(w[15] & 0xFFu), (unsigned long)(w[15] >> 8));
-    for (i = 0; i < 24; ++i)
+    for (i = 0; i < count; ++i)
         if (i != 15) say(L" %hs=%lu", k_ai_ctrl_reuse_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
@@ -2037,7 +2040,7 @@ static void print_army_solver(const uint32_t *w)
             (unsigned long)e[11], (unsigned long)e[12], (unsigned long)e[13], (unsigned long)e[14]);
     }
 }
-static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
+static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
     const uint32_t *arrays[48] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
@@ -2267,7 +2270,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags)
     if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_army_storm(s->army_storm_words);
     print_army_solver(s->army_solver_words);
-    print_ai_ctrl(s->ai_ctrl_reuse_words);
+    print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
     print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
@@ -4583,9 +4586,11 @@ static BOOL write_receipt(Run *r, int exit_code)
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_deferred\": null,\n");
     if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CTRL_MODE_MASK)) {
+        /* Words 16..23 belong to the brain levers when one is on (their own receipt objects carry them); 24..31 to claim-once. */
+        const unsigned ctrl_count = (r->cfg.ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) ? 16u : 24u;
         unsigned ctrl_index;
         sb_fmt(&b, "  \"ai_ctrl\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
-        for (ctrl_index = 0; ctrl_index < NTW2_AI_CTRL_REUSE_WORDS; ++ctrl_index)
+        for (ctrl_index = 0; ctrl_index < ctrl_count; ++ctrl_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_ctrl_reuse_metrics[ctrl_index], (unsigned long)r->last.ai_ctrl_reuse_words[ctrl_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_ctrl\": null,\n");
@@ -5556,7 +5561,7 @@ static int monitor(Run *r)
             r->observation_complete = TRUE;
             say(L"Observation bound (%lu s) reached (game pid %lu).\n",
                 (unsigned long)r->opt.observe_s, (unsigned long)r->pid);
-            if (r->have_status) { print_status(&r->last, r->opt.mask); print_counters(&r->last); print_module_words(&r->last, r->cfg.brain_flags); }
+            if (r->have_status) { print_status(&r->last, r->opt.mask); print_counters(&r->last); print_module_words(&r->last, r->cfg.brain_flags, r->cfg.ai_ctrl_flags); }
             if (!read_profile(r)) say(L"Final profile read unavailable; using the last complete periodic copy if retained.\n");
             profile_ok = write_profile(r);
             if (r->opt.exit_game_after_observe) {
