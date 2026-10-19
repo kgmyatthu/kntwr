@@ -376,13 +376,31 @@ static void RunProcess(const Case& c, const char* exePath) {
     STARTUPINFOA si = {};
     si.cb = sizeof si;
     PROCESS_INFORMATION pi = {};
-    Require(CreateProcessA(exePath, cmd, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, dir, &si, &pi) != 0, "CreateProcess(CREATE_SUSPENDED) of the stock game");
-    const uint32_t base = Peb32ImageBase(pi.hProcess);
-    std::printf("  suspended process pid %lu, image base %#010x (preferred %#010x, delta %+d)\n", pi.dwProcessId, base, c.sp.base,
-                static_cast<int>(base - c.sp.base));
     ntw2_gp_report rep;
-    ntw2_gp_memory mem = ntw2_gp_process_memory(pi.hProcess);
-    int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+    uint32_t base = 0;
+    int rc = -1;
+    // About a quarter of fresh processes have an early private allocation inside the 40 KiB range above the image (observed
+    // at 0x2420000 for base 0xF30000); the applier refuses those with E_ALLOC before writing, and the launcher retries with a
+    // new process.  Model exactly that.
+    int attempts = 0;
+    for (; attempts < 16; ++attempts) {
+        pi = {};
+        Require(CreateProcessA(exePath, cmd, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, dir, &si, &pi) != 0, "CreateProcess(CREATE_SUSPENDED) of the stock game");
+        base = Peb32ImageBase(pi.hProcess);
+        ntw2_gp_memory mem = ntw2_gp_process_memory(pi.hProcess);
+        rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        if (rc == NTW2_GP_E_ALLOC && rep.phase == 0) {
+            std::printf("  attempt %d: range above the image is busy in this process (%s); new process\n", attempts + 1, rep.error);
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            continue;
+        }
+        break;
+    }
+    std::printf("  suspended process pid %lu, image base %#010x (preferred %#010x, delta %+d), %d attempt(s)\n", pi.dwProcessId, base, c.sp.base,
+                static_cast<int>(base - c.sp.base), attempts + 1);
     if (rc != 0) std::fprintf(stderr, "  process apply failed: status %u phase %u: %s (run %u va %#x)\n", rep.status, rep.phase, rep.error, rep.fail_run, rep.fail_va);
     if (rc != 0) TerminateProcess(pi.hProcess, 1);
     Require(rc == 0, "ntw2_gp_apply on the suspended real process");
@@ -412,6 +430,60 @@ static void RunProcess(const Case& c, const char* exePath) {
 }
 
 // ---------------------------------------------------------------------------------------------------- driver
+// ---------------------------------------------------------------------------------------------------- rollback of a live module
+// Fault-injecting memory backend over the current process: fails or silently corrupts the Nth write.
+struct FaultMem {
+    ntw2_gp_memory inner;
+    int mode;      // 0 pass, 1 fail only write N, 2 fail every write from N on, 3 corrupt write N (reports success)
+    uint32_t n;
+    uint32_t writes;
+};
+static int FmRead(void* c, uint32_t va, void* d, uint32_t n) { auto f = static_cast<FaultMem*>(c); return f->inner.read(f->inner.ctx, va, d, n); }
+static int FmWrite(void* c, uint32_t va, const void* s, uint32_t n) {
+    auto f = static_cast<FaultMem*>(c);
+    const uint32_t w = ++f->writes;
+    if ((f->mode == 1 && w == f->n) || (f->mode == 2 && w >= f->n)) return 1;
+    if (f->mode == 3 && w == f->n) {
+        Bytes bad(static_cast<const uint8_t*>(s), static_cast<const uint8_t*>(s) + n);
+        bad[0] ^= 0xFF;
+        return f->inner.write(f->inner.ctx, va, bad.data(), n);
+    }
+    return f->inner.write(f->inner.ctx, va, s, n);
+}
+static int FmRemalloc(void* c, uint32_t va, uint32_t o, uint32_t n) { auto f = static_cast<FaultMem*>(c); return f->inner.remalloc(f->inner.ctx, va, o, n); }
+static int FmProtect(void* c, uint32_t va, uint32_t s, uint32_t p) { auto f = static_cast<FaultMem*>(c); return f->inner.protect(f->inner.ctx, va, s, p); }
+
+static void RunRollback(const Case& c, uint32_t base) {
+    struct Inj { const char* name; int mode; uint32_t n; bool expectRestored; };
+    const Inj cases[] = {{"second write fails", 1, 2, true}, {"first write fails", 1, 1, true}, {"first write silently corrupted (read-back)", 3, 1, true},
+                         {"last write silently corrupted (read-back)", 3, 2, true}, {"write fails and so does the restore", 2, 2, false}};
+    for (const Inj& inj : cases) {
+        Mapping m;
+        Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (rollback)");
+        Bytes before(m.base, m.base + c.sp.soi);
+        FaultMem fm = {ntw2_gp_process_memory(GetCurrentProcess()), inj.mode, inj.n, 0};
+        ntw2_gp_memory mem = {&fm, FmRead, FmWrite, FmRemalloc, FmProtect};
+        ntw2_gp_report rep;
+        int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        RequireF(rc != 0, "%s: apply must fail", inj.name);
+        std::printf("  rollback: %s -> status %u, rollback %u: %s\n", inj.name, rep.status, rep.rollback, rep.error);
+        if (inj.expectRestored) {
+            Require(rep.rollback == NTW2_GP_ROLLBACK_RESTORED, "failed write/verify of a live module is rolled back");
+            Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "rollback left the stock image byte-identical");
+            // The restored module can be patched again, and then equals the loader image of the patched file.
+            ntw2_gp_report again;
+            ntw2_gp_memory real = ntw2_gp_process_memory(GetCurrentProcess());
+            Require(ntw2_gp_apply(&real, base, c.sp.base, c.blob, c.blobSize, &again) == 0, "re-apply after rollback");
+            Bytes want = LoaderImage(c.patched, base, "patched");
+            Bytes stockImage = LoaderImage(c.stock, base, "stock");
+            Require(CompareImage("after rollback", m.base, want, stockImage, c.pp, c.sp, false) == 0, "re-applied image equals the patched loader image");
+        } else {
+            Require(rep.rollback == NTW2_GP_ROLLBACK_FAILED, "a failed restore is reported as ROLLBACK_FAILED");
+        }
+        Unmap(&m);
+    }
+}
+
 static const char* Arg(int argc, char** argv, const char* key) {
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], key)) return argv[i + 1];
@@ -470,16 +542,19 @@ int main(int argc, char** argv) {
         Case mss = MakeCase("mss32", mblob, msize, mstock, mpatched);
         uint32_t mused = 0;
         bool mseen = false;
-        for (uint32_t base : {mss.sp.base, 0x20000000u, 0x4C310000u}) {
+        uint32_t mssBase = 0;
+        for (uint32_t base : {mss.sp.base, 0x20000000u, 0x4C310000u, 0x3A720000u}) {
             Mapping probe;
             if (!MapStock(mss.stock, mss.sp, mss.pp, base, &probe)) { std::printf("  base %#010x not free in this process; skipped\n", base); continue; }
             Unmap(&probe);
             RunPrivate(mss, base, &mseen);
             ++mused;
+            if (base != mss.sp.base && !mssBase) mssBase = base;
         }
-        Require(mused >= 2, "mss32 verified at two bases");
-        RunNegatives(mss, 0x20000000u);
-        RunDoubleApply(mss, 0x20000000u);
+        Require(mused >= 2 && mssBase != 0, "mss32 verified at two bases (one relocated)");
+        RunNegatives(mss, mssBase);
+        RunDoubleApply(mss, mssBase);
+        RunRollback(mss, mssBase);
     }
 
     for (int i = 1; i < argc; ++i)

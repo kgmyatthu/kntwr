@@ -165,6 +165,12 @@ typedef struct FileId {
     DWORD volume, hi, lo;
 } FileId;
 
+/* On-disk state of mss32.dll.  Only Napoleon.exe is required to be a supported image: the gameplay patch does not depend on the
+   audio DLL, so an unrecognised or missing mss32.dll is reported loudly (console + receipt) and the in-memory audio patch is
+   skipped; it is never silently labelled patched. */
+enum { MSS_MISSING = 0, MSS_STOCK, MSS_PATCHED, MSS_UNKNOWN };
+static const char *const k_mss_state_name[4] = { "missing", "stock", "patched", "unknown" };
+
 typedef struct Options {
     wchar_t game[MAXP];
     wchar_t replay[MAXP];
@@ -299,7 +305,8 @@ typedef struct Run {
     char dll_sha[65];
     uint64_t exe_size, dll_size;
     FileId exe_id;
-    BOOL exe_is_stock, gp_applied, gp_live_verified, mss32_is_stock, mss32_applied;
+    BOOL exe_is_stock, gp_applied, gp_live_verified, mss32_applied;
+    int mss32_state;
     char mss32_sha[65];
     uint64_t mss32_size;
     uint32_t mss32_base;
@@ -856,16 +863,26 @@ static BOOL validate_game(Run *r)
         wchar_t mpath[MAXP];
         HANDLE mf;
         join_path(mpath, r->game_dir, L"mss32.dll");
+        r->mss32_state = MSS_MISSING;
         mf = CreateFileW(mpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (mf != INVALID_HANDLE_VALUE) {
-            if (sha256_handle(mf, r->mss32_sha, &r->mss32_size, &we, &ne)) {
-                if (_stricmp(r->mss32_sha, NTW2_STOCK_MSS32_SHA256) == 0) {
-                    r->mss32_is_stock = TRUE;
-                    say(L"mss32.dll: stock (audio DSP patch applied in memory; %I64u bytes, SHA-256 match).\n",
-                        (unsigned long long)r->mss32_size);
-                } else if (_stricmp(r->mss32_sha, NTW2_MSS32_SHA256) == 0) {
-                    say(L"mss32.dll: already patched on disk (%I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
-                }
+        if (mf == INVALID_HANDLE_VALUE) {
+            say(L"mss32.dll: not readable at \"%ls\" (Win32 %lu); the in-memory audio patch will be skipped.\n", mpath, (unsigned long)GetLastError());
+        } else {
+            r->mss32_state = MSS_UNKNOWN;
+            if (!sha256_handle(mf, r->mss32_sha, &r->mss32_size, &we, &ne)) {
+                r->mss32_sha[0] = 0;
+                say(L"mss32.dll: hashing failed; treated as unknown, the in-memory audio patch will be skipped.\n");
+            } else if (_stricmp(r->mss32_sha, NTW2_STOCK_MSS32_SHA256) == 0) {
+                r->mss32_state = MSS_STOCK;
+                say(L"mss32.dll: stock (audio DSP patch applied in memory; %I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
+            } else if (_stricmp(r->mss32_sha, NTW2_MSS32_SHA256) == 0) {
+                r->mss32_state = MSS_PATCHED;
+                say(L"mss32.dll: already patched on disk (%I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
+            } else {
+                wchar_t got[65];
+                MultiByteToWideChar(CP_ACP, 0, r->mss32_sha, -1, got, 65);
+                say(L"mss32.dll: UNKNOWN (%I64u bytes, sha256 %ls; neither stock nor the pinned patched build). The in-memory audio patch is skipped.\n",
+                    (unsigned long long)r->mss32_size, got);
             }
             CloseHandle(mf);
         }
@@ -4807,7 +4824,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                g->proof_section_bytes[0], g->proof_section_bytes[1], g->proof_section_bytes[2], g->proof_section_bytes[3],
                g->proof_section_bytes[4], g->proof_section_bytes[5], g->proof_section_bytes[6], g->proof_section_bytes[7],
                r->gp_live_verified ? "true" : "false",
-               r->mss32_is_stock ? "stock" : (r->mss32_sha[0] ? "patched" : "other"), r->mss32_applied ? "true" : "false",
+               k_mss_state_name[r->mss32_state], r->mss32_applied ? "true" : "false",
                (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied);
     }
     sb_put(&b, "  \"runtime_dll\": ", 17);
@@ -5529,34 +5546,88 @@ static int finish(Run *r, int code, const wchar_t *outcome)
 }
 
 /* ------------------------------------------------------------------------------------------------ install & monitor */
-/* Freeze every thread of pid so an unaligned rel32 write into an already-loaded DLL (mss32.dll RVA 0x314EF) cannot tear on
-   another thread (e.g. the Miles mixer thread).  Returns the number of suspended handles stored in out[]. */
-static unsigned suspend_pid_threads(DWORD pid, HANDLE *out, unsigned cap)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    THREADENTRY32 te;
-    unsigned n = 0;
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    te.dwSize = sizeof te;
-    if (Thread32First(snap, &te)) {
-        do {
-            if (te.th32OwnerProcessID == pid && n < cap) {
-                HANDLE th = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-                if (th) {
-                    if (SuspendThread(th) != (DWORD)-1) out[n++] = th;
-                    else CloseHandle(th);
-                }
-            }
-        } while (Thread32Next(snap, &te));
-    }
-    CloseHandle(snap);
-    return n;
-}
+/* Freeze EVERY thread of pid so a non-atomic write into an already-loaded DLL (mss32.dll's rel32 at RVA 0x314EF straddles a dword
+   boundary) cannot tear on another thread (e.g. the Miles mixer).  Threads can be created while enumerating, so snapshots repeat
+   until a whole pass finds no thread that is not already frozen and had no failure.  Any unrecoverable failure unwinds every
+   suspension taken so far and returns FALSE: the caller must then not write. */
+typedef struct ThreadFreeze {
+    HANDLE *h;
+    DWORD *tid;
+    unsigned n, cap;
+} ThreadFreeze;
 
-static void resume_pid_threads(HANDLE *ths, unsigned n)
+static BOOL freeze_has(const ThreadFreeze *f, DWORD tid)
 {
     unsigned i;
-    for (i = 0; i < n; ++i) { ResumeThread(ths[i]); CloseHandle(ths[i]); }
+    for (i = 0; i < f->n; ++i) if (f->tid[i] == tid) return TRUE;
+    return FALSE;
+}
+
+static void thaw_threads(ThreadFreeze *f)
+{
+    unsigned i;
+    for (i = 0; i < f->n; ++i) { ResumeThread(f->h[i]); CloseHandle(f->h[i]); }
+    if (f->h) HeapFree(GetProcessHeap(), 0, f->h);
+    if (f->tid) HeapFree(GetProcessHeap(), 0, f->tid);
+    memset(f, 0, sizeof *f);
+}
+
+static BOOL freeze_threads(DWORD pid, ThreadFreeze *f, wchar_t *why, size_t why_cap)
+{
+    enum { kMaxPasses = 64 };
+    int pass;
+    memset(f, 0, sizeof *f);
+    why[0] = 0;
+    for (pass = 0; pass < kMaxPasses; ++pass) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te;
+        BOOL progress = FALSE, failed = FALSE;
+        DWORD last_err = 0;
+        if (snap == INVALID_HANDLE_VALUE) {
+            _snwprintf_s(why, why_cap, _TRUNCATE, L"thread snapshot failed (Win32 %lu)", (unsigned long)GetLastError());
+            thaw_threads(f);
+            return FALSE;
+        }
+        te.dwSize = sizeof te;
+        if (Thread32First(snap, &te)) {
+            do {
+                HANDLE th;
+                if (te.th32OwnerProcessID != pid || freeze_has(f, te.th32ThreadID)) continue;
+                th = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                if (!th) { failed = TRUE; last_err = GetLastError(); continue; }   /* may have exited since the snapshot: next pass decides */
+                if (SuspendThread(th) == (DWORD)-1) { failed = TRUE; last_err = GetLastError(); CloseHandle(th); continue; }
+                if (f->n == f->cap) {
+                    unsigned cap = f->cap ? f->cap * 2u : 64u;
+                    HANDLE *nh = f->h ? (HANDLE *)HeapReAlloc(GetProcessHeap(), 0, f->h, cap * sizeof *nh) : (HANDLE *)HeapAlloc(GetProcessHeap(), 0, cap * sizeof *nh);
+                    DWORD *nt;
+                    if (nh) f->h = nh;
+                    nt = nh ? (f->tid ? (DWORD *)HeapReAlloc(GetProcessHeap(), 0, f->tid, cap * sizeof *nt) : (DWORD *)HeapAlloc(GetProcessHeap(), 0, cap * sizeof *nt)) : NULL;
+                    if (nt) f->tid = nt;
+                    if (!nh || !nt) {
+                        ResumeThread(th); CloseHandle(th); CloseHandle(snap);
+                        _snwprintf_s(why, why_cap, _TRUNCATE, L"out of memory while tracking suspended threads");
+                        thaw_threads(f);
+                        return FALSE;
+                    }
+                    f->cap = cap;
+                }
+                f->h[f->n] = th;
+                f->tid[f->n] = te.th32ThreadID;
+                f->n++;
+                progress = TRUE;
+            } while (Thread32Next(snap, &te));
+        }
+        CloseHandle(snap);
+        if (!progress && !failed) return TRUE;     /* a clean pass found nothing new: every thread is stopped */
+        if (failed && !progress) {
+            _snwprintf_s(why, why_cap, _TRUNCATE, L"a thread could not be opened/suspended (Win32 %lu)", (unsigned long)last_err);
+            if (pass >= 8) { thaw_threads(f); return FALSE; }   /* transient (thread exiting) vs persistent */
+        }
+        Sleep(1);
+    }
+    _snwprintf_s(why, why_cap, _TRUNCATE, L"the process kept creating threads (%d passes)", (int)kMaxPasses);
+    thaw_threads(f);
+    return FALSE;
 }
 
 static const wchar_t *rc_text(int rc)
@@ -5643,28 +5714,56 @@ static int install_runtime(Run *r)
             return EXIT_INSTALL;
         }
     }
-    if (r->mss32_is_stock) {
+    if (r->mss32_state == MSS_STOCK) {
         NameFind mf;
+        uint32_t msz = 0, tries;
+        const uint8_t *mb = ntw2_gp_mss32_blob(&msz);
+        ntw2_gp_memory mm = ntw2_gp_process_memory(r->proc);
+        ThreadFreeze fz;
+        wchar_t why_freeze[256];
+        unsigned fz_count;
+        int mrc;
         mf.name = L"mss32.dll";
         mf.base = mf.size = 0;
-        if (module_walk(r->pid, name_cb, &mf, &err) > 0 && mf.base) {
-            uint32_t msz = 0;
-            const uint8_t *mb = ntw2_gp_mss32_blob(&msz);
-            ntw2_gp_memory mm = ntw2_gp_process_memory(r->proc);
-            HANDLE ths[256];
-            unsigned nth = suspend_pid_threads(r->pid, ths, 256);
-            int mrc;
-            r->mss32_base = mf.base;
-            mrc = ntw2_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
-            resume_pid_threads(ths, nth);
-            if (mrc != 0) {
-                errsay(L"applying the in-memory mss32.dll patch failed: %hs.\n", r->mss32_rep.error);
-                return EXIT_INSTALL;
-            }
-            r->mss32_applied = TRUE;
-            say(L"  mss32.dll patch applied in memory at 0x%08lX (%lu runs, %lu bytes, %u threads frozen).\n",
-                (unsigned long)mf.base, (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied, nth);
+        /* mss32.dll is a static import, mapped before the entry point; the loader has settled, so a bounded retry covers a
+           transient enumeration failure.  Never a silent skip. */
+        for (tries = 0; tries < 50 && !mf.base; ++tries) {
+            if (tries) Sleep(100);
+            mf.base = mf.size = 0;
+            if (module_walk(r->pid, name_cb, &mf, &err) <= 0) mf.base = 0;
         }
+        if (!mf.base) {
+            errsay(L"mss32.dll is stock on disk but was not found among the game's modules after %u tries (Win32 %lu); the in-memory audio patch "
+                   L"cannot be applied, so the runtime was NOT installed.\n", tries, (unsigned long)err);
+            return EXIT_INSTALL;
+        }
+        r->mss32_base = mf.base;
+        if (!freeze_threads(r->pid, &fz, why_freeze, 256)) {
+            errsay(L"cannot freeze every game thread (%ls); refusing the mss32.dll write, the runtime was NOT installed.\n", why_freeze);
+            return EXIT_INSTALL;
+        }
+        fz_count = fz.n;
+        mrc = ntw2_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
+        if (mrc != 0 && r->mss32_rep.rollback == NTW2_GP_ROLLBACK_FAILED) {
+            /* The patch is partly written and could not be undone: the launcher-owned game must not run. */
+            errsay(L"applying the in-memory mss32.dll patch failed and could not be rolled back: %hs. Terminating the launched game (pid %lu).\n",
+                   r->mss32_rep.error, (unsigned long)r->pid);
+            TerminateProcess(r->proc, 1);
+            WaitForSingleObject(r->proc, 5000);
+            r->game_exited = TRUE;
+            r->game_exit = 1;
+            thaw_threads(&fz);
+            return EXIT_INSTALL;
+        }
+        thaw_threads(&fz);   /* only after success, nothing-written, or a verified rollback */
+        if (mrc != 0) {
+            errsay(L"applying the in-memory mss32.dll patch failed (%ls): %hs.\n",
+                   r->mss32_rep.rollback == NTW2_GP_ROLLBACK_RESTORED ? L"original bytes restored and verified" : L"nothing was written", r->mss32_rep.error);
+            return EXIT_INSTALL;
+        }
+        r->mss32_applied = TRUE;
+        say(L"  mss32.dll patch applied in memory at 0x%08lX (%lu runs, %lu bytes, %u threads frozen).\n",
+            (unsigned long)mf.base, (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied, fz_count);
     }
 
     if (!resolve_remote_loadlibrary(r, &ll_addr)) return EXIT_INSTALL;
@@ -6166,7 +6265,7 @@ static BOOL launch_game(Run *r)
         say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     memset(&pi, 0, sizeof pi);
-    for (attempt = 1; attempt <= (r->exe_is_stock ? 8 : 1); ++attempt) {
+    for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
         DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
         memset(&pi, 0, sizeof pi);
         if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, flags, NULL, r->game_dir, &si, &pi)) {
@@ -6187,7 +6286,8 @@ static BOOL launch_game(Run *r)
                 return FALSE;
             }
             grc = ntw2_gp_apply(&pm, base, 0x400000u, blob, bsz, &r->gp_rep);
-            if (grc == NTW2_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 8) {
+            if (grc == NTW2_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 16) {
+                say(L"  attempt %d: the range above the game image is busy in this process (early private allocation); starting a new process.\n", attempt);
                 TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, 2000);
                 CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
                 continue;

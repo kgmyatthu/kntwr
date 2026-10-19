@@ -309,6 +309,7 @@ static int gp_has_fix(const gp_fix *f, uint32_t rva)
 typedef struct gp_write {
     uint32_t rva, len;
     uint8_t *data;
+    uint8_t *orig; /* live bytes before any write: the rollback image */
 } gp_write;
 
 static int gp_run_rva(const gp_hdr *h, gp_run *r)
@@ -344,6 +345,7 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
     gp_hdr sh, ph;
     uint8_t hdr_live[GP_HDR_READ], hdr_new[GP_HDR_READ];
     uint8_t *rbuf = NULL, *pbuf = NULL, *secbuf = NULL, *imgbuf = NULL;
+    int rollback_armed = 0;
     gp_fix stock_fix = {0}, patched_fix = {0};
     gp_write *plan = NULL;
     uint32_t plan_n = 0, i, delta = base - preferred, app_total = 0, app_runs = 0;
@@ -476,6 +478,9 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
         plan[plan_n].data = buf;
         plan_n++;
         if ((rc = gp_mem_read(mem, base + ustart, buf, ulen, rep, "a patch site")) != 0) goto done;
+        plan[plan_n - 1].orig = (uint8_t *)malloc(ulen);
+        if (!plan[plan_n - 1].orig) { rc = gp_error(rep, NTW2_GP_E_NOMEM, "out of memory (rollback image)"); goto done; }
+        memcpy(plan[plan_n - 1].orig, buf, ulen);
         for (k = gp_lower_bound(&stock_fix, r->rva >= 3u ? r->rva - 3u : 0u); k < stock_fix.n && stock_fix.v[k] < r->rva + r->len; ++k) {
             uint8_t *f = buf + (stock_fix.v[k] - ustart);
             wr32u(f, rd32u(f) - delta);
@@ -598,6 +603,9 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
             }
         }
     }
+    /* Without a remapped image (e.g. mss32.dll) the target is a live module: from here every failure restores the original
+       bytes (see done:).  The exe path replaces the whole image and cannot roll back: the caller discards that process. */
+    rollback_armed = (ph.soi == sh.soi);
     /* Write from high RVA to low RVA: in an already-loaded DLL (mss32.dll), high-RVA stub caves are populated before the
        low-RVA call sites that branch into them. */
     for (i = plan_n; i > 0; --i) {
@@ -642,10 +650,30 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
     }
     rep->status = NTW2_GP_OK;
     rc = 0;
+    rollback_armed = 0;
 
 done:
+    if (rc != 0 && rollback_armed) {
+        /* Restore low RVA first (call sites before the caves they branch into), then verify every window byte for byte. */
+        int ok = 1;
+        uint8_t *chk = NULL;
+        uint32_t maxw = 0;
+        for (i = 0; i < plan_n; ++i) if (plan[i].len > maxw) maxw = plan[i].len;
+        chk = (uint8_t *)malloc(maxw ? maxw : 1u);
+        for (i = 0; i < plan_n; ++i)
+            if (mem->write(mem->ctx, base + plan[i].rva, plan[i].orig, plan[i].len) != 0) ok = 0;
+        for (i = 0; ok && i < plan_n; ++i)
+            if (!chk || mem->read(mem->ctx, base + plan[i].rva, chk, plan[i].len) != 0 || memcmp(chk, plan[i].orig, plan[i].len) != 0) ok = 0;
+        free(chk);
+        rep->rollback = ok ? NTW2_GP_ROLLBACK_RESTORED : NTW2_GP_ROLLBACK_FAILED;
+        {
+            const size_t used = strlen(rep->error);
+            snprintf(rep->error + used, sizeof rep->error - used, "%s",
+                     ok ? " [rolled back: original bytes restored and verified]" : " [ROLLBACK FAILED: target is partially patched]");
+        }
+    }
     if (plan) {
-        for (i = 0; i < plan_n; ++i) free(plan[i].data);
+        for (i = 0; i < plan_n; ++i) { free(plan[i].data); free(plan[i].orig); }
         free(plan);
     }
     free(secbuf);
