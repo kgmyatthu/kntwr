@@ -45,7 +45,7 @@ extern "C" {
 #define NTW2_VA_FLOOR_MASK (0x1Fu << NTW2_VA_FLOOR_SHIFT) /* bits 22..26: total free VA floor in 32 MiB units (launcher --va-floor-mib 64..1024; 0 = default 256 MiB, encoded 2..16 => 64..512 MiB, 17 = 1024 MiB) */
 #define NTW2_VA_HOLE_SHIFT 27u
 #define NTW2_VA_HOLE_MASK (0x1Fu << NTW2_VA_HOLE_SHIFT) /* bits 27..31: largest free hole floor in 32 MiB units (launcher --va-hole-mib 32..512; 0 = default 128 MiB, encoded 1..16 => 32..512 MiB) */
-#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_MOUNTED_OFFICER | NTW2_MOUNTED_OFFICER_WIDEN | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_MOUNTED_OFFICER | NTW2_MOUNTED_OFFICER_WIDEN | NTW2_ENGAGE_CENSUS | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)
 #define NTW2_ARMY_SOLVER_MEMO 0x10u /* ntw2_config::va_watch_flags bit (launcher --army-solver-memo): bit-exact memoised flag=1 formation slot solver (src/army/native_army_solver.h). Inside a routed tick on the tick owner the R1/R2 assignment-command slots 0x1331E74 / 0x1332110 / 0x1325474 run a dedicated SOLVER clone chain whose 0x502770 calls (18F12AA and the 18F0D00 trampoline path) enter ntw_solver::Solve instead of the native pair-swap solver; any out-of-contract input falls back to the native solver. Entries, EAX and the allocator call sequence are bit-identical to native. Requires a routed tick (a kManagerRouted feature such as NTW2_PROFILE) and main_thread_id; exclusive with NTW2_ARMY_SOLVER_SHADOW; compatible with NTW2_ARMY_STORM_CENSUS. */
 #define NTW2_ARMY_SOLVER_SHADOW 0x20u /* ntw2_config::va_watch_flags bit (launcher --army-solver-shadow): same chain, but the NATIVE 0x502770 stays authoritative; the kernel re-solves a pre-call copy and the result (entries bytes, EAX) is compared and counted; native/kernel inclusive times are recorded per solve. Same requirements as NTW2_ARMY_SOLVER_MEMO; exclusive with it. */
 #define NTW2_ALLOC_CENSUS 0x40u /* ntw2_config::va_watch_flags bit (launcher --alloc-census): opt-in process-heap allocation callsite census (alloc_census_words, src/core/ntw2_alloc_census.*). */
@@ -54,6 +54,7 @@ extern "C" {
 #define NTW2_MOUNTED_OFFICER 0x20000u /* ntw2_config::va_watch_flags bit (launcher --mounted-officer, opt-in GAMEPLAY feature, NEVER implied by --features all): a unit that has no mounts of its own ([unit+0x34]==0) but whose mount references were resolved from its unit_stats_land row (mount_model [unit+0x88], mount_entity [unit+0x8C], mount_animations_table &unit+0x90) gets exactly one mount agent for its officer (men[0]). Installed by redirecting the single call 0x531340 -> unit constructor 0x51B7D0 to CLONE_UNIT_CTOR (the constructor with a gate inserted at its mount-loop test 0x51C22E), at monitor start (before any battle loads) and restored at stop. Words: mounted_officer_words, src/army/ntw2_mounted_officer.h. */
 #define NTW2_MOUNTED_OFFICER_WIDEN 0x40000u /* ntw2_config::va_watch_flags bit (launcher --mounted-officer-widen): the officer's mount also raises the unit radius [unit+0x2EC] (MAXSS with [mount+0x58]) exactly like a stock cavalry mount, widening the unit's spacing; without it the infantry spacing is kept. Requires NTW2_MOUNTED_OFFICER. */
 #define NTW2_ALLOC_FIX 0x200000u /* ntw2_config::va_watch_flags bit (launcher --alloc-fix; implied by --features all unless --no-alloc-fix): pathfinder +0x17C waypoint subnode leak reclamation (alloc_census_words mode 2 alone, mode 3 with NTW2_ALLOC_CENSUS; 0 B table and 0 Provider vtable hooks when NTW2_ALLOC_CENSUS is clear). */
+#define NTW2_ENGAGE_CENSUS 0x80000u /* ntw2_config::va_watch_flags bit (launcher --engage-census, opt-in READ-ONLY diagnostic, NEVER implied by --features all): after every routed native tick the tick owner reads the AI units' positions, calls the native is_moving/is_firing/missile-range predicates (0x55C320/0x55AFE0/0x5646A0) and records how deep AI infantry walk into their own missile range before they halt or start firing (engage_census_words, src/ai/ntw2_engage_census.h). Requires a routed tick (NTW2_PROFILE or a simulation feature). No engine write. */
 #define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
@@ -420,6 +421,7 @@ enum ntw2_overlay_word {
 #define NTW2_MOUNTED_OFFICER_LABELS \
     "version", "flags", "units_seen", "units_eligible", "officer_first", "skipped_has_mounts", "skipped_no_refs", "skipped_no_officer", \
     "mounts_created", "attach_failures", "alloc_failures", "serial_last", "last_rider_vtable", "skipped_has_guns", "faults", "patch_installed"
+#define NTW2_ENGAGE_CENSUS_WORDS 2176u /* engage_census_words (src/ai/ntw2_engage_census.h): counters, histograms and 20-word event rows */
 #define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ai/ntw2_planner_search.h row layout, version 1 */
 #define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ai/ntw2_record_test.h row layout, version 1 */
 #define NTW2_AI_PREPASS_WORDS (NTW2_AI_POLY_WORDS + NTW2_AI_RECORD_TEST_WORDS) /* ai_prepass_words */
@@ -1103,6 +1105,9 @@ typedef struct ntw2_status {
        unit-constructor mount gate (16 words; the constructors run while loading, so the row is published by the monitor in every phase). Reset at start,
        retained after stop; all zero without NTW2_MOUNTED_OFFICER. */
     uint32_t mounted_officer_words[NTW2_MOUNTED_OFFICER_WORDS];
+    /* --engage-census (appended after mounted_officer_words; owner module src/ai/ntw2_engage_census.*): header counters 0..31, histograms 32..247, rows 256..2175
+       (layout in ntw2_engage_census.h). Reset at start, retained after stop; all zero without NTW2_ENGAGE_CENSUS. */
+    uint32_t engage_census_words[NTW2_ENGAGE_CENSUS_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1535,7 +1540,7 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
-              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_MOUNTED_OFFICER | NTW2_MOUNTED_OFFICER_WIDEN | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)),
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_MOUNTED_OFFICER | NTW2_MOUNTED_OFFICER_WIDEN | NTW2_ENGAGE_CENSUS | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)),
               "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");
@@ -1563,7 +1568,9 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,alloc_census_words) + NTW2_ALLOC_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,arena_words) &&
               offsetof(ntw2_status,arena_words) + NTW2_ARENA_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,overlay_words) &&
               offsetof(ntw2_status,overlay_words) + NTW2_OVERLAY_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,mounted_officer_words) &&
-              offsetof(ntw2_status,mounted_officer_words) + NTW2_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
+              offsetof(ntw2_status,mounted_officer_words) + NTW2_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,engage_census_words) &&
+              offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS == 2176u &&
+              NTW2_ENGAGE_CENSUS == 0x80000u &&
               NTW2_ALLOC_CENSUS_WORDS == 1056u && NTW2_ARENA_WORDS == 32u && NTW2_OVERLAY_WORDS == 16u && NTW2_MOUNTED_OFFICER_WORDS == 16u &&
               NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u && NTW2_ALLOC_FIX == 0x200000u &&
               NTW2_MOUNTED_OFFICER == 0x20000u && NTW2_MOUNTED_OFFICER_WIDEN == 0x40000u &&

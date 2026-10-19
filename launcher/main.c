@@ -219,6 +219,7 @@ typedef struct Options {
     BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
     BOOL mounted_officer;    /* --mounted-officer: opt-in gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); never implied by --features all */
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (NTW2_MOUNTED_OFFICER_WIDEN) */
+    BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (NTW2_ENGAGE_CENSUS); never implied by --features all */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -1445,6 +1446,53 @@ static const char *const k_alloc_census_metrics[32] = { NTW2_ALLOC_CENSUS_LABELS
 static const char *const k_arena_metrics[NTW2_ARENA_WORDS] = { NTW2_ARENA_LABELS };
 static const char *const k_overlay_metrics[NTW2_OVERLAY_WORDS] = { NTW2_OVERLAY_LABELS };
 static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] = { NTW2_MOUNTED_OFFICER_LABELS };
+/* --engage-census (src/ai/ntw2_engage_census.h): header words 0..27, histograms 32..247, 20-word rows from 256. */
+#define EC_HDR 28u
+#define EC_HALT_RATIO 32u
+#define EC_HALT_METRES 54u
+#define EC_FIRE_RATIO 76u
+#define EC_MOVING_ALL 98u
+#define EC_MOVING_B0 128u
+#define EC_MOVING_B1 158u
+#define EC_MOVING_B4 188u
+#define EC_MOVING_OTHER 218u
+#define EC_ROW_WORDS 20u
+#define EC_FIRST_ROWS 256u
+#define EC_DEEP_ROWS 896u
+#define EC_RING_ROWS 1536u
+#define EC_ROWS 32u
+static const char *const k_engage_census_metrics[EC_HDR] = {
+    "version", "flags", "ticks", "ai_units", "halts", "fire_starts", "faults", "bad_member", "enemyless", "table_full", "native_calls", "cost_us_total", "cost_us_max",
+    "last_model_tick", "ai_sides_last", "ai_units_last", "enemy_units_last", "dm_computed", "moving_in_range", "inactive_units", "no_missile", "bad_graph", "table_used",
+    "first_count", "deep_count", "events_total", "model_changes", "image_delta" };
+/* Percentile (0..1) of a histogram of `bins` equal-width bins plus one overflow bin; the bin centre, or bins*step when it lands in the overflow. */
+static double ec_percentile(const uint32_t *h, unsigned bins, double step, double pct, unsigned long *total_out)
+{
+    unsigned long total = 0, run = 0;
+    unsigned i;
+    for (i = 0; i <= bins; ++i) total += h[i];
+    if (total_out) *total_out = total;
+    if (!total) return -1.0;
+    for (i = 0; i <= bins; ++i) {
+        run += h[i];
+        if ((double)run >= pct * (double)total) return i < bins ? ((double)i + 0.5) * step : (double)bins * step;
+    }
+    return (double)bins * step;
+}
+static void print_engage_census_line(const uint32_t *w)
+{
+    unsigned long nh = 0, nm = 0;
+    double h10, h50, m10, m50;
+    if (!w[0]) return;
+    h10 = ec_percentile(w + EC_HALT_RATIO, 20, 0.1, 0.10, &nh);
+    h50 = ec_percentile(w + EC_HALT_RATIO, 20, 0.1, 0.50, NULL);
+    m10 = ec_percentile(w + EC_MOVING_ALL, 30, 0.05, 0.10, &nm);
+    m50 = ec_percentile(w + EC_MOVING_ALL, 30, 0.05, 0.50, NULL);
+    say(L"  engage_census: ticks=%lu ai_units=%lu halts=%lu fire_starts=%lu faults=%lu bad_member=%lu table_full=%lu cost_us total=%lu max=%lu | halt dM/range n=%lu p10=%.2f median=%.2f | "
+        L"moving-in-range n=%lu dM/range p10=%.2f median=%.2f%ls\n",
+        (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[9],
+        (unsigned long)w[11], (unsigned long)w[12], nh, h10, h50, nm, m10, m50, (w[1] & 2u) ? L" [DISABLED by fault]" : L"");
+}
 /* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
    --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
@@ -2332,6 +2380,10 @@ static void print_mounted_officer(const uint32_t *w)
     for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
+static void print_engage_census(const uint32_t *w)
+{
+    print_engage_census_line(w);
+}
 static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
@@ -2566,6 +2618,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_arena(s->arena_words);
     print_overlay(s->overlay_words);
     print_mounted_officer(s->mounted_officer_words);
+    print_engage_census(s->engage_census_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
@@ -4278,6 +4331,63 @@ static void sb_mounted_officer(Sb *b, const Run *r)
     for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
+{
+    unsigned i;
+    sb_fmt(b, "\"%s\": [", name);
+    for (i = 0; i < n; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]");
+}
+static void sb_engage_rows(Sb *b, const char *name, const uint32_t *base, unsigned count, unsigned first)
+{
+    unsigned i, j;
+    sb_fmt(b, "\"%s\": [", name);
+    for (i = 0; i < count; ++i) {
+        const uint32_t *row = base + ((first + i) % EC_ROWS) * EC_ROW_WORDS;
+        sb_fmt(b, "%s[", i ? "," : "");
+        for (j = 0; j < EC_ROW_WORDS; ++j) sb_fmt(b, "%s%lu", j ? "," : "", (unsigned long)row[j]);
+        sb_fmt(b, "]");
+    }
+    sb_fmt(b, "]");
+}
+/* --engage-census (src/ai/ntw2_engage_census.h): counters, histograms and rows as raw uint32 words (floats are IEEE bit patterns; -1.0f = 0xBF800000 = unknown); null unless requested.
+   Rows: [tick, unit, type(1 HALT/2 FIRE_START), dC, dM, dMe, range, B34, ring count, ring index, cmd vtable, class, members, ticks_stopped, enemy unit, side, destD, destEnemyD, flags, 0]. */
+static void sb_engage_census(Sb *b, const Run *r)
+{
+    const uint32_t *w = r->last.engage_census_words;
+    unsigned i, ev, ring_n;
+    if (!r->opt.engage_census) {
+        sb_fmt(b, "  \"engage_census\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"engage_census\": {\"have_status\": %s, \"counters\": {", r->have_status ? "true" : "false");
+    for (i = 0; i < EC_HDR; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_engage_census_metrics[i], (unsigned long)w[i]);
+    sb_fmt(b, "},\n    ");
+    sb_u32_array(b, "halt_ratio_hist", w + EC_HALT_RATIO, 22);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "halt_metres_hist", w + EC_HALT_METRES, 22);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "fire_ratio_hist", w + EC_FIRE_RATIO, 22);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "moving_all", w + EC_MOVING_ALL, 30);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "moving_b34_0", w + EC_MOVING_B0, 30);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "moving_b34_1", w + EC_MOVING_B1, 30);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "moving_b34_4", w + EC_MOVING_B4, 30);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "moving_b34_other", w + EC_MOVING_OTHER, 30);
+    sb_fmt(b, ",\n    ");
+    sb_engage_rows(b, "first_halt_rows", w + EC_FIRST_ROWS, w[23] > EC_ROWS ? EC_ROWS : w[23], 0);
+    sb_fmt(b, ",\n    ");
+    sb_engage_rows(b, "deepest_halt_rows", w + EC_DEEP_ROWS, w[24] > EC_ROWS ? EC_ROWS : w[24], 0);
+    sb_fmt(b, ",\n    ");
+    ev = w[25];
+    ring_n = ev > EC_ROWS ? EC_ROWS : ev;
+    sb_engage_rows(b, "last_events_oldest_first", w + EC_RING_ROWS, ring_n, ev > EC_ROWS ? ev % EC_ROWS : 0);
+    sb_fmt(b, "},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -4897,6 +5007,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
     sb_fmt(&b, "  \"mounted_officer_requested\": %s,\n  \"mounted_officer_widen_requested\": %s,\n", r->opt.mounted_officer ? "true" : "false",
            r->opt.mounted_officer_widen ? "true" : "false");
+    sb_fmt(&b, "  \"engage_census_requested\": %s,\n", r->opt.engage_census ? "true" : "false");
     sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
            (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (NTW2_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
            (unsigned long)(r->opt.va_hole_mib ? r->opt.va_hole_mib : (NTW2_MEMORY_MIN_LARGEST_HOLE >> 20)));
@@ -4960,6 +5071,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_arena(&b, r);
     sb_overlay(&b, r);
     sb_mounted_officer(&b, r);
+    sb_engage_census(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -5848,6 +5960,7 @@ static int install_runtime(Run *r)
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
                              (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
+                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -6084,7 +6197,7 @@ static BOOL stop_then_close_game(Run *r)
 static int monitor(Run *r)
 {
     uint64_t t0 = now_ms(), last_stats = t0, last_receipt = 0, last_profile = 0, first_ok_deadline = t0 + 15000;
-    uint64_t last_trace = 0, last_va = 0;
+    uint64_t last_trace = 0, last_va = 0, last_ec = 0;
     BOOL have_prev = FALSE;
     uint32_t prev_phase = 0, prev_active = 0, prev_gen = 0, prev_err = 0;
     unsigned bad = 0;
@@ -6207,6 +6320,7 @@ static int monitor(Run *r)
             last_stats = now_ms();
         }
         if (r->opt.va_watch && now_ms() - last_va >= 10000) { print_va_watch(&s, FALSE); last_va = now_ms(); }
+        if (r->opt.engage_census && s.phase == NTW2_ACTIVE && now_ms() - last_ec >= 10000) { print_engage_census_line(s.engage_census_words); last_ec = now_ms(); }
         if (s.phase == NTW2_FAILED) {
             errsay(L"runtime failure: error=0x%08lX detail=0x%08lX. Requesting stop so original code is restored.\n",
                    (unsigned long)s.error, (unsigned long)s.error_detail);
@@ -6300,6 +6414,7 @@ static BOOL launch_game(Run *r)
         say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
+    if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
     memset(&pi, 0, sizeof pi);
     for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
         DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
@@ -6450,6 +6565,10 @@ static void usage(void)
         L"                        row fills the mount columns (mount_model, mount_entity, mount_animations_table, mount_armour, mount_health) with horse = 0\n"
         L"                        gets exactly one mount for its officer (men[0]). Data decides which units qualify. Redirects the unit constructor call\n"
         L"                        0x531340 to a private constructor clone at start (restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
+        L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
+        L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
+        L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
+        L"                        words: engage_census_words (src/ai/ntw2_engage_census.h), receipt engage_census (counters, histograms, event rows).\n"
         L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
         L"                        the infantry spacing)\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
@@ -6721,6 +6840,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--no-arena-release")) o->no_arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--mounted-officer")) o->mounted_officer = TRUE;
+        else if (!wcscmp(name, L"--engage-census")) o->engage_census = TRUE;
         else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
@@ -6955,6 +7075,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     if ((o->tick_pcore || o->tick_core_ab) &&
         !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
         errsay(L"--tick-pcore/--tick-core-ab need a routed tick: add profile or a simulation feature (e.g. --features all).\n");
+        return -1;
+    }
+    if (o->engage_census &&
+        !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        errsay(L"--engage-census needs a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
     if (o->tick_pcore && o->tick_core_ab) {
@@ -7199,6 +7324,7 @@ int wmain(int argc, wchar_t **argv)
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
                              (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
+                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -7228,6 +7354,7 @@ int wmain(int argc, wchar_t **argv)
             say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
+        if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
         say(L"Validation complete; nothing was started.\n");
         return finish(r, EXIT_OK, L"validated");
     }

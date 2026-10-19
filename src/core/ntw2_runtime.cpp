@@ -61,6 +61,7 @@
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
+#include "ai/ntw2_engage_census.h"
 #include "core/ntw2_alloc_census.h"
 #include "render/ntw2_arena_release.h"
 
@@ -2481,6 +2482,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         TraceTick(trace,modelTick,tid,bodyUs,interval,true,start.QuadPart);
         if (census) { CoreSample(end.QuadPart); trace.flags|=CoreFlags(entryE,placed); }
         traced=true;
+        if (config.va_watch_flags&NTW2_ENGAGE_CENSUS) ntw2_engage_census::Tick(Address(model),modelTick); // read-only observer, after the tick body is published
     } __finally {
         coreCensus.active=false;
         if (placed) SetThreadAffinityMask(GetCurrentThread(),priorAffinity);
@@ -3391,6 +3393,7 @@ void SampleCounters() {
     for (U i=0;i<32;++i) ntw2_state.visual_words[i]=visualWords[i];
     PublishAllocatorStatus();
     ntw2_arena_release::Sample(const_cast<U*>(ntw2_state.arena_words));
+    if (config.va_watch_flags&NTW2_ENGAGE_CENSUS) ntw2_engage_census::Snapshot(ntw2_state.engage_census_words);
     // The tick-only histogram follows whichever thread currently executes the tick (gate word = that thread id).
     if (config.enabled_mask&NTW2_GRID_CENSUS) ntw2_grid_census_snapshot(&ntw2_state.grid_census);
     if (config.loco_flags&NTW2_LOCO_GRID_PROBATION) ntw2_grid_probation::Snapshot(const_cast<U*>(ntw2_state.grid_probation_words));
@@ -3883,6 +3886,8 @@ static U StartImpl(void* raw) {
             (next.profile_site!=7 && next.profile_site!=19 && next.profile_site!=35) ||
             (next.profile_site==19 && !(next.va_watch_flags&NTW2_ARMY_STORM_CENSUS)) ||
             (next.profile_site==35 && (next.enabled_mask&NTW2_AI_ASYNC)))) ||
+        // --engage-census observes after the routed native tick on the tick owner.
+        ((next.va_watch_flags&NTW2_ENGAGE_CENSUS) && !(next.enabled_mask&kRouted)) ||
         // --tick-pcore / --tick-core-ab place the routed tick body (TickGate's routed path); one placement mode at a time.
         ((next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB)) && (!(next.enabled_mask&kRouted) ||
                                                                        (next.va_watch_flags&(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))==(NTW2_TICK_PCORE|NTW2_TICK_CORE_AB))) ||
@@ -3919,6 +3924,7 @@ static U StartImpl(void* raw) {
     ntw2_alloc_census::Configure(imageBase,imageSize,delta,allocCensusRequestedMode);
     CpuTopologyInit(); // tick core census + NTW2_TICK_PCORE / NTW2_TICK_CORE_AB masks; no tick is routed before activation
     ntw2_grid_census_reset((config.enabled_mask&NTW2_GRID_CENSUS)!=0); // sampler is stopped; disabled starts publish an all-zero row
+    ntw2_engage_census::Reset((config.va_watch_flags&NTW2_ENGAGE_CENSUS)!=0,delta);
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);
     ntw2_ai_async2::Reset(false,delta,&tickOwner,&aiThreadId); // zero row until a generation activates
     ntw2_ai_ctrl::Reset(0,delta,0); ntw2_ai_ctrl_geometry::Reset(); // zero rows until a generation activates (Activate configures)
@@ -3998,6 +4004,7 @@ static U StartImpl(void* raw) {
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();
     for (U i=0;i<NTW2_MOUNTED_OFFICER_WORDS;++i) ntw2_state.mounted_officer_words[i]=0;
+    ntw2_engage_census::Snapshot(ntw2_state.engage_census_words); // zero row (Reset above) or the armed header
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;
