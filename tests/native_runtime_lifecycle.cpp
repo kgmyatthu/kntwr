@@ -186,7 +186,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW|NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE|NTW2_ALLOC_FIX) && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && NTW2_ARMY_SOLVER_MEMO==0x10u && NTW2_ARMY_SOLVER_SHADOW==0x20u && NTW2_ALLOC_CENSUS==0x40u && NTW2_ARENA_RELEASE==0x80u && NTW2_HEAP_OPTIMIZE==0x10000u && NTW2_ALLOC_FIX==0x200000u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW|NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE|NTW2_ALLOC_FIX|NTW2_VA_FLOOR_MASK|NTW2_VA_HOLE_MASK) && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && NTW2_ARMY_SOLVER_MEMO==0x10u && NTW2_ARMY_SOLVER_SHADOW==0x20u && NTW2_ALLOC_CENSUS==0x40u && NTW2_ARENA_RELEASE==0x80u && NTW2_HEAP_OPTIMIZE==0x10000u && NTW2_ALLOC_FIX==0x200000u && NTW2_VA_FLOOR_SHIFT==22u && NTW2_VA_HOLE_SHIFT==27u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -724,12 +724,19 @@ static int AllocatorFailureFixture(bool ai,U faultMode,ntw2_start_fn start,ntw2_
     return failures ? 1 : 0;
 }
 alignas(8) static volatile LONG64 virtualAvailOverride;
-static volatile LONG virtualMemoryCalls, virtualLowAfter;
+static volatile LONG virtualMemoryCalls, virtualLowAfter, virtualHoleCapBytes;
+static SIZE_T WINAPI TestVirtualQuery(LPCVOID address,PMEMORY_BASIC_INFORMATION buffer,SIZE_T length) {
+    const SIZE_T got=VirtualQuery(address,buffer,length);
+    const U cap=static_cast<U>(InterlockedCompareExchange(&virtualHoleCapBytes,0,0));
+    if(got==sizeof(MEMORY_BASIC_INFORMATION) && buffer->State==MEM_FREE && cap && buffer->RegionSize>cap)
+        buffer->RegionSize=cap; // WalkUserVirtualAddressSpace advances by capped RegionSize, revisiting the tail in <=cap chunks and terminating normally.
+    return got;
+}
 static BOOL WINAPI TestMemoryStatus(LPMEMORYSTATUSEX memory) {
     if(!GlobalMemoryStatusEx(memory)) return FALSE;
     const LONG call=InterlockedIncrement(&virtualMemoryCalls);
     const LONG lowAfter=InterlockedCompareExchange(&virtualLowAfter,0,0);
-    memory->ullAvailVirtual=lowAfter && call>=lowAfter ? 511ull<<20 :
+    memory->ullAvailVirtual=lowAfter && call>=lowAfter ? 255ull<<20 :
         static_cast<ULONGLONG>(InterlockedCompareExchange64(&virtualAvailOverride,0,0));
     return TRUE;
 }
@@ -758,7 +765,7 @@ static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,
     // Admission failure is terminal for this DLL lifetime. Each refusal mode
     // runs in its own child rather than restarting a Failed runtime.
     if(!failures) {
-        InterlockedExchange64(&virtualAvailOverride,post ? 2ll<<30 : 511ll<<20);
+        InterlockedExchange64(&virtualAvailOverride,post ? 2ll<<30 : 255ll<<20);
         InterlockedExchange(&virtualMemoryCalls,0);
         // Activation floor, thread reserve, collision reserve, and movement
         // reserve pass; pressure arrives at the final pre-publication check.
@@ -774,8 +781,9 @@ static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,
                 if(snapshot.phase==NTW2_FAILED) { failed=true; break; }
             }
         Check(failed && snapshot.error==NTW2_ERROR_VA_BUDGET && !snapshot.active_mask &&
-              snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1,"low VA refuses activation without enabling a feature epoch");
-        Check(MemoryValue(snapshot,post ? NTW2_MEM_POST_ALLOC_AVAIL_LO : NTW2_MEM_ACTIVATION_AVAIL_LO)==511ull<<20,
+              snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1 &&
+              snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_TOTAL,"low VA refuses activation without enabling a feature epoch");
+        Check(MemoryValue(snapshot,post ? NTW2_MEM_POST_ALLOC_AVAIL_LO : NTW2_MEM_ACTIVATION_AVAIL_LO)==255ull<<20,
               "the failing available-VA sample is retained exactly");
         Check((snapshot.memory_words[NTW2_MEM_LOCO_BYTES]>0)==(post!=0) &&
               (snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0)==(post!=0),
@@ -813,16 +821,34 @@ static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile 
     U catalogBytes=0;
     for(U i=NTW2_MEM_LOCO_CATALOG_RING_BYTES;i<=NTW2_MEM_LOCO_CATALOG_POLYGON_BYTES;++i) catalogBytes+=before.memory_words[i];
     Check(catalogBytes==before.memory_words[NTW2_MEM_LOCO_CATALOG_BYTES],"catalog backing categories reconcile with its retained allocation");
-    InterlockedExchange64(&virtualAvailOverride,511ll<<20);
+    // A single low sample is filtered by the 2-sample jitter guard when VA recovers before the next sample;
+    // 2 consecutive samples latch and retire.
+    const U preDipSamples=before.memory_words[NTW2_MEM_SAMPLES];
+    InterlockedExchange64(&virtualAvailOverride,255ll<<20);
+    bool oneDip=false;
+    for(const ULONGLONG end=GetTickCount64()+2000;GetTickCount64()<end;Sleep(5))
+        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_SAMPLES]>preDipSamples) { oneDip=true; break; }
+    InterlockedExchange64(&virtualAvailOverride,2ll<<30);
+    Check(oneDip && !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS] &&
+          !snapshot.memory_words[NTW2_MEM_LATCH_REASON] && snapshot.active_mask==(NTW2_BATCH64|owned),
+          "single periodic low-VA sample does not trip the 2-sample latch");
+    const U postRecoverySamples=snapshot.memory_words[NTW2_MEM_SAMPLES];
+    bool recoveredOnce=false;
+    for(const ULONGLONG end=GetTickCount64()+2000;GetTickCount64()<end;Sleep(5))
+        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_SAMPLES]>postRecoverySamples) { recoveredOnce=true; break; }
+    Check(recoveredOnce && !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK],"recovery resets the breach streak before sustained pressure");
+    InterlockedExchange64(&virtualAvailOverride,255ll<<20);
     bool retired=false;
-    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
+    for(const ULONGLONG end=GetTickCount64()+4000;GetTickCount64()<end;Sleep(5))
         if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_BUDGET_RELEASES]==1) { retired=true; break; }
     Check(retired && snapshot.phase==NTW2_ACTIVE && snapshot.active_mask==NTW2_BATCH64 && !snapshot.error,
           "periodic low VA disables only owned stages without failing unrelated features");
     Check(snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1 &&
           snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK]==owned &&
           !snapshot.memory_words[NTW2_MEM_BUDGET_RELEASE_PENDING] &&
-          MemoryValue(snapshot,NTW2_MEM_MIN_AVAIL_LO)==511ull<<20,"pressure latches one exact budget refusal and completes quiescent retirement");
+          snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_TOTAL &&
+          snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]>=NTW2_MEMORY_MIN_LARGEST_HOLE &&
+          MemoryValue(snapshot,NTW2_MEM_MIN_AVAIL_LO)==255ull<<20,"pressure latches one exact budget refusal and completes quiescent retirement");
     Check(!snapshot.memory_words[NTW2_MEM_LOCO_BYTES] && !snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES] &&
           snapshot.memory_words[NTW2_MEM_RELEASED_LOCO_BYTES]==before.memory_words[NTW2_MEM_LOCO_BYTES] &&
           snapshot.memory_words[NTW2_MEM_RELEASED_COLLIDE_BYTES]==before.memory_words[NTW2_MEM_COLLIDE_BYTES],
@@ -856,6 +882,7 @@ static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile 
     Put(locoGrid,0x14,15); // valid 16-by-16 coordinates with native row stride 32
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask) && ReadState(state,snapshot) &&
           !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS] &&
+          !snapshot.memory_words[NTW2_MEM_LATCH_REASON] &&
           snapshot.memory_words[NTW2_MEM_LOCO_BYTES]>0 && snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0,
           "explicit runtime restart clears the latch and admits owned stages again");
     Check(snapshot.memory_words[NTW2_MEM_NATIVE_GRID_SHIFT]==5 &&
@@ -863,8 +890,69 @@ static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile 
           snapshot.memory_words[NTW2_MEM_NATIVE_GRID_DIMENSION]==16 &&
           snapshot.memory_words[NTW2_MEM_CELL_CAPACITY]==496,"header sizing preserves native row-stride padding without a fixed million-cell reserve");
     Check(stop(nullptr)==0,"restarted periodic fixture stops cleanly");
+    // Verify va_watch_flags floor/hole encoding validation and custom thresholds (e.g. 512 MiB total floor, 256 MiB hole floor).
+    config.va_watch_flags=(1u<<NTW2_VA_FLOOR_SHIFT);
+    Check(start(&config)!=0,"va_floor_mib encoding 1 (32 MiB < 64 MiB min) is refused");
+    config.va_watch_flags=(18u<<NTW2_VA_FLOOR_SHIFT);
+    Check(start(&config)!=0,"va_floor_mib encoding 18 (>17 max) is refused");
+    config.va_watch_flags=(17u<<NTW2_VA_HOLE_SHIFT);
+    Check(start(&config)!=0,"va_hole_mib encoding 17 (>512 MiB max) is refused");
+    config.va_watch_flags=(17u<<NTW2_VA_FLOOR_SHIFT)|(8u<<NTW2_VA_HOLE_SHIFT); // 1024 MiB total floor, 256 MiB hole floor
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask) && ReadState(state,snapshot) &&
+          snapshot.memory_words[NTW2_MEM_FLOOR_BYTES]==(1024u<<20) &&
+          snapshot.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES]==(256u<<20),
+          "custom va_floor_mib=1024 and va_hole_mib=256 decode into floor_bytes and hole_floor_bytes");
+    // Test hole-only periodic latch (latch_reason == NTW2_LATCH_REASON_HOLE) while total avail (2 GiB) stays above floor (1024 MiB).
+    U* vqImport=ModuleImport(runtimeModule,"VirtualQuery");
+    Check(vqImport!=nullptr,"runtime exposes VirtualQuery seam for hole-floor test");
+    if(vqImport) {
+        const U vqOriginal=*vqImport;
+        InterlockedExchange(&virtualHoleCapBytes,0);
+        Check(Replace(vqImport,A(reinterpret_cast<void*>(&TestVirtualQuery))),"install VirtualQuery hole cap fixture");
+        InterlockedExchange(&virtualHoleCapBytes,255<<20); // cap largest free hole to 255 MiB (< 256 MiB hole floor)
+        bool holeRetired=false;
+        for(const ULONGLONG end=GetTickCount64()+4000;GetTickCount64()<end;Sleep(5))
+            if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_BUDGET_RELEASES]==1) { holeRetired=true; break; }
+        Check(holeRetired && snapshot.active_mask==NTW2_BATCH64 &&
+              snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK]==owned &&
+              snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_HOLE &&
+              snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]==(255u<<20),
+              "2 consecutive low-hole samples latch NTW2_LATCH_REASON_HOLE and retire owned arenas while total VA is ample");
+        InterlockedExchange(&virtualHoleCapBytes,0);
+        Check(Replace(vqImport,vqOriginal),"restore real VirtualQuery import");
+    }
+    Check(stop(nullptr)==0,"custom floor fixture stops cleanly");
+    config.va_watch_flags=0;
     Check(Replace(import,original),"restore real memory query after periodic pressure");
-    printf("native host lifecycle (periodic VA retirement): checks=%u failures=%u\n",checks,failures);
+    {
+        // Measure 32-bit VirtualQuery user-space walk cost across ~1000+ regions (mapped Napoleon.exe + allocations).
+        void* extra[500]={};
+        for(unsigned i=0;i<500;++i) extra[i]=VirtualAlloc(nullptr,131072,MEM_RESERVE,PAGE_NOACCESS);
+        for(unsigned i=0;i<500;++i) if(extra[i]) { VirtualFree(extra[i],0,MEM_RELEASE); extra[i]=VirtualAlloc(extra[i],65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE); }
+        LARGE_INTEGER freq,t0,t1; QueryPerformanceFrequency(&freq);
+        U totalRegions=0, freeRegions=0;
+        LONGLONG sumTicks=0, maxTicks=0;
+        for(unsigned rep=0;rep<50;++rep) {
+            QueryPerformanceCounter(&t0);
+            MEMORY_BASIC_INFORMATION mbi;
+            U regs=0, frees=0;
+            for(U addr=0;VirtualQuery(reinterpret_cast<const void*>(addr),&mbi,sizeof(mbi))==sizeof(mbi);) {
+                ++regs; if(mbi.State==MEM_FREE) ++frees;
+                const ULONGLONG next=static_cast<ULONGLONG>(addr)+mbi.RegionSize;
+                if(next>0xFFFFFFFFull) break;
+                addr=static_cast<U>(next);
+            }
+            QueryPerformanceCounter(&t1);
+            const LONGLONG dt=t1.QuadPart-t0.QuadPart;
+            sumTicks+=dt; if(dt>maxTicks) maxTicks=dt;
+            totalRegions=regs; freeRegions=frees;
+        }
+        for(unsigned i=0;i<500;++i) if(extra[i]) VirtualFree(extra[i],0,MEM_RELEASE);
+        const double meanMs=(static_cast<double>(sumTicks)/50.0)*1000.0/static_cast<double>(freq.QuadPart);
+        const double maxMs=static_cast<double>(maxTicks)*1000.0/static_cast<double>(freq.QuadPart);
+        printf("native host lifecycle (periodic VA retirement): checks=%u failures=%u walk_regions=%u free_regions=%u walk_mean_ms=%.3f walk_max_ms=%.3f\n",
+               checks,failures,totalRegions,freeRegions,meanMs,maxMs);
+    }
     return failures ? 1 : 0;
 }
 // Owned services with no real scene at the quiescent boundary: activation refuses,
@@ -2975,9 +3063,12 @@ int main(int argc,char** argv) {
             Check(GridCensusWithoutCalls(snapshot,false),"ordinary LOCO starts keep census disabled");
             U storage=0;
             for(U m=NTW2_MEM_LOCO_BYTES;m<=NTW2_MEM_OTHER_BYTES;++m) storage+=snapshot.memory_words[m];
-            Check(snapshot.memory_words[NTW2_MEM_VERSION]==3 && snapshot.memory_words[NTW2_MEM_TOTAL_BYTES]==storage &&
+            Check(snapshot.memory_words[NTW2_MEM_VERSION]==4 && snapshot.memory_words[NTW2_MEM_TOTAL_BYTES]==storage &&
                   snapshot.memory_words[NTW2_MEM_FLOOR_BYTES]==NTW2_MEMORY_MIN_AVAIL_VIRTUAL &&
-                  !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS],"memory row accounts every module and preserves VA floor");
+                  snapshot.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES]==NTW2_MEMORY_MIN_LARGEST_HOLE &&
+                  snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]>=NTW2_MEMORY_MIN_LARGEST_HOLE &&
+                  !snapshot.memory_words[NTW2_MEM_LATCH_REASON] &&
+                  !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS],"memory row accounts every module and preserves VA total and hole floors");
             Check(storage<96u*1024u*1024u,"small workloads never reserve worst-case Stage C arenas");
             Check(siteCallee && ((siteCallee(13)==moveOriginal)==!loco) && (!loco || InRuntime(siteCallee(13))),
                   loco ? "site 13 bound to the host movement gate" : "site 13 stays the original without the feature");

@@ -40,7 +40,12 @@ extern "C" {
 #define NTW2_ARMY_STORM_SAMPLE_MASK 0xFF00u /* bits 8..15: storm-gated sampler threshold in ms (launcher --army-storm-sample-ms, 1..255); 0: sampler unchanged. Requires NTW2_PROFILE and profile_site 19 (site 18, with NTW2_ARMY_STORM_CENSUS) or 35 (site 34, without NTW2_AI_ASYNC): the profile gate then admits a sample only while the selected site has been in progress for at least this long. */
 #define NTW2_TICK_PCORE 0x4u /* ntw2_config::va_watch_flags bit (launcher --tick-pcore): on a hybrid CPU the thread that executes a routed tick gets a hard affinity to the highest-efficiency-class (P) logical processors for the tick body; its previous affinity is restored before the gate returns. Placement only: no engine state, order or result changes. Requires a routed tick (NTW2_PROFILE or a simulation feature); a non-hybrid host leaves it inert. Exclusive with NTW2_TICK_CORE_AB. */
 #define NTW2_TICK_CORE_AB 0x8u /* ntw2_config::va_watch_flags bit (launcher --tick-core-ab): measurement only. Like NTW2_TICK_PCORE, but even model ticks are pinned to P and odd model ticks to E logical processors, so neighbouring ticks give an in-run E-core penalty. Requires a routed tick; exclusive with NTW2_TICK_PCORE. */
-#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX)
+#define NTW2_VA_FLOOR_UNIT_MIB 32u
+#define NTW2_VA_FLOOR_SHIFT 22u
+#define NTW2_VA_FLOOR_MASK (0x1Fu << NTW2_VA_FLOOR_SHIFT) /* bits 22..26: total free VA floor in 32 MiB units (launcher --va-floor-mib 64..1024; 0 = default 256 MiB, encoded 2..16 => 64..512 MiB, 17 = 1024 MiB) */
+#define NTW2_VA_HOLE_SHIFT 27u
+#define NTW2_VA_HOLE_MASK (0x1Fu << NTW2_VA_HOLE_SHIFT) /* bits 27..31: largest free hole floor in 32 MiB units (launcher --va-hole-mib 32..512; 0 = default 128 MiB, encoded 1..16 => 32..512 MiB) */
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)
 #define NTW2_ARMY_SOLVER_MEMO 0x10u /* ntw2_config::va_watch_flags bit (launcher --army-solver-memo): bit-exact memoised flag=1 formation slot solver (src/army/native_army_solver.h). Inside a routed tick on the tick owner the R1/R2 assignment-command slots 0x1331E74 / 0x1332110 / 0x1325474 run a dedicated SOLVER clone chain whose 0x502770 calls (18F12AA and the 18F0D00 trampoline path) enter ntw_solver::Solve instead of the native pair-swap solver; any out-of-contract input falls back to the native solver. Entries, EAX and the allocator call sequence are bit-identical to native. Requires a routed tick (a kManagerRouted feature such as NTW2_PROFILE) and main_thread_id; exclusive with NTW2_ARMY_SOLVER_SHADOW; compatible with NTW2_ARMY_STORM_CENSUS. */
 #define NTW2_ARMY_SOLVER_SHADOW 0x20u /* ntw2_config::va_watch_flags bit (launcher --army-solver-shadow): same chain, but the NATIVE 0x502770 stays authoritative; the kernel re-solves a pre-call copy and the result (entries bytes, EAX) is compared and counted; native/kernel inclusive times are recorded per solve. Same requirements as NTW2_ARMY_SOLVER_MEMO; exclusive with it. */
 #define NTW2_ALLOC_CENSUS 0x40u /* ntw2_config::va_watch_flags bit (launcher --alloc-census): opt-in process-heap allocation callsite census (alloc_census_words, src/core/ntw2_alloc_census.*). */
@@ -171,8 +176,11 @@ enum ntw2_va_word {
     "armed_pages", "uncovered_bytes", "array_base", "array_bytes", "allocation_base", "allocation_bytes", \
     "arm_us", "open_us", "max_toggle_us", "layout_changes", "refusals", "traps_tick", "traps_pool", \
     "traps_ai", "traps_main", "traps_other", "probe_arms", "disarms"
-#define NTW2_MEMORY_WORDS 57u
-#define NTW2_MEMORY_MIN_AVAIL_VIRTUAL (512u * 1024u * 1024u)
+#define NTW2_MEMORY_WORDS 60u
+#define NTW2_MEMORY_MIN_AVAIL_VIRTUAL (256u * 1024u * 1024u)
+#define NTW2_MEMORY_MIN_LARGEST_HOLE (128u * 1024u * 1024u)
+#define NTW2_LATCH_REASON_TOTAL 1u
+#define NTW2_LATCH_REASON_HOLE 2u
 #define NTW2_MEMORY_WORD_LABELS \
     "version", "loco_bytes", "collide_bytes", "profile_bytes", "runtime_image_bytes", "clone_bytes", \
     "pool_stack_bytes", "ai_stack_bytes", "other_stack_bytes", "lod_bytes", "ballistics_bytes", "other_bytes", \
@@ -186,7 +194,8 @@ enum ntw2_va_word {
     "native_grid_shift", "native_grid_maximum", "native_grid_dimension", \
     "loco_catalog_ring_bytes", "loco_catalog_capsule_bytes", "loco_catalog_wall_bytes", \
     "loco_catalog_edge_bytes", "loco_catalog_polygon_bytes", "loco_catalog_rings", \
-    "loco_catalog_capsules", "loco_catalog_walls", "loco_catalog_edges", "loco_catalog_polygon_points"
+    "loco_catalog_capsules", "loco_catalog_walls", "loco_catalog_edges", "loco_catalog_polygon_points", \
+    "hole_floor_bytes", "min_largest_hole", "latch_reason"
 enum ntw2_memory_word {
     NTW2_MEM_VERSION, NTW2_MEM_LOCO_BYTES, NTW2_MEM_COLLIDE_BYTES, NTW2_MEM_PROFILE_BYTES,
     NTW2_MEM_RUNTIME_IMAGE_BYTES, NTW2_MEM_CLONE_BYTES, NTW2_MEM_POOL_STACK_BYTES, NTW2_MEM_AI_STACK_BYTES,
@@ -206,7 +215,8 @@ enum ntw2_memory_word {
     NTW2_MEM_LOCO_CATALOG_RING_BYTES, NTW2_MEM_LOCO_CATALOG_CAPSULE_BYTES, NTW2_MEM_LOCO_CATALOG_WALL_BYTES,
     NTW2_MEM_LOCO_CATALOG_EDGE_BYTES, NTW2_MEM_LOCO_CATALOG_POLYGON_BYTES, NTW2_MEM_LOCO_CATALOG_RINGS,
     NTW2_MEM_LOCO_CATALOG_CAPSULES, NTW2_MEM_LOCO_CATALOG_WALLS, NTW2_MEM_LOCO_CATALOG_EDGES,
-    NTW2_MEM_LOCO_CATALOG_POLYGON_POINTS
+    NTW2_MEM_LOCO_CATALOG_POLYGON_POINTS,
+    NTW2_MEM_HOLE_FLOOR_BYTES, NTW2_MEM_MIN_LARGEST_HOLE, NTW2_MEM_LATCH_REASON
 };
 #define NTW2_ENV_TARGET_WORDS 64u
 #define NTW2_RESOLVE_FRAME_WORDS 4u
@@ -883,14 +893,17 @@ typedef struct ntw2_status {
        payloads/VirtualAlloc reservations plus module image and explicit thread stack reservations;
        CRT heap rounding and unrelated game/driver allocation are not attributed to a module.
        ullAvailVirtual is measured by GlobalMemoryStatusEx (lo/hi pairs), not inferred from that sum.
-       Activation and each large reservation require >=512MiB remaining VA; the post-allocation
-       check precedes feature publication. min_avail is sampled at activation and once/second.
+       Activation and each large reservation require >=256MiB remaining total VA (NTW2_MEMORY_MIN_AVAIL_VIRTUAL)
+       and largest_free_hole >= 128MiB (NTW2_MEMORY_MIN_LARGEST_HOLE); the post-allocation
+       check precedes feature publication. min_avail and min_largest_hole are sampled at activation and once/second.
        Capacity growth refuses before writes, never reallocates in a tick.
        Version 2 appends indices 28..43 without moving any version-1 word.
        Version 3 appends native grid shift/inclusive clamp/dimension and catalog backing bytes/counts.
+       Version 4 appends hole_floor_bytes, min_largest_hole (bytes) and latch_reason (1 total, 2 hole).
        Catalog's first five byte categories sum to loco_catalog_bytes; counts are unique retained geometry.
        cell_capacity is the address span ((clamp<<shift)+clamp+1), including any stride padding.
-       Low periodic VA latches LOCO/COLLIDE native fallback until next Start; once the
+       Periodic VA below floor_bytes or largest hole below hole_floor_bytes on 2 consecutive samples
+       latches LOCO/COLLIDE native fallback until next Start; once the
        tick owner drains, their allocations are released without stopping other features.
        active_mask excludes these bits. Released bytes and the last allocated LOCO
        breakdown remain diagnostic; loco_bytes/collide_bytes become zero after release. */
@@ -1447,7 +1460,9 @@ static_assert(offsetof(ntw2_status,loco_grid_v2_words) + NTW2_LOCO_GRID_V2_WORDS
               NTW2_LOCO_GRID_V2_WORDS == 16u && NTW2_COLLIDE_SOURCE_WORDS == 4u, "Stage C rows retain their shipped offsets");
 static_assert(offsetof(ntw2_status,memory_words) + NTW2_MEMORY_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_completion_words) &&
               NTW2_MEM_FLOOR_BYTES == 27u && NTW2_MEM_RELEASED_COLLIDE_BYTES == 43u &&
-              NTW2_MEM_LOCO_CATALOG_POLYGON_POINTS + 1 == NTW2_MEMORY_WORDS,
+              NTW2_MEM_LOCO_CATALOG_POLYGON_POINTS == 56u && NTW2_MEM_HOLE_FLOOR_BYTES == 57u &&
+              NTW2_MEM_MIN_LARGEST_HOLE == 58u && NTW2_MEM_LATCH_REASON == 59u &&
+              NTW2_MEM_LATCH_REASON + 1 == NTW2_MEMORY_WORDS,
               "memory diagnostics preserve earlier indices before the AI completion tail");
 static_assert(offsetof(ntw2_status,ai_completion_words) + NTW2_AI_COMPLETION_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,grid_census) &&
               offsetof(ntw2_status,grid_census) + sizeof(ntw2_grid_census_status) == offsetof(ntw2_status,ai_census_words) &&
@@ -1502,7 +1517,7 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
-              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX)),
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX | NTW2_VA_FLOOR_MASK | NTW2_VA_HOLE_MASK)),
               "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");

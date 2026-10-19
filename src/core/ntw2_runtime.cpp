@@ -130,7 +130,9 @@ bool CaptureAtTick(void (*capture)(void*), void* context);
 bool NeedsActivationWorkload();
 ntw2_workload::Capacity activationCapacity{};
 U memoryWords[NTW2_MEMORY_WORDS]{}, defaultStackBytes, runtimeImageBytes;
-ULONGLONG memoryNextSample;
+ULONGLONG memoryNextSample, vaLastHoleWalk, vaCachedLargestHole;
+U vaTotalFloorBytes=NTW2_MEMORY_MIN_AVAIL_VIRTUAL, vaHoleFloorBytes=NTW2_MEMORY_MIN_LARGEST_HOLE;
+U vaBreachStreak, vaLastWalkUs;
 volatile LONG budgetDisabledMask, budgetReleasePending;
 bool budgetRetired;
 void SampleMemoryStorage();
@@ -176,35 +178,95 @@ void Memory64(U at,ULONGLONG value) {
 ULONGLONG Memory64(U at) {
     return static_cast<ULONGLONG>(memoryWords[at]) | (static_cast<ULONGLONG>(memoryWords[at+1])<<32);
 }
-bool SampleVirtualMemory(bool force,ULONGLONG* available=nullptr) {
+struct VaWalk {
+    ULONGLONG largestFree, reserved, committed, image, mapped;
+    U freeRegions;
+};
+VaWalk WalkUserVirtualAddressSpace() {
+    static LONGLONG freq=0;
+    if(!freq) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); freq=f.QuadPart; }
+    LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
+    VaWalk w={};
+    MEMORY_BASIC_INFORMATION info;
+    for(U address=0; VirtualQuery(reinterpret_cast<const void*>(address),&info,sizeof(info))==sizeof(info); ) {
+        const ULONGLONG size=info.RegionSize;
+        if(info.State==MEM_FREE) { ++w.freeRegions; if(size>w.largestFree) w.largestFree=size; }
+        else {
+            if(info.State==MEM_COMMIT) w.committed+=size;
+            w.reserved+=size;
+            if(info.Type==MEM_IMAGE) w.image+=size; else if(info.Type==MEM_MAPPED) w.mapped+=size;
+        }
+        const ULONGLONG next=static_cast<ULONGLONG>(address)+size;
+        if(next>0xFFFFFFFFull) break;
+        address=static_cast<U>(next);
+    }
+    QueryPerformanceCounter(&t1);
+    vaLastWalkUs=freq ? static_cast<U>((t1.QuadPart-t0.QuadPart)*1000000ll/freq) : 0u;
+    return w;
+}
+// --va-watch (NTW2_VA_WATCH): opt-in process-VA sampler for load-time crash forensics. Runs on the monitor thread once
+// per second in every phase (the ACTIVE-only memory_words sampler cannot see a battle load). GlobalMemoryStatusEx plus
+// one VirtualQuery walk of user space (~1200 regions, ~0.54 ms mean / 0.71 ms max; shared with SampleVirtualMemory). Reads only; publishes under the status sequence.
+U vaWords[NTW2_VA_WATCH_WORDS];
+ULONGLONG vaNextSample=0, vaStart=0;
+bool SampleVirtualMemory(bool force,ULONGLONG* available=nullptr,ULONGLONG* largestHoleOut=nullptr) {
     const ULONGLONG now=GetTickCount64();
     if(!force && now<memoryNextSample) return true;
     MEMORYSTATUSEX memory={}; memory.dwLength=sizeof(memory);
     if(!GlobalMemoryStatusEx(&memory)) { memoryWords[NTW2_MEM_ERROR]=GetLastError(); return false; }
     if(!memoryWords[NTW2_MEM_SAMPLES] || memory.ullAvailVirtual<Memory64(NTW2_MEM_MIN_AVAIL_LO))
         Memory64(NTW2_MEM_MIN_AVAIL_LO,memory.ullAvailVirtual);
+    // Shared VirtualQuery walk: when --va-watch just walked in this monitor cycle (now == vaLastHoleWalk), reuse its result;
+    // otherwise walk here (1 Hz, ~0.54 ms measured; if >1 ms on a slow host, walks every 5 s when avail > 2x total_floor
+    // and every 1 s at or below).
+    ULONGLONG largestHole=vaCachedLargestHole;
+    const ULONGLONG walkIntervalMs=(vaLastWalkUs>1000u && memory.ullAvailVirtual>2ull*vaTotalFloorBytes) ? 5000ull : 1000ull;
+    if(force || !vaLastHoleWalk || (now>vaLastHoleWalk && now-vaLastHoleWalk>=walkIntervalMs)) {
+        const VaWalk w=WalkUserVirtualAddressSpace();
+        largestHole=w.largestFree;
+        vaCachedLargestHole=largestHole;
+        vaLastHoleWalk=now;
+    }
+    const U holeBytes=largestHole>UINT32_MAX ? UINT32_MAX : static_cast<U>(largestHole);
+    if(!memoryWords[NTW2_MEM_SAMPLES] || holeBytes<memoryWords[NTW2_MEM_MIN_LARGEST_HOLE])
+        memoryWords[NTW2_MEM_MIN_LARGEST_HOLE]=holeBytes;
     ++memoryWords[NTW2_MEM_SAMPLES]; memoryNextSample=now+1000;
     const U owned=static_cast<U>(Load(&enabled))&(NTW2_LOCO|NTW2_COLLIDE);
-    if(owned && memory.ullAvailVirtual<NTW2_MEMORY_MIN_AVAIL_VIRTUAL && !Load(&budgetDisabledMask)) {
-        // Stage entry observes this latch before touching either module. A stage
-        // already in progress finishes; its tick owner protects the retained arenas.
-        _InterlockedExchange(&budgetReleasePending,1);
-        _InterlockedExchange(&budgetDisabledMask,static_cast<LONG>(owned));
-        memoryWords[NTW2_MEM_BUDGET_DISABLED_MASK]=owned;
-        memoryWords[NTW2_MEM_BUDGET_RELEASE_PENDING]=1;
-        ++memoryWords[NTW2_MEM_BUDGET_REFUSALS];
+    const bool lowTotal=memory.ullAvailVirtual<vaTotalFloorBytes;
+    const bool lowHole=largestHole<vaHoleFloorBytes;
+    if(owned && !Load(&budgetDisabledMask)) {
+        // Require the breach on 2 consecutive periodic samples before latching to filter transient 1-sample dips.
+        if(!force && (lowTotal || lowHole)) {
+            if(++vaBreachStreak>=2) {
+                // Stage entry observes this latch before touching either module. A stage
+                // already in progress finishes; its tick owner protects the retained arenas.
+                _InterlockedExchange(&budgetReleasePending,1);
+                _InterlockedExchange(&budgetDisabledMask,static_cast<LONG>(owned));
+                memoryWords[NTW2_MEM_BUDGET_DISABLED_MASK]=owned;
+                memoryWords[NTW2_MEM_BUDGET_RELEASE_PENDING]=1;
+                memoryWords[NTW2_MEM_LATCH_REASON]=lowTotal ? NTW2_LATCH_REASON_TOTAL : NTW2_LATCH_REASON_HOLE;
+                ++memoryWords[NTW2_MEM_BUDGET_REFUSALS];
+            }
+        } else if(!force) {
+            vaBreachStreak=0;
+        }
     }
     if(available) *available=memory.ullAvailVirtual;
+    if(largestHoleOut) *largestHoleOut=largestHole;
     return true;
 }
 bool VirtualBudget(ULONGLONG reservation=0,bool activation=false,bool post=false) {
-    ULONGLONG available=0;
-    const bool measured=SampleVirtualMemory(true,&available);
+    ULONGLONG available=0, largestHole=0;
+    const bool measured=SampleVirtualMemory(true,&available,&largestHole);
     if(activation) Memory64(NTW2_MEM_ACTIVATION_AVAIL_LO,available);
     if(post) Memory64(NTW2_MEM_POST_ALLOC_AVAIL_LO,available);
-    if(!measured || available<reservation+NTW2_MEMORY_MIN_AVAIL_VIRTUAL) {
+    const bool lowTotal=!measured || available<reservation+NTW2_MEMORY_MIN_AVAIL_VIRTUAL;
+    const bool lowHole=measured && largestHole<NTW2_MEMORY_MIN_LARGEST_HOLE;
+    if(lowTotal || lowHole) {
+        if(measured && !memoryWords[NTW2_MEM_LATCH_REASON])
+            memoryWords[NTW2_MEM_LATCH_REASON]=lowTotal ? NTW2_LATCH_REASON_TOTAL : NTW2_LATCH_REASON_HOLE;
         ++memoryWords[NTW2_MEM_BUDGET_REFUSALS];
-        RecordError(VirtualAddressBudget,measured ? static_cast<U>(available>>20) : memoryWords[NTW2_MEM_ERROR]);
+        RecordError(VirtualAddressBudget,measured ? static_cast<U>((lowTotal ? available : largestHole)>>20) : memoryWords[NTW2_MEM_ERROR]);
         return false;
     }
     return true;
@@ -212,11 +274,6 @@ bool VirtualBudget(ULONGLONG reservation=0,bool activation=false,bool post=false
 void PublishMemory() { // lifecycle sequence is held by the monitor
     for(U i=0;i<NTW2_MEMORY_WORDS;++i) ntw2_state.memory_words[i]=memoryWords[i];
 }
-// --va-watch (NTW2_VA_WATCH): opt-in process-VA sampler for load-time crash forensics. Runs on the monitor thread once
-// per second in every phase (the ACTIVE-only memory_words sampler cannot see a battle load). GlobalMemoryStatusEx plus
-// one VirtualQuery walk of user space (a few thousand regions, ~1 ms). Reads only; publishes under the status sequence.
-U vaWords[NTW2_VA_WATCH_WORDS];
-ULONGLONG vaNextSample=0, vaStart=0;
 void VaWatchSample() {
     if(!(config.va_watch_flags&(NTW2_VA_WATCH|NTW2_HEAP_OPTIMIZE))) return;
     const ULONGLONG now=GetTickCount64();
@@ -229,22 +286,11 @@ void VaWatchSample() {
         ntw2_arena_release::OnVaWatch(static_cast<U>(memory.ullAvailVirtual>>20));
         return;
     }
-    ULONGLONG largestFree=0, reserved=0, committed=0, image=0, mapped=0; U freeRegions=0;
-    MEMORY_BASIC_INFORMATION info;
-    for(U address=0; VirtualQuery(reinterpret_cast<const void*>(address),&info,sizeof(info))==sizeof(info); ) {
-        const ULONGLONG size=info.RegionSize;
-        if(info.State==MEM_FREE) { ++freeRegions; if(size>largestFree) largestFree=size; }
-        else {
-            if(info.State==MEM_COMMIT) committed+=size;
-            reserved+=size;
-            if(info.Type==MEM_IMAGE) image+=size; else if(info.Type==MEM_MAPPED) mapped+=size;
-        }
-        const ULONGLONG next=static_cast<ULONGLONG>(address)+size;
-        if(next>0xFFFFFFFFull) break;
-        address=static_cast<U>(next);
-    }
+    const VaWalk w=WalkUserVirtualAddressSpace();
+    vaCachedLargestHole=w.largestFree;
+    vaLastHoleWalk=now;
     const U uptime=static_cast<U>((now-vaStart)/1000), phase=ntw2_state.phase;
-    const U availMiB=static_cast<U>(memory.ullAvailVirtual>>20), largestMiB=static_cast<U>(largestFree>>20);
+    const U availMiB=static_cast<U>(memory.ullAvailVirtual>>20), largestMiB=static_cast<U>(w.largestFree>>20);
     vaWords[NTW2_VA_VERSION]=1;
     vaWords[NTW2_VA_AVAIL_LO]=static_cast<U>(memory.ullAvailVirtual); vaWords[NTW2_VA_AVAIL_HI]=static_cast<U>(memory.ullAvailVirtual>>32);
     if(!vaWords[NTW2_VA_SAMPLES] || memory.ullAvailVirtual<(static_cast<ULONGLONG>(vaWords[NTW2_VA_MIN_AVAIL_LO])|(static_cast<ULONGLONG>(vaWords[NTW2_VA_MIN_AVAIL_HI])<<32))) {
@@ -253,9 +299,9 @@ void VaWatchSample() {
     }
     vaWords[NTW2_VA_LARGEST_FREE]=largestMiB;
     if(!vaWords[NTW2_VA_SAMPLES] || largestMiB<vaWords[NTW2_VA_MIN_LARGEST_FREE]) vaWords[NTW2_VA_MIN_LARGEST_FREE]=largestMiB;
-    vaWords[NTW2_VA_FREE_REGIONS]=freeRegions;
-    vaWords[NTW2_VA_RESERVED_MIB]=static_cast<U>(reserved>>20); vaWords[NTW2_VA_COMMITTED_MIB]=static_cast<U>(committed>>20);
-    vaWords[NTW2_VA_IMAGE_MIB]=static_cast<U>(image>>20); vaWords[NTW2_VA_MAPPED_MIB]=static_cast<U>(mapped>>20);
+    vaWords[NTW2_VA_FREE_REGIONS]=w.freeRegions;
+    vaWords[NTW2_VA_RESERVED_MIB]=static_cast<U>(w.reserved>>20); vaWords[NTW2_VA_COMMITTED_MIB]=static_cast<U>(w.committed>>20);
+    vaWords[NTW2_VA_IMAGE_MIB]=static_cast<U>(w.image>>20); vaWords[NTW2_VA_MAPPED_MIB]=static_cast<U>(w.mapped>>20);
     U* ring=vaWords+NTW2_VA_RING_BASE+(vaWords[NTW2_VA_RING_NEXT]%NTW2_VA_RING_ENTRIES)*NTW2_VA_RING_WORDS;
     ring[0]=uptime; ring[1]=availMiB; ring[2]=largestMiB; ring[3]=phase;
     ++vaWords[NTW2_VA_RING_NEXT]; ++vaWords[NTW2_VA_SAMPLES];
@@ -3789,6 +3835,11 @@ static U StartImpl(void* raw) {
                                    ((next.ai_prepass_flags&NTW2_AI_RECORD_TEST_BITS) && !(next.ai_prepass_flags&(NTW2_AI_POLY_SHADOW|NTW2_AI_POLY))))) ||
         // --va-watch / --army-storm-*: the VA watch sampler plus the storm census bit and its sampler threshold (bits 8..15).
         (next.va_watch_flags&~NTW2_VA_WATCH_FLAGS_VALID) ||
+        // --va-floor-mib (bits 22..26, 0=default 256 MiB, 2..16 = 64..512 MiB in 32 MiB units, 17 = 1024 MiB; 1 and 18..31 refused)
+        // and --va-hole-mib (bits 27..31, 0=default 128 MiB, 1..16 = 32..512 MiB in 32 MiB units; 17..31 refused).
+        (((next.va_watch_flags&NTW2_VA_FLOOR_MASK)>>NTW2_VA_FLOOR_SHIFT)==1u ||
+         ((next.va_watch_flags&NTW2_VA_FLOOR_MASK)>>NTW2_VA_FLOOR_SHIFT)>17u ||
+         ((next.va_watch_flags&NTW2_VA_HOLE_MASK)>>NTW2_VA_HOLE_SHIFT)>16u) ||
         // The storm census times the 0x581F30 calls on the tick owner behind a routed tick; it binds sites 101/103 like the shadow.
         ((next.va_watch_flags&NTW2_ARMY_STORM_CENSUS) && (!(next.enabled_mask&kManagerRouted) || !next.main_thread_id ||
                                                           (next.enabled_mask&NTW2_ARMY_UNIT_SHADOW))) ||
@@ -3839,11 +3890,16 @@ static U StartImpl(void* raw) {
     ntw2_ai_ctrl::Reset(0,delta,0); ntw2_ai_ctrl_geometry::Reset(); // zero rows until a generation activates (Activate configures)
     { const ntw2_prepass::Targets none={}; ntw2_prepass::CensusReset(0,none,1); } // zero row until a generation activates
     memset(memoryWords,0,sizeof(memoryWords));
-    memoryWords[NTW2_MEM_VERSION]=3;
+    memoryWords[NTW2_MEM_VERSION]=4;
     _InterlockedExchange(&budgetDisabledMask,0); budgetRetired=false;
     _InterlockedExchange(&budgetReleasePending,0);
-    memoryWords[NTW2_MEM_FLOOR_BYTES]=NTW2_MEMORY_MIN_AVAIL_VIRTUAL;
-    memoryNextSample=0; activationCapacity={};
+    const U floorCode=(config.va_watch_flags&NTW2_VA_FLOOR_MASK)>>NTW2_VA_FLOOR_SHIFT;
+    const U holeCode=(config.va_watch_flags&NTW2_VA_HOLE_MASK)>>NTW2_VA_HOLE_SHIFT;
+    vaTotalFloorBytes=floorCode ? ((floorCode==17u ? 32u : floorCode)*NTW2_VA_FLOOR_UNIT_MIB*1024u*1024u) : NTW2_MEMORY_MIN_AVAIL_VIRTUAL;
+    vaHoleFloorBytes=holeCode ? (holeCode*NTW2_VA_FLOOR_UNIT_MIB*1024u*1024u) : NTW2_MEMORY_MIN_LARGEST_HOLE;
+    memoryWords[NTW2_MEM_FLOOR_BYTES]=vaTotalFloorBytes;
+    memoryWords[NTW2_MEM_HOLE_FLOOR_BYTES]=vaHoleFloorBytes;
+    memoryNextSample=0; vaLastHoleWalk=0; vaCachedLargestHole=0; vaBreachStreak=0; vaLastWalkUs=0; activationCapacity={};
     memset(vaWords,0,sizeof(vaWords)); vaNextSample=0; vaStart=0;
     collideSampleReady=false; // retained solver words belong to the previous start until the next activation
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation

@@ -210,6 +210,8 @@ typedef struct Options {
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (NTW2_ARENA_RELEASE) */
     BOOL no_arena_release;   /* --no-arena-release: opt out of --arena-release under --features all */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
+    uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
+    uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -3036,13 +3038,18 @@ static void print_memory(const Run *r)
 {
     unsigned i;
     if (!r->have_status) return;
-    say(L"memory: activation-sized storage; VA floor=512MiB; periodic low VA latches native LOCO/COLLIDE fallback until restart\n");
+    say(L"memory: activation-sized storage; VA total floor=%luMiB, hole floor=%luMiB; periodic low VA (2 consecutive samples) latches native LOCO/COLLIDE fallback until restart\n",
+        (unsigned long)(r->last.memory_words[NTW2_MEM_FLOOR_BYTES] >> 20),
+        (unsigned long)(r->last.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES] >> 20));
     for (i = 0; i < NTW2_MEMORY_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_memory_metrics[i], (unsigned long)r->last.memory_words[i], (i+1)%4 ? L" " : L"\n");
     if (NTW2_MEMORY_WORDS % 4) say(L"\n");
     if(r->last.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK])
-        say(L"  Budget fallback mask=0x%08lX; retired arenas=%lu; released LOCO=%lu COLLIDE=%lu bytes; LOCO breakdown retains last allocation\n",
+        say(L"  Budget fallback mask=0x%08lX (latch_reason=%lu: %ls); retired arenas=%lu; released LOCO=%lu COLLIDE=%lu bytes; LOCO breakdown retains last allocation\n",
             (unsigned long)r->last.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK],
+            (unsigned long)r->last.memory_words[NTW2_MEM_LATCH_REASON],
+            r->last.memory_words[NTW2_MEM_LATCH_REASON] == NTW2_LATCH_REASON_HOLE ? L"hole" :
+            (r->last.memory_words[NTW2_MEM_LATCH_REASON] == NTW2_LATCH_REASON_TOTAL ? L"total" : L"none"),
             (unsigned long)r->last.memory_words[NTW2_MEM_BUDGET_RELEASES],
             (unsigned long)r->last.memory_words[NTW2_MEM_RELEASED_LOCO_BYTES],
             (unsigned long)r->last.memory_words[NTW2_MEM_RELEASED_COLLIDE_BYTES]);
@@ -4663,7 +4670,7 @@ static void sb_brain_states(Sb *b, const Run *r)
  * loco.owned.quiet records --loco-quiet (requires --loco-owned-services); loco.owned.detail.metrics holds all 16 labelled detail words. loco.shadow.enabled is the EFFECTIVE state (false under quiet), requested/suppressed_by_quiet report the CLI.
  * loco_parallel records --loco-parallel (requires loco and loco_clone); loco.grid.enabled records effective grid mode (--loco-grid or --loco-grid-verify), default off.
  * loco.grid_v2.metrics exports the 16 NTW2_LOCO_GRID_V2_LABELS words; verify records --loco-grid-verify. collide.source exports source/native_stages/owned_stages/owned_refusals.
- * loco_grid_v2_words[16], collide_source_words[4], memory_words[57], then ai_completion_words[24] append at the status tail.
+ * loco_grid_v2_words[16], collide_source_words[4], memory_words[60], then ai_completion_words[24] append at the status tail.
  * loco.grid_build.metrics exports the 16 NTW2_LOCO_GRID_BUILD_LABELS words (loco_grid_build_words[16], the last status row); loco_grid_incremental records --loco-grid-incremental.
  * loco.grid_probation (--grid-probation) exports the 32 NTW2_GRID_PROBATION_LABELS words and every used caller row
  * {eip, eip_module, caller, caller_module, thread_mask, clone, clone_address, count, writes, first_site, last_site}.
@@ -4783,6 +4790,9 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"alloc_fix_requested\": %s,\n", r->opt.alloc_fix ? "true" : "false");
     sb_fmt(&b, "  \"arena_release_requested\": %s,\n", r->opt.arena_release ? "true" : "false");
     sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
+    sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
+           (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (NTW2_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
+           (unsigned long)(r->opt.va_hole_mib ? r->opt.va_hole_mib : (NTW2_MEMORY_MIN_LARGEST_HOLE >> 20)));
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
@@ -5577,7 +5587,9 @@ static int install_runtime(Run *r)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
-                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
+                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
+                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
+                             ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
@@ -6101,7 +6113,9 @@ static void usage(void)
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
         L"                        tracker/+0x13C/avoidance effects in contact order; other contacts run the original callback in place\n"
         L"  --va-watch            diagnostic: sample process VA (avail, largest free region, VirtualQuery walk) once a second in every\n"
-        L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n");
+        L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n"
+        L"  --va-floor-mib N      total free VA floor in MiB (64..512 in 32 MiB steps, or 1024; default 256). Latches LOCO/COLLIDE fallback.\n"
+        L"  --va-hole-mib M       largest free VA hole floor in MiB (32..512 in 32 MiB steps; default 128). Latches LOCO/COLLIDE fallback.\n");
     say(L"%ls",
         L"  --alloc-census        diagnostic: process-heap allocation callsite census (alloc_census_words, receipt alloc_census). Default off.\n"
         L"  --alloc-fix           live pathfinder +0x17C waypoint subnode leak reclamation (mode=2 zero-VA alone, mode=3 with --alloc-census;\n"
@@ -6383,6 +6397,21 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
+        }
+        else if (!wcscmp(name, L"--va-floor-mib")) {
+            NEEDVAL();
+            if (!parse_uint(val, 64, 1024, &o->va_floor_mib) || (o->va_floor_mib % NTW2_VA_FLOOR_UNIT_MIB != 0) ||
+                (o->va_floor_mib > 512 && o->va_floor_mib != 1024)) {
+                errsay(L"--va-floor-mib must be 64..512 in multiples of 32, or 1024.\n");
+                return -1;
+            }
+        }
+        else if (!wcscmp(name, L"--va-hole-mib")) {
+            NEEDVAL();
+            if (!parse_uint(val, 32, 512, &o->va_hole_mib) || (o->va_hole_mib % NTW2_VA_FLOOR_UNIT_MIB != 0)) {
+                errsay(L"--va-hole-mib must be 32..512 in multiples of 32.\n");
+                return -1;
+            }
         }
         else if (!wcscmp(name, L"--loco-quiet")) o->loco_quiet = TRUE;
         else if (!wcscmp(name, L"--loco-grid")) o->loco_grid = TRUE;
@@ -6840,7 +6869,9 @@ int wmain(int argc, wchar_t **argv)
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
-                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
+                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
+                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
+                             ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
