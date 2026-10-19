@@ -207,8 +207,9 @@ typedef struct Options {
     BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (va_watch_flags NTW2_ALLOC_CENSUS) */
     BOOL alloc_fix;          /* --alloc-fix: live pathfinder subnode reclamation (va_watch_flags NTW2_ALLOC_FIX; mode=2 alone, mode=3 with --alloc-census) */
     BOOL no_alloc_fix;       /* --no-alloc-fix: opt out of --alloc-fix under --features all */
-    BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown (NTW2_ARENA_RELEASE) */
-    BOOL heap_optimize;      /* --heap-optimize: process-heap / arena optimization (NTW2_HEAP_OPTIMIZE) */
+    BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (NTW2_ARENA_RELEASE) */
+    BOOL no_arena_release;   /* --no-arena-release: opt out of --arena-release under --features all */
+    BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
@@ -6106,8 +6107,11 @@ static void usage(void)
         L"  --alloc-fix           live pathfinder +0x17C waypoint subnode leak reclamation (mode=2 zero-VA alone, mode=3 with --alloc-census;\n"
         L"                        alloc_census_words, receipt alloc_census; implied by --features all unless --no-alloc-fix)\n"
         L"  --no-alloc-fix        opt out of --alloc-fix under --features all\n"
-        L"  --arena-release       release pose/scene 1 MB arena blocks at battle teardown (arena_words, receipt arena). Default off.\n"
-        L"  --heap-optimize       process-heap / arena optimization (arena_words, receipt arena). Default off.\n"
+        L"  --arena-release       release pose/scene 1 MB arena blocks at battle teardown and trim 600-frame high-water tails\n"
+        L"                        (arena_words, receipt arena; implied by --features all unless --no-arena-release)\n"
+        L"  --no-arena-release    opt out of --arena-release under --features all\n"
+        L"  --heap-optimize       opt-in HeapOptimizeResources at teardown and <640 MiB watermark (1 Hz GlobalMemoryStatusEx\n"
+        L"                        sample even without --va-watch; arena_words, receipt arena). Default off.\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
         L"                        loco = locomotion Stages A/B/C; optional owned grid v2 published at site-13 exit;\n"
         L"                        cannot combine with brain or collide_lod; brain2 v2 can coexist; collide requires --loco-clone --loco-parallel --loco-owned-services and grid\n"
@@ -6374,6 +6378,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--alloc-fix")) o->alloc_fix = TRUE;
         else if (!wcscmp(name, L"--no-alloc-fix")) o->no_alloc_fix = TRUE;
         else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
+        else if (!wcscmp(name, L"--no-arena-release")) o->no_arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
@@ -6508,6 +6513,15 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_alloc_fix)
         o->alloc_fix = TRUE;
+    /* The shipping set also implies pose/scene 1 MB arena release + 600-frame high-water tail trim
+       (--arena-release; lever4-arena: 25 blocks / 23.8 MiB trimmed in-battle + 33 blocks / 31.5 MiB released
+       at stop, +49 MiB avail VA at 600 s, 0 faults). --no-arena-release opts out; --heap-optimize stays opt-in. */
+    if (o->arena_release && o->no_arena_release) {
+        errsay(L"--arena-release and --no-arena-release are exclusive.\n");
+        return -1;
+    }
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_arena_release)
+        o->arena_release = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
