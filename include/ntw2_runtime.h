@@ -40,12 +40,13 @@ extern "C" {
 #define NTW2_ARMY_STORM_SAMPLE_MASK 0xFF00u /* bits 8..15: storm-gated sampler threshold in ms (launcher --army-storm-sample-ms, 1..255); 0: sampler unchanged. Requires NTW2_PROFILE and profile_site 19 (site 18, with NTW2_ARMY_STORM_CENSUS) or 35 (site 34, without NTW2_AI_ASYNC): the profile gate then admits a sample only while the selected site has been in progress for at least this long. */
 #define NTW2_TICK_PCORE 0x4u /* ntw2_config::va_watch_flags bit (launcher --tick-pcore): on a hybrid CPU the thread that executes a routed tick gets a hard affinity to the highest-efficiency-class (P) logical processors for the tick body; its previous affinity is restored before the gate returns. Placement only: no engine state, order or result changes. Requires a routed tick (NTW2_PROFILE or a simulation feature); a non-hybrid host leaves it inert. Exclusive with NTW2_TICK_CORE_AB. */
 #define NTW2_TICK_CORE_AB 0x8u /* ntw2_config::va_watch_flags bit (launcher --tick-core-ab): measurement only. Like NTW2_TICK_PCORE, but even model ticks are pinned to P and odd model ticks to E logical processors, so neighbouring ticks give an in-run E-core penalty. Requires a routed tick; exclusive with NTW2_TICK_PCORE. */
-#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE)
+#define NTW2_VA_WATCH_FLAGS_VALID (NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX)
 #define NTW2_ARMY_SOLVER_MEMO 0x10u /* ntw2_config::va_watch_flags bit (launcher --army-solver-memo): bit-exact memoised flag=1 formation slot solver (src/army/native_army_solver.h). Inside a routed tick on the tick owner the R1/R2 assignment-command slots 0x1331E74 / 0x1332110 / 0x1325474 run a dedicated SOLVER clone chain whose 0x502770 calls (18F12AA and the 18F0D00 trampoline path) enter ntw_solver::Solve instead of the native pair-swap solver; any out-of-contract input falls back to the native solver. Entries, EAX and the allocator call sequence are bit-identical to native. Requires a routed tick (a kManagerRouted feature such as NTW2_PROFILE) and main_thread_id; exclusive with NTW2_ARMY_SOLVER_SHADOW; compatible with NTW2_ARMY_STORM_CENSUS. */
 #define NTW2_ARMY_SOLVER_SHADOW 0x20u /* ntw2_config::va_watch_flags bit (launcher --army-solver-shadow): same chain, but the NATIVE 0x502770 stays authoritative; the kernel re-solves a pre-call copy and the result (entries bytes, EAX) is compared and counted; native/kernel inclusive times are recorded per solve. Same requirements as NTW2_ARMY_SOLVER_MEMO; exclusive with it. */
 #define NTW2_ALLOC_CENSUS 0x40u /* ntw2_config::va_watch_flags bit (launcher --alloc-census): opt-in process-heap allocation callsite census (alloc_census_words, src/core/ntw2_alloc_census.*). */
 #define NTW2_ARENA_RELEASE 0x80u /* ntw2_config::va_watch_flags bit (launcher --arena-release): opt-in pose/scene arena release at battle teardown (arena_words, src/render/ntw2_arena_release.*). */
 #define NTW2_HEAP_OPTIMIZE 0x10000u /* ntw2_config::va_watch_flags bit (launcher --heap-optimize): opt-in process-heap / arena optimization (arena_words). */
+#define NTW2_ALLOC_FIX 0x200000u /* ntw2_config::va_watch_flags bit (launcher --alloc-fix): opt-in pathfinder +0x17C waypoint subnode leak reclamation (alloc_census_words mode 2 alone, mode 3 with NTW2_ALLOC_CENSUS; 0 B table and 0 Provider vtable hooks when NTW2_ALLOC_CENSUS is clear). */
 #define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
@@ -379,12 +380,13 @@ enum ntw2_memory_word {
 #define NTW2_ALLOC_CENSUS_HEADER_WORDS 32u
 #define NTW2_ALLOC_CENSUS_ROWS 128u
 #define NTW2_ALLOC_CENSUS_ROW_WORDS 8u
-#define NTW2_ALLOC_CENSUS_MODE 2u /* header word 2: 0 = off, 1 = --alloc-census (diagnostic), 2 = --alloc-fix (live fix + census) */
+#define NTW2_ALLOC_CENSUS_MODE 2u /* header word 2: 0 = off, 1 = --alloc-census, 2 = --alloc-fix, 3 = --alloc-fix + --alloc-census */
+#define NTW2_ALLOC_CENSUS_OMITTED_THREADS 24u /* header word 24: thread entries omitted when 512-slot TEB table is full */
 #define NTW2_ALLOC_CENSUS_LABELS \
     "version", "enabled", "mode", "ptr_capacity", "ptr_used", "callsite_capacity", "callsite_used", "overflow_count", \
     "hook_faults", "live_bytes", "live_count", "baseline_bytes", "drift_bytes", "peak_live_bytes", "total_allocs", "total_frees", \
     "untracked_frees", "reentrant_skips", "samples", "fix_freed_blocks", "fix_freed_bytes", "fix_active_sites", "storage_bytes", "slots_owned", \
-    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
+    "omitted_threads", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
 #define NTW2_ARENA_WORDS 32u /* arena_words (src/render/ntw2_arena_release.*): lever 4 + lever 7 counters */
 #define NTW2_ARENA_LABELS \
     "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15", \
@@ -1490,7 +1492,7 @@ static_assert(offsetof(ntw2_status,army_b0_words) + NTW2_ARMY_B0_WORDS * sizeof(
               NTW2_ARMY_B0_WORDS == 160u, "army B0 row appends after va_watch_words");
 static_assert(offsetof(ntw2_status,army_storm_words) + NTW2_ARMY_STORM_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,brain_s0_words) &&
               NTW2_ARMY_STORM_WORDS == 128u && NTW2_ARMY_STORM_CENSUS == 0x2u && NTW2_ARMY_STORM_SAMPLE_MASK == (0xFFu << NTW2_ARMY_STORM_SAMPLE_SHIFT) &&
-              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE)),
+              !(NTW2_VA_WATCH_FLAGS_VALID & ~(NTW2_VA_WATCH | NTW2_ARMY_STORM_CENSUS | NTW2_ARMY_STORM_SAMPLE_MASK | NTW2_TICK_PCORE | NTW2_TICK_CORE_AB | NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW | NTW2_ALLOC_CENSUS | NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE | NTW2_ALLOC_FIX)),
               "army storm row keeps the four retired puppet motion/divert/mover/select rows' 128 words after army_b0_words");
 static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_deferred_words) &&
               NTW2_BRAIN_S0_WORDS == 560u, "brain S0 row appends after army_storm_words");
@@ -1519,7 +1521,7 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,arena_words) + NTW2_ARENA_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,overlay_words) &&
               offsetof(ntw2_status,overlay_words) + NTW2_OVERLAY_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) &&
               NTW2_ALLOC_CENSUS_WORDS == 1056u && NTW2_ARENA_WORDS == 32u && NTW2_OVERLAY_WORDS == 16u &&
-              NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u &&
+              NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u && NTW2_ALLOC_FIX == 0x200000u &&
               NTW2_ARMY_SOLVER_WORDS == 519u && NTW2_ARMY_SOLVER_MEMO == 0x10u && NTW2_ARMY_SOLVER_SHADOW == 0x20u &&
               NTW2_AI_PREPASS_CENSUS_WORDS == 82u && NTW2_AI_POLY_WORDS == 32u && NTW2_AI_RECORD_TEST_WORDS == 28u && NTW2_AI_PREPASS_WORDS == 60u &&
               NTW2_AI_PREPASS_CENSUS == 0x1u && NTW2_AI_PRESIZE == 0x2u &&

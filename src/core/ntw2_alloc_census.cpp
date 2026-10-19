@@ -65,7 +65,7 @@ volatile LONG g_reentrantSkips = 0;
 volatile LONG g_fixFreedBlocks = 0;
 volatile LONG g_fixFreedBytes = 0;
 volatile LONG g_fixActiveSites = 0;
-
+volatile LONG g_omittedThreads = 0;
 U g_imageBase = 0;
 U g_imageSize = 0;
 U g_delta = 0;
@@ -128,15 +128,33 @@ __forceinline U HashPtr(U ptr) {
 }
 
 __forceinline ThreadSlot* FindThreadSlot(U teb) {
+    if (teb < 8u) return nullptr;
     U idx = ((teb >> 12) * 2654435761u) & (kThreadSlots - 1u);
+    U firstTombstone = UINT32_MAX;
     for (U probe = 0; probe < kThreadSlots; ++probe, idx = (idx + 1u) & (kThreadSlots - 1u)) {
-        const LONG cur = g_threads[idx].teb;
+        const LONG cur = Load(&g_threads[idx].teb);
         if (static_cast<U>(cur) == teb) return &g_threads[idx];
+        if (cur == 1) {
+            if (firstTombstone == UINT32_MAX) firstTombstone = idx;
+            continue;
+        }
         if (cur == 0) {
+            if (firstTombstone != UINT32_MAX) {
+                if (_InterlockedCompareExchange(&g_threads[firstTombstone].teb, static_cast<LONG>(teb), 1) == 1) {
+                    return &g_threads[firstTombstone];
+                }
+            }
             const LONG prev = _InterlockedCompareExchange(&g_threads[idx].teb, static_cast<LONG>(teb), 0);
             if (prev == 0 || static_cast<U>(prev) == teb) return &g_threads[idx];
+            if (prev == 1 && firstTombstone == UINT32_MAX) firstTombstone = idx;
         }
     }
+    if (firstTombstone != UINT32_MAX) {
+        if (_InterlockedCompareExchange(&g_threads[firstTombstone].teb, static_cast<LONG>(teb), 1) == 1) {
+            return &g_threads[firstTombstone];
+        }
+    }
+    _InterlockedIncrement(&g_omittedThreads);
     return nullptr;
 }
 
@@ -351,14 +369,7 @@ void RecordAllocLocked(U ptr, U rawSize, const U* sp, U ret0) {
     --ntw2::probeDepth;
 }
 
-void RecordFree(U ptr) {
-    const U teb = __readfsdword(0x18);
-    ThreadSlot* ts = FindThreadSlot(teb);
-    if (!ts) return;
-    if (_InterlockedCompareExchange(&ts->depth, 1, 0) != 0) {
-        _InterlockedIncrement(&g_reentrantSkips);
-        return;
-    }
+void RecordFreeLocked(U ptr) {
     ++ntw2::probeDepth;
     __try {
         if (Load(&g_enabled) && g_ptrs && g_callsites) {
@@ -380,9 +391,11 @@ void RecordFree(U ptr) {
         _InterlockedIncrement(&g_hookFaults);
     }
     --ntw2::probeDepth;
-    _InterlockedExchange(&ts->depth, 0);
 }
 
+// Restrict census tracking to Provider[3] (GetProcessHeap(), [self + 4] == 3).
+// Provider[0] (0xFF8100) resizes blocks > 0x50 bytes via HeapReAlloc at 0xFF826E without
+// going through the Provider vtable; excluding Provider[0..2] avoids stale resized pointers.
 __forceinline bool IsProcessHeapProvider(const void* self) {
     return self && *reinterpret_cast<const U*>(static_cast<const uint8_t*>(self) + 4u) == 3u;
 }
@@ -399,19 +412,39 @@ AllocResult* __fastcall AllocGate(void* self, void* edx, AllocResult* out, U siz
         if (ts) _InterlockedIncrement(&g_reentrantSkips);
         return g_originalAlloc(self, edx, out, size);
     }
-    AllocResult* res = g_originalAlloc(self, edx, out, size);
-    if (Load(&g_enabled) && out && out->ptr >= 8u && IsProcessHeapProvider(self)) {
-        RecordAllocLocked(out->ptr, size, sp, ret0);
+    AllocResult* res = nullptr;
+    __try {
+        res = g_originalAlloc(self, edx, out, size);
+        if (Load(&g_enabled) && out && out->ptr >= 8u && IsProcessHeapProvider(self) &&
+            IsProcessHeapProvider(reinterpret_cast<const void*>(static_cast<uintptr_t>(out->owner)))) {
+            RecordAllocLocked(out->ptr, size, sp, ret0);
+        }
+    } __finally {
+        _InterlockedExchange(&ts->depth, 0);
     }
-    _InterlockedExchange(&ts->depth, 0);
     return res;
 }
 
 U __fastcall FreeGate(void* self, void* edx, U ptr) {
-    if (Load(&g_enabled) && ptr >= 8u && IsProcessHeapProvider(self)) {
-        RecordFree(ptr);
+    if (!Load(&g_enabled)) {
+        return g_originalFree(self, edx, ptr);
     }
-    return g_originalFree(self, edx, ptr);
+    const U teb = __readfsdword(0x18);
+    ThreadSlot* ts = FindThreadSlot(teb);
+    if (!ts || _InterlockedCompareExchange(&ts->depth, 1, 0) != 0) {
+        if (ts) _InterlockedIncrement(&g_reentrantSkips);
+        return g_originalFree(self, edx, ptr);
+    }
+    U res = 0;
+    __try {
+        if (ptr >= 8u && IsProcessHeapProvider(self)) {
+            RecordFreeLocked(ptr);
+        }
+        res = g_originalFree(self, edx, ptr);
+    } __finally {
+        _InterlockedExchange(&ts->depth, 0);
+    }
+    return res;
 }
 
 struct RowCandidate {
@@ -450,7 +483,7 @@ void BuildSnapshot(U slotsOwned) {
     out[HFixActiveSites] = static_cast<U>(Load(&g_fixActiveSites));
     out[HStorageBytes] = g_storage ? kTotalStorageBytes : 0u;
     out[HSlotsOwned] = slotsOwned;
-
+    out[HOmittedThreads] = static_cast<U>(Load(&g_omittedThreads));
     RowCandidate top[NTW2_ALLOC_CENSUS_ROWS] = {};
     U topCount = 0;
     uint64_t sumLiveBytes = 0;
@@ -578,6 +611,7 @@ void Reset() {
     _InterlockedExchange(&g_fixFreedBlocks, 0);
     _InterlockedExchange(&g_fixFreedBytes, 0);
     _InterlockedExchange(&g_fixActiveSites, 0);
+    _InterlockedExchange(&g_omittedThreads, 0);
     g_nextSampleTick = 0;
     g_samples = 0;
     g_baselineBytes = 0;
@@ -610,7 +644,7 @@ bool Start(const Binding& binding) {
     _InterlockedExchange(&g_reentrantSkips, 0);
     _InterlockedExchange(&g_fixFreedBlocks, 0);
     _InterlockedExchange(&g_fixFreedBytes, 0);
-    _InterlockedExchange(&g_fixActiveSites, 0);
+    _InterlockedExchange(&g_omittedThreads, 0);
     g_nextSampleTick = 0;
     g_samples = 0;
     g_baselineBytes = 0;
@@ -716,6 +750,21 @@ void ReclaimTick(U model) {
     }
     --ntw2::probeDepth;
 }
+void OnThreadDetach() {
+    const U teb = __readfsdword(0x18);
+    if (teb < 8u) return;
+    U idx = ((teb >> 12) * 2654435761u) & (kThreadSlots - 1u);
+    for (U probe = 0; probe < kThreadSlots; ++probe, idx = (idx + 1u) & (kThreadSlots - 1u)) {
+        const LONG cur = Load(&g_threads[idx].teb);
+        if (cur == 0) return;
+        if (static_cast<U>(cur) == teb) {
+            _InterlockedExchange(&g_threads[idx].depth, 0);
+            _InterlockedCompareExchange(&g_threads[idx].teb, 1, cur);
+            return;
+        }
+    }
+}
+
 U CurrentMode() {
     return static_cast<U>(Load(&g_mode));
 }

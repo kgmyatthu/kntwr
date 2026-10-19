@@ -204,9 +204,8 @@ typedef struct Options {
     BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags NTW2_TICK_CORE_AB) */
     BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (ntw2_config::va_watch_flags NTW2_ARMY_SOLVER_MEMO) */
     BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
-    BOOL alloc_census;       /* --alloc-census (or --alloc-fix): sets ntw2_config::va_watch_flags NTW2_ALLOC_CENSUS */
-    BOOL alloc_census_explicit; /* --alloc-census explicitly requested on CLI */
-    BOOL alloc_fix;          /* --alloc-fix: live leak reclamation (mode=2 alone, mode=3 with --alloc-census) */
+    BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (va_watch_flags NTW2_ALLOC_CENSUS) */
+    BOOL alloc_fix;          /* --alloc-fix: live pathfinder subnode reclamation (va_watch_flags NTW2_ALLOC_FIX; mode=2 alone, mode=3 with --alloc-census) */
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown (NTW2_ARENA_RELEASE) */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / arena optimization (NTW2_HEAP_OPTIMIZE) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -3948,7 +3947,7 @@ static void sb_alloc_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.alloc_census_words;
     unsigned i, first;
-    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & NTW2_ALLOC_CENSUS))) {
+    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (NTW2_ALLOC_CENSUS | NTW2_ALLOC_FIX)))) {
         sb_fmt(b, "  \"alloc_census\": null,\n");
         return;
     }
@@ -4584,6 +4583,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"tick_pcore\": %s,\n", r->opt.tick_pcore ? "true" : "false");
     sb_fmt(&b, "  \"army_solver_memo\": %s,\n", r->opt.army_solver_memo ? "true" : "false");
     sb_fmt(&b, "  \"alloc_census_requested\": %s,\n", r->opt.alloc_census ? "true" : "false");
+    sb_fmt(&b, "  \"alloc_fix_requested\": %s,\n", r->opt.alloc_fix ? "true" : "false");
     sb_fmt(&b, "  \"arena_release_requested\": %s,\n", r->opt.arena_release ? "true" : "false");
     sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
@@ -5379,8 +5379,8 @@ static int install_runtime(Run *r)
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
-                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) |
-                             (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
+                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
+                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
@@ -5435,12 +5435,6 @@ static int install_runtime(Run *r)
     r->dll_base = nf.base;
     r->state_addr = r->dll_base + r->dll.state_rva;
     say(L"Runtime loaded at 0x%08lX and verified against the local file.\n", (unsigned long)r->dll_base);
-    if (r->opt.alloc_fix) {
-        uint32_t mode = r->opt.alloc_census_explicit ? 3u : 2u;
-        SIZE_T nw = 0;
-        WriteProcessMemory(r->proc, (LPVOID)(uintptr_t)(r->state_addr + (uint32_t)offsetof(ntw2_status, alloc_census_words) + 4u * NTW2_ALLOC_CENSUS_MODE),
-                           &mode, sizeof(mode), &nw);
-    }
 
     rc = remote_call(r, r->dll_base + r->dll.start_rva, mem, 30000, &code, &err);
     if (rc != RC_OK) {
@@ -5811,6 +5805,9 @@ static BOOL launch_game(Run *r)
     say(L"Launching: %ls\n  working directory: %ls\n", cmd, r->game_dir);
     if (r->opt.army_storm_census) say(L"  army storm census: ON, storm-gated sampler threshold %lu ms (0 = sampler unchanged)\n", (unsigned long)r->opt.army_storm_sample_ms);
     if (r->opt.army_solver_memo || r->opt.army_solver_shadow) say(L"  army solver: %ls\n", r->opt.army_solver_memo ? L"MEMO (kernel replaces the native flag=1 solver)" : L"SHADOW (native authoritative, kernel compared)");
+    if (r->opt.alloc_census || r->opt.alloc_fix)
+        say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
+                               (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, NULL, r->game_dir, &si, &pi)) {
         DWORD e = GetLastError();
         if (e == ERROR_ELEVATION_REQUIRED)
@@ -6171,8 +6168,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--tick-core-ab")) o->tick_core_ab = TRUE;
         else if (!wcscmp(name, L"--army-solver-memo")) o->army_solver_memo = TRUE;
         else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
-        else if (!wcscmp(name, L"--alloc-census")) { o->alloc_census = TRUE; o->alloc_census_explicit = TRUE; }
-        else if (!wcscmp(name, L"--alloc-fix")) { o->alloc_census = TRUE; o->alloc_fix = TRUE; }
+        else if (!wcscmp(name, L"--alloc-census")) o->alloc_census = TRUE;
+        else if (!wcscmp(name, L"--alloc-fix")) o->alloc_fix = TRUE;
         else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
@@ -6615,8 +6612,8 @@ int wmain(int argc, wchar_t **argv)
                             (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
                             (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
-                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) |
-                             (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
+                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
+                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
     r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
