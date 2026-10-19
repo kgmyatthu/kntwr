@@ -105,6 +105,7 @@ ntw2_config config;
 ntw2_clone_set clones;
 U cloneBindings[NTW2_BIND_COUNT]; // the exact table the primary clone set was built with (BRAIN2 Stage 2 rebuilds its worker family from it)
 World world;
+bool arenaKeepHooks; // set around the Deactivate() of a live-but-dormant world: ntw2_arena_release keeps its slots and frees nothing
 Module formation, query, path;
 volatile U* pathStorage;
 volatile U* formationDiag;
@@ -3414,7 +3415,14 @@ bool StopModules() {
             Sleep(1);
         }
     }
-    ntw2_arena_release::Stop();
+    {   // Arena memory is freed only when the battle world is gone: a world that merely went dormant (the scheduler flag drops at >1x
+        // playback) keeps rendering from the same pose/scene/scratch blocks and its live per-frame mesh items point into them.
+        const U savedProbe=probe; World now; bool asynchronousNow=false;
+        const bool worldAlive=FindWorld(now,asynchronousNow) && SameWorld(world,now);
+        probe=savedProbe; // FindWorld records its failure reason; the monitor owns that word
+        ntw2_arena_release::Stop(!worldAlive ? ntw2_arena_release::StopMode::Release :
+                                 arenaKeepHooks ? ntw2_arena_release::StopMode::KeepHooks : ntw2_arena_release::StopMode::Detach);
+    }
     SampleCounters();
     ntw2_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     ntw2_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
@@ -3639,7 +3647,9 @@ bool Activate(const World& candidate) {
     World now; bool asynchronous=false;
     if (!FindWorld(now,asynchronous) || !SameWorld(world,now) ||
         ((config.enabled_mask&kSimulation) && !asynchronous)) {
+        arenaKeepHooks=FindWorld(now,asynchronous) && SameWorld(world,now); // dormant, not gone
         const bool clean=Deactivate();
+        arenaKeepHooks=false;
         if (clean) Phase(NTW2_WAITING_BATTLE);
         return clean && !failure;
     }
@@ -3717,7 +3727,10 @@ DWORD WINAPI Monitor(void*) {
             const bool dormantBrain2=(config.enabled_mask&NTW2_BRAIN2) && !(config.enabled_mask&NTW2_AI_ASYNC);
             if (!found || !SameWorld(world,candidate) || candidate.tick<previousTick ||
                 ((config.enabled_mask&kSimulation) && !asynchronous && !dormantBrain2)) {
-                if (!Deactivate()) break;
+                arenaKeepHooks=found && SameWorld(world,candidate) && candidate.tick>=previousTick; // the same live world went dormant: its arenas stay in use
+                const bool clean=Deactivate();
+                arenaKeepHooks=false;
+                if (!clean) break;
                 Phase(NTW2_WAITING_BATTLE);
             } else { previousTick=candidate.tick; CadenceSample(candidate.tick); SampleCounters(); continue; }
         }
@@ -3743,7 +3756,7 @@ DWORD WINAPI Monitor(void*) {
     bool clean=true;
     bool hooks=false;
     for (U i=0;i<slotCount;++i) hooks=hooks || slots[i].owned || slots[i].protectionDirty;
-    if (hooks || Load(&enabled) || formation.ready || query.ready || path.ready || poolReady)
+    if (hooks || Load(&enabled) || formation.ready || query.ready || path.ready || poolReady || ntw2_arena_release::HooksInstalled())
         clean=Deactivate();
     if (!AiShutdown()) clean=false;
     if (clean && (config.enabled_mask&NTW2_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context

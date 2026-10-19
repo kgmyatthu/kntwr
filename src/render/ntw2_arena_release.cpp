@@ -526,11 +526,17 @@ bool Start(uint32_t image_base, uint32_t va_watch_flags, uint32_t root, uint32_t
 
     g_words[kWFlagsActive] = g_flags;
 
-    g_slots[0] = { V(kCtxPassSlotVa),        V(kCtxPassOrigVa),         static_cast<U>(reinterpret_cast<uintptr_t>(&CtxPassGate)),        0, false, false };
-    g_slots[1] = { V(kSceneResetSlotVa),     V(kSceneResetOrigVa),     static_cast<U>(reinterpret_cast<uintptr_t>(&SceneResetGate)),     0, false, false };
-    g_slots[2] = { V(kRenderRootDtorSlotVa), V(kRenderRootDtorOrigVa), static_cast<U>(reinterpret_cast<uintptr_t>(&RenderRootDtorGate)), 0, false, false };
+    // Slots kept installed by Stop(KeepHooks) keep their recorded protection; only fresh slots are initialised and swapped.
+    const ArenaSlot fresh[3] = {
+        { V(kCtxPassSlotVa),        V(kCtxPassOrigVa),        static_cast<U>(reinterpret_cast<uintptr_t>(&CtxPassGate)),        0, false, false },
+        { V(kSceneResetSlotVa),     V(kSceneResetOrigVa),     static_cast<U>(reinterpret_cast<uintptr_t>(&SceneResetGate)),     0, false, false },
+        { V(kRenderRootDtorSlotVa), V(kRenderRootDtorOrigVa), static_cast<U>(reinterpret_cast<uintptr_t>(&RenderRootDtorGate)), 0, false, false },
+    };
+    for (U i = 0u; i < 3u; ++i)
+        if (!g_slots[i].owned) g_slots[i] = fresh[i];
 
     for (U i = 0u; i < 3u; ++i) {
+        if (g_slots[i].owned) continue;
         if (!SwapArenaSlot(g_slots[i], true)) {
             for (U j = i; j > 0u; --j) SwapArenaSlot(g_slots[j - 1u], false);
             _InterlockedExchange(&g_active, 0);
@@ -542,11 +548,18 @@ bool Start(uint32_t image_base, uint32_t va_watch_flags, uint32_t root, uint32_t
     return true;
 }
 
-void Stop() {
+bool HooksInstalled() {
+    for (U i = 0u; i < 3u; ++i)
+        if (g_slots[i].owned || g_slots[i].protection_dirty) return true;
+    return false;
+}
+
+void Stop(StopMode mode) {
     _InterlockedExchange(&g_active, 0);
     if (!g_flags) return;
+    if (mode == StopMode::KeepHooks) return;
 
-    if ((g_flags & NTW2_ARENA_RELEASE) && _InterlockedCompareExchange(&g_teardown_done, 0, 0) == 0) {
+    if (mode == StopMode::Release && (g_flags & NTW2_ARENA_RELEASE) && _InterlockedCompareExchange(&g_teardown_done, 0, 0) == 0) {
         const U scene = GetGlobalScene();
         if (scene) {
             if (g_main_tid != 0u && GetCurrentThreadId() == g_main_tid) {

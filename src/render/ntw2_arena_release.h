@@ -43,13 +43,25 @@ enum Word : uint32_t {
 
 static_assert(kWHeapOptTotalUs + 1u == NTW2_ARENA_WORDS, "arena_words enum matches NTW2_ARENA_WORDS");
 
-// Arm hooks and reset per-generation counters on battle activation.
+// Arm hooks and reset per-generation counters on battle activation (slots kept by Stop(KeepHooks) stay installed).
 // Returns false only if vtable slot protection/patching fails when flags are active.
 bool Start(uint32_t image_base, uint32_t va_watch_flags, uint32_t root, uint32_t main_thread_id);
 
-// Execute battle-teardown arena release (Lever 4a) and HeapOptimizeResources (Lever 7),
-// then restore vtable slots before StopModules() samples final counters.
-void Stop();
+// Why the runtime deactivates. Only Release frees arena memory, and only when the battle world is gone: the pose/scene/scratch blocks stay
+// referenced by live render state (per-frame mesh-item containers, previous-frame poses) for as long as the world renders.
+enum class StopMode : uint32_t {
+    Release,    // the battle world is gone: teardown release (Lever 4a), restore the vtable slots, heap optimization
+    KeepHooks,  // the same live world went dormant (the scheduler flag drops at >1x): stop trimming, keep the slots installed so the
+                // render-root destructor gate (or a later Stop(Release)) still releases at the real battle end
+    Detach      // the runtime shuts down with the world alive: restore the slots, free nothing
+};
+
+// Lever 4a teardown (Release only), HeapOptimizeResources (Lever 7), then restore vtable slots (Release, Detach) before
+// StopModules() samples final counters.
+void Stop(StopMode mode);
+
+// True while Start's vtable slots are owned (no Release/Detach has restored them).
+bool HooksInstalled();
 
 // Copy current counters into ntw2_state.arena_words[0..31].
 void Sample(uint32_t* out_words);
