@@ -13,9 +13,9 @@ using U = uint32_t;
 
 constexpr U kVersion = 1u;
 constexpr U kModeOff = 0u;
-constexpr U kModeCensus = 1u;
-constexpr U kModeFix = 2u;
-
+constexpr U kModeCensus = 1u;    // --alloc-census: 32.25 MiB table + Provider[3] vtable hooks
+constexpr U kModeFix = 2u;       // --alloc-fix alone: 0 B table, 0 vtable hooks, ReclaimTick active
+constexpr U kModeFixCensus = 3u; // --alloc-fix --alloc-census: both ReclaimTick and census table/hooks active
 // Provider[0..3] vtable at 0x13EDE38 (.rdata):
 //   +0x00 (0x13EDE38): 0x00FF7D30 scalar deleting dtor
 //   +0x04 (0x13EDE3C): 0x00FF8350 alloc(out_pair*, size) -> __thiscall ret 8
@@ -58,6 +58,7 @@ enum HeaderWord : U {
     HFixActiveSites = 21,
     HStorageBytes = 22,
     HSlotsOwned = 23,
+    HOmittedThreads = 24,
 };
 
 enum RowWord : U {
@@ -79,7 +80,7 @@ struct Binding {
     const ntw2_clone_set* clones;
 };
 
-U RequiredStorageBytes();
+U RequiredStorageBytes(U mode = kModeCensus);
 U StorageBytes();
 U AllocGateAddress();
 U FreeGateAddress();
@@ -93,5 +94,6 @@ void Snapshot(volatile U* words, U slotsOwned, bool force = false);
 // Phase B accounting helpers for --alloc-fix hooks/clones.
 void RecordFixFreed(U blocks, U bytes, U siteBit = 1u);
 void ReclaimTick(U model);
+void OnThreadDetach();
 U CurrentMode();
 } // namespace ntw2_alloc_census
