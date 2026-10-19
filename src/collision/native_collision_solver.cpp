@@ -111,9 +111,10 @@ bool CapacityLimits(const ntw2_workload::Capacity& capacity,Limits& limits) {
     limits.members=capacity.memberships; limits.pairs=capacity.pairs;
     limits.lanes=(std::min)(kChunks-1,binding.workers)+1;
     limits.hash=1; while (limits.hash<2*limits.records) limits.hash<<=1;
-    // Census: ~13 candidates/primary, but only ~8.7k admitted shapes at ~48k primary.
-    // Dense worlds beyond this contact budget refuse before the first game write.
-    limits.contacts=(std::min)(limits.pairs,(std::max)(limits.primary,(limits.pairs+15)/16));
+    // Pairs are a pure counter bound (no buffer is sized from them). Contacts are the buffered resource:
+    // measured peak accepted contacts are 0.18 (open field, 48k primary) to 0.70 (dense borodino500, 56k primary) per primary,
+    // so twice the primary slots cover the dense line with headroom. Dense worlds beyond this still refuse before the first game write.
+    limits.contacts=2*limits.primary;
     limits.histogram=(((std::min)(limits.cells,limits.members)+15)&~15u)*limits.lanes;
     return true;
 }

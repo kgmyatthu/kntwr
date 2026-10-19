@@ -1531,9 +1531,9 @@ static void CapacityCases(U workers) {
     Require(ntw2_collide::Start(owned), "bind owned solver without workload storage");
     Require(ntw2_collide::StorageBytes() == 0, "Start reserves no workload address space");
     const U smallEstimate = ntw2_collide::EstimateActivationBytes(small);
-    const ntw2_workload::Capacity replayCapacity{48128,74752,1048576,160256,770048};
-    Require(ntw2_collide::EstimateActivationBytes(replayCapacity) <= 13 * 1024 * 1024,
-        "candidate-free replay-sized collision reservation stays below thirteen MiB");
+    const ntw2_workload::Capacity replayCapacity{48128,74752,1048576,160256,3080192};
+    Require(ntw2_collide::EstimateActivationBytes(replayCapacity) <= 16 * 1024 * 1024,
+        "candidate-free replay-sized collision reservation stays below sixteen MiB");
     auto invalid = small; invalid.records = 3;
     Require(ntw2_collide::EstimateActivationBytes(invalid) == 0xffffffffu, "invalid capacity estimate fails closed");
     invalid = small; invalid.pairs = 0xffffffffu;
@@ -1618,8 +1618,11 @@ static void CapacityCases(U workers) {
         run("exact compact contact and candidate boundary",four,small,false);
         auto cap = small; cap.pairs = 11;
         run("candidate capacity refuses before writes",four,cap,true);
-        Spec five = four; five.input[3].x = 2.75f; five.expectedContacts = 5;
-        run("contact capacity plus one refuses before writes",five,small,true);
+        // Contact slots are 2x primary (independent of the pair bound): six mutually overlapping records yield 15 > 12.
+        Spec five; five.input.resize(6); five.expectedContacts = 15;
+        for (U i = 0; i < 6; ++i) { five.input[i].x = 2.0f + 0.05f * i; five.input[i].z = 2.0f; five.input[i].radius = 0.5f; }
+        auto contactCap = small; contactCap.primary = contactCap.records = 6; contactCap.pairs = 64;
+        run("contact capacity plus one refuses before writes",five,contactCap,true);
         Spec rejected = four; rejected.expectedContacts = 0;
         for (Input& in : rejected.input) in.radius = 0.01f;
         run("rejected candidates consume no contact packets",rejected,small,false);
@@ -1685,12 +1688,12 @@ static void CapacityCases(U workers) {
         run("owner rebuild then streamed contacts preserve every lane's order",parallel,lanes,false);
         parallel.rebuild = 0;
         for (U i = 0; i < parallel.input.size(); ++i) {
-            U group = i / 4;
-            parallel.input[i].x = -60.0f + float(group % 16) * 8.0f + float(i % 4) * 0.125f;
+            U group = i / 8;
+            parallel.input[i].x = -60.0f + float(group % 16) * 8.0f + float(i % 8) * 0.125f;
             parallel.input[i].z = -56.0f + float(group / 16) * 8.0f;
             parallel.input[i].radius = 0.5f;
         }
-        parallel.expectedContacts = 960;
+        parallel.expectedContacts = 2240; // 80 groups x C(8,2) > 2 x 640 contact slots
         run("concurrent contact overflow never commits a partial stage",parallel,lanes,true);
         parallel.rebuild = 1;
         run("concurrent streamed overflow leaves original rebuild untouched",parallel,lanes,true);

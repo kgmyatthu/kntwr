@@ -2784,9 +2784,10 @@ bool CaptureWorkloadImpl() {
             }
         }
     }
-    // cg-stagec2: 601701 candidates / 47877 primary records =12.57. Sixteen
-    // candidates per admitted primary gives census-derived headroom, not4M slots.
-    activationCapacity.pairs=16u*activationCapacity.primary;
+    // cg-stagec2: 601701 candidates / 47877 primary records = 12.57 (open field). Dense borodino500 lines measure 1214308 / 56269
+    // = 21.6 per primary. Pairs only bound a counter (no buffer is sized from them), so give 64 per primary, up to the solver's
+    // 4194304 hard limit; a stage past it refuses natively before the first game write.
+    activationCapacity.pairs=static_cast<U>((std::min<ULONGLONG>)(4194304ull,64ull*activationCapacity.primary));
     memberships=(memberships+(memberships+3)/4+255u)&~ULONGLONG(255u);
     if(!memberships) memberships=256;
     if(memberships>maxMemberships) return refuse(10,static_cast<U>(memberships>>8));
