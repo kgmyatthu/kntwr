@@ -206,6 +206,7 @@ typedef struct Options {
     BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
     BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (va_watch_flags NTW2_ALLOC_CENSUS) */
     BOOL alloc_fix;          /* --alloc-fix: live pathfinder subnode reclamation (va_watch_flags NTW2_ALLOC_FIX; mode=2 alone, mode=3 with --alloc-census) */
+    BOOL no_alloc_fix;       /* --no-alloc-fix: opt out of --alloc-fix under --features all */
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown (NTW2_ARENA_RELEASE) */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / arena optimization (NTW2_HEAP_OPTIMIZE) */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -5903,7 +5904,9 @@ static void usage(void)
         L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n");
     say(L"%ls",
         L"  --alloc-census        diagnostic: process-heap allocation callsite census (alloc_census_words, receipt alloc_census). Default off.\n"
-        L"  --alloc-fix           live process-heap leak fix (mode=2 zero-VA alone; combine with --alloc-census for mode=3 fix+census). Default off.\n"
+        L"  --alloc-fix           live pathfinder +0x17C waypoint subnode leak reclamation (mode=2 zero-VA alone, mode=3 with --alloc-census;\n"
+        L"                        alloc_census_words, receipt alloc_census; implied by --features all unless --no-alloc-fix)\n"
+        L"  --no-alloc-fix        opt out of --alloc-fix under --features all\n"
         L"  --arena-release       release pose/scene 1 MB arena blocks at battle teardown (arena_words, receipt arena). Default off.\n"
         L"  --heap-optimize       process-heap / arena optimization (arena_words, receipt arena). Default off.\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
@@ -6170,6 +6173,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
         else if (!wcscmp(name, L"--alloc-census")) o->alloc_census = TRUE;
         else if (!wcscmp(name, L"--alloc-fix")) o->alloc_fix = TRUE;
+        else if (!wcscmp(name, L"--no-alloc-fix")) o->no_alloc_fix = TRUE;
         else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
@@ -6295,6 +6299,16 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->brain_target_cull_shadow &&
         !(o->ai_ctrl_flags & NTW2_AI_CTRL_GEOMETRY))
         o->brain_target_cull = TRUE;
+    /* The shipping set also implies pathfinder +0x17C waypoint subnode leak reclamation
+       (--alloc-fix; lh-fix/lh-fix600: 3.00 M nodes / 336.3 MiB reclaimed in 1800 s, non-arena heap leak slope
+       11.35 -> 0.11 MiB/min (-99.0%), +311 MiB avail VA at 1800 s, 0 B VirtualAlloc and 0 hooks in mode 2,
+       0 faults). --no-alloc-fix opts out; --alloc-census stays opt-in (combines with all as mode 3). */
+    if (o->alloc_fix && o->no_alloc_fix) {
+        errsay(L"--alloc-fix and --no-alloc-fix are exclusive.\n");
+        return -1;
+    }
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_alloc_fix)
+        o->alloc_fix = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
@@ -6637,6 +6651,9 @@ int wmain(int argc, wchar_t **argv)
         if (!validate_runtime(r)) return finish(r, EXIT_VALIDATE, L"unusable runtime DLL");
     }
     if (r->opt.validate_only) {
+        if (r->opt.alloc_census || r->opt.alloc_fix)
+            say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
+                                   (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         say(L"Validation complete; nothing was started.\n");
         return finish(r, EXIT_OK, L"validated");
     }

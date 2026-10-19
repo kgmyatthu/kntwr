@@ -46,7 +46,7 @@ extern "C" {
 #define NTW2_ALLOC_CENSUS 0x40u /* ntw2_config::va_watch_flags bit (launcher --alloc-census): opt-in process-heap allocation callsite census (alloc_census_words, src/core/ntw2_alloc_census.*). */
 #define NTW2_ARENA_RELEASE 0x80u /* ntw2_config::va_watch_flags bit (launcher --arena-release): opt-in pose/scene arena release at battle teardown (arena_words, src/render/ntw2_arena_release.*). */
 #define NTW2_HEAP_OPTIMIZE 0x10000u /* ntw2_config::va_watch_flags bit (launcher --heap-optimize): opt-in process-heap / arena optimization (arena_words). */
-#define NTW2_ALLOC_FIX 0x200000u /* ntw2_config::va_watch_flags bit (launcher --alloc-fix): opt-in pathfinder +0x17C waypoint subnode leak reclamation (alloc_census_words mode 2 alone, mode 3 with NTW2_ALLOC_CENSUS; 0 B table and 0 Provider vtable hooks when NTW2_ALLOC_CENSUS is clear). */
+#define NTW2_ALLOC_FIX 0x200000u /* ntw2_config::va_watch_flags bit (launcher --alloc-fix; implied by --features all unless --no-alloc-fix): pathfinder +0x17C waypoint subnode leak reclamation (alloc_census_words mode 2 alone, mode 3 with NTW2_ALLOC_CENSUS; 0 B table and 0 Provider vtable hooks when NTW2_ALLOC_CENSUS is clear). */
 #define NTW2_ARMY_STORM_WORDS 128u /* army_storm_words: site-18 storm census row (former retired puppet motion/divert/mover/select rows, same offset); layout src/army/native_army_storm.h, labels NTW2_ARMY_STORM_LABELS */
 /* VA watch (opt-in, --va-watch; monitor thread, every second in every phase incl. WAITING_BATTLE/loading):
    GlobalMemoryStatusEx avail virtual plus a VirtualQuery walk of the whole user space. Header 16 words, then a ring of
