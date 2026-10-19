@@ -217,6 +217,8 @@ typedef struct Options {
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (NTW2_ARENA_RELEASE) */
     BOOL no_arena_release;   /* --no-arena-release: opt out of --arena-release under --features all */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
+    BOOL mounted_officer;    /* --mounted-officer: opt-in gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); never implied by --features all */
+    BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (NTW2_MOUNTED_OFFICER_WIDEN) */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -1442,6 +1444,7 @@ static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_S
 static const char *const k_alloc_census_metrics[32] = { NTW2_ALLOC_CENSUS_LABELS };
 static const char *const k_arena_metrics[NTW2_ARENA_WORDS] = { NTW2_ARENA_LABELS };
 static const char *const k_overlay_metrics[NTW2_OVERLAY_WORDS] = { NTW2_OVERLAY_LABELS };
+static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] = { NTW2_MOUNTED_OFFICER_LABELS };
 /* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
    --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
@@ -2317,6 +2320,18 @@ static void print_overlay(const uint32_t *w)
 {
     print_overlay_words_row(w);
 }
+static void print_mounted_officer(const uint32_t *w)
+{
+    unsigned i;
+    if (!w[0]) return;
+    say(L"  mounted_officer: units_seen=%lu eligible(no mounts)=%lu officer_first=%lu has_mounts=%lu skipped_no_refs=%lu skipped_no_officer=%lu MOUNTS_CREATED=%lu "
+        L"attach_failures=%lu alloc_failures=%lu faults=%lu widen=%lu patch_installed=%lu\n",
+        (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8],
+        (unsigned long)w[9], (unsigned long)w[10], (unsigned long)w[14], (unsigned long)(w[1] >> 1 & 1u), (unsigned long)w[15]);
+    say(L"  mounted_officer words:");
+    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
+    say(L"\n");
+}
 static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
@@ -2550,6 +2565,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_alloc_census(s->alloc_census_words);
     print_arena(s->arena_words);
     print_overlay(s->overlay_words);
+    print_mounted_officer(s->mounted_officer_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
@@ -4247,6 +4263,21 @@ static void sb_overlay(Sb *b, const Run *r)
     for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+/* --mounted-officer (src/army/ntw2_mounted_officer.h): the gate counters; null unless requested. */
+static void sb_mounted_officer(Sb *b, const Run *r)
+{
+    const uint32_t *w = r->last.mounted_officer_words;
+    unsigned i;
+    if (!r->opt.mounted_officer) {
+        sb_fmt(b, "  \"mounted_officer\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"mounted_officer\": {\"have_status\": %s, \"words\": {", r->have_status ? "true" : "false");
+    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_mounted_officer_metrics[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"raw\": [");
+    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 static void sb_ai_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.ai_census_words;
@@ -4864,6 +4895,8 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"alloc_fix_requested\": %s,\n", r->opt.alloc_fix ? "true" : "false");
     sb_fmt(&b, "  \"arena_release_requested\": %s,\n", r->opt.arena_release ? "true" : "false");
     sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
+    sb_fmt(&b, "  \"mounted_officer_requested\": %s,\n  \"mounted_officer_widen_requested\": %s,\n", r->opt.mounted_officer ? "true" : "false",
+           r->opt.mounted_officer_widen ? "true" : "false");
     sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
            (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (NTW2_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
            (unsigned long)(r->opt.va_hole_mib ? r->opt.va_hole_mib : (NTW2_MEMORY_MIN_LARGEST_HOLE >> 20)));
@@ -4926,6 +4959,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_alloc_census(&b, r);
     sb_arena(&b, r);
     sb_overlay(&b, r);
+    sb_mounted_officer(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
         unsigned memory_index;
@@ -5813,6 +5847,7 @@ static int install_runtime(Run *r)
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
+                             (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -6264,6 +6299,7 @@ static BOOL launch_game(Run *r)
     if (r->opt.alloc_census || r->opt.alloc_fix)
         say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
+    if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
     memset(&pi, 0, sizeof pi);
     for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
         DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
@@ -6410,6 +6446,12 @@ static void usage(void)
         L"  --no-arena-release    opt out of --arena-release under --features all\n"
         L"  --heap-optimize       opt-in HeapOptimizeResources at teardown and <640 MiB watermark (1 Hz GlobalMemoryStatusEx\n"
         L"                        sample even without --va-watch; arena_words, receipt arena). Default off.\n"
+        L"  --mounted-officer     opt-in GAMEPLAY feature (NEVER implied by --features all; replays desync vs vanilla): an infantry unit whose unit_stats_land\n"
+        L"                        row fills the mount columns (mount_model, mount_entity, mount_animations_table, mount_armour, mount_health) with horse = 0\n"
+        L"                        gets exactly one mount for its officer (men[0]). Data decides which units qualify. Redirects the unit constructor call\n"
+        L"                        0x531340 to a private constructor clone at start (restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
+        L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
+        L"                        the infantry spacing)\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
         L"                        loco = locomotion Stages A/B/C; optional owned grid v2 published at site-13 exit;\n"
         L"                        cannot combine with brain or collide_lod; brain2 v2 can coexist; collide requires --loco-clone --loco-parallel --loco-owned-services and grid\n"
@@ -6678,6 +6720,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--arena-release")) o->arena_release = TRUE;
         else if (!wcscmp(name, L"--no-arena-release")) o->no_arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
+        else if (!wcscmp(name, L"--mounted-officer")) o->mounted_officer = TRUE;
+        else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -7154,6 +7198,7 @@ int wmain(int argc, wchar_t **argv)
     r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
+                             (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -7182,6 +7227,7 @@ int wmain(int argc, wchar_t **argv)
         if (r->opt.alloc_census || r->opt.alloc_fix)
             say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
+        if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
         say(L"Validation complete; nothing was started.\n");
         return finish(r, EXIT_OK, L"validated");
     }

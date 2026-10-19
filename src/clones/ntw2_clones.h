@@ -177,6 +177,9 @@ enum ntw2_binding {
     /* --brain-retarget-jitter / --brain-target-cull (appended; src/brain/ntw2_retarget_jitter.h): RJ_TRACKER_TICK replaces CLONE_STEP_676FD0's call 6775C4 of the
        combat node's tracker tick 6671A0 (thiscall ECX = tracker (node+0x48), one stack argument = the agent, ret 4, EAX = target agent or 0): the host mirror. */
     NTW2_BIND_RJ_TRACKER_TICK,
+    /* --mounted-officer (appended; src/army/ntw2_mounted_officer.h): MO_GATE is inserted into CLONE_UNIT_CTOR before the mount-loop test 0x51C22E (`test ecx,ecx; jle 0x51C462`).
+       __stdcall (unit, ctor argument 1, &entity-serial slot) -> void: runs the one-mount body for the unit's officer when the unit has no mounts and resolved mount references. */
+    NTW2_BIND_MO_GATE,
     NTW2_BIND_COUNT
 };
 enum ntw2_clone_id {
@@ -333,6 +336,9 @@ enum ntw2_clone_id {
     /* --brain-retarget-jitter / --brain-target-cull (appended): pure-retarget copy of the combat node step 0x676FD0 (node vtable 0x1333E3C slot +8 -> thunk
        0x66D750); its only change is the tracker tick call 0x6775C4 -> NTW2_BIND_RJ_TRACKER_TICK. */
     NTW2_CLONE_STEP_676FD0,
+    /* --mounted-officer (appended): the unit constructor 0x51B7D0..0x51CA1C with the mount gate inserted before its mount-loop test 0x51C22E (NTW2_BIND_MO_GATE) and its
+       six-entry equipment-kind switch table rebased behind the body. Entered only through the redirected call 0x531340 while --mounted-officer is installed. */
+    NTW2_CLONE_UNIT_CTOR,
     NTW2_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

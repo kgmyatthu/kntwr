@@ -60,6 +60,7 @@
 #include "ai/ntw2_claim_once.h"
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
+#include "army/ntw2_mounted_officer.h"
 #include "core/ntw2_alloc_census.h"
 #include "render/ntw2_arena_release.h"
 
@@ -2597,6 +2598,7 @@ bool BuildClones() {
     bindings[NTW2_BIND_PS_WALK_CALL]=FnAddress(&PsWalkCall);
     bindings[NTW2_BIND_PS_POLY]=FnAddress(&ntw2_poly::Gate);
     bindings[NTW2_BIND_RJ_TRACKER_TICK]=FnAddress(&ntw2_retarget_jitter::TrackerTick);
+    bindings[NTW2_BIND_MO_GATE]=FnAddress(&ntw2_mounted_officer::Gate);
     bindings[NTW2_BIND_PS_LADDER]=FnAddress(&ntw2_spiral::Ladder);
     bindings[NTW2_BIND_PS_LADDER_PROBE]=FnAddress(&ntw2_spiral::LadderProbe);
     bindings[NTW2_BIND_PS_SPIRAL]=FnAddress(&ntw2_spiral::Spiral);
@@ -3669,10 +3671,23 @@ void CadenceSample(U tick) {
     cadence.lastChange=now; cadence.lastTick=tick;
     StateBegin(); for (U i=0;i<16;++i) ntw2_state.tick_words[i]=w[i]; StateEnd();
 }
+void PublishMountedOfficer() { // monitor thread: the row is zero without NTW2_MOUNTED_OFFICER
+    if (!(config.va_watch_flags&NTW2_MOUNTED_OFFICER)) return;
+    StateBegin(); ntw2_mounted_officer::Snapshot(ntw2_state.mounted_officer_words); StateEnd();
+}
 DWORD WINAPI Monitor(void*) {
     if (!LoadEntries()) RecordError(MissingExport,0);
     if (!failure) BuildClones();
     if (!failure && (config.enabled_mask&NTW2_AI_CENSUS)) ntw2_ai_census::SetController(clones.entries[NTW2_CLONE_AI_CONTROLLER],0xBC);
+    if (!failure && (config.va_watch_flags&NTW2_MOUNTED_OFFICER)) {
+        // --mounted-officer: the constructor clone is resident (BuildClones); redirect its single call now, before any battle loads.
+        namespace mo=ntw2_mounted_officer;
+        const mo::Targets targets={V(mo::kNative.alloc),V(mo::kNative.vecAlloc),V(mo::kNative.vecFree),V(mo::kNative.modelCtx),V(mo::kNative.animCtx),
+                                   V(mo::kNative.pose),V(mo::kNative.ctor),V(mo::kNative.attach)};
+        mo::Configure((config.va_watch_flags&NTW2_MOUNTED_OFFICER_WIDEN)!=0,targets);
+        if (!mo::InstallRedirect(delta,clones.entries[NTW2_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
+        PublishMountedOfficer();
+    }
     ntw2_profile_storm_threshold_ms=(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS))) {
         siteGateIndex=config.profile_site;
@@ -3693,6 +3708,7 @@ DWORD WINAPI Monitor(void*) {
         const bool found=FindWorld(candidate,asynchronous);
         StateBegin(); ntw2_state.probe=probe; StateEnd();
         VaWatchSample(); // no-op unless --va-watch; rate-limited to 1 Hz
+        PublishMountedOfficer(); // the unit constructors run while loading: publish in every phase
         if (Load(&enabled)) {
             // 0x5EE050 recomputes +0x2829C from the playback/unit rate (0x5B3210), not battle lifetime.
             // At >1x the task route can go dormant while this same world keeps running synchronously.
@@ -3733,6 +3749,8 @@ DWORD WINAPI Monitor(void*) {
     if (clean && (config.enabled_mask&NTW2_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context
     CrashRemove();
     ntw2_profile_stop();
+    if (!ntw2_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
+    PublishMountedOfficer();
     if (config.enabled_mask&NTW2_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
@@ -3835,6 +3853,8 @@ static U StartImpl(void* raw) {
                                    ((next.ai_prepass_flags&NTW2_AI_RECORD_TEST_BITS) && !(next.ai_prepass_flags&(NTW2_AI_POLY_SHADOW|NTW2_AI_POLY))))) ||
         // --va-watch / --army-storm-*: the VA watch sampler plus the storm census bit and its sampler threshold (bits 8..15).
         (next.va_watch_flags&~NTW2_VA_WATCH_FLAGS_VALID) ||
+        // --mounted-officer-widen needs --mounted-officer (the gate it modifies).
+        ((next.va_watch_flags&NTW2_MOUNTED_OFFICER_WIDEN) && !(next.va_watch_flags&NTW2_MOUNTED_OFFICER)) ||
         // --va-floor-mib (bits 22..26, 0=default 256 MiB, 2..16 = 64..512 MiB in 32 MiB units, 17 = 1024 MiB; 1 and 18..31 refused)
         // and --va-hole-mib (bits 27..31, 0=default 128 MiB, 1..16 = 32..512 MiB in 32 MiB units; 17..31 refused).
         (((next.va_watch_flags&NTW2_VA_FLOOR_MASK)>>NTW2_VA_FLOOR_SHIFT)==1u ||
@@ -3962,6 +3982,8 @@ static U StartImpl(void* raw) {
     ntw2_claim_once::ResetRow();
     ntw2_retarget_jitter::ResetRow();
     ntw2_target_cull::ResetRow();
+    ntw2_mounted_officer::ResetRow();
+    for (U i=0;i<NTW2_MOUNTED_OFFICER_WORDS;++i) ntw2_state.mounted_officer_words[i]=0;
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
         for (U i=0;i<NTW2_NODE_EVENT_WORDS;++i) ntw2_state.idle_node_event_words[cls][i]=0;

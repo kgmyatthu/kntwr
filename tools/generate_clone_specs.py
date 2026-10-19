@@ -1689,6 +1689,10 @@ SOURCES = [
     # [node+71],0; je 676FD0`). One contiguous span through its out-of-line static-init tails (last jmp 678310, int3 padding from 678315). Pure
     # retarget copy: only `call 6671A0` (6775C4, the single caller of the tracker tick) goes to the host mirror RJ_TRACKER_TICK.
     ('STEP_676FD0', 0x676FD0, 0x678315, 'private'),
+    # --mounted-officer: the unit constructor (single caller 0x531340) through its trailing NOP, and its six-entry equipment-kind switch table. 'private': the original
+    # stays live for every caller; the clone is entered only through the redirected 0x531340 call while the feature is installed.
+    ('UNIT_CTOR', 0x51B7D0, 0x51CA1C, 'private'),
+    ('UNIT_CTOR_TABLE', 0x51CA1C, 0x51CA34, 'clone-data'),
     # Contact responses (src/collision/native_contact.cpp, analysis/native-contact-response.md): the type-8 callback chain the
     # port transcribes or the owner replays. Pins only: nothing is cloned or patched. Already pinned above and reused:
     # PIN_LOCO_PROJECT 80E9D0, PIN_COLLIDE_RADIUS 81A670, PIN_COLLIDE_BUMP 1318038 (0.5), PIN_COLLIDE_ONE 1318048 (1.0),
@@ -2423,6 +2427,7 @@ def clone_configs():
         *prepass_configs(),
         *ps_configs(),
         *step_configs(),
+        *unit_ctor_configs(),
         *solver_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
@@ -2617,6 +2622,46 @@ STEP_EXPECT_CALLS = {'STEP_676FD0': {0x10D0900, 0x126DEF6, 0x126DF40, 0x126E299,
 STEP_EXPECT_CENSUS = {'STEP_676FD0': (1175, 67, 63, 0)}
 EXPECT_CALLS.update(STEP_EXPECT_CALLS)
 EXPECT_CENSUS.update(STEP_EXPECT_CENSUS)
+
+
+# --mounted-officer (src/army/ntw2_mounted_officer.h, analysis/native-mounted-officer.md): the unit constructor 0x51B7D0 (class vtable 0x1321294 family; the only
+# caller is 0x531340 inside the unit allocator 0x531320) with the mount gate inserted before the mount-loop test 0x51C22E. The gate is the host binding MO_GATE:
+# __stdcall (unit = EBP, constructor argument 1 = [ESP+0x54], &entity serial = ESP+0x5C) -> void. It runs for every unit (the host counts those with mounts and acts only
+# for [unit+0x34] == 0 with resolved mount references; it never changes [unit+0x34], so the original `test ecx,ecx; jle 0x51C462` still skips the stock loop). EAX/EDX are
+# saved around the call (stdcall host preserves EBX/ESI/EDI/EBP) and ECX is reloaded from [EBP+0x34] (the value the original test consumes: both predecessors of 0x51C22E carry it).
+# The equipment-kind switch table at 0x51CA1C (six relocated entries, `jmp [eax*4+0x51CA1C]` at 0x51C8BE) is rebased behind the body.
+UNIT_CTOR_VA, UNIT_CTOR_GATE = 0x51B7D0, 0x51C22E
+UNIT_CTOR_TABLE_VA, UNIT_CTOR_TABLE_END, UNIT_CTOR_TABLE_JMP = 0x51CA1C, 0x51CA34, 0x51C8BE
+UNIT_CTOR_INSERT = [bytes.fromhex('50' '52' '8d442464' '50' 'ff742460' '55'), b'\xe8', Fix('rel', Bind('MO_GATE')), bytes.fromhex('5a58' '8b4d34')]
+UNIT_CTOR_INSERT_BYTES = 22
+UNIT_CTOR_TABLE_OFFSET = UNIT_CTOR_TABLE_VA - UNIT_CTOR_VA + UNIT_CTOR_INSERT_BYTES
+UNIT_CTOR_TABLE_CFG = dict(clone='UNIT_CTOR_TABLE', source='UNIT_CTOR_TABLE', target_clone='UNIT_CTOR', offset=UNIT_CTOR_TABLE_OFFSET,
+                           jump=UNIT_CTOR_TABLE_JMP,
+                           expected_entries=(0x51C8C5, 0x51C8F4, 0x51C989, 0x51C913, 0x51C93C, 0x51C965))
+
+
+def unit_ctor_abs_retarget(value, site):
+    if value == UNIT_CTOR_TABLE_VA:
+        if site != UNIT_CTOR_TABLE_JMP + 3:
+            fail(f'UNIT_CTOR: unexpected switch-table reference at {site:#x}')
+        return Clone('UNIT_CTOR', UNIT_CTOR_TABLE_OFFSET)
+    return None
+
+
+def unit_ctor_configs():
+    return [dict(clone='UNIT_CTOR', source='UNIT_CTOR', inserts={UNIT_CTOR_GATE: UNIT_CTOR_INSERT},
+                 indirect_ok={UNIT_CTOR_TABLE_JMP}, abs_expected=1, abs_retarget=unit_ctor_abs_retarget, indirect_calls=set(),
+                 expect_rets={0x51CA16: RET(0xC)})]
+
+
+UNIT_CTOR_EXPECT_CALLS = {'UNIT_CTOR': {0x10D3140, 0x444B40, 0x4C9D40, 0x4F0660, 0x4F0800, 0x4F0930, 0x4F0CE0, 0x514990, 0x51B6B0, 0x51D050, 0x51D090,
+                                        0x51D0F0, 0x51D400, 0x51D8D0, 0x51DBE0, 0x51DF30, 0x51DF60, 0x51E670, 0x5307E0, 0x531E30, 0x5357B0, 0x537E40,
+                                        0x53EFE0, 0x544E60, 0x5473B0, 0x5488F0, 0x54A1C0, 0x54C1F0, 0x54F170, 0x564790, 0x569700, 0x5784C0, 0x579840,
+                                        0x59A750, 0x59D420, 0x59D460, 0x59DA70, 0x59EED0, 0x5A3B70, 0x61CB90, 0x655B20, 0x68C750, 0x6CD8E0, 0x72BBA0,
+                                        0x7EAE90, 0x80B260, 0x80B670, 0xE1CAC0, 0xF548D0, 0xFF7EF0}}
+UNIT_CTOR_EXPECT_CENSUS = {'UNIT_CTOR': (1043, 27, 88, 0)}
+EXPECT_CALLS.update(UNIT_CTOR_EXPECT_CALLS)
+EXPECT_CENSUS.update(UNIT_CTOR_EXPECT_CENSUS)
 
 
 # --army-solver-memo / --army-solver-shadow (src/army/native_army_solver.h): a DEDICATED copy of the flag=1 assignment route, not the
@@ -3273,6 +3318,12 @@ def build_all(image, header_path):
     ai_ctrl_extra_checks(image, plans)
     prepass_extra_checks(image)
     append_table(image, registry, plans['AI_CONTROLLER'], AI_CONTROLLER_TABLE_CFG)
+    append_table(image, registry, plans['UNIT_CTOR'], UNIT_CTOR_TABLE_CFG)
+    ctor_insns = {i.address: i for i, _, _ in plans['UNIT_CTOR'].instructions}
+    if (ctor_insns[0x51C22E].bytes != bytes.fromhex('85c9') or ctor_insns[0x51C230].bytes != bytes.fromhex('0f8e2c020000') or
+            ctor_insns[0x51C462].bytes != bytes.fromhex('8b5c2418') or
+            ctor_insns[0x51BFB9].bytes != bytes.fromhex('8b4d34') or ctor_insns[0x51C8BE].bytes != bytes.fromhex('ff2485') + u32(UNIT_CTOR_TABLE_VA)):
+        fail('UNIT_CTOR: mount-loop gate test/branch, loop exit, [unit+0x34] load or the equipment-kind switch changed')
     army_insns = {i.address: i for i, _, _ in plans['ARMY'].instructions}
     if army_insns[0x58037F].bytes != bytes.fromhex('e9fc9afbff'):
         fail('ARMY: timed tail is no longer the pinned jmp 0x539E80')
