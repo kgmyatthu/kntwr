@@ -52,6 +52,7 @@
 
 #include "ntw2_runtime.h"
 #include "profile/ntw2_profile.h"
+#include "core/ntw2_gameplay_patch.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
 #error "ntw2.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
@@ -298,6 +299,11 @@ typedef struct Run {
     char dll_sha[65];
     uint64_t exe_size, dll_size;
     FileId exe_id;
+    BOOL exe_is_stock, gp_applied, gp_live_verified, mss32_is_stock, mss32_applied;
+    char mss32_sha[65];
+    uint64_t mss32_size;
+    uint32_t mss32_base;
+    ntw2_gp_report gp_rep, mss32_rep;
     HANDLE exe_file;   /* held share-read-only from validation until the game is set up: no swap/modify window */
     HANDLE dll_file;
     DllInfo dll;
@@ -828,16 +834,42 @@ static BOOL validate_game(Run *r)
         report_hash_failure(L"Napoleon.exe", we, ne);
         return FALSE;
     }
-    if (_stricmp(r->exe_sha, NTW2_IMAGE_SHA256) != 0) {
-        wchar_t got[65], want[65];
+    if (_stricmp(r->exe_sha, NTW2_STOCK_IMAGE_SHA256) == 0) {
+        r->exe_is_stock = TRUE;
+        say(L"Napoleon.exe: stock (gameplay patch applied in memory; x86 PE32, %I64u bytes, SHA-256 match).\n",
+            (unsigned long long)r->exe_size);
+    } else if (_stricmp(r->exe_sha, NTW2_IMAGE_SHA256) == 0) {
+        r->exe_is_stock = FALSE;
+        say(L"Napoleon.exe: already patched on disk (in-memory gameplay patch skipped; x86 PE32, %I64u bytes, SHA-256 match).\n",
+            (unsigned long long)r->exe_size);
+    } else {
+        wchar_t got[65], want_s[65], want_p[65];
         MultiByteToWideChar(CP_ACP, 0, r->exe_sha, -1, got, 65);
-        MultiByteToWideChar(CP_ACP, 0, NTW2_IMAGE_SHA256, -1, want, 65);
-        errsay(L"\"%ls\" is not the supported Napoleon.exe.\n  size   : %I64u bytes\n  sha256 : %ls\n  expected: %ls\n"
-               L"Only the exact pinned image is supported; the game files were not modified.\n",
-               r->exe_path, (unsigned long long)r->exe_size, got, want);
+        MultiByteToWideChar(CP_ACP, 0, NTW2_STOCK_IMAGE_SHA256, -1, want_s, 65);
+        MultiByteToWideChar(CP_ACP, 0, NTW2_IMAGE_SHA256, -1, want_p, 65);
+        errsay(L"\"%ls\" is not a supported Napoleon.exe.\n  size   : %I64u bytes\n  sha256 : %ls\n  stock  : %ls\n  patched: %ls\n"
+               L"Only the stock Steam image or the pinned patched image is supported; the game files were not modified.\n",
+               r->exe_path, (unsigned long long)r->exe_size, got, want_s, want_p);
         return FALSE;
     }
-    say(L"Supported Napoleon.exe confirmed (x86 PE32, %I64u bytes, SHA-256 match).\n", (unsigned long long)r->exe_size);
+    {
+        wchar_t mpath[MAXP];
+        HANDLE mf;
+        join_path(mpath, r->game_dir, L"mss32.dll");
+        mf = CreateFileW(mpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (mf != INVALID_HANDLE_VALUE) {
+            if (sha256_handle(mf, r->mss32_sha, &r->mss32_size, &we, &ne)) {
+                if (_stricmp(r->mss32_sha, NTW2_STOCK_MSS32_SHA256) == 0) {
+                    r->mss32_is_stock = TRUE;
+                    say(L"mss32.dll: stock (audio DSP patch applied in memory; %I64u bytes, SHA-256 match).\n",
+                        (unsigned long long)r->mss32_size);
+                } else if (_stricmp(r->mss32_sha, NTW2_MSS32_SHA256) == 0) {
+                    say(L"mss32.dll: already patched on disk (%I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
+                }
+            }
+            CloseHandle(mf);
+        }
+    }
     return TRUE;
 }
 
@@ -4753,6 +4785,31 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_wstr(&b, r->exe_path);
     sb_fmt(&b, ",\n  \"image_sha256\": \"%s\",\n  \"image_size\": %I64u,\n  \"image_sha256_expected\": \"%s\",\n", r->exe_sha,
            (unsigned long long)r->exe_size, NTW2_IMAGE_SHA256);
+    sb_fmt(&b, "  \"image_on_disk\": \"%s\",\n  \"image_sha256_stock_expected\": \"%s\",\n",
+           r->exe_is_stock ? "stock" : "patched", NTW2_STOCK_IMAGE_SHA256);
+    {
+        const ntw2_gp_report *g = &r->gp_rep;
+        sb_fmt(&b, "  \"gameplay_patch\": {\n    \"on_disk\": \"%s\",\n    \"applied\": %s,\n    \"status\": %lu,\n"
+                   "    \"runs_total\": %lu,\n    \"runs_header\": %lu,\n    \"runs_applied\": %lu,\n    \"bytes_applied\": %lu,\n"
+                   "    \"fixups_stock_unrelocated\": %lu,\n    \"fixups_patched_relocated\": %lu,\n"
+                   "    \"sections_mapped\": %lu,\n    \"section_bytes\": %lu,\n    \"section_fixups\": %lu,\n"
+                   "    \"section_base_va\": \"0x%08lX\",\n    \"proof_site_va\": \"0x%08lX\",\n    \"proof_target_va\": \"0x%08lX\",\n"
+                   "    \"proof_site_bytes\": \"%02x%02x%02x%02x%02x\",\n    \"proof_section_va\": \"0x%08lX\",\n"
+                   "    \"proof_section_bytes\": \"%02x%02x%02x%02x%02x%02x%02x%02x\",\n    \"live_verified\": %s,\n"
+                   "    \"mss32_on_disk\": \"%s\",\n    \"mss32_applied\": %s,\n    \"mss32_runs_applied\": %lu,\n    \"mss32_bytes_applied\": %lu\n  },\n",
+               r->exe_is_stock ? "stock" : "patched", r->gp_applied ? "true" : "false", (unsigned long)g->status,
+               (unsigned long)g->runs_total, (unsigned long)g->runs_header, (unsigned long)g->runs_applied, (unsigned long)g->bytes_applied,
+               (unsigned long)g->fixups_stock_unrelocated, (unsigned long)g->fixups_patched_relocated,
+               (unsigned long)g->sections_mapped, (unsigned long)g->section_bytes, (unsigned long)g->section_fixups,
+               (unsigned long)g->section_base_va, (unsigned long)g->proof_site_va, (unsigned long)g->proof_target_va,
+               g->proof_site_bytes[0], g->proof_site_bytes[1], g->proof_site_bytes[2], g->proof_site_bytes[3], g->proof_site_bytes[4],
+               (unsigned long)g->proof_section_va,
+               g->proof_section_bytes[0], g->proof_section_bytes[1], g->proof_section_bytes[2], g->proof_section_bytes[3],
+               g->proof_section_bytes[4], g->proof_section_bytes[5], g->proof_section_bytes[6], g->proof_section_bytes[7],
+               r->gp_live_verified ? "true" : "false",
+               r->mss32_is_stock ? "stock" : (r->mss32_sha[0] ? "patched" : "other"), r->mss32_applied ? "true" : "false",
+               (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied);
+    }
     sb_put(&b, "  \"runtime_dll\": ", 17);
     sb_wstr(&b, r->dll_path);
     sb_fmt(&b, ",\n  \"runtime_sha256\": \"%s\",\n  \"runtime_size\": %I64u,\n", r->dll_sha, (unsigned long long)r->dll_size);
@@ -5472,6 +5529,36 @@ static int finish(Run *r, int code, const wchar_t *outcome)
 }
 
 /* ------------------------------------------------------------------------------------------------ install & monitor */
+/* Freeze every thread of pid so an unaligned rel32 write into an already-loaded DLL (mss32.dll RVA 0x314EF) cannot tear on
+   another thread (e.g. the Miles mixer thread).  Returns the number of suspended handles stored in out[]. */
+static unsigned suspend_pid_threads(DWORD pid, HANDLE *out, unsigned cap)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te;
+    unsigned n = 0;
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    te.dwSize = sizeof te;
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID == pid && n < cap) {
+                HANDLE th = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                if (th) {
+                    if (SuspendThread(th) != (DWORD)-1) out[n++] = th;
+                    else CloseHandle(th);
+                }
+            }
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    return n;
+}
+
+static void resume_pid_threads(HANDLE *ths, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; ++i) { ResumeThread(ths[i]); CloseHandle(ths[i]); }
+}
+
 static const wchar_t *rc_text(int rc)
 {
     return rc == RC_TIMEOUT ? L"timed out (the remote thread may still be running; its memory was not freed)"
@@ -5540,6 +5627,45 @@ static int install_runtime(Run *r)
     r->exe_base = scan.main_base;
     say(L"Game pid %lu, main image base 0x%08lX%ls.\n", (unsigned long)r->pid, (unsigned long)r->exe_base,
         r->exe_base == 0x400000u ? L"" : L" (relocated)");
+    if (r->gp_applied && r->gp_rep.proof_site_va && r->gp_rep.proof_section_va) {
+        uint8_t sb[5], cb[8];
+        SIZE_T n1 = 0, n2 = 0;
+        if (ReadProcessMemory(r->proc, (LPCVOID)(uintptr_t)r->gp_rep.proof_site_va, sb, 5, &n1) && n1 == 5 &&
+            ReadProcessMemory(r->proc, (LPCVOID)(uintptr_t)r->gp_rep.proof_section_va, cb, 8, &n2) && n2 == 8 &&
+            memcmp(sb, r->gp_rep.proof_site_bytes, 5) == 0 && memcmp(cb, r->gp_rep.proof_section_bytes, 8) == 0) {
+            r->gp_live_verified = TRUE;
+            say(L"  gameplay patch live: trampoline 0x%08lX -> 0x%08lX (%02X %02X %02X %02X %02X), .sq4 @ 0x%08lX (%02X %02X %02X %02X %02X %02X %02X %02X).\n",
+                (unsigned long)r->gp_rep.proof_site_va, (unsigned long)r->gp_rep.proof_target_va,
+                sb[0], sb[1], sb[2], sb[3], sb[4], (unsigned long)r->gp_rep.proof_section_va,
+                cb[0], cb[1], cb[2], cb[3], cb[4], cb[5], cb[6], cb[7]);
+        } else {
+            errsay(L"live read-back of the in-memory gameplay patch failed; runtime not installed.\n");
+            return EXIT_INSTALL;
+        }
+    }
+    if (r->mss32_is_stock) {
+        NameFind mf;
+        mf.name = L"mss32.dll";
+        mf.base = mf.size = 0;
+        if (module_walk(r->pid, name_cb, &mf, &err) > 0 && mf.base) {
+            uint32_t msz = 0;
+            const uint8_t *mb = ntw2_gp_mss32_blob(&msz);
+            ntw2_gp_memory mm = ntw2_gp_process_memory(r->proc);
+            HANDLE ths[256];
+            unsigned nth = suspend_pid_threads(r->pid, ths, 256);
+            int mrc;
+            r->mss32_base = mf.base;
+            mrc = ntw2_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
+            resume_pid_threads(ths, nth);
+            if (mrc != 0) {
+                errsay(L"applying the in-memory mss32.dll patch failed: %hs.\n", r->mss32_rep.error);
+                return EXIT_INSTALL;
+            }
+            r->mss32_applied = TRUE;
+            say(L"  mss32.dll patch applied in memory at 0x%08lX (%lu runs, %lu bytes, %u threads frozen).\n",
+                (unsigned long)mf.base, (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied, nth);
+        }
+    }
 
     if (!resolve_remote_loadlibrary(r, &ll_addr)) return EXIT_INSTALL;
 
@@ -5995,13 +6121,32 @@ static BOOL napoleon_running(void)
     return any;
 }
 
+typedef LONG(NTAPI *nt_query_proc_fn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+static BOOL query_peb32_image_base(HANDLE proc, uint32_t *out)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    nt_query_proc_fn nq = ntdll ? (nt_query_proc_fn)GetProcAddress(ntdll, "NtQueryInformationProcess") : NULL;
+    ULONG_PTR peb = 0;
+    ULONG got = 0;
+    SIZE_T rd = 0;
+    if (!nq) return FALSE;
+    if (nq(proc, 26 /* ProcessWow64Information */, &peb, sizeof peb, &got) != 0 || peb == 0) {
+        struct { PVOID a, peb, c, d, e, f; } pbi;
+        memset(&pbi, 0, sizeof pbi);
+        if (nq(proc, 0 /* ProcessBasicInformation */, &pbi, sizeof pbi, &got) != 0) return FALSE;
+        peb = (ULONG_PTR)pbi.peb;
+    }
+    return ReadProcessMemory(proc, (LPCVOID)(peb + 8), out, 4, &rd) && rd == 4 && *out != 0;
+}
+
 static BOOL launch_game(Run *r)
 {
     static wchar_t cmd[32768];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     FILETIME ex, kt, ut;
-    int n;
+    int n, attempt;
 
     if (r->opt.replay[0])
         n = _snwprintf_s(cmd, 32768, _TRUNCATE, L"\"%ls\" game_startup_mode replay \"%ls\"", r->exe_path, r->opt.replay);
@@ -6014,19 +6159,58 @@ static BOOL launch_game(Run *r)
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_SHOWNOACTIVATE;
     }
-    memset(&pi, 0, sizeof pi);
     say(L"Launching: %ls\n  working directory: %ls\n", cmd, r->game_dir);
     if (r->opt.army_storm_census) say(L"  army storm census: ON, storm-gated sampler threshold %lu ms (0 = sampler unchanged)\n", (unsigned long)r->opt.army_storm_sample_ms);
     if (r->opt.army_solver_memo || r->opt.army_solver_shadow) say(L"  army solver: %ls\n", r->opt.army_solver_memo ? L"MEMO (kernel replaces the native flag=1 solver)" : L"SHADOW (native authoritative, kernel compared)");
     if (r->opt.alloc_census || r->opt.alloc_fix)
         say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
-    if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, NULL, r->game_dir, &si, &pi)) {
-        DWORD e = GetLastError();
-        if (e == ERROR_ELEVATION_REQUIRED)
-            errsay(L"Windows says Napoleon.exe requires elevation. Run ntw2.exe from an elevated prompt (nothing was started).\n");
-        else win_fail(L"CreateProcessW(Napoleon.exe)", e);
-        return FALSE;
+    memset(&pi, 0, sizeof pi);
+    for (attempt = 1; attempt <= (r->exe_is_stock ? 8 : 1); ++attempt) {
+        DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
+        memset(&pi, 0, sizeof pi);
+        if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, flags, NULL, r->game_dir, &si, &pi)) {
+            DWORD e = GetLastError();
+            if (e == ERROR_ELEVATION_REQUIRED)
+                errsay(L"Windows says Napoleon.exe requires elevation. Run ntw2.exe from an elevated prompt (nothing was started).\n");
+            else win_fail(L"CreateProcessW(Napoleon.exe)", e);
+            return FALSE;
+        }
+        if (r->exe_is_stock) {
+            uint32_t base = 0, bsz = 0;
+            const uint8_t *blob = ntw2_gp_napoleon_blob(&bsz);
+            ntw2_gp_memory pm = ntw2_gp_process_memory(pi.hProcess);
+            int grc;
+            if (!query_peb32_image_base(pi.hProcess, &base)) {
+                errsay(L"unable to read the suspended game's image base from the PEB.\n");
+                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                return FALSE;
+            }
+            grc = ntw2_gp_apply(&pm, base, 0x400000u, blob, bsz, &r->gp_rep);
+            if (grc == NTW2_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 8) {
+                TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, 2000);
+                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                continue;
+            }
+            if (grc != 0) {
+                errsay(L"applying the in-memory gameplay patch failed: %hs.\n", r->gp_rep.error);
+                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                return FALSE;
+            }
+            if (ResumeThread(pi.hThread) == (DWORD)-1) {
+                win_fail(L"ResumeThread(Napoleon.exe)", GetLastError());
+                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                return FALSE;
+            }
+            r->gp_applied = TRUE;
+            r->exe_base = base;
+            say(L"  gameplay patch applied in memory before first instruction: base 0x%08lX (delta %+ld), %lu/%lu runs (%lu B), "
+                L"%lu appended sections (0x%lX B at 0x%08lX, %lu relocs).\n",
+                (unsigned long)base, (long)(base - 0x400000u), (unsigned long)r->gp_rep.runs_applied, (unsigned long)r->gp_rep.runs_total,
+                (unsigned long)r->gp_rep.bytes_applied, (unsigned long)r->gp_rep.sections_mapped, (unsigned long)r->gp_rep.section_bytes,
+                (unsigned long)r->gp_rep.section_base_va, (unsigned long)r->gp_rep.section_fixups);
+        }
+        break;
     }
     CloseHandle(pi.hThread);
     r->proc = pi.hProcess;

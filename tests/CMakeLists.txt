@@ -377,6 +377,11 @@ if(TARGET ntw2_runtime)
     INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include")
   add_dependencies(native_runtime_lifecycle ntw2_runtime)
 endif()
+# In-memory gameplay patch: the applier (src/core/ntw2_gameplay_patch.c, also linked into ntw2.exe) against the loader-equivalent
+# patched image. Needs the STOCK game file (NTW2_STOCK_IMAGE) next to the generated patched image.
+ntw2_harness(native_gameplay_patch_oracle STD 20 FP strict
+  SOURCES native_gameplay_patch_oracle.cpp "${NTW2_GAMEPLAY_PATCH_SOURCE}"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 
 if(NTW2_HAVE_IMAGE)
   ntw2_asset(_table native-formation-angle-table-28252.bin)
@@ -522,6 +527,24 @@ if(NTW2_HAVE_IMAGE)
       COMMAND native_runtime_lifecycle "${NTW2_IMAGE_ARG}" "$<TARGET_FILE:ntw2_runtime>")
     set_tests_properties(ntw2_runtime_lifecycle PROPERTIES LABELS "image" TIMEOUT 120)
     ntw2_note_registered(ntw2_runtime_lifecycle)
+  endif()
+  if(NTW2_STOCK_IMAGE AND EXISTS "${NTW2_STOCK_IMAGE}")
+    file(TO_NATIVE_PATH "${NTW2_STOCK_IMAGE}" _stock_arg)
+    get_filename_component(_stock_dir "${NTW2_STOCK_IMAGE}" DIRECTORY)
+    set(_gp_args --patched "${NTW2_IMAGE_ARG}" --stock "${_stock_arg}")
+    ntw2_asset(_mss_patched mss32_patched.dll)
+    if(_mss_patched AND EXISTS "${_stock_dir}/mss32.dll")
+      file(TO_NATIVE_PATH "${_stock_dir}/mss32.dll" _mss_stock)
+      list(APPEND _gp_args --mss32-patched "${_mss_patched}" --mss32-stock "${_mss_stock}")
+    endif()
+    # --process also creates the stock game SUSPENDED (no instruction of it ever runs), applies the patch through the process
+    # backend and compares the whole live image with the loader image of the patched file.
+    list(APPEND _gp_args --process)
+    add_test(NAME ntw2_gameplay_patch COMMAND native_gameplay_patch_oracle ${_gp_args})
+    set_tests_properties(ntw2_gameplay_patch PROPERTIES LABELS "image" TIMEOUT 300)
+    ntw2_note_registered(ntw2_gameplay_patch)
+  else()
+    ntw2_note_skipped(ntw2_gameplay_patch "NTW2_STOCK_IMAGE not set to the stock Napoleon.exe")
   endif()
 else()
   foreach(_t ballistics_query_cache ballistics_runtime_integration formation_slot formation_batch formation_runtime

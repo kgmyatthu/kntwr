@@ -49,7 +49,9 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 option(NTW2_BUILD_RUNTIME "Build ntw2_runtime.dll and the ntw2.exe launcher (the product)" ON)
 option(NTW2_BUILD_TESTS "Build native oracles/harnesses/payload audits and register them with CTest" OFF)
 set(NTW2_TEST_IMAGE "" CACHE FILEPATH
-    "Supported Napoleon.exe (SHA-256 in include/ntw2_runtime.h). Image oracles are registered only when this file exists.")
+    "The PATCHED pinned image (SHA-256 NTW2_IMAGE_SHA256 in include/ntw2_runtime.h) = what the launcher builds in memory from the stock game files; generate it with tools/apply_ntwpatch.py. Image oracles are registered only when this file exists.")
+set(NTW2_STOCK_IMAGE "" CACHE FILEPATH
+    "The STOCK Napoleon.exe on disk (mss32.dll beside it). Enables the in-memory gameplay patch identity oracle (ntw2_gameplay_patch).")
 get_filename_component(_ntw2_default_assets "${CMAKE_CURRENT_SOURCE_DIR}/../analysis" ABSOLUTE)
 set(NTW2_TEST_ASSETS "${_ntw2_default_assets}" CACHE PATH
     "Directory holding the pinned oracle captures (*.bin kits, angle table, replay records). Tests whose capture is missing are not registered.")
@@ -232,7 +234,7 @@ if(NTW2_BUILD_RUNTIME)
   set_target_properties(ntw2_runtime PROPERTIES OUTPUT_NAME ntw2_runtime)
 
   # Launcher: plain C, x86, static CRT.  The runtime DLL name is baked from the target so launcher and DLL cannot drift.
-  add_executable(ntw2 ${NTW2_LAUNCHER_SOURCES})
+  add_executable(ntw2 ${NTW2_LAUNCHER_SOURCES} ${NTW2_GAMEPLAY_PATCH_SOURCE})
   target_include_directories(ntw2 PRIVATE include launcher src) # src: C-compatible src/loco/native_loco.h word labels
   target_compile_options(ntw2 PRIVATE /O2 /W4 /utf-8)
   target_compile_definitions(ntw2 PRIVATE NTW2_RUNTIME_DLL_NAME="$<TARGET_FILE_NAME:ntw2_runtime>")
