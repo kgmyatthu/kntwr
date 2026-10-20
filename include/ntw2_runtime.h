@@ -354,8 +354,8 @@ enum ntw2_memory_word {
 #define NTW2_AI_STANDOFF_DEFAULT_K 90u
 #define NTW2_AI_GROUP_WORDS 32u /* ai_group_words: words 0..15 --ai-formup-gate (ntw2_group_formup::Word, labels NTW2_AI_FORMUP_LABELS), 16..31 --ai-standoff (labels NTW2_AI_STANDOFF_LABELS) */
 #define NTW2_AI_FORMUP_LABELS \
-    "gate_calls", "blocked", "pass_formed", "pass_timeout", "pass_escape", "pass_native_false", "max_wait_ticks", "states_entered", \
-    "formed_pct_le10", "formed_pct_le25", "formed_pct_le50", "formed_pct_le75", "formed_pct_le90", "formed_pct_gt90", "unreadable", "faults"
+    "gate_evals", "native_exit", "blocked", "pass_formed", "pass_timeout", "pass_escape", "pass_waived", "blocked_entries", "wait_max_ticks", "wait_sum_ticks", \
+    "formed_le25", "formed_le50", "formed_le75", "formed_gt75", "unmeasured_members", "faults_lo16_outofscope_hi16"
 #define NTW2_AI_STANDOFF_LABELS \
     "so_reserved16", "so_reserved17", "so_reserved18", "so_reserved19", "so_reserved20", "so_reserved21", "so_reserved22", "so_reserved23", \
     "so_reserved24", "so_reserved25", "so_reserved26", "so_reserved27", "so_reserved28", "so_reserved29", "so_reserved30", "so_reserved31"
