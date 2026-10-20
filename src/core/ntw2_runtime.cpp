@@ -58,6 +58,7 @@
 #include "ai/ntw2_planner_prepass.h"
 #include "ai/ntw2_spiral.h"
 #include "ai/ntw2_claim_once.h"
+#include "ai/ntw2_group_formup.h"
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
@@ -112,7 +113,8 @@ volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = NTW2_BRAIN_SLOTS;
 constexpr U kMaxSlots = 11 + kBrainSlotCount + ntw2_ai_census::kPinCount + ntw2_ai_async2::kPinCount + ntw2_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1 + ntw2_alloc_census::kSlotCount; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot + alloc census provider slots
-Slot slots[kMaxSlots];
+constexpr U kGroupSlots = 8; // --ai-formup-gate 4 (REFORM / MOVE_TO_FORMUP test + enter) + 4 reserved for --ai-standoff
+Slot slots[kMaxSlots+kGroupSlots];
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
 U allocCensusSlotFirst, allocCensusSlotEnd; // [first,end) of the alloc census provider slots inside slots[]
 U allocCensusRequestedMode; // 0 = off, 1 = --alloc-census, 2 = --alloc-fix (captured at ntw2_start before status reset)
@@ -2578,6 +2580,8 @@ void SnapshotAiCtrl() {
     for (U i=0;i<NTW2_AI_CTRL_REUSE_WORDS-16;++i) row[16+i]=i<ntw2_ai_ctrl_geometry::kStatusWords ? geometry[i] : 0;
     static_assert(ntw2_claim_once::kWords==NTW2_AI_CTRL_REUSE_WORDS-24 && ntw2_ai_ctrl_geometry::kStatusWords<=8, "claim-once words fill the B half after the geometry words");
     ntw2_claim_once::Snapshot(row+24); // --ai-claim-once: all zero without the bit
+    static_assert(ntw2_group_formup::kWords<=NTW2_AI_GROUP_WORDS/2, "formup words fill the first half of ai_group_words");
+    ntw2_group_formup::Snapshot(ntw2_state.ai_group_words); // --ai-formup-gate: words 0..15, all zero without the bit
     static_assert(ntw2_retarget_jitter::kWords==4, "retarget-jitter words fill words 20..23");
     if (config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER) ntw2_retarget_jitter::Snapshot(row+20); // --brain-retarget-jitter (exclusive with the geometry mode that owns 16..23)
     static_assert(ntw2_target_cull::kWords==4, "target-cull words fill words 16..19");
@@ -3111,6 +3115,13 @@ bool BuildSlots() {
         AddSlot(ntw2_spiral::kFallbackSlot,ntw2_spiral::kFallbackOriginal,FnAddress(&ntw2_spiral::FallbackGate));
         AddSlot(ntw2_spiral::kControllerSlot,ntw2_spiral::kControllerOriginal,FnAddress(&ntw2_spiral::ControllerGate));
     } else if (config.ai_ctrl_flags & NTW2_AI_CLAIM_BITS) AddSlot(ntw2_claim_once::kFallbackSlot,ntw2_claim_once::kFallbackOriginal,FnAddress(&ntw2_claim_once::Gate));
+    // --ai-formup-gate: the REFORM (2) / MOVE_TO_FORMUP (3) ATTACK_BATTLEGROUP state-class test + enter slots (mirror gates, pinned to the audited thunks; analysis/native-ai-formup-gate.md).
+    if (config.ai_ctrl_flags & NTW2_AI_FORMUP_GATE) {
+        AddSlot(ntw2_group_formup::kTest2Slot,ntw2_group_formup::kTest2Original,FnAddress(&ntw2_group_formup::TestGate2));
+        AddSlot(ntw2_group_formup::kEnter2Slot,ntw2_group_formup::kEnter2Original,FnAddress(&ntw2_group_formup::EnterGate2));
+        AddSlot(ntw2_group_formup::kTest3Slot,ntw2_group_formup::kTest3Original,FnAddress(&ntw2_group_formup::TestGate3));
+        AddSlot(ntw2_group_formup::kEnter3Slot,ntw2_group_formup::kEnter3Original,FnAddress(&ntw2_group_formup::EnterGate3));
+    }
     // --brain-target-cull* / --brain-retarget-jitter: the combat node step slot (0x1333E44 = 0x66D750) -> NodeStepGate (the clone runs only on the tick thread inside site 6).
     if (config.ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) AddSlot(ntw2_retarget_jitter::kVtableSlot,ntw2_retarget_jitter::kThunk,FnAddress(&NodeStepGate));
     // Keep original entry slots intact in BRAIN2 observe/census mode. Its optional
@@ -3533,6 +3544,15 @@ bool Activate(const World& candidate) {
                                                 V(ntw2_claim_once::kMemoState),V(ntw2_claim_once::kRecompute),V(ntw2_claim_once::kWorkingList),&PsScopeThread};
         ntw2_claim_once::Configure((config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE) ? ntw2_claim_once::ModeOnce :
                                    (config.ai_ctrl_flags&NTW2_AI_CLAIM_ONCE_CENSUS) ? ntw2_claim_once::ModeCensus : ntw2_claim_once::ModeOff,targets);
+    }
+    {
+        // --ai-formup-gate: the four ATTACK_BATTLEGROUP REFORM / MOVE_TO_FORMUP state-class slots (tests + enters); the gate is armed here, the slots are published by BuildSlots.
+        namespace gf=ntw2_group_formup;
+        const gf::Targets targets={V(gf::kReformExit),V(gf::kReformAlt),V(gf::kFormupExit),V(gf::kFormupAlt),V(gf::kFormupAlt2),V(gf::kPoseToVec),V(gf::kMoveVtable),
+                                   V(gf::kTest2Original),V(gf::kEnter2Original),V(gf::kTest3Original),V(gf::kEnter3Original),&PsScopeThread};
+        const gf::Params params={config.ai_group_params&NTW2_AI_FORMUP_PCT_MASK,(config.ai_group_params&NTW2_AI_FORMUP_METRES_MASK)>>NTW2_AI_FORMUP_METRES_SHIFT,
+                                 config.ai_group_params>>NTW2_AI_FORMUP_TIMEOUT_SHIFT};
+        gf::Configure((config.ai_ctrl_flags&NTW2_AI_FORMUP_GATE)!=0,params,targets);
     }
     {
         // The mirror's search call: --brain-target-cull(-shadow) substitutes its 0x553420 replacement here (same ABI).
@@ -4011,6 +4031,7 @@ static U StartImpl(void* raw) {
     ntw2_spiral::ResetRow(); // the poll copies the module row: a session that never activates must not republish the previous one
     ntw2_record_test::Reset();
     ntw2_claim_once::ResetRow();
+    ntw2_group_formup::ResetRow();
     ntw2_retarget_jitter::ResetRow();
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();
