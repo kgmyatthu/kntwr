@@ -255,6 +255,7 @@ typedef struct Options {
     uint32_t inject_timeout_s;
     BOOL activate;
     BOOL validate_only;
+    BOOL allow_concurrent;
     BOOL focus;
     BOOL exit_game_after_observe;
 } Options;
@@ -6883,6 +6884,7 @@ static void usage(void)
         L"                        write NTW2TLOG binary at observation end; receipt includes summary and loss count\n"
         L"  --no-activate         launch the game without installing the runtime\n"
         L"  --validate-only       validate Napoleon.exe and the runtime DLL, start nothing\n"
+        L"  --allow-concurrent    diagnostic: allow a second game instance (replay verification); timings are not comparable between concurrent runs\n"
         L"  --focus               allow normal game-window activation (default: no activation requested)\n"
         L"  --no-focus            explicitly keep the default nonactivating startup (best effort)\n"
         L"  --help\n\n"
@@ -7080,6 +7082,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--loco-shadow")) o->loco_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= NTW2_AI_CTRL;
         else if (!wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
+        else if (!wcscmp(name, L"--allow-concurrent")) o->allow_concurrent = TRUE;
         else if (!wcscmp(name, L"--no-focus")) o->focus = FALSE;
         else if (!wcscmp(name, L"--focus")) o->focus = TRUE;
         else if (!wcscmp(name, L"--exit-game-after-observe")) o->exit_game_after_observe = TRUE;
@@ -7591,10 +7594,11 @@ int wmain(int argc, wchar_t **argv)
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
         if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
+        if (r->opt.allow_concurrent) say(L"  concurrent: ALLOWED (a second game instance may run; timings are not comparable between concurrent runs)\n");
         say(L"Validation complete; nothing was started.\n");
         return finish(r, EXIT_OK, L"validated");
     }
-    if (napoleon_running()) return finish(r, EXIT_CONFLICT, L"Napoleon.exe already running");
+    if (!r->opt.allow_concurrent && napoleon_running()) return finish(r, EXIT_CONFLICT, L"Napoleon.exe already running");
 
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
     if (!launch_game(r)) return finish(r, EXIT_LAUNCH, L"game launch failed");
