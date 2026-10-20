@@ -21,11 +21,12 @@ using ThisFloat = float(__fastcall*)(U, U);
 using ThisPtr = U(__fastcall*)(U, U);
 using ThisPtrOut = U(__fastcall*)(U, U, U);
 
-struct UnitState { U unit, lastSeen; unsigned char prevMoving, prevFiring, used, pad; U ticksStopped; };
+struct UnitState { U unit, lastSeen; unsigned char prevMoving, prevFiring, used, ever; U ticksStopped, traces; };
 struct Gathered { U unit, side, ai, cx_bits, cz_bits, members, first, formation; float cx, cz, minX, maxX, minZ, maxZ; int loaded; U poolOff, poolCount; };
 
 U words[kWords];
 bool enabled, disabled;
+U tickFiring[2], liveUnits[2], liveMembers[2];
 U delta, imageLo, imageSize, lastModel, battleFaults, gCount;
 UnitState table[kStateSlots];
 Gathered units[kMaxUnits];
@@ -37,6 +38,7 @@ inline U Rd(U a) { return *reinterpret_cast<const volatile U*>(static_cast<uintp
 inline float RdF(U a) { return *reinterpret_cast<const volatile float*>(static_cast<uintptr_t>(a)); }
 inline bool Good(float v) { return v == v && fabsf(v) < kCoordLimit; }
 inline U Bits(float f) { U u; memcpy(&u, &f, 4); return u; }
+inline float FromBits(U u) { float f; memcpy(&f, &u, 4); return f; }
 inline U V(U preferred) { return preferred + delta; }
 inline void Bump(Word w) { ++words[w]; }
 
@@ -222,72 +224,132 @@ void Gather(U model) {
     words[WAiSidesLast] = aiSides;
     gCount = n;
 }
-// One AI unit (units[i], n gathered); POD locals only (it runs inside __try). Native predicates are called only after the pre-validation above.
+// Active command row of a unit: count/index/vtable, destination distances (0x844F70), the attack-order predicates. Everything native is pre-validated.
+void Dest(const Gathered& u, const Gathered* enemy, U* cntOut, U* idxOut, U* vtOut, float* destD, float* destEnemyD, U* flagsOut) {
+    const U cnt = Rd(u.unit + 0x930), idxRow = Rd(u.unit + 0x934);
+    U vt = 0xFFFFFFFFu, flags = 0;
+    float dD = -1.0f, dE = -1.0f;
+    if (cnt != 0 && cnt <= 10 && idxRow < cnt) {
+        const U row = u.unit + 0x398 + 0x90 * idxRow;
+        const U table2 = Rd(row);
+        vt = table2 ? table2 - delta : 0;
+        const bool rowOk = table2 && InImage(table2) && InImage(Rd(table2 + 0x38)) && InImage(Rd(table2 + 0x2C)) && InImage(Rd(table2 + 0x30));
+        if (table2 && !rowOk) Bump(WNativeSkipped);
+        if (rowOk) {
+            const U pose = reinterpret_cast<ThisPtr>(static_cast<uintptr_t>(Rd(table2 + 0x38)))(row, 0);
+            words[WNativeCalls] += 1;
+            if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x2C)))(row, 0) & 0xFF) flags |= 1u;
+            if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x30)))(row, 0) & 0xFF) flags |= 2u;
+            words[WNativeCalls] += 2;
+            if (Sane(pose) && (!Rd(pose + 0x10) || Sane(Rd(pose + 0x10)))) {
+                float out[3] = {0, 0, 0};
+                const U r = reinterpret_cast<ThisPtrOut>(static_cast<uintptr_t>(V(0x80E9D0)))(pose, 0, static_cast<U>(reinterpret_cast<uintptr_t>(out)));
+                words[WNativeCalls] += 1;
+                const float dx = RdF(r), dz = RdF(r + 8);
+                if (Good(dx) && Good(dz)) {
+                    flags |= 4u;
+                    const float ux = dx - u.cx, uz = dz - u.cz, ex = dx - enemy->cx, ez = dz - enemy->cz;
+                    dD = sqrtf(ux * ux + uz * uz); dE = sqrtf(ex * ex + ez * ez);
+                }
+            }
+        }
+    }
+    *cntOut = cnt; *idxOut = idxRow; *vtOut = vt; *destD = dD; *destEnemyD = dE; *flagsOut = flags;
+}
+
+inline void HistRange(U base, float ratio) {
+    U bin = static_cast<U>(ratio / 0.05f); if (bin >= kMovingBins) bin = kMovingBins - 1;
+    ++words[base + bin];
+}
+
+// One unit (units[i], n gathered); POD locals only (it runs inside __try). Native predicates are called only after the pre-validation above.
 void Observe(U i, U n, U modelTick, U* eligible) {
-    {
-        Gathered& u = units[i];
-        if (!u.ai) return;
-        const int rs = RangeSafe(u.unit);
-        float range = 0.0f;
-        if (rs < 0) { Bump(WNativeSkipped); return; }
-        if (rs > 0) { range = reinterpret_cast<ThisFloat>(static_cast<uintptr_t>(V(0x5646A0)))(u.unit, 0); ++words[WNativeCalls]; }
-        if (!(range > 0.0f) || !Good(range)) { ++words[WNoMissile]; return; }
-        if (!MovingSafe(u.unit) || !SlotCallSafe(u.unit, 0x10)) { Bump(WNativeSkipped); return; }
-        ++*eligible; ++words[WAiUnits];
-        const bool moving = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55C320)))(u.unit, 0) != 0;
-        const bool firing = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55AFE0)))(u.unit, 0) == 1;
+    Gathered& u = units[i];
+    const U clsPtr = Rd(u.unit + 0x2C);
+    const U cls = Sane(clsPtr) ? Rd(clsPtr + 0x1C) : 7u;
+    const U c8 = cls > 7 ? 7u : cls;
+    const bool art = cls == 1;
+    const U sd = u.side > 1 ? 1u : u.side;
+    const bool predsOk = MovingSafe(u.unit) && SlotCallSafe(u.unit, 0x10);
+    bool moving = false, firing = false;
+    const U sv = kSideVal + kSideWords * sd;
+    words[sv + 0] = u.ai; ++words[sv + 1]; ++words[sv + 8 + c8];
+    if (predsOk) {
+        moving = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55C320)))(u.unit, 0) != 0;
+        firing = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55AFE0)))(u.unit, 0) == 1;
         words[WNativeCalls] += 2;
-        UnitState* st = Find(u.unit, modelTick);
-        // Nearest enemy unit by centre, and the three nearest for the member search.
-        float d2[3] = {1e30f, 1e30f, 1e30f}; int idx[3] = {-1, -1, -1}; U enemies = 0;
-        for (U j = 0; j < n; ++j) {
-            if (units[j].side == u.side) continue;
-            ++enemies;
-            const float dx = units[j].cx - u.cx, dz = units[j].cz - u.cz, d = dx * dx + dz * dz;
-            if (d < d2[2]) {
-                if (d < d2[1]) {
-                    d2[2] = d2[1]; idx[2] = idx[1];
-                    if (d < d2[0]) { d2[1] = d2[0]; idx[1] = idx[0]; d2[0] = d; idx[0] = static_cast<int>(j); }
-                    else { d2[1] = d; idx[1] = static_cast<int>(j); }
-                } else { d2[2] = d; idx[2] = static_cast<int>(j); }
+        if (moving) { ++words[sv + 2]; ++words[sv + 16 + c8]; }
+        if (firing) { ++words[sv + 3]; ++words[sv + 24 + c8]; ++tickFiring[sd]; }
+    } else Bump(WNativeSkipped);
+    if (!u.ai) return;
+    const int rs = RangeSafe(u.unit);
+    float range = 0.0f;
+    if (rs < 0) { Bump(WNativeSkipped); return; }
+    if (rs > 0) { range = reinterpret_cast<ThisFloat>(static_cast<uintptr_t>(V(0x5646A0)))(u.unit, 0); ++words[WNativeCalls]; }
+    if (!(range > 0.0f) || !Good(range)) { ++words[WNoMissile]; return; }
+    if (!predsOk) return;
+    ++*eligible; ++words[WAiUnits];
+    UnitState* st = Find(u.unit, modelTick);
+    if (st && firing && !art && !st->ever) { st->ever = 1; ++words[WEverFiring]; }
+    // Nearest enemy unit by centre, and the three nearest for the member search.
+    float d2[3] = {1e30f, 1e30f, 1e30f}; int idx[3] = {-1, -1, -1}; U enemies = 0;
+    for (U j = 0; j < n; ++j) {
+        if (units[j].side == u.side) continue;
+        ++enemies;
+        const float dx = units[j].cx - u.cx, dz = units[j].cz - u.cz, d = dx * dx + dz * dz;
+        if (d < d2[2]) {
+            if (d < d2[1]) {
+                d2[2] = d2[1]; idx[2] = idx[1];
+                if (d < d2[0]) { d2[1] = d2[0]; idx[1] = idx[0]; d2[0] = d; idx[0] = static_cast<int>(j); }
+                else { d2[1] = d; idx[1] = static_cast<int>(j); }
+            } else { d2[2] = d; idx[2] = static_cast<int>(j); }
+        }
+    }
+    if (enemies == 0 || idx[0] < 0) {
+        ++words[WEnemyless];
+        if (st) { st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick; st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped); }
+        return;
+    }
+    words[WEnemyUnitsLast] = enemies;
+    const float dC = sqrtf(d2[0]);
+    float dM = -1.0f, dMe = -1.0f;
+    if (dC < 4.0f * range + 100.0f && LoadMembers(u)) {
+        float best = 1e30f, bestE = 1e30f;
+        for (int k = 0; k < 3; ++k) {
+            if (idx[k] < 0) continue;
+            Gathered& e = units[idx[k]];
+            if (!LoadMembers(e)) continue;
+            const float* em = pool + 2 * e.poolOff;
+            for (U a = 0; a < e.poolCount; ++a) {
+                const float dx = em[2 * a] - u.cx, dz = em[2 * a + 1] - u.cz, d = dx * dx + dz * dz;
+                if (d < bestE) bestE = d;
             }
-        }
-        if (enemies == 0 || idx[0] < 0) {
-            ++words[WEnemyless];
-            if (st) { st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick; st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped); }
-            return;
-        }
-        words[WEnemyUnitsLast] = enemies;
-        const float dC = sqrtf(d2[0]);
-        float dM = -1.0f, dMe = -1.0f;
-        if (dC < 4.0f * range + 100.0f && LoadMembers(u)) {
-            float best = 1e30f, bestE = 1e30f;
-            for (int k = 0; k < 3; ++k) {
-                if (idx[k] < 0) continue;
-                Gathered& e = units[idx[k]];
-                if (!LoadMembers(e)) continue;
-                const float* em = pool + 2 * e.poolOff;
+            const float* om = pool + 2 * u.poolOff;
+            for (U b = 0; b < u.poolCount; ++b) {
+                const float ox = om[2 * b], oz = om[2 * b + 1];
+                if (BoxDist2(e, ox, oz) >= best) continue;
                 for (U a = 0; a < e.poolCount; ++a) {
-                    const float dx = em[2 * a] - u.cx, dz = em[2 * a + 1] - u.cz, d = dx * dx + dz * dz;
-                    if (d < bestE) bestE = d;
-                }
-                const float* om = pool + 2 * u.poolOff;
-                for (U b = 0; b < u.poolCount; ++b) {
-                    const float ox = om[2 * b], oz = om[2 * b + 1];
-                    if (BoxDist2(e, ox, oz) >= best) continue;
-                    for (U a = 0; a < e.poolCount; ++a) {
-                        const float dx = em[2 * a] - ox;
-                        const float dxx = dx * dx;
-                        if (dxx >= best) continue;
-                        const float dz = em[2 * a + 1] - oz, d = dxx + dz * dz;
-                        if (d < best) best = d;
-                    }
+                    const float dx = em[2 * a] - ox;
+                    const float dxx = dx * dx;
+                    if (dxx >= best) continue;
+                    const float dz = em[2 * a + 1] - oz, d = dxx + dz * dz;
+                    if (d < best) best = d;
                 }
             }
-            if (best < 1e29f) { dM = sqrtf(best); ++words[WDmComputed]; }
-            if (bestE < 1e29f) dMe = sqrtf(bestE);
         }
-        const U b34 = Rd(u.unit + 0xB34);
+        if (best < 1e29f) { dM = sqrtf(best); ++words[WDmComputed]; }
+        if (bestE < 1e29f) dMe = sqrtf(bestE);
+    }
+    // Per-class stats (every AI unit with range > 0 and an enemy, artillery included).
+    {
+        U* c = &words[kClassStats + 4 * c8];
+        ++c[0];
+        const float mc = FromBits(c[1]);
+        if (mc < 0.0f || dC < mc) { c[1] = Bits(dC); c[2] = modelTick; }
+        if (dM >= 0.0f) { const float md = FromBits(c[3]); if (md < 0.0f || dM < md) c[3] = Bits(dM); }
+    }
+    const U b34 = Rd(u.unit + 0xB34);
+    if (!art) {
         if (moving && dM >= 0.0f && dM < 1.5f * range) {
             const float r = dM / range;
             U bin = static_cast<U>(r / 0.05f); if (bin >= kMovingBins) bin = kMovingBins - 1;
@@ -295,56 +357,45 @@ void Observe(U i, U n, U modelTick, U* eligible) {
             ++words[(b34 == 0 ? kMovingB0 : b34 == 1 ? kMovingB1 : b34 == 4 ? kMovingB4 : kMovingOther) + bin];
             ++words[WMovingInRange];
         }
-        const float nearLimit = 3.0f * range + 2.0f * RdF(u.formation + 0x670);
-        const bool inReach = dC < nearLimit;
-        if (st && st->prevMoving != 2) {
-            U type = 0;
-            if (st->prevMoving && !moving && inReach) type = kTypeHalt;
-            else if (!st->prevFiring && firing && inReach) type = kTypeFire;
-            if (type) {
-                const float ratio = dM >= 0.0f ? dM / range : -1.0f;
-                if (type == kTypeHalt) { ++words[WHalts]; Hist(kHaltRatio, kHistBins, ratio, 0.1f); Hist(kHaltMetres, kHistBins, dM, 10.0f); }
-                else { ++words[WFireStarts]; Hist(kFireRatio, kHistBins, ratio, 0.1f); }
-                const U cnt = Rd(u.unit + 0x930), idxRow = Rd(u.unit + 0x934);
-                U vt = 0xFFFFFFFFu;
-                float destD = -1.0f, destEnemyD = -1.0f;
-                U flags = 0;
-                if (cnt != 0 && cnt <= 10 && idxRow < cnt) {
-                    const U row = u.unit + 0x398 + 0x90 * idxRow;
-                    const U table2 = Rd(row);
-                    vt = table2 ? table2 - delta : 0;
-                    const bool rowOk = table2 && InImage(table2) && InImage(Rd(table2 + 0x38)) && InImage(Rd(table2 + 0x2C)) && InImage(Rd(table2 + 0x30));
-                    if (table2 && !rowOk) Bump(WNativeSkipped);
-                    if (rowOk) {
-                        const U pose = reinterpret_cast<ThisPtr>(static_cast<uintptr_t>(Rd(table2 + 0x38)))(row, 0);
-                        words[WNativeCalls] += 1;
-                        if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x2C)))(row, 0) & 0xFF) flags |= 1u;
-                        if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x30)))(row, 0) & 0xFF) flags |= 2u;
-                        words[WNativeCalls] += 2;
-                        if (Sane(pose) && (!Rd(pose + 0x10) || Sane(Rd(pose + 0x10)))) {
-                            float out[3] = {0, 0, 0};
-                            const U r = reinterpret_cast<ThisPtrOut>(static_cast<uintptr_t>(V(0x80E9D0)))(pose, 0, static_cast<U>(reinterpret_cast<uintptr_t>(out)));
-                            words[WNativeCalls] += 1;
-                            const float dx = RdF(r), dz = RdF(r + 8);
-                            if (Good(dx) && Good(dz)) {
-                                flags |= 4u;
-                                const float ux = dx - u.cx, uz = dz - u.cz, ex = dx - units[idx[0]].cx, ez = dz - units[idx[0]].cz;
-                                destD = sqrtf(ux * ux + uz * uz); destEnemyD = sqrtf(ex * ex + ez * ez);
-                            }
-                        }
-                    }
-                }
-                U r2[kRowWords] = {};
-                r2[0] = modelTick; r2[1] = u.unit; r2[2] = type; r2[3] = Bits(dC); r2[4] = Bits(dM); r2[5] = Bits(dMe); r2[6] = Bits(range);
-                r2[7] = b34; r2[8] = cnt; r2[9] = idxRow; r2[10] = vt; r2[11] = Rd(Rd(u.unit + 0x2C) + 0x1C); r2[12] = u.members;
-                r2[13] = st->ticksStopped; r2[14] = units[idx[0]].unit; r2[15] = u.side; r2[16] = Bits(destD); r2[17] = Bits(destEnemyD); r2[18] = flags;
-                Record(type, r2, ratio);
-            }
+        if (!moving && dM >= 0.0f && dM < 1.5f * range) {
+            HistRange(kStillAll, dM / range);
+            if (firing) HistRange(kStillFiring, dM / range);
         }
-        if (st) {
-            st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped);
-            st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick;
+        if ((modelTick % kTraceEvery) == 0 && dC < 3.0f * range + 200.0f) {
+            U cnt, idxRow, vt, flags; float dD, dE;
+            Dest(u, &units[idx[0]], &cnt, &idxRow, &vt, &dD, &dE, &flags);
+            U count = st ? ++st->traces : 1u;
+            if (count > 32767u) count = 32767u;
+            U* t = &words[kTrace + kTraceWords * (words[WTraceSamples] % kTraceRows)];
+            t[0] = modelTick; t[1] = u.unit; t[2] = Bits(dC); t[3] = Bits(dM);
+            t[4] = (moving ? 1u : 0u) | (firing ? 2u : 0u) | ((b34 & 0xFFu) << 8) | (cnt > 0 ? 0x10000u : 0u) | (count << 17);
+            t[5] = vt; t[6] = Bits(dD); t[7] = Bits(dE);
+            ++words[WTraceSamples];
         }
+    }
+    const float nearLimit = 3.0f * range + 2.0f * RdF(u.formation + 0x670);
+    const bool inReach = dC < nearLimit;
+    if (st && st->prevMoving != 2) {
+        U type = 0;
+        if (st->prevMoving && !moving && inReach) type = kTypeHalt;
+        else if (!st->prevFiring && firing && inReach) type = kTypeFire;
+        if (type && art) Bump(type == kTypeHalt ? WArtHalts : WArtFireStarts);
+        else if (type) {
+            const float ratio = dM >= 0.0f ? dM / range : -1.0f;
+            if (type == kTypeHalt) { ++words[WHalts]; Hist(kHaltRatio, kHistBins, ratio, 0.1f); Hist(kHaltMetres, kHistBins, dM, 10.0f); }
+            else { ++words[WFireStarts]; Hist(kFireRatio, kHistBins, ratio, 0.1f); }
+            U cnt, idxRow, vt, flags; float destD, destEnemyD;
+            Dest(u, &units[idx[0]], &cnt, &idxRow, &vt, &destD, &destEnemyD, &flags);
+            U r2[kRowWords] = {};
+            r2[0] = modelTick; r2[1] = u.unit; r2[2] = type; r2[3] = Bits(dC); r2[4] = Bits(dM); r2[5] = Bits(dMe); r2[6] = Bits(range);
+            r2[7] = b34; r2[8] = cnt; r2[9] = idxRow; r2[10] = vt; r2[11] = cls; r2[12] = u.members;
+            r2[13] = st->ticksStopped; r2[14] = units[idx[0]].unit; r2[15] = u.side; r2[16] = Bits(destD); r2[17] = Bits(destEnemyD); r2[18] = flags;
+            Record(type, r2, ratio);
+        }
+    }
+    if (st) {
+        st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped);
+        st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick;
     }
 }
 
@@ -370,6 +421,7 @@ void Reset(bool enable, U imageDelta, U base, U size) {
     enabled = enable; disabled = false; delta = imageDelta; imageLo = base; imageSize = size; lastModel = 0; poolUsed = 0; battleFaults = 0; gCount = 0;
     words[WVersion] = kVersion; words[WDelta] = imageDelta;
     words[WFlags] = enable ? 1u : 0u;
+    for (U c = 0; c < 8; ++c) { words[kClassStats + 4 * c + 1] = Bits(-1.0f); words[kClassStats + 4 * c + 3] = Bits(-1.0f); }
 }
 
 void Tick(U model, U modelTick) {
@@ -387,9 +439,16 @@ void Tick(U model, U modelTick) {
     if (!GatherGuarded(model)) Fault(false);
     else {
         U eligible = 0;
+        tickFiring[0] = tickFiring[1] = liveUnits[0] = liveUnits[1] = liveMembers[0] = liveMembers[1] = 0;
+        for (U i = 0; i < gCount; ++i) { const U sd = units[i].side > 1 ? 1u : units[i].side; ++liveUnits[sd]; liveMembers[sd] += units[i].members; }
         for (U i = 0; i < gCount && !disabled; ++i)
             if (!ObserveGuarded(i, gCount, modelTick, &eligible)) Fault(true);
         words[WAiUnitsLast] = eligible;
+        for (U sd = 0; sd < 2; ++sd) {
+            const U sv = kSideVal + kSideWords * sd;
+            words[sv + 5] = liveUnits[sd]; words[sv + 6] = liveMembers[sd]; words[sv + 7] = tickFiring[sd];
+            if (tickFiring[sd] > words[sv + 4]) words[sv + 4] = tickFiring[sd];
+        }
     }
     --ntw2::probeDepth;
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);

@@ -1461,6 +1461,20 @@ static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] =
 #define EC_DEEP_ROWS 896u
 #define EC_RING_ROWS 1536u
 #define EC_ROWS 32u
+#define EC_STILL_ALL 2176u
+#define EC_STILL_FIRING 2206u
+#define EC_CLASS_STATS 2236u
+#define EC_SIDE_VAL 2268u
+#define EC_SIDE_WORDS 32u
+#define EC_TRACE 2336u
+#define EC_TRACE_WORDS 8u
+#define EC_TRACE_ROWS 512u
+static float ec_f(uint32_t u)
+{
+    float f;
+    memcpy(&f, &u, sizeof f);
+    return f;
+}
 static const char *const k_engage_census_metrics[EC_HDR] = {
     "version", "flags", "ticks", "ai_units", "halts", "fire_starts", "faults", "bad_member", "enemyless", "table_full", "native_calls", "cost_us_total", "cost_us_max",
     "last_model_tick", "ai_sides_last", "ai_units_last", "enemy_units_last", "dm_computed", "moving_in_range", "inactive_units", "no_missile", "bad_graph", "table_used",
@@ -1492,6 +1506,17 @@ static void print_engage_census_line(const uint32_t *w)
         L"moving-in-range n=%lu dM/range p10=%.2f median=%.2f%ls\n",
         (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[9],
         (unsigned long)w[11], (unsigned long)w[12], nh, h10, h50, nm, m10, m50, (w[1] & 2u) ? L" [DISABLED by fault]" : L"");
+    {
+        unsigned sd;
+        for (sd = 0; sd < 2; ++sd) {
+            const uint32_t *v = w + EC_SIDE_VAL + EC_SIDE_WORDS * sd;
+            say(L"  engage_census side%u(%ls): unit_ticks=%lu moving=%lu firing=%lu max_simul_firing=%lu live_units=%lu live_members=%lu firing_now=%lu\n", sd,
+                v[0] ? L"AI" : L"non-AI", (unsigned long)v[1], (unsigned long)v[2], (unsigned long)v[3], (unsigned long)v[4], (unsigned long)v[5], (unsigned long)v[6],
+                (unsigned long)v[7]);
+        }
+        say(L"  engage_census: ever_firing_ai_nonart=%lu art_halts=%lu art_fire_starts=%lu trace_samples=%lu\n", (unsigned long)w[250], (unsigned long)w[31], (unsigned long)w[248],
+            (unsigned long)w[249]);
+    }
 }
 /* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
@@ -4362,7 +4387,8 @@ static void sb_engage_census(Sb *b, const Run *r)
     }
     sb_fmt(b, "  \"engage_census\": {\"have_status\": %s, \"counters\": {", r->have_status ? "true" : "false");
     for (i = 0; i < EC_HDR; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_engage_census_metrics[i], (unsigned long)w[i]);
-    sb_fmt(b, "},\n    ");
+    sb_fmt(b, ", \"art_halts\": %lu, \"art_fire_starts\": %lu, \"trace_samples\": %lu, \"ever_firing_ai_nonart\": %lu},\n    ",
+           (unsigned long)w[31], (unsigned long)w[248], (unsigned long)w[249], (unsigned long)w[250]);
     sb_u32_array(b, "halt_ratio_hist", w + EC_HALT_RATIO, 22);
     sb_fmt(b, ",\n    ");
     sb_u32_array(b, "halt_metres_hist", w + EC_HALT_METRES, 22);
@@ -4379,6 +4405,29 @@ static void sb_engage_census(Sb *b, const Run *r)
     sb_fmt(b, ",\n    ");
     sb_u32_array(b, "moving_b34_other", w + EC_MOVING_OTHER, 30);
     sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "still_all_hist", w + EC_STILL_ALL, 30);
+    sb_fmt(b, ",\n    ");
+    sb_u32_array(b, "still_firing_hist", w + EC_STILL_FIRING, 30);
+    sb_fmt(b, ",\n    \"class_stats\": [");
+    for (i = 0; i < 8; ++i) {
+        const uint32_t *c = w + EC_CLASS_STATS + 4 * i;
+        sb_fmt(b, "%s{\"class\": %u, \"unit_ticks\": %lu, \"min_dC\": %.2f, \"min_dC_tick\": %lu, \"min_dM\": %.2f}", i ? ", " : "", i, (unsigned long)c[0],
+               (double)ec_f(c[1]), (unsigned long)c[2], (double)ec_f(c[3]));
+    }
+    sb_fmt(b, "],\n    \"side_validation\": [");
+    for (i = 0; i < 2; ++i) {
+        const uint32_t *v = w + EC_SIDE_VAL + EC_SIDE_WORDS * i;
+        sb_fmt(b, "%s{\"side\": %u, \"ai\": %lu, \"unit_ticks\": %lu, \"moving_ticks\": %lu, \"firing_ticks\": %lu, \"max_simul_firing\": %lu, \"live_units_last\": %lu, "
+               "\"live_members_last\": %lu, \"firing_last_tick\": %lu, ", i ? ", " : "", i, (unsigned long)v[0], (unsigned long)v[1], (unsigned long)v[2], (unsigned long)v[3],
+               (unsigned long)v[4], (unsigned long)v[5], (unsigned long)v[6], (unsigned long)v[7]);
+        sb_u32_array(b, "class_unit_ticks", v + 8, 8);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "class_moving_ticks", v + 16, 8);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "class_firing_ticks", v + 24, 8);
+        sb_fmt(b, "}");
+    }
+    sb_fmt(b, "],\n    ");
     sb_engage_rows(b, "first_halt_rows", w + EC_FIRST_ROWS, w[23] > EC_ROWS ? EC_ROWS : w[23], 0);
     sb_fmt(b, ",\n    ");
     sb_engage_rows(b, "deepest_halt_rows", w + EC_DEEP_ROWS, w[24] > EC_ROWS ? EC_ROWS : w[24], 0);
@@ -4386,6 +4435,20 @@ static void sb_engage_census(Sb *b, const Run *r)
     ev = w[25];
     ring_n = ev > EC_ROWS ? EC_ROWS : ev;
     sb_engage_rows(b, "last_events_oldest_first", w + EC_RING_ROWS, ring_n, ev > EC_ROWS ? ev % EC_ROWS : 0);
+    /* Infantry trace ring, oldest first, decoded: [tick, unit, dC, dM, moving, firing, B34, ncmd>0, unit_samples, cmd_vtable, destD, destEnemyD]. */
+    sb_fmt(b, ",\n    \"trace_columns\": [\"tick\",\"unit\",\"dC\",\"dM\",\"moving\",\"firing\",\"b34\",\"has_cmd\",\"unit_samples\",\"cmd_vtable\",\"destD\",\"destEnemyD\"],\n    \"trace\": [");
+    {
+        const unsigned tn = w[249] > EC_TRACE_ROWS ? EC_TRACE_ROWS : w[249];
+        const unsigned t0 = w[249] > EC_TRACE_ROWS ? w[249] % EC_TRACE_ROWS : 0;
+        unsigned k;
+        for (k = 0; k < tn; ++k) {
+            const uint32_t *t = w + EC_TRACE + EC_TRACE_WORDS * ((t0 + k) % EC_TRACE_ROWS);
+            sb_fmt(b, "%s[%lu,%lu,%.1f,%.1f,%lu,%lu,%lu,%lu,%lu,%lu,%.1f,%.1f]", k ? "," : "", (unsigned long)t[0], (unsigned long)t[1], (double)ec_f(t[2]), (double)ec_f(t[3]),
+                   (unsigned long)(t[4] & 1u), (unsigned long)(t[4] >> 1 & 1u), (unsigned long)(t[4] >> 8 & 0xFFu), (unsigned long)(t[4] >> 16 & 1u), (unsigned long)(t[4] >> 17),
+                   (unsigned long)t[5], (double)ec_f(t[6]), (double)ec_f(t[7]));
+        }
+    }
+    sb_fmt(b, "]");
     sb_fmt(b, "},\n");
 }
 static void sb_ai_census(Sb *b, const Run *r)
@@ -4895,7 +4958,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                         NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u +
                         NTW2_ARMY_B0_WORDS * 64u + NTW2_BRAIN_S0_WORDS * 16u +
                         NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + NTW2_BRAIN_UNIT_POLICY_WORDS * 48u +
-                        NTW2_BRAIN_LOC_WORDS * 24u + 16384u + 8192u + 4096u];
+                        NTW2_BRAIN_LOC_WORDS * 24u + NTW2_ENGAGE_CENSUS_WORDS * 24u + 16384u + 8192u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];

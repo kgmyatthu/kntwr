@@ -133,7 +133,7 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,arena_words)+NTW2_ARENA_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,overlay_words) && NTW2_ARENA_WORDS==32u &&
               offsetof(ntw2_status,overlay_words)+NTW2_OVERLAY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,mounted_officer_words) && NTW2_OVERLAY_WORDS==16u &&
               offsetof(ntw2_status,mounted_officer_words)+NTW2_MOUNTED_OFFICER_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,engage_census_words) && NTW2_MOUNTED_OFFICER_WORDS==16u &&
-              offsetof(ntw2_status,engage_census_words)+NTW2_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS==2176u && NTW2_ENGAGE_CENSUS==0x80000u &&
+              offsetof(ntw2_status,engage_census_words)+NTW2_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS==6432u && NTW2_ENGAGE_CENSUS==0x80000u &&
               NTW2_AI_POLY_SHADOW==0x4u && NTW2_AI_POLY==0x8u && NTW2_AI_SPIRAL_CENSUS==0x10u && NTW2_AI_SPIRAL_CAP_SHIFT==16u &&
               NTW2_AI_RECORD_TEST_SHADOW==0x20u && NTW2_AI_RECORD_TEST==0x40u && NTW2_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
