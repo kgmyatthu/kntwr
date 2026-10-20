@@ -184,7 +184,7 @@ static void TestFormed() {
             Arm(true,c.pct); seq.clear(); Thunk(state==2 ? 0x702A40 : 0x702AE0,Sub()); (state==2 ? gf::EnterGate2 : gf::EnterGate3)(Sub());
             seq.clear(); const U r=GateTest(state,Sub());
             if(c.pass) Require(r==0xE88 && seq.size()==2 && seq[1]==TEv88 && W(gf::WPassFormed)==1,"formed >= pct releases the exit");
-            else Require(r==0 && seq.size()==1 && seq[0]==(state==2 ? TReformExit : TFormupExit) && W(gf::WBlocked)==1 && W(gf::WBlockedEntries)==1,"formed < pct withholds the exit and calls nothing else");
+            else Require(r==0 && seq.size()==1 && seq[0]==(state==2 ? TReformExit : TFormupExit) && W(gf::WBlocked)==1 && W(gf::WBlockedEntries)==(state==2 ? 1u : 0x10000u),"formed < pct withholds the exit and calls nothing else");
         }
     }
     // Distance rule: <= metres is formed, > metres is not; metres 0 needs the exact slot.
@@ -253,6 +253,14 @@ static void TestScopeAndFaults() {
     gf::EnterGate2(Sub(0)); Put(modelMem,0x58,3010); gf::EnterGate2(Sub(1)); Put(modelMem,0x58,3020);
     Require(gf::TestGate2(Sub(0))==0xE88 && gf::TestGate2(Sub(1))==0,"per-tactic clocks");
     Require(W(gf::WBlockedEntries)==1,"one blocked entry (the second tactic); the first was released by timeout before being blocked");
+    // A blocked entry released by the enemy escape or by the engine's waiver is accounted too (wait sum / max), in state 3 counted in the high half of word 7.
+    Arm(true,80,25,2400); BuildTactic(0,Members(0,4),4000,false,500.0f); gf::EnterGate3(Sub(0));
+    Put(modelMem,0x58,4030); Require(gf::TestGate3(Sub(0))==0,"state 3 blocked");
+    Put(tacticMem[0],0x80C,0); PutF(tacticMem[0],0x80C,100.0f); Put(modelMem,0x58,4075);
+    Require(gf::TestGate3(Sub(0))==0xE88 && W(gf::WPassEscape)==1 && W(gf::WWaitSum)==75 && W(gf::WWaitMax)==75 && W(gf::WBlockedEntries)==0x10000u,"escape release accounts the wait of a blocked state-3 entry");
+    gf::EnterGate3(Sub(0)); Put(modelMem,0x58,4100); PutF(tacticMem[0],0x80C,500.0f); Require(gf::TestGate3(Sub(0))==0,"blocked again after re-entry");
+    tacticMem[0][0x81E]=0; Put(modelMem,0x58,4110);
+    Require(gf::TestGate3(Sub(0))==0xE88 && W(gf::WPassWaived)==1 && W(gf::WWaitSum)==110 && W(gf::WBlockedEntries)==0x20000u,"waiver release accounts the wait");
     std::printf("scope / faults / per-tactic clocks\n");
 }
 

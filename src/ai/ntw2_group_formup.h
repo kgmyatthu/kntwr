@@ -42,9 +42,9 @@ namespace ntw2_group_formup {
 //  4 pass_timeout     ... released by the safety timeout
 //  5 pass_escape      ... released because [t+0x80C] <= 140 m
 //  6 pass_waived      ... released because the engine waived form-up ([t+0x81E] == 0)
-//  7 blocked_entries  distinct state entries that were blocked at least once (blocked transitions)
+//  7 blocked_entries  distinct state entries that were blocked at least once (blocked transitions): bits 0..15 REFORM (2), bits 16..31 MOVE_TO_FORMUP (3)
 //  8 wait_max_ticks   longest wait (ticks since state entry) seen on a blocked or a released-after-blocked evaluation
-//  9 wait_sum_ticks   sum of waits of released entries that had been blocked (mean time groups spent forming = sum / released)
+//  9 wait_sum_ticks   sum of the waits of blocked entries when they were released (formed, timeout, escape or waiver); mean time spent forming = sum / (entries released)
 // 10..13 formed% histogram of every evaluation that measured it: <= 25, <= 50, <= 75, > 75
 // 14 unmeasured      members counted formed because no destination could be read
 // 15 faults          SEH faults / table-full fallbacks (native answer let through); bits 16..31 = gate calls outside the site-34 think scope

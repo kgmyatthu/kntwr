@@ -103,21 +103,21 @@ inline void Account(Entry& e, U wait) {
 
 // true: let the native "exit" through. POD locals only.
 bool AllowImpl(U tactic, U state) {
-    if (Rd8(tactic + 0x81E) == 0) { Bump(WPassWaived); return true; }
-    if (RdF(tactic + 0x80C) <= kEscapeMetres) { Bump(WPassEscape); return true; }
     U tick;
     if (!ModelTick(tactic, &tick)) { Bump(WFaults); return true; }
     Entry* e = Find(tactic, tick);
     if (!e) { Bump(WFaults); return true; }
     if (e->state != state) { e->state = static_cast<unsigned char>(state); e->enter = tick; e->blocked = 0; } // exit tested without a seen entry: start the clock here
     const U wait = tick >= e->enter ? tick - e->enter : 0;
+    if (Rd8(tactic + 0x81E) == 0) { Bump(WPassWaived); Account(*e, wait); return true; }
+    if (RdF(tactic + 0x80C) <= kEscapeMetres) { Bump(WPassEscape); Account(*e, wait); return true; }
     if (wait >= param.timeoutTicks) { Bump(WPassTimeout); Account(*e, wait); return true; }
     U members;
     const U pct = FormedPercent(tactic, &members);
     Bump(pct <= 25 ? WHist0 : pct <= 50 ? WHist1 : pct <= 75 ? WHist2 : WHist3);
     if (pct >= param.pct) { Bump(WPassFormed); Account(*e, wait); return true; }
     Bump(WBlocked);
-    if (!e->blocked) { e->blocked = 1; Bump(WBlockedEntries); }
+    if (!e->blocked) { e->blocked = 1; Bump(WBlockedEntries, state == 2 ? 1u : 0x10000u); }
     if (wait > words[WWaitMax]) words[WWaitMax] = wait;
     return false;
 }
