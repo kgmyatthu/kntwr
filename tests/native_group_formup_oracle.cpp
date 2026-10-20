@@ -263,6 +263,15 @@ static void TestScopeAndFaults() {
     Require(gf::TestGate3(Sub(0))==0xE88 && W(gf::WPassWaived)==1 && W(gf::WWaitSum)==110 && W(gf::WBlockedEntries)==0x20000u,"waiver release accounts the wait");
     std::printf("scope / faults / per-tactic clocks\n");
 }
+// Informational cost of one blocked evaluation (native exit TRUE, 16 member units, all with move rows; the natives are host fakes, so the engine's own test cost is excluded).
+static void TestCost() {
+    std::vector<Member> v; for(U i=0;i<kMaxUnits;++i) v.push_back({100,100,100,200,true,true,1,0,0});
+    BuildTactic(0,v,1000,false,500.0f); Script(true,false,true,false,false); Arm(true,80,25,2400); gf::EnterGate2(Sub());
+    LARGE_INTEGER f,a,b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+    constexpr U n=200000; for(U i=0;i<n;++i) Require(gf::TestGate2(Sub())==0,"blocked");
+    QueryPerformanceCounter(&b);
+    std::printf("cost: %.0f ns per blocked evaluation (16 members, fake natives)\n",1e9*static_cast<double>(b.QuadPart-a.QuadPart)/static_cast<double>(f.QuadPart)/n);
+}
 
 int main(int argc,char** argv) {
     if(argc!=2) { std::fprintf(stderr,"usage: native_group_formup_oracle Napoleon.exe\n"); return 2; }
@@ -279,7 +288,7 @@ int main(int argc,char** argv) {
     // The thunks are the original bytes: assert their call structure so a different image cannot pass silently.
     static const B reformHead[]={0x56,0x8b,0x74,0x24,0x08,0x8d,0x46,0x84};
     Require(!std::memcmp(At(0x702A80),reformHead,sizeof(reformHead)) && !std::memcmp(At(0x702B20),reformHead,sizeof(reformHead)),"REFORM / MOVE_TO_FORMUP test thunk prologue");
-    TestForwarding(); TestMirror(); TestFormed(); TestReleases(); TestScopeAndFaults();
+    TestForwarding(); TestMirror(); TestFormed(); TestReleases(); TestScopeAndFaults(); TestCost();
     std::printf("group formup oracle: %u checks\n",checks);
     return 0;
 }
