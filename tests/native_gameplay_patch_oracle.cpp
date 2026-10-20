@@ -500,6 +500,61 @@ static void CheckBlob(const char* name, const uint8_t* blob, uint32_t size, cons
                 static_cast<unsigned long long>(info.appended_bytes), info.stock_sha256, info.patched_sha256);
 }
 
+// Diagnostic bisection (--gameplay-patch-only-runs / --gameplay-patch-skip-runs): the filter only decides which non-header runs reach the live image.
+//   ONLY={}  : no code run is written: the image is the stock loader image with the patched header and the appended sections;
+//   SKIP={44,48}: the two relocated-operand runs (RVA 0x43C70C / 0x43F2F1) stay stock, every other byte is the loader-equivalent patched image.
+static void RunFilter(const Case& c, uint32_t base) {
+    ntw2_gp_filter parsed;
+    std::memset(&parsed, 0, sizeof parsed);
+    Require(ntw2_gp_filter_parse("14-16,36,44", &parsed) == 0, "filter list parses");
+    Require((parsed.runs[0] & (7u << 14)) == (7u << 14) && (parsed.runs[1] & (1u << 4)) && (parsed.runs[1] & (1u << 12)) && !(parsed.runs[0] & (1u << 17)) && !(parsed.runs[0] & (1u << 13)),
+            "filter bits: 14-16, 36, 44");
+    const char* bad[] = {"", "x", "1-", "-3", "5-2", "3,,4", "3,", "128", "1 2"};
+    for (const char* s : bad) { ntw2_gp_filter f; std::memset(&f, 0, sizeof f); RequireF(ntw2_gp_filter_parse(s, &f) != 0, "malformed run list \"%s\" refused", s); }
+
+    Bytes patchedImage = LoaderImage(c.patched, base, "patched");
+    Bytes stockImage = LoaderImage(c.stock, base, "stock");
+    const uint32_t windows[2] = {0x43C70Cu, 0x43F2F1u};
+    for (int variant = 0; variant < 2; ++variant) {
+        Mapping m;
+        Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image (filter)");
+        ntw2_gp_filter f;
+        std::memset(&f, 0, sizeof f);
+        if (variant == 0) f.mode = NTW2_GP_ONLY;
+        else { f.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44,48", &f) == 0, "skip list parses"); }
+        ntw2_gp_report rep;
+        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
+        Require(ntw2_gp_apply_filtered(&mem, base, c.sp.base, c.blob, c.blobSize, &f, &rep) == 0, "filtered apply");
+        Require(rep.status == NTW2_GP_OK && rep.phase == 1, "filtered report status");
+        const uint32_t soh = c.pp.soh;
+        uint64_t bad = 0, stockWindowBytes = 0;
+        for (uint32_t i = 0; i < c.pp.soi; ++i) {
+            uint8_t want = patchedImage[i];
+            if (variant == 0) {
+                if (i >= soh && i < c.sp.soi) want = stockImage[i];
+            } else {
+                for (uint32_t w : windows)
+                    if (i >= w && i < w + 8u && m.base[i] == stockImage[i] && m.base[i] != patchedImage[i]) { want = stockImage[i]; ++stockWindowBytes; }
+            }
+            if (m.base[i] != want) {
+                if (bad < 6) std::fprintf(stderr, "  filter variant %d mismatch rva %#x: live %02x want %02x\n", variant, i, m.base[i], want);
+                ++bad;
+            }
+        }
+        RequireF(bad == 0, "filter variant %d: live image differs from its expectation (%llu bytes)", variant, static_cast<unsigned long long>(bad));
+        if (variant == 0) {
+            Require(rep.runs_applied == 0 && rep.runs_skipped == rep.runs_total - rep.runs_header && rep.runs_skipped > 90, "ONLY={} writes no run");
+            Require(rep.sections_mapped == c.pp.nsec - c.sp.nsec, "ONLY={} still maps the appended sections");
+        } else {
+            Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "SKIP={44,48} skips exactly two runs");
+            Require(stockWindowBytes >= 2, "the two skipped runs stay stock in the live image");
+        }
+        std::printf("  filter %-10s applied %u skipped %u header %u: live image matches its expectation over [0, %#x)\n", variant == 0 ? "ONLY={}" : "SKIP={44,48}",
+                    rep.runs_applied, rep.runs_skipped, rep.runs_header, c.pp.soi);
+        Unmap(&m);
+    }
+}
+
 int main(int argc, char** argv) {
     const char* patchedPath = Arg(argc, argv, "--patched");
     const char* stockPath = Arg(argc, argv, "--stock");
@@ -531,6 +586,7 @@ int main(int argc, char** argv) {
     Require(windowSeen, "at least one patch run overlaps a relocation fixup (the relocation arithmetic was exercised)");
     RunNegatives(nap, firstNonZero);
     RunDoubleApply(nap, firstNonZero);
+    RunFilter(nap, firstNonZero);
 
     const char* mp = Arg(argc, argv, "--mss32-patched");
     const char* ms = Arg(argc, argv, "--mss32-stock");

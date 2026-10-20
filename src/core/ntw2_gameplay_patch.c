@@ -338,8 +338,42 @@ static int gp_mem_read(const ntw2_gp_memory *m, uint32_t va, void *dst, uint32_t
     return 0;
 }
 
-int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, const uint8_t *blob, uint32_t blob_size,
-                  ntw2_gp_report *rep)
+/* Run selection (header runs are always part of the loader-equivalent layout; the filter picks which other runs are written into the live image). */
+static int gp_run_selected(const ntw2_gp_filter *f, uint32_t i)
+{
+    int bit;
+    if (!f || f->mode == NTW2_GP_ALL) return 1;
+    bit = i < NTW2_GP_MAX_RUNS && ((f->runs[i >> 5] >> (i & 31u)) & 1u) != 0;
+    return f->mode == NTW2_GP_ONLY ? bit : !bit;
+}
+
+int ntw2_gp_filter_parse(const char *list, ntw2_gp_filter *f)
+{
+    const char *p = list;
+    if (!list || !*list) return -1;
+    while (*p) {
+        char *end;
+        unsigned long a, b;
+        if (*p < '0' || *p > '9') return -1;
+        a = strtoul(p, &end, 10);
+        b = a;
+        p = end;
+        if (*p == '-') {
+            ++p;
+            if (*p < '0' || *p > '9') return -1;
+            b = strtoul(p, &end, 10);
+            p = end;
+        }
+        if (b < a || b >= NTW2_GP_MAX_RUNS) return -1;
+        for (; a <= b; ++a) f->runs[a >> 5] |= 1u << (a & 31u);
+        if (*p == ',') { ++p; if (!*p) return -1; }
+        else if (*p) return -1;
+    }
+    return 0;
+}
+
+int ntw2_gp_apply_filtered(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, const uint8_t *blob, uint32_t blob_size,
+                           const ntw2_gp_filter *filter, ntw2_gp_report *rep)
 {
     gp_blob b;
     gp_hdr sh, ph;
@@ -456,6 +490,7 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
         size_t k;
         uint8_t *buf;
         if (r->header) continue;
+        if (!gp_run_selected(filter, i)) { rep->runs_skipped++; continue; }
         if (r->rva + r->len > sh.soi) {
             rep->fail_run = i;
             rc = gp_error(rep, NTW2_GP_E_LAYOUT, "run %u (RVA %#x) extends beyond the stock image", (unsigned)i, (unsigned)r->rva);
@@ -554,7 +589,7 @@ int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, 
     /* Proof points for live read-back: the first run that becomes a jump into an appended section, and the first section bytes. */
     for (i = 0; i < b.run_count; ++i) {
         const gp_run *r = &b.runs[i];
-        if (!r->header && r->len >= 5u && r->new_b[0] == 0xE9u) {
+        if (!r->header && r->len >= 5u && r->new_b[0] == 0xE9u && gp_run_selected(filter, i)) {
             const uint32_t target = r->rva + 5u + rd32u(r->new_b + 1);
             if (target >= sh.soi && target < ph.soi) {
                 rep->proof_site_va = base + r->rva;
@@ -684,6 +719,12 @@ done:
     free(patched_fix.v);
     free(b.runs);
     return rc;
+}
+
+int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, const uint8_t *blob, uint32_t blob_size,
+                  ntw2_gp_report *rep)
+{
+    return ntw2_gp_apply_filtered(mem, base, preferred, blob, blob_size, NULL, rep);
 }
 
 /* ------------------------------------------------------------------------------------------------ process backend */

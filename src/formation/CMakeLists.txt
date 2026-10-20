@@ -10,3 +10,4 @@ endforeach()
 
 # Compiled straight into ntw2_runtime.
 ntw2_runtime_sources(native_formation_solver.cpp)
+ntw2_runtime_sources(ntw2_formation_census.cpp)

@@ -194,7 +194,7 @@ static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offs
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(sizeof(ntw2_config)==72 && offsetof(ntw2_config,ai_group_params2)==68 && offsetof(ntw2_config,ai_group_params)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW|NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE|NTW2_ALLOC_FIX|NTW2_MOUNTED_OFFICER|NTW2_MOUNTED_OFFICER_WIDEN|NTW2_ENGAGE_CENSUS|NTW2_VA_FLOOR_MASK|NTW2_VA_HOLE_MASK) && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && NTW2_ARMY_SOLVER_MEMO==0x10u && NTW2_ARMY_SOLVER_SHADOW==0x20u && NTW2_ALLOC_CENSUS==0x40u && NTW2_ARENA_RELEASE==0x80u && NTW2_HEAP_OPTIMIZE==0x10000u && NTW2_ALLOC_FIX==0x200000u && NTW2_VA_FLOOR_SHIFT==22u && NTW2_VA_HOLE_SHIFT==27u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
+static_assert(sizeof(ntw2_config)==72 && offsetof(ntw2_config,ai_group_params2)==68 && offsetof(ntw2_config,ai_group_params)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW|NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE|NTW2_ALLOC_FIX|NTW2_MOUNTED_OFFICER|NTW2_MOUNTED_OFFICER_WIDEN|NTW2_ENGAGE_CENSUS|NTW2_FORMATION_CENSUS|NTW2_VA_FLOOR_MASK|NTW2_VA_HOLE_MASK) && NTW2_FORMATION_CENSUS==0x100000u && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && NTW2_ARMY_SOLVER_MEMO==0x10u && NTW2_ARMY_SOLVER_SHADOW==0x20u && NTW2_ALLOC_CENSUS==0x40u && NTW2_ARENA_RELEASE==0x80u && NTW2_HEAP_OPTIMIZE==0x10000u && NTW2_ALLOC_FIX==0x200000u && NTW2_VA_FLOOR_SHIFT==22u && NTW2_VA_HOLE_SHIFT==27u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
               offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
               NTW2_COLLIDE_FLAGS_VALID==3u &&
               offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
@@ -2319,7 +2319,7 @@ int main(int argc,char** argv) {
     // Retired puppet probe: its mask bit and the config word at offset 48 are refused.
     config.enabled_mask=0x80000u; Check(start(&config)==1,"retired puppet mask bit refused");
     config.enabled_mask=NTW2_BATCH64; config.va_watch_flags=0x4u; Check(start(&config)==1,"unknown va_watch_flags bit 2 refused");
-    config.va_watch_flags=0x100000u; Check(start(&config)==1,"unknown va_watch_flags bit 20 refused");
+    config.va_watch_flags=NTW2_FORMATION_CENSUS; Check(start(&config)==1,"formation census refused without a routed tick");
     config.va_watch_flags=NTW2_ENGAGE_CENSUS; Check(start(&config)==1,"engage census refused without a routed tick");
     config.va_watch_flags=NTW2_VA_WATCH; Check(start(&config)==2,"--va-watch passes validation and refuses a foreign main image");
     config.va_watch_flags=NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS; Check(start(&config)==1,"census beside --va-watch still needs a routed tick");
@@ -2337,8 +2337,8 @@ int main(int argc,char** argv) {
     Check(start(&config)==1,"storm census and the army unit shadow are exclusive");
     config.enabled_mask=NTW2_PROFILE; Check(start(&config)==2,"storm census with PROFILE passes validation and refuses a foreign main image");
     config.enabled_mask=NTW2_AI_ASYNC; Check(start(&config)==2,"storm census with a simulation feature passes validation");
-    config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|0x100000u; config.enabled_mask=NTW2_PROFILE;
-    Check(start(&config)==1,"unknown va_watch_flags bit refused beside the census");
+    config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|NTW2_FORMATION_CENSUS; config.enabled_mask=NTW2_PROFILE;
+    Check(start(&config)==2,"formation census beside the storm census passes validation and refuses a foreign main image");
     config.va_watch_flags=5u<<NTW2_ARMY_STORM_SAMPLE_SHIFT; config.profile_site=19;
     Check(start(&config)==1,"storm sample threshold without the census refused");
     config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|(5u<<NTW2_ARMY_STORM_SAMPLE_SHIFT); config.enabled_mask=NTW2_AI_ASYNC;
@@ -2366,7 +2366,7 @@ int main(int argc,char** argv) {
     config.va_watch_flags=NTW2_ARMY_SOLVER_SHADOW|NTW2_ARMY_STORM_CENSUS; Check(start(&config)==2,"solver shadow is compatible with the storm census");
     config.enabled_mask=NTW2_AI_ASYNC; config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO; Check(start(&config)==2,"solver memo with a simulation feature passes validation");
     config.main_thread_id=0; Check(start(&config)==1,"solver refused without a main thread id");
-    config.main_thread_id=GetCurrentThreadId(); config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO|0x100000u; Check(start(&config)==1,"unknown va_watch_flags bit refused beside the solver");
+    config.main_thread_id=GetCurrentThreadId(); config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO|NTW2_FORMATION_CENSUS; Check(start(&config)==2,"formation census beside the solver passes validation");
     config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.main_thread_id=0; config.va_watch_flags=NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE;
     Check(start(&config)==2,"alloc census, arena release and heap optimize flags pass validation without a routed tick");
     config.va_watch_flags=0; config.profile_site=0; config.main_thread_id=0;

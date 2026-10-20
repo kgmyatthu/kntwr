@@ -71,6 +71,7 @@ typedef struct ntw2_gp_report {
     uint32_t runs_total;          /* runs in the patch */
     uint32_t runs_header;         /* runs inside the PE header (verified and applied when sections are appended) */
     uint32_t runs_applied;        /* runs written into the image (code, rdata, data, reloc) */
+    uint32_t runs_skipped;        /* non-header runs left out by the run filter (diagnostic bisection; 0 for a full patch) */
     uint32_t bytes_applied;       /* bytes written for those runs (incl. relocation-widened windows) */
     uint32_t fixups_stock_unrelocated; /* stock fixups inside run windows (un-relocated for verification) */
     uint32_t fixups_patched_relocated; /* patched fixups inside run windows (re-relocated after the write) */
@@ -105,6 +106,19 @@ int ntw2_gp_blob_describe(const uint8_t *blob, uint32_t size, ntw2_gp_blob_info 
 /* Turn the loader-mapped STOCK image at image_base (preferred base preferred_base) into the patched image.  0 on success. */
 int ntw2_gp_apply(const ntw2_gp_memory *mem, uint32_t image_base, uint32_t preferred_base,
                   const uint8_t *blob, uint32_t blob_size, ntw2_gp_report *rep);
+
+/* Diagnostic bisection: which non-header runs are written.  Header runs always shape the patched layout (section table, relocation tables, appended
+   sections); runs outside the selection are simply not written, so the live bytes there stay stock (with the loader's stock relocation applied). */
+#define NTW2_GP_MAX_RUNS 128u
+enum { NTW2_GP_ALL = 0, NTW2_GP_ONLY = 1, NTW2_GP_SKIP = 2 };
+typedef struct ntw2_gp_filter {
+    uint32_t mode;                          /* NTW2_GP_ALL / NTW2_GP_ONLY (only the listed runs) / NTW2_GP_SKIP (all but the listed runs) */
+    uint32_t runs[NTW2_GP_MAX_RUNS / 32];   /* bit i = run i (blob order) */
+} ntw2_gp_filter;
+/* "14-16,36,44": ORs the listed runs (0..127) into f->runs.  0 on success, -1 on a malformed list. */
+int ntw2_gp_filter_parse(const char *list, ntw2_gp_filter *f);
+int ntw2_gp_apply_filtered(const ntw2_gp_memory *mem, uint32_t image_base, uint32_t preferred_base,
+                           const uint8_t *blob, uint32_t blob_size, const ntw2_gp_filter *filter, ntw2_gp_report *rep);
 
 #ifdef _WIN32
 /* Backend over a process handle (PROCESS_VM_OPERATION|READ|WRITE|QUERY_INFORMATION); GetCurrentProcess() works too.

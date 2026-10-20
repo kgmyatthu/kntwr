@@ -22,6 +22,7 @@
 #include <tlhelp32.h>
 #include <bcrypt.h>
 #include <stdarg.h>
+#include <intrin.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -53,6 +54,7 @@
 #include "ntw2_runtime.h"
 #include "profile/ntw2_profile.h"
 #include "core/ntw2_gameplay_patch.h"
+#include "census.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
 #error "ntw2.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
@@ -69,7 +71,8 @@
 #define NTW2_WIDEN(x) NTW2_WIDEN2(x)
 #define RUNTIME_DLL_NAME NTW2_WIDEN(NTW2_RUNTIME_DLL_NAME)
 
-#define GAME_EXE_NAME L"Napoleon.exe"
+static const wchar_t *g_game_exe = L"Napoleon.exe";   /* --game-exe NAME (diagnostic): the exe file name inside the game folder */
+#define GAME_EXE_NAME (g_game_exe)
 #define MAXP 4096u
 
 enum {
@@ -220,6 +223,12 @@ typedef struct Options {
     BOOL mounted_officer;    /* --mounted-officer: opt-in gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); never implied by --features all */
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (NTW2_MOUNTED_OFFICER_WIDEN) */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (NTW2_ENGAGE_CENSUS); never implied by --features all */
+    BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (NTW2_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
+    uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
+    wchar_t formation_census_csv[MAXP]; /* --formation-census-csv FILE */
+    BOOL no_gameplay_patch;  /* --no-gameplay-patch: stock bytes in memory (diagnostic bisection; the runtime refuses a stock image, so it needs --no-activate) */
+    ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes */
+    wchar_t game_exe[MAXP];  /* --game-exe NAME */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
     BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
@@ -5121,7 +5130,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     {
         const ntw2_gp_report *g = &r->gp_rep;
         sb_fmt(&b, "  \"gameplay_patch\": {\n    \"on_disk\": \"%s\",\n    \"applied\": %s,\n    \"status\": %lu,\n"
-                   "    \"runs_total\": %lu,\n    \"runs_header\": %lu,\n    \"runs_applied\": %lu,\n    \"bytes_applied\": %lu,\n"
+                   "    \"runs_total\": %lu,\n    \"runs_header\": %lu,\n    \"runs_applied\": %lu,\n    \"runs_skipped\": %lu,\n    \"bytes_applied\": %lu,\n"
                    "    \"fixups_stock_unrelocated\": %lu,\n    \"fixups_patched_relocated\": %lu,\n"
                    "    \"sections_mapped\": %lu,\n    \"section_bytes\": %lu,\n    \"section_fixups\": %lu,\n"
                    "    \"section_base_va\": \"0x%08lX\",\n    \"proof_site_va\": \"0x%08lX\",\n    \"proof_target_va\": \"0x%08lX\",\n"
@@ -5129,7 +5138,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                    "    \"proof_section_bytes\": \"%02x%02x%02x%02x%02x%02x%02x%02x\",\n    \"live_verified\": %s,\n"
                    "    \"mss32_on_disk\": \"%s\",\n    \"mss32_applied\": %s,\n    \"mss32_runs_applied\": %lu,\n    \"mss32_bytes_applied\": %lu\n  },\n",
                r->exe_is_stock ? "stock" : "patched", r->gp_applied ? "true" : "false", (unsigned long)g->status,
-               (unsigned long)g->runs_total, (unsigned long)g->runs_header, (unsigned long)g->runs_applied, (unsigned long)g->bytes_applied,
+               (unsigned long)g->runs_total, (unsigned long)g->runs_header, (unsigned long)g->runs_applied, (unsigned long)g->runs_skipped, (unsigned long)g->bytes_applied,
                (unsigned long)g->fixups_stock_unrelocated, (unsigned long)g->fixups_patched_relocated,
                (unsigned long)g->sections_mapped, (unsigned long)g->section_bytes, (unsigned long)g->section_fixups,
                (unsigned long)g->section_base_va, (unsigned long)g->proof_site_va, (unsigned long)g->proof_target_va,
@@ -6152,7 +6161,7 @@ static int install_runtime(Run *r)
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
                              (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
-                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) |
+                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? NTW2_FORMATION_CENSUS : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -6581,6 +6590,40 @@ static BOOL query_peb32_image_base(HANDLE proc, uint32_t *out)
     return ReadProcessMemory(proc, (LPCVOID)(peb + 8), out, 4, &rd) && rd == 4 && *out != 0;
 }
 
+/* --formation-census with --no-activate: no runtime, no injection. The launcher polls the game's memory (census.c) until the observation bound or the exit. */
+static int run_external_census(Run *r)
+{
+    uint32_t base = r->exe_base;
+    uint64_t t0 = now_ms();
+    int code = EXIT_OK;
+    if (ext_census_open(r->opt.formation_census_csv, r->opt.formation_census_every) != 0) {
+        errsay(L"cannot create the formation census CSV \"%ls\".\n", r->opt.formation_census_csv);
+        return EXIT_RECEIPT;
+    }
+    say(L"Launcher-side formation census running (no runtime): csv %ls; Ctrl+C%ls stops it.\n", r->opt.formation_census_csv,
+        r->opt.observe_s ? L" or the observation bound" : L"");
+    for (;;) {
+        if (g_stop) { code = EXIT_INTERRUPTED; break; }
+        if (!process_alive(r->proc)) {
+            GetExitCodeProcess(r->proc, &r->game_exit);
+            r->game_exited = TRUE;
+            say(L"The game exited (code 0x%08lX).\n", (unsigned long)r->game_exit);
+            break;
+        }
+        if (r->opt.observe_s && now_ms() - t0 >= (uint64_t)r->opt.observe_s * 1000u) {
+            say(L"Observation bound (%lu s) reached.\n", (unsigned long)r->opt.observe_s);
+            break;
+        }
+        if (!base) query_peb32_image_base(r->proc, &base);
+        else ext_census_poll(r->proc, base);
+        WaitForSingleObject(r->proc, 100);
+    }
+    say(L"Formation census: %lu rows written to %ls.\n", (unsigned long)ext_census_rows(), r->opt.formation_census_csv);
+    ext_census_close();
+    if (r->opt.exit_game_after_observe && !r->game_exited && !close_observed_game(r)) code = EXIT_GAME_STOP_FAILED;
+    return code;
+}
+
 static BOOL launch_game(Run *r)
 {
     static wchar_t cmd[32768];
@@ -6608,6 +6651,20 @@ static BOOL launch_game(Run *r)
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
     if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
+    if (r->opt.formation_census)
+        say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
+            (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u), r->opt.formation_census_csv);
+    if (r->opt.no_gameplay_patch) say(L"  gameplay patch: NOT applied (--no-gameplay-patch, stock bytes in memory)\n");
+    else if (r->opt.gp_filter.mode != NTW2_GP_ALL)
+        say(L"  gameplay patch: SUBSET (--gameplay-patch-%ls-runs: %lu run bits listed; header and appended sections always applied)\n",
+            r->opt.gp_filter.mode == NTW2_GP_ONLY ? L"only" : L"skip",
+            (unsigned long)(__popcnt(r->opt.gp_filter.runs[0]) + __popcnt(r->opt.gp_filter.runs[1]) + __popcnt(r->opt.gp_filter.runs[2]) + __popcnt(r->opt.gp_filter.runs[3])));
+    if (r->opt.formation_census && r->opt.activate) {   /* the in-process census reads its path / period from the game's environment */
+        wchar_t ev[16];
+        SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_CSV", r->opt.formation_census_csv);
+        _snwprintf_s(ev, 16, _TRUNCATE, L"%lu", (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u));
+        SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_EVERY", ev);
+    }
     memset(&pi, 0, sizeof pi);
     for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
         DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
@@ -6629,7 +6686,17 @@ static BOOL launch_game(Run *r)
                 TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
                 return FALSE;
             }
-            grc = ntw2_gp_apply(&pm, base, 0x400000u, blob, bsz, &r->gp_rep);
+            if (r->opt.no_gameplay_patch) {
+                if (ResumeThread(pi.hThread) == (DWORD)-1) {
+                    win_fail(L"ResumeThread(Napoleon.exe)", GetLastError());
+                    TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                    return FALSE;
+                }
+                r->exe_base = base;
+                say(L"  gameplay patch NOT applied (--no-gameplay-patch): stock image resumed at base 0x%08lX (delta %+ld).\n", (unsigned long)base, (long)(base - 0x400000u));
+                break;
+            }
+            grc = ntw2_gp_apply_filtered(&pm, base, 0x400000u, blob, bsz, &r->opt.gp_filter, &r->gp_rep);
             if (grc == NTW2_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 16) {
                 say(L"  attempt %d: the range above the game image is busy in this process (early private allocation); starting a new process.\n", attempt);
                 TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, 2000);
@@ -6762,6 +6829,15 @@ static void usage(void)
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
         L"                        words: engage_census_words (src/ai/ntw2_engage_census.h), receipt engage_census (counters, histograms, event rows).\n"
+        L"  --formation-census[=EVERY] --formation-census-csv FILE  opt-in READ-ONLY diagnostic (NEVER implied by --features all): every EVERY model ticks (default 30)\n"
+        L"                        one CSV row per live unit of both alliances: men centroid / RMS spread vs the spread of the formation's slot positions (collapsed =\n"
+        L"                        moving, >= 60 men, men_rms < 0.35 x slot_rms), nearest-neighbour spacing, spacing and layout floats; FILE.summary.txt has the counts.\n"
+        L"                        With a runtime: in-process (needs a routed tick; calls the engine's own slot generator). With --no-activate: launcher-side\n"
+        L"                        ReadProcessMemory census of an unmodified game (no slots; moving = centroid speed > 0.5 m/s). Honours --observe-seconds.\n"
+        L"  --no-gameplay-patch   diagnostic bisection, needs --no-activate: resume the stock image unpatched (no in-memory gameplay patch)\n"
+        L"  --gameplay-patch-only-runs LIST / --gameplay-patch-skip-runs LIST  diagnostic bisection: write only (or all but) the listed non-header runs of the 103-run\n"
+        L"                        gameplay patch (LIST like 14-16,36-38,44); the PE header, relocations and the five appended sections are always applied\n"
+        L"  --game-exe NAME       diagnostic: the game executable inside the game folder (default Napoleon.exe; e.g. a copy of the pinned patched image)\n"
         L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
         L"                        the infantry spacing)\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
@@ -7075,6 +7151,33 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--mounted-officer")) o->mounted_officer = TRUE;
         else if (!wcscmp(name, L"--engage-census")) o->engage_census = TRUE;
+        else if (!wcscmp(name, L"--formation-census")) {
+            o->formation_census = TRUE;
+            if (val && !parse_uint(val, 1, 10000, &o->formation_census_every)) { errsay(L"--formation-census=EVERY must be 1..10000 (model ticks).\n"); return -1; }
+        }
+        else if (!wcscmp(name, L"--formation-census-csv")) {
+            NEEDVAL();
+            if (!val[0] || wcslen(val) >= MAXP || wcschr(val, L'"')) { errsay(L"--formation-census-csv needs a nonempty path without double quotes.\n"); return -1; }
+            wcscpy_s(o->formation_census_csv, MAXP, val);
+        }
+        else if (!wcscmp(name, L"--no-gameplay-patch")) o->no_gameplay_patch = TRUE;
+        else if (!wcscmp(name, L"--gameplay-patch-only-runs") || !wcscmp(name, L"--gameplay-patch-skip-runs")) {
+            const uint32_t want = name[wcslen(L"--gameplay-patch-")] == L'o' ? NTW2_GP_ONLY : NTW2_GP_SKIP;
+            char narrow[256];
+            NEEDVAL();
+            if (o->gp_filter.mode != NTW2_GP_ALL && o->gp_filter.mode != want) { errsay(L"--gameplay-patch-only-runs and --gameplay-patch-skip-runs are exclusive.\n"); return -1; }
+            if (WideCharToMultiByte(CP_ACP, 0, val, -1, narrow, (int)sizeof narrow, NULL, NULL) <= 0 || ntw2_gp_filter_parse(narrow, &o->gp_filter) != 0) {
+                errsay(L"%ls needs a run list like 14-16,36-38,44 (runs 0..127 of the patch).\n", name);
+                return -1;
+            }
+            o->gp_filter.mode = want;
+        }
+        else if (!wcscmp(name, L"--game-exe")) {
+            NEEDVAL();
+            if (!val[0] || wcspbrk(val, L"\\/:\"")) { errsay(L"--game-exe takes a bare file name inside the game folder.\n"); return -1; }
+            wcscpy_s(o->game_exe, MAXP, val);
+            g_game_exe = o->game_exe;
+        }
         else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
@@ -7345,6 +7448,20 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--engage-census needs a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
+    if (o->formation_census) {
+        if (!o->formation_census_csv[0]) { errsay(L"--formation-census needs --formation-census-csv FILE.\n"); return -1; }
+        if (o->activate && !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+            errsay(L"--formation-census with a runtime needs a routed tick: add profile or a simulation feature (e.g. --features all); or use --no-activate for the launcher-side census.\n");
+            return -1;
+        }
+    } else if (o->formation_census_csv[0]) {
+        errsay(L"--formation-census-csv needs --formation-census.\n");
+        return -1;
+    }
+    if (o->no_gameplay_patch && (o->activate || o->gp_filter.mode != NTW2_GP_ALL)) {
+        errsay(L"--no-gameplay-patch needs --no-activate (the runtime requires the patched image) and excludes --gameplay-patch-only-runs/--gameplay-patch-skip-runs.\n");
+        return -1;
+    }
     if (o->tick_pcore && o->tick_core_ab) {
         errsay(L"--tick-pcore and --tick-core-ab are exclusive.\n");
         return -1;
@@ -7501,8 +7618,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     if ((o->mask & NTW2_COLLIDE) && (o->mask & NTW2_FORMATION))
         say(L"note: collide stays inert while formation is enabled (the original manager bypasses the ACTIVE clone); "
             L"omit formation to run the experimental solver.\n");
-    if (o->exit_game_after_observe && (!o->observe_s || !o->activate)) {
-        errsay(L"--exit-game-after-observe requires nonzero --observe-seconds and runtime activation.\n");
+    if (o->exit_game_after_observe && (!o->observe_s || (!o->activate && !o->formation_census))) {
+        errsay(L"--exit-game-after-observe requires nonzero --observe-seconds and runtime activation (or --formation-census with --no-activate).\n");
         return -1;
     }
     return 0;
@@ -7587,7 +7704,7 @@ int wmain(int argc, wchar_t **argv)
                              (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
                              (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
                              (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
-                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) |
+                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? NTW2_FORMATION_CENSUS : 0u) |
                              ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
                              ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
     r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
@@ -7628,6 +7745,10 @@ int wmain(int argc, wchar_t **argv)
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
     if (!launch_game(r)) return finish(r, EXIT_LAUNCH, L"game launch failed");
     if (!r->opt.activate) {
+        if (r->opt.formation_census) {
+            code = run_external_census(r);
+            return finish(r, code, code == EXIT_OK ? L"formation census complete (no runtime)" : L"formation census ended abnormally (no runtime)");
+        }
         say(L"--no-activate: the runtime was NOT installed. Game pid %lu left running.\n", (unsigned long)r->pid);
         return finish(r, EXIT_OK, L"launched without runtime");
     }
