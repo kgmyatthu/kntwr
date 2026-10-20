@@ -329,7 +329,37 @@ enum ntw2_memory_word {
 #define NTW2_AI_TARGET_CULL 0x800u
 #define NTW2_AI_RETARGET_JITTER 0x1000u
 #define NTW2_AI_BRAIN_STEP_BITS (NTW2_AI_TARGET_CULL_SHADOW | NTW2_AI_TARGET_CULL | NTW2_AI_RETARGET_JITTER)
-#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS)
+/* --ai-formup-gate[=pct,metres] / --ai-standoff[=k] (src/ai/ntw2_group_formup.h, src/ai/ntw2_group_standoff.h; analysis/native-ai-formup-gate.md): bits 13 / 14 of
+   ai_ctrl_flags (bit 15..31 stay reserved, refused). AI-ONLY GAMEPLAY DEVIATIONS (user-approved, opt-in, never implied by --features all): they change only the AI
+   planner's ATTACK_BATTLEGROUP decisions (FORMUP_GATE: the reform / move-to-form-up exits; STANDOFF: the move-to-target destination / arrival), thread-scoped to the
+   site-34 planner think. Same routed-tick / no-ai_async2 / no-ai_ctrl validation as the claim bits; they publish ai_group_words (own row, no geometry exclusion).
+   Parameters travel in the two appended config words ai_group_params / ai_group_params2 (both ZERO unless the bit they belong to is set):
+     ai_group_params  (FORMUP_GATE): bits 0..6 pct (0..100: share of members that must sit within `metres` of their slot), bit 7 reserved 0,
+                      bits 8..15 metres (0..255), bits 16..31 safety timeout in ticks (1..65535, ticks since the state was entered; the launcher default is 600 = 60 s).
+     ai_group_params2 (STANDOFF):    bits 0..7 k = stand-off factor x 100 (1..255, launcher default 90), bits 8..31 reserved 0 (owned by the stand-off slice). */
+#define NTW2_AI_FORMUP_GATE 0x2000u
+#define NTW2_AI_STANDOFF 0x4000u
+#define NTW2_AI_GROUP_BITS (NTW2_AI_FORMUP_GATE | NTW2_AI_STANDOFF)
+#define NTW2_AI_FORMUP_PCT_MASK 0x7Fu
+#define NTW2_AI_FORMUP_METRES_SHIFT 8u
+#define NTW2_AI_FORMUP_METRES_MASK 0xFF00u
+#define NTW2_AI_FORMUP_TIMEOUT_SHIFT 16u
+#define NTW2_AI_FORMUP_TIMEOUT_MASK 0xFFFF0000u
+#define NTW2_AI_FORMUP_PARAMS_VALID (NTW2_AI_FORMUP_PCT_MASK | NTW2_AI_FORMUP_METRES_MASK | NTW2_AI_FORMUP_TIMEOUT_MASK)
+#define NTW2_AI_FORMUP_DEFAULT_PCT 80u
+#define NTW2_AI_FORMUP_DEFAULT_METRES 25u
+#define NTW2_AI_FORMUP_DEFAULT_TIMEOUT 600u
+#define NTW2_AI_STANDOFF_K_MASK 0xFFu
+#define NTW2_AI_STANDOFF_PARAMS2_VALID 0xFFu
+#define NTW2_AI_STANDOFF_DEFAULT_K 90u
+#define NTW2_AI_GROUP_WORDS 32u /* ai_group_words: words 0..15 --ai-formup-gate (ntw2_group_formup::Word, labels NTW2_AI_FORMUP_LABELS), 16..31 --ai-standoff (labels NTW2_AI_STANDOFF_LABELS) */
+#define NTW2_AI_FORMUP_LABELS \
+    "gate_calls", "blocked", "pass_formed", "pass_timeout", "pass_escape", "pass_native_false", "max_wait_ticks", "states_entered", \
+    "formed_pct_le10", "formed_pct_le25", "formed_pct_le50", "formed_pct_le75", "formed_pct_le90", "formed_pct_gt90", "unreadable", "faults"
+#define NTW2_AI_STANDOFF_LABELS \
+    "so_reserved16", "so_reserved17", "so_reserved18", "so_reserved19", "so_reserved20", "so_reserved21", "so_reserved22", "so_reserved23", \
+    "so_reserved24", "so_reserved25", "so_reserved26", "so_reserved27", "so_reserved28", "so_reserved29", "so_reserved30", "so_reserved31"
+#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS | NTW2_AI_GROUP_BITS)
 #define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry (--ai-ctrl-geometry) or, without it, 16..19 --brain-target-cull and 20..23 --brain-retarget-jitter (ntw2_retarget_jitter::Word), 24..31 --ai-claim-once (ntw2_claim_once::Word) */
 #define NTW2_AI_CTRL_REUSE_LABELS \
     "batches", "scorer_calls", "eligible", "hist_calls", "hist_served", "hist_mismatch", "b44_b41_transitions_in_batch", \
@@ -482,6 +512,8 @@ typedef struct ntw2_config {
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the NTW2_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (NTW2_AI_DEFERRED_K_MASK, 1..NTW2_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (NTW2_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires NTW2_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). NTW2_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify) in bits 0..3, NTW2_AI_CLAIM_ONCE / NTW2_AI_CLAIM_ONCE_CENSUS (--ai-claim-once / --ai-claim-once-census) in bits 8 / 9; 0: off. */
     uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at +64, so the config is now full). NTW2_AI_PREPASS_* / NTW2_AI_PRESIZE / NTW2_AI_POLY* flags (launcher --ai-prepass-census, --ai-presize, --ai-poly-shadow, --ai-poly), NTW2_AI_SPIRAL_CENSUS (--ai-spiral-census) and the spiral cap in metres in bits 16..31 (--ai-spiral-cap-m); 0: off. */
+    uint32_t ai_group_params;  /* Appended at offset 64 (config 64 -> 72 bytes; the launcher's injection blob now places the DLL path at +72). NTW2_AI_FORMUP_* packing (pct, metres, timeout ticks); nonzero only with NTW2_AI_FORMUP_GATE. */
+    uint32_t ai_group_params2; /* Appended at offset 68. NTW2_AI_STANDOFF_K_MASK packing (k x 100); nonzero only with NTW2_AI_STANDOFF. */
 } ntw2_config;
 
 enum ntw2_phase {
@@ -1108,6 +1140,9 @@ typedef struct ntw2_status {
     /* --engage-census (appended after mounted_officer_words; owner module src/ai/ntw2_engage_census.*): header counters 0..31, histograms 32..247, rows 256..2175, still/class/side tables and the trace ring 2176..6431
        (layout in ntw2_engage_census.h). Reset at start, retained after stop; all zero without NTW2_ENGAGE_CENSUS. */
     uint32_t engage_census_words[NTW2_ENGAGE_CENSUS_WORDS];
+    /* --ai-formup-gate / --ai-standoff (appended after engage_census_words; owner modules src/ai/ntw2_group_formup.* (words 0..15, labels NTW2_AI_FORMUP_LABELS) and
+       src/ai/ntw2_group_standoff.* (words 16..31, labels NTW2_AI_STANDOFF_LABELS)). Reset at start, retained after stop; all zero without the bits. */
+    uint32_t ai_group_words[NTW2_AI_GROUP_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1440,10 +1475,11 @@ typedef uint32_t (__stdcall *ntw2_ai_async2_private_entry_fn)(uint32_t clone);
 
 #ifdef __cplusplus
 }
-static_assert(sizeof(ntw2_config) == 64 && offsetof(ntw2_config, loco_flags) == 36 &&
+static_assert(sizeof(ntw2_config) == 72 && offsetof(ntw2_config, loco_flags) == 36 &&
               offsetof(ntw2_config, brain_flags) == 40 && offsetof(ntw2_config, collide_flags) == 44 &&
               offsetof(ntw2_config, va_watch_flags) == 48 && offsetof(ntw2_config, ai_deferred) == 52 &&
-              offsetof(ntw2_config, ai_ctrl_flags) == 56 && offsetof(ntw2_config, ai_prepass_flags) == 60,
+              offsetof(ntw2_config, ai_ctrl_flags) == 56 && offsetof(ntw2_config, ai_prepass_flags) == 60 &&
+              offsetof(ntw2_config, ai_group_params) == 64 && offsetof(ntw2_config, ai_group_params2) == 68,
               "configuration ABI is append-only");
 static_assert(offsetof(ntw2_status,grid_census) == 4 * (29 + 16 + 16 + 24 + 8 + 192 + 16 + 16 + 64 + 16 + 16 + 32 + 32 + NTW2_BRAIN_WORDS + 32 + 80 + 8 + 8 + 32 + NTW2_ALLOCATOR_WORDS + 2 + NTW2_BRAIN_STATE_WORDS + NTW2_COLLISION_WORDS + NTW2_COLLIDE_WORDS + NTW2_BRAIN2_WORDS + NTW2_COLLIDE_LOD_WORDS + 16 + NTW2_AI_SLICE_BUDGET_WORDS + 8 + NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS + NTW2_LOCO_OWNED_DETAIL_WORDS + NTW2_LOCO_OWNED_PHASE_WORDS + NTW2_LOCO_OWNED_LOAD_WORDS + NTW2_LOCO_GRID_V2_WORDS + NTW2_COLLIDE_SOURCE_WORDS + NTW2_MEMORY_WORDS + NTW2_AI_COMPLETION_WORDS), "status ABI prefix");
 static_assert(offsetof(ntw2_status,ai_slice_budget_words) == offsetof(ntw2_status,ai_ctrl_words) + 16 * sizeof(uint32_t) &&
@@ -1547,7 +1583,7 @@ static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeo
 static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&
-              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x1F0Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
+              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x7F0Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
               NTW2_AI_CLAIM_ONCE == 0x100u && NTW2_AI_CLAIM_ONCE_CENSUS == 0x200u && NTW2_AI_TARGET_CULL_SHADOW == 0x400u && NTW2_AI_TARGET_CULL == 0x800u &&
               NTW2_AI_RETARGET_JITTER == 0x1000u, "ai_ctrl_reuse row appends after ai_deferred_words");
 static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_cw_words) &&
@@ -1569,7 +1605,9 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,arena_words) + NTW2_ARENA_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,overlay_words) &&
               offsetof(ntw2_status,overlay_words) + NTW2_OVERLAY_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,mounted_officer_words) &&
               offsetof(ntw2_status,mounted_officer_words) + NTW2_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,engage_census_words) &&
-              offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
+              offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_group_words) &&
+              offsetof(ntw2_status,ai_group_words) + NTW2_AI_GROUP_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_AI_GROUP_WORDS == 32u &&
+              NTW2_AI_FORMUP_GATE == 0x2000u && NTW2_AI_STANDOFF == 0x4000u && NTW2_AI_CTRL_FLAGS_VALID == 0x7F0Fu && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
               NTW2_ENGAGE_CENSUS == 0x80000u &&
               NTW2_ALLOC_CENSUS_WORDS == 1056u && NTW2_ARENA_WORDS == 32u && NTW2_OVERLAY_WORDS == 16u && NTW2_MOUNTED_OFFICER_WORDS == 16u &&
               NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u && NTW2_ALLOC_FIX == 0x200000u &&

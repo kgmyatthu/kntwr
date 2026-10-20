@@ -3784,6 +3784,17 @@ DWORD WINAPI Monitor(void*) {
 }
 }
 
+// --ai-formup-gate / --ai-standoff parameter words: each is zero unless the bit it belongs to is set, and valid (include/ntw2_runtime.h) when it is.
+static bool GroupParamsValid(const ntw2_config& c) {
+    if (!(c.ai_ctrl_flags&NTW2_AI_FORMUP_GATE)) { if (c.ai_group_params) return false; }
+    else {
+        const U pct=c.ai_group_params&NTW2_AI_FORMUP_PCT_MASK, timeout=c.ai_group_params>>NTW2_AI_FORMUP_TIMEOUT_SHIFT;
+        if ((c.ai_group_params&~NTW2_AI_FORMUP_PARAMS_VALID) || pct>100 || !timeout) return false;
+    }
+    if (!(c.ai_ctrl_flags&NTW2_AI_STANDOFF)) return c.ai_group_params2==0;
+    return !(c.ai_group_params2&~NTW2_AI_STANDOFF_PARAMS2_VALID) && (c.ai_group_params2&NTW2_AI_STANDOFF_K_MASK)!=0;
+}
+
 static U StartImpl(void* raw) {
     ntw2_config next;
     if (!Read(Address(raw),&next,sizeof(next)) || next.abi!=NTW2_ABI || next.size!=sizeof(next) ||
@@ -3850,7 +3861,7 @@ static U StartImpl(void* raw) {
         ((next.enabled_mask&NTW2_ARMY_UNIT_SHADOW) && !(next.enabled_mask&kRouted)) ||
         // --ai-ctrl-*: the batch hooks live in the AI_CONTROLLER clone chain behind the routed MANAGER tick, on the tick owner;
         // CENSUS is shadow-only, VERIFY needs a live feature. The offload / async2 controller gates bypass the clone chain.
-        (next.ai_ctrl_flags&~NTW2_AI_CTRL_FLAGS_VALID) || (next.ai_ctrl_flags&NTW2_AI_CLAIM_BITS)==NTW2_AI_CLAIM_BITS ||
+        (next.ai_ctrl_flags&~NTW2_AI_CTRL_FLAGS_VALID) || (next.ai_ctrl_flags&NTW2_AI_CLAIM_BITS)==NTW2_AI_CLAIM_BITS || !GroupParamsValid(next) ||
         // --brain-target-cull-shadow / --brain-target-cull exclude each other; the brain-step levers share the status words 16..23 with the geometry mode.
         (next.ai_ctrl_flags&(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL))==(NTW2_AI_TARGET_CULL_SHADOW|NTW2_AI_TARGET_CULL) ||
         ((next.ai_ctrl_flags&NTW2_AI_BRAIN_STEP_BITS) && (next.ai_ctrl_flags&NTW2_AI_CTRL_GEOMETRY)) ||
