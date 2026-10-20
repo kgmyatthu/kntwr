@@ -42,8 +42,9 @@ bool ModelTick(U tactic, U* tick) {
     return true;
 }
 
-// Latch entry of the tactic (created / recycled on demand). A tactic not seen for > kStaleTicks model ticks starts again unarrived. Null = table full.
-Entry* Find(U tactic, U tick) {
+// Latch entry of the tactic. A tactic not seen for > kStaleTicks model ticks starts again unarrived. With create == false an absent tactic yields null and nothing is created or counted;
+// with create == true null means the table is full.
+Entry* Find(U tactic, U tick, bool create) {
     const U h = (tactic >> 4) * 2654435761u;
     Entry* spare = nullptr;
     for (U i = 0; i < kEntries; ++i) {
@@ -56,7 +57,7 @@ Entry* Find(U tactic, U tick) {
         if (!spare && (!e.used || (tick > e.last && tick - e.last > kStaleTicks))) spare = &e;
         if (!e.used) break;
     }
-    if (!spare) return nullptr;
+    if (!create || !spare) return nullptr;
     spare->tactic = tactic; spare->used = 1; spare->last = tick; spare->arrived = 0;
     Bump(WGroups);
     return spare;
@@ -109,15 +110,15 @@ void Post(U tactic) {
     if (!Sane(tactic)) return;
     const U state = Rd(tactic + kStateOffset);
     U tick = 0;
-    Entry* e = nullptr;
     const bool haveTick = ModelTick(tactic, &tick);
-    if (haveTick) {
-        e = Find(tactic, tick);
-        if (!e) Bump(WTableFull);
+    if (state != 4) { // leaving / outside state 4: forget a latched arrival, never create an entry
+        if (haveTick) { if (Entry* old = Find(tactic, tick, false)) old->arrived = 0; }
+        return;
     }
-    if (state != 4) { if (e) e->arrived = 0; return; }
     Bump(WState4);
-    if (!e) { if (!haveTick) Bump(WUnmeasured); return; } // no latch entry: native marks stay
+    if (!haveTick) { Bump(WUnmeasured); return; } // no model tick: native marks stay
+    Entry* e = Find(tactic, tick, true);
+    if (!e) { Bump(WTableFull); return; }          // no latch entry: native marks stay
     if (e->arrived) { Bump(WReleasedCalls); return; }
     bool measured = false;
     const bool arrived = Arrived(tactic, &measured);
