@@ -285,6 +285,9 @@ ntw2_harness(native_group_standoff_oracle STD 20 FP strict
 ntw2_harness(native_group_hold_oracle STD 20 FP strict
   SOURCES native_group_hold_oracle.cpp "${NTW2_SRC}/ai/ntw2_group_hold.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+ntw2_harness(native_march_slots_oracle STD 20 FP strict
+  SOURCES native_march_slots_oracle.cpp "${NTW2_SRC}/ai/ntw2_march_slots.cpp"
+  INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_retarget_jitter_oracle STD 20 FP strict
   SOURCES native_retarget_jitter_oracle.cpp "${NTW2_SRC}/brain/ntw2_retarget_jitter.cpp"
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
@@ -504,6 +507,9 @@ if(NTW2_HAVE_IMAGE)
   add_test(NAME ntw2_group_hold COMMAND native_group_hold_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_group_hold PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_group_hold)
+  add_test(NAME ntw2_march_slots COMMAND native_march_slots_oracle "${NTW2_IMAGE_ARG}")
+  set_tests_properties(ntw2_march_slots PROPERTIES LABELS "image" TIMEOUT 300)
+  ntw2_note_registered(ntw2_march_slots)
   add_test(NAME ntw2_retarget_jitter COMMAND native_retarget_jitter_oracle "${NTW2_IMAGE_ARG}")
   set_tests_properties(ntw2_retarget_jitter PROPERTIES LABELS "image" TIMEOUT 300)
   ntw2_note_registered(ntw2_retarget_jitter)

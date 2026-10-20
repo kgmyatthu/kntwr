@@ -136,10 +136,11 @@ static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32
               offsetof(ntw2_status,engage_census_words)+NTW2_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_group_words) && NTW2_ENGAGE_CENSUS_WORDS==6832u && NTW2_ENGAGE_CENSUS==0x80000u &&
               offsetof(ntw2_status,ai_group_words)+NTW2_AI_GROUP_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_hold_words) &&
               offsetof(ntw2_status,ai_hold_words)+NTW2_AI_HOLD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,anim_guard_words) &&
-              offsetof(ntw2_status,anim_guard_words)+NTW2_ANIM_GUARD_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS==8u &&
-              NTW2_AI_GROUP_WORDS==32u && NTW2_AI_HOLD_WORDS==16u &&
+              offsetof(ntw2_status,anim_guard_words)+NTW2_ANIM_GUARD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_march_words) &&
+              offsetof(ntw2_status,ai_march_words)+NTW2_AI_MARCH_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS==8u &&
+              NTW2_AI_GROUP_WORDS==32u && NTW2_AI_HOLD_WORDS==16u && NTW2_AI_MARCH_WORDS==16u && NTW2_AI_MARCH_SLOTS==0x20000u &&
               NTW2_AI_HOLD_SLOTS==0x8000u && NTW2_AI_HOLD_SLOTS_ALL==0x10000u && NTW2_AI_FORMUP_GATE==0x2000u && NTW2_AI_STANDOFF==0x4000u &&
-              NTW2_AI_GROUP_BITS==0x6000u && NTW2_AI_CTRL_FLAGS_VALID==0x1FF0Fu && NTW2_AI_FORMUP_PARAMS_VALID==0xFFFFFF7Fu && NTW2_AI_STANDOFF_PARAMS2_VALID==0xFFu &&
+              NTW2_AI_GROUP_BITS==0x6000u && NTW2_AI_CTRL_FLAGS_VALID==0x3FF0Fu && NTW2_AI_FORMUP_PARAMS_VALID==0xFFFFFF7Fu && NTW2_AI_STANDOFF_PARAMS2_VALID==0xFFu &&
               NTW2_AI_POLY_SHADOW==0x4u && NTW2_AI_POLY==0x8u && NTW2_AI_SPIRAL_CENSUS==0x10u && NTW2_AI_SPIRAL_CAP_SHIFT==16u &&
               NTW2_AI_RECORD_TEST_SHADOW==0x20u && NTW2_AI_RECORD_TEST==0x40u && NTW2_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
               NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,

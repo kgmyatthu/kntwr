@@ -60,6 +60,7 @@
 #include "ai/ntw2_claim_once.h"
 #include "ai/ntw2_group_formup.h"
 #include "ai/ntw2_group_hold.h"
+#include "ai/ntw2_march_slots.h"
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
@@ -808,7 +809,11 @@ U __fastcall StormRoute2Gate(void* command) {
     const bool solver=SolverEpoch();
     const auto native=reinterpret_cast<ntw2_army_storm::Native>(solver ? clones.entries[NTW2_CLONE_SOLVER_581AE0] : V(0x581ae0));
     if (solver) ntw2_army_solver::NoteRoute(ntw2_army_solver::RouteR2);
-    return StormEpoch() ? ntw2_army_storm::Route2(command,native) : native(command);
+    // --ai-march-slots: the first execute of an AI formation MOVE command is followed by an uncapped re-solve + full order issue (ntw2_march_slots.h); the tick owner inside a routed epoch only.
+    const bool march=(config.ai_ctrl_flags&NTW2_AI_MARCH_SLOTS) && Epoch(kRouted) && ntw2_march_slots::Pre(Address(command),world.model);
+    const U result=StormEpoch() ? ntw2_army_storm::Route2(command,native) : native(command);
+    if (march) ntw2_march_slots::Post(Address(command),solver ? clones.entries[NTW2_CLONE_SOLVER_576B30] : 0,solver);
+    return result;
 }
 U __fastcall StormRoute1Gate(void* state, void* edx, U arg) {
     const bool solver=SolverEpoch();
@@ -2591,6 +2596,8 @@ void SnapshotAiCtrl() {
     ntw2_group_formup::Snapshot(ntw2_state.ai_group_words); // --ai-formup-gate: words 0..15, all zero without the bit
     static_assert(ntw2_group_hold::kWords==NTW2_AI_HOLD_WORDS, "hold words fill ai_hold_words");
     if (config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS) ntw2_group_hold::Snapshot(ntw2_state.ai_hold_words); // --ai-hold-slots: all zero without the bit
+    static_assert(ntw2_march_slots::kWords==NTW2_AI_MARCH_WORDS, "march words fill ai_march_words");
+    if (config.ai_ctrl_flags&NTW2_AI_MARCH_SLOTS) ntw2_march_slots::Snapshot(ntw2_state.ai_march_words); // --ai-march-slots: all zero without the bit
     static_assert(ntw2_retarget_jitter::kWords==4, "retarget-jitter words fill words 20..23");
     if (config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER) ntw2_retarget_jitter::Snapshot(row+20); // --brain-retarget-jitter (exclusive with the geometry mode that owns 16..23)
     static_assert(ntw2_target_cull::kWords==4, "target-cull words fill words 16..19");
@@ -3107,6 +3114,9 @@ bool BuildSlots() {
     if (config.va_watch_flags & (NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) {
         AddSlot(0x1325474,0x581ae0,FnAddress(&StormRoute2Gate));
         AddSlot(0x1331e74,0x617510,FnAddress(&StormRoute1Gate));
+    } else if (config.ai_ctrl_flags & NTW2_AI_MARCH_SLOTS) {
+        // --ai-march-slots without the census / solver: the same R2 gate runs the original execute plus the march-slot pre/post steps.
+        AddSlot(0x1325474,0x581ae0,FnAddress(&StormRoute2Gate));
     }
     // --army-solver-memo/-shadow: the second R1 state-enter (0x1332110 = 0x611CF0), entered through SolverRoute1bGate (SOLVER_65D7D0 clone chain).
     if (config.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW)) AddSlot(0x1332110,0x611cf0,FnAddress(&SolverRoute1bGate));
@@ -3758,6 +3768,12 @@ DWORD WINAPI Monitor(void*) {
         if (!gh::InstallRedirect(delta,FnAddress(&gh::MarkGate))) RecordError(SlotConflict,gh::kCallSite);
         StateBegin(); gh::Snapshot(ntw2_state.ai_hold_words); StateEnd();
     }
+    if (!failure && (config.ai_ctrl_flags&NTW2_AI_MARCH_SLOTS)) {
+        // --ai-march-slots: configured here; the R2 slot 0x1325474 (StormRoute2Gate, installed by BuildSlots) is the only hook, restored with the slots.
+        const ntw2_march_slots::Targets targets={delta,V(ntw2_march_slots::kSolveOriginal),V(ntw2_march_slots::kIssueOriginal)};
+        ntw2_march_slots::Configure(targets);
+        StateBegin(); ntw2_march_slots::Snapshot(ntw2_state.ai_march_words); StateEnd();
+    }
     ntw2_profile_storm_threshold_ms=(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS))) {
         siteGateIndex=config.profile_site;
@@ -3835,6 +3851,7 @@ DWORD WINAPI Monitor(void*) {
         if (!ntw2_group_hold::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_group_hold::kCallSite); clean=false; } // restore the marking call before the final publish
         StateBegin(); ntw2_group_hold::Snapshot(ntw2_state.ai_hold_words); StateEnd();
     }
+    if (config.ai_ctrl_flags&NTW2_AI_MARCH_SLOTS) { StateBegin(); ntw2_march_slots::Snapshot(ntw2_state.ai_march_words); StateEnd(); } // slots restored by now: publish the final totals
     if (config.enabled_mask&NTW2_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
@@ -4085,6 +4102,8 @@ static U StartImpl(void* raw) {
     ntw2_group_formup::ResetRow();
     ntw2_group_hold::ResetRow();
     for (U i=0;i<NTW2_AI_HOLD_WORDS;++i) ntw2_state.ai_hold_words[i]=0;
+    ntw2_march_slots::ResetRow();
+    for (U i=0;i<NTW2_AI_MARCH_WORDS;++i) ntw2_state.ai_march_words[i]=0;
     ntw2_retarget_jitter::ResetRow();
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();

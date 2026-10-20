@@ -379,7 +379,16 @@ enum ntw2_memory_word {
 #define NTW2_ANIM_GUARD_WORDS 8u /* anim_guard_words (ntw2_clip_picker_guard::Word, labels NTW2_ANIM_GUARD_LABELS; table_last/cat_last are last-value words, not counters) */
 #define NTW2_ANIM_GUARD_LABELS \
     "calls_cold", "guarded", "scanned_max", "empty_tables", "table_last", "cat_last", "patch_installed", "version"
-#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS | NTW2_AI_GROUP_BITS | NTW2_AI_HOLD_SLOTS | NTW2_AI_HOLD_SLOTS_ALL)
+/* --ai-march-slots (src/ai/ntw2_march_slots.h; analysis/native-march-collapse.md): bit 17 NTW2_AI_MARCH_SLOTS of ai_ctrl_flags. AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by
+   --features all): the first execute of an AI formation MOVE command re-solves the man -> slot assignment with the uncapped solver flag and reissues every man's move order, so
+   marching AI men keep their rank-and-file slots instead of crossing into a strip. Same routed-tick / no-ai_async2 / no-ai_ctrl validation as the other AI bits; publishes
+   ai_march_words (own row, appended after anim_guard_words). */
+#define NTW2_AI_MARCH_SLOTS 0x20000u
+#define NTW2_AI_MARCH_WORDS 16u /* ai_march_words (ntw2_march_slots::Word, labels NTW2_AI_MARCH_LABELS) */
+#define NTW2_AI_MARCH_LABELS \
+    "calls", "first_exec", "latched", "ai_fresh", "player_fresh", "unmeasured", "resolved", "gone", \
+    "men_sum", "max_men", "solve_us", "issue_us", "max_us", "solver_clone", "spare", "faults"
+#define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS | NTW2_AI_GROUP_BITS | NTW2_AI_HOLD_SLOTS | NTW2_AI_HOLD_SLOTS_ALL | NTW2_AI_MARCH_SLOTS)
 #define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry (--ai-ctrl-geometry) or, without it, 16..19 --brain-target-cull and 20..23 --brain-retarget-jitter (ntw2_retarget_jitter::Word), 24..31 --ai-claim-once (ntw2_claim_once::Word) */
 #define NTW2_AI_CTRL_REUSE_LABELS \
     "batches", "scorer_calls", "eligible", "hist_calls", "hist_served", "hist_mismatch", "b44_b41_transitions_in_batch", \
@@ -1167,6 +1176,8 @@ typedef struct ntw2_status {
     uint32_t ai_hold_words[NTW2_AI_HOLD_WORDS];
     /* Clip picker crash guard (appended after ai_hold_words; owner module src/animation/ntw2_clip_picker_guard.*, labels NTW2_ANIM_GUARD_LABELS). Reset at monitor start, retained after stop. */
     uint32_t anim_guard_words[NTW2_ANIM_GUARD_WORDS];
+    /* --ai-march-slots (appended after anim_guard_words; owner module src/ai/ntw2_march_slots.*, labels NTW2_AI_MARCH_LABELS). Reset at start, retained after stop; all zero without the bit. */
+    uint32_t ai_march_words[NTW2_AI_MARCH_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1607,7 +1618,7 @@ static_assert(offsetof(ntw2_status,brain_s0_words) + NTW2_BRAIN_S0_WORDS * sizeo
 static_assert(offsetof(ntw2_status,ai_deferred_words) + NTW2_AI_DEFERRED_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_ctrl_reuse_words) &&
               NTW2_AI_DEFERRED_WORDS == 64u, "ai_deferred row appends after brain_s0_words");
 static_assert(offsetof(ntw2_status,ai_ctrl_reuse_words) + NTW2_AI_CTRL_REUSE_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_relink_words) &&
-              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x1FF0Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
+              NTW2_AI_CTRL_REUSE_WORDS == 32u && NTW2_AI_CTRL_FLAGS_VALID == 0x3FF0Fu && NTW2_AI_CTRL_MODE_MASK == 0xFu &&
               NTW2_AI_CLAIM_ONCE == 0x100u && NTW2_AI_CLAIM_ONCE_CENSUS == 0x200u && NTW2_AI_TARGET_CULL_SHADOW == 0x400u && NTW2_AI_TARGET_CULL == 0x800u &&
               NTW2_AI_RETARGET_JITTER == 0x1000u, "ai_ctrl_reuse row appends after ai_deferred_words");
 static_assert(offsetof(ntw2_status,loco_relink_words) + NTW2_LOCO_RELINK_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,loco_cw_words) &&
@@ -1632,10 +1643,11 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_group_words) &&
               offsetof(ntw2_status,ai_group_words) + NTW2_AI_GROUP_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_hold_words) &&
               offsetof(ntw2_status,ai_hold_words) + NTW2_AI_HOLD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,anim_guard_words) &&
-              offsetof(ntw2_status,anim_guard_words) + NTW2_ANIM_GUARD_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS == 8u &&
-              NTW2_AI_GROUP_WORDS == 32u && NTW2_AI_HOLD_WORDS == 16u &&
+              offsetof(ntw2_status,anim_guard_words) + NTW2_ANIM_GUARD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_march_words) &&
+              offsetof(ntw2_status,ai_march_words) + NTW2_AI_MARCH_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS == 8u &&
+              NTW2_AI_GROUP_WORDS == 32u && NTW2_AI_HOLD_WORDS == 16u && NTW2_AI_MARCH_WORDS == 16u && NTW2_AI_MARCH_SLOTS == 0x20000u &&
               NTW2_AI_HOLD_SLOTS == 0x8000u && NTW2_AI_HOLD_SLOTS_ALL == 0x10000u &&
-              NTW2_AI_FORMUP_GATE == 0x2000u && NTW2_AI_STANDOFF == 0x4000u && NTW2_AI_CTRL_FLAGS_VALID == 0x1FF0Fu && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
+              NTW2_AI_FORMUP_GATE == 0x2000u && NTW2_AI_STANDOFF == 0x4000u && NTW2_AI_CTRL_FLAGS_VALID == 0x3FF0Fu && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
               NTW2_ENGAGE_CENSUS == 0x80000u &&
               NTW2_ALLOC_CENSUS_WORDS == 1056u && NTW2_ARENA_WORDS == 32u && NTW2_OVERLAY_WORDS == 16u && NTW2_MOUNTED_OFFICER_WORDS == 16u &&
               NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u && NTW2_ALLOC_FIX == 0x200000u &&

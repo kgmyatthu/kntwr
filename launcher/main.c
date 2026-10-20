@@ -226,6 +226,7 @@ typedef struct Options {
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (NTW2_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
     wchar_t formation_census_csv[MAXP]; /* --formation-census-csv FILE */
+    BOOL formation_census_men; /* --formation-census-men: also write FILE.men.csv (per-man steering detail of a few tracked units; NTW2_FORMATION_CENSUS_MEN) */
     BOOL no_gameplay_patch;  /* --no-gameplay-patch: stock bytes in memory (diagnostic bisection; the runtime refuses a stock image, so it needs --no-activate) */
     ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes */
     wchar_t game_exe[MAXP];  /* --game-exe NAME */
@@ -259,6 +260,7 @@ typedef struct Options {
     uint32_t ai_standoff_k;
     BOOL ai_hold_slots;      /* --ai-hold-slots[=infantry|all]: bit 15 (NTW2_AI_HOLD_SLOTS), plus bit 16 (NTW2_AI_HOLD_SLOTS_ALL) for =all; opt-in only */
     BOOL ai_hold_slots_all;
+    BOOL ai_march_slots;     /* --ai-march-slots: bit 17 (NTW2_AI_MARCH_SLOTS); AI-only, opt-in only */
     uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
@@ -1665,11 +1667,21 @@ static void print_ai_group(const uint32_t *w, const uint32_t *hold, uint32_t ai_
         say(L"\n");
     }
 }
+/* --ai-march-slots (src/ai/ntw2_march_slots.h): ai_march_words; prints every nonzero word by label. */
+static void print_ai_march(const uint32_t *w, uint32_t ai_ctrl_flags)
+{
+    static const char *const march_names[NTW2_AI_MARCH_WORDS] = { NTW2_AI_MARCH_LABELS };
+    unsigned i;
+    if (!(ai_ctrl_flags & NTW2_AI_MARCH_SLOTS)) return;
+    say(L"  ai_march:");
+    for (i = 0; i < NTW2_AI_MARCH_WORDS; ++i) if (w[i]) say(L" %hs=%lu", march_names[i], (unsigned long)w[i]);
+    say(L"\n");
+}
 /* ntw2_config::ai_group_params / ai_group_params2 from the parsed options (ABI packing: include/ntw2_runtime.h NTW2_AI_FORMUP_* / NTW2_AI_STANDOFF_*). */
 static void apply_group_cfg(ntw2_config *c, const Options *o)
 {
     c->ai_ctrl_flags |= (o->ai_formup_gate ? NTW2_AI_FORMUP_GATE : 0u) | (o->ai_standoff ? NTW2_AI_STANDOFF : 0u) |
-                        (o->ai_hold_slots ? NTW2_AI_HOLD_SLOTS : 0u) | (o->ai_hold_slots_all ? NTW2_AI_HOLD_SLOTS_ALL : 0u);
+                        (o->ai_hold_slots ? NTW2_AI_HOLD_SLOTS : 0u) | (o->ai_hold_slots_all ? NTW2_AI_HOLD_SLOTS_ALL : 0u) | (o->ai_march_slots ? NTW2_AI_MARCH_SLOTS : 0u);
     c->ai_group_params = o->ai_formup_gate ? (o->ai_formup_pct | (o->ai_formup_metres << NTW2_AI_FORMUP_METRES_SHIFT) | (o->ai_formup_timeout << NTW2_AI_FORMUP_TIMEOUT_SHIFT)) : 0u;
     c->ai_group_params2 = o->ai_standoff ? o->ai_standoff_k : 0u;
 }
@@ -2717,6 +2729,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
     print_ai_group(s->ai_group_words, s->ai_hold_words, ai_ctrl_flags);
+    print_ai_march(s->ai_march_words, ai_ctrl_flags);
     if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_retarget_jitter(s->ai_ctrl_reuse_words); /* words 20..23 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (s->requested_mask & NTW2_VISUAL) {
@@ -5329,6 +5342,13 @@ static BOOL write_receipt(Run *r, int exit_code)
         for (hi = 0; hi < NTW2_AI_HOLD_WORDS; ++hi) sb_fmt(&b, ", \"%s\": %lu", hold_names[hi], (unsigned long)r->last.ai_hold_words[hi]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_hold\": null,\n");
+    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_MARCH_SLOTS)) {
+        static const char *const march_names[NTW2_AI_MARCH_WORDS] = { NTW2_AI_MARCH_LABELS };
+        unsigned mi;
+        sb_fmt(&b, "  \"ai_march\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
+        for (mi = 0; mi < NTW2_AI_MARCH_WORDS; ++mi) sb_fmt(&b, ", \"%s\": %lu", march_names[mi], (unsigned long)r->last.ai_march_words[mi]);
+        sb_fmt(&b, "},\n");
+    } else sb_fmt(&b, "  \"ai_march\": null,\n");
     if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_RETARGET_JITTER)) {
         const uint32_t *jw = r->last.ai_ctrl_reuse_words + 20;
         unsigned jitter_index;
@@ -6664,6 +6684,7 @@ static BOOL launch_game(Run *r)
         SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_CSV", r->opt.formation_census_csv);
         _snwprintf_s(ev, 16, _TRUNCATE, L"%lu", (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u));
         SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_EVERY", ev);
+        if (r->opt.formation_census_men) SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_MEN", L"1");
     }
     memset(&pi, 0, sizeof pi);
     for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
@@ -6834,6 +6855,8 @@ static void usage(void)
         L"                        moving, >= 60 men, men_rms < 0.35 x slot_rms), nearest-neighbour spacing, spacing and layout floats; FILE.summary.txt has the counts.\n"
         L"                        With a runtime: in-process (needs a routed tick; calls the engine's own slot generator). With --no-activate: launcher-side\n"
         L"                        ReadProcessMemory census of an unmodified game (no slots; moving = centroid speed > 0.5 m/s). Honours --observe-seconds.\n"
+        L"  --formation-census-men  with --formation-census (runtime only): also FILE.men.csv, per-man steering of the first 6 AI + 3 player marching 400+-man units\n"
+        L"                        (agent order/path-follower state, move-target position object and its world point, order-node slot object, sampled men + unit aggregates)\n"
         L"  --no-gameplay-patch   diagnostic bisection, needs --no-activate: resume the stock image unpatched (no in-memory gameplay patch)\n"
         L"  --gameplay-patch-only-runs LIST / --gameplay-patch-skip-runs LIST  diagnostic bisection: write only (or all but) the listed non-header runs of the 103-run\n"
         L"                        gameplay patch (LIST like 14-16,36-38,44); the PE header, relocations and the five appended sections are always applied\n"
@@ -6956,6 +6979,12 @@ static void usage(void)
         L"                        only infantry that is not light / skirmisher; `all`: every non-artillery member. Members fighting melee, dead and artillery are\n"
         L"                        never touched; the shared unit simulation is untouched. Needs a routed tick (e.g. --features all); excludes ai_ctrl / ai_async2.\n"
         L"                        Row: ai_hold (src/ai/ntw2_group_hold.h), receipt ai_hold.\n");
+    say(L"%ls",
+        L"  --ai-march-slots      AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). The first execute of an AI formation MOVE command\n"
+        L"                        re-solves the man -> slot assignment with the uncapped solver flag and reissues every man's move order, so marching AI line infantry\n"
+        L"                        keeps its rank-and-file slots instead of crossing into a 1 m strip when the new template faces away from the old formation. Player\n"
+        L"                        commands, the shared soldier simulation and everything else are untouched. Needs a routed tick (e.g. --features all); excludes\n"
+        L"                        ai_ctrl / ai_async2. Row: ai_march (src/ai/ntw2_march_slots.h), receipt ai_march.\n");
     say(L"%ls",
         L"  --brain-retarget-jitter  SHARED-SIMULATION GAMEPLAY DEVIATION (both armies, the player included; replays desync vs vanilla; opt-in, NEVER implied by\n"
         L"                        --features all). A soldier whose melee target became invalid this tick no longer re-searches immediately: its\n"
@@ -7081,6 +7110,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->ai_standoff_k = NTW2_AI_STANDOFF_DEFAULT_K;
     o->ai_hold_slots = FALSE;
     o->ai_hold_slots_all = FALSE;
+    o->ai_march_slots = FALSE;
     o->ai_prepass_flags = 0;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
@@ -7155,6 +7185,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             o->formation_census = TRUE;
             if (val && !parse_uint(val, 1, 10000, &o->formation_census_every)) { errsay(L"--formation-census=EVERY must be 1..10000 (model ticks).\n"); return -1; }
         }
+        else if (!wcscmp(name, L"--formation-census-men")) o->formation_census_men = TRUE;
         else if (!wcscmp(name, L"--formation-census-csv")) {
             NEEDVAL();
             if (!val[0] || wcslen(val) >= MAXP || wcschr(val, L'"')) { errsay(L"--formation-census-csv needs a nonempty path without double quotes.\n"); return -1; }
@@ -7274,6 +7305,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                 if (!wcscmp(val, L"all")) o->ai_hold_slots_all = TRUE;
                 else if (wcscmp(val, L"infantry")) { errsay(L"--ai-hold-slots[=infantry|all]: unknown mode (default infantry).\n"); return -1; }
             }
+        } else if (!wcscmp(name, L"--ai-march-slots")) {
+            o->ai_march_slots = TRUE;
         } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
             uint32_t cap;
             NEEDVAL();
@@ -7394,9 +7427,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
         return -1;
     }
-    if ((o->ai_formup_gate || o->ai_standoff || o->ai_hold_slots) && ((o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
+    if ((o->ai_formup_gate || o->ai_standoff || o->ai_hold_slots || o->ai_march_slots) && ((o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
                              !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
-        errsay(L"--ai-formup-gate / --ai-standoff / --ai-hold-slots need a routed tick (add profile or a simulation feature, e.g. --features all) "
+        errsay(L"--ai-formup-gate / --ai-standoff / --ai-hold-slots / --ai-march-slots need a routed tick (add profile or a simulation feature, e.g. --features all) "
                L"and exclude the ai_ctrl and ai_async2 features.\n");
         return -1;
     }
