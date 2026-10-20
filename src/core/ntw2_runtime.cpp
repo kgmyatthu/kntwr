@@ -59,6 +59,7 @@
 #include "ai/ntw2_spiral.h"
 #include "ai/ntw2_claim_once.h"
 #include "ai/ntw2_group_formup.h"
+#include "ai/ntw2_group_hold.h"
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
@@ -2582,6 +2583,8 @@ void SnapshotAiCtrl() {
     ntw2_claim_once::Snapshot(row+24); // --ai-claim-once: all zero without the bit
     static_assert(ntw2_group_formup::kWords<=NTW2_AI_GROUP_WORDS/2, "formup words fill the first half of ai_group_words");
     ntw2_group_formup::Snapshot(ntw2_state.ai_group_words); // --ai-formup-gate: words 0..15, all zero without the bit
+    static_assert(ntw2_group_hold::kWords==NTW2_AI_HOLD_WORDS, "hold words fill ai_hold_words");
+    if (config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS) ntw2_group_hold::Snapshot(ntw2_state.ai_hold_words); // --ai-hold-slots: all zero without the bit
     static_assert(ntw2_retarget_jitter::kWords==4, "retarget-jitter words fill words 20..23");
     if (config.ai_ctrl_flags&NTW2_AI_RETARGET_JITTER) ntw2_retarget_jitter::Snapshot(row+20); // --brain-retarget-jitter (exclusive with the geometry mode that owns 16..23)
     static_assert(ntw2_target_cull::kWords==4, "target-cull words fill words 16..19");
@@ -3722,6 +3725,14 @@ DWORD WINAPI Monitor(void*) {
         if (!mo::InstallRedirect(delta,clones.entries[NTW2_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
         PublishMountedOfficer();
     }
+    if (!failure && (config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS)) {
+        // --ai-hold-slots: the single `call 0x7C8820` (ATTACK_BATTLEGROUP posture marking) inside the tactic update 0x7D91D0 goes through MarkGate (restored at stop); no battle is running yet.
+        namespace gh=ntw2_group_hold;
+        const gh::Targets targets={V(gh::kMarking),&PsScopeThread};
+        gh::Configure((config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS_ALL) ? gh::ModeAll : gh::ModeInfantry,targets);
+        if (!gh::InstallRedirect(delta,FnAddress(&gh::MarkGate))) RecordError(SlotConflict,gh::kCallSite);
+        StateBegin(); gh::Snapshot(ntw2_state.ai_hold_words); StateEnd();
+    }
     ntw2_profile_storm_threshold_ms=(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS))) {
         siteGateIndex=config.profile_site;
@@ -3788,6 +3799,10 @@ DWORD WINAPI Monitor(void*) {
     ntw2_profile_stop();
     if (!ntw2_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
     PublishMountedOfficer();
+    if (config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS) {
+        if (!ntw2_group_hold::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_group_hold::kCallSite); clean=false; } // restore the marking call before the final publish
+        StateBegin(); ntw2_group_hold::Snapshot(ntw2_state.ai_hold_words); StateEnd();
+    }
     if (config.enabled_mask&NTW2_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
@@ -3811,8 +3826,9 @@ static bool GroupParamsValid(const ntw2_config& c) {
         const U pct=c.ai_group_params&NTW2_AI_FORMUP_PCT_MASK, timeout=c.ai_group_params>>NTW2_AI_FORMUP_TIMEOUT_SHIFT;
         if ((c.ai_group_params&~NTW2_AI_FORMUP_PARAMS_VALID) || pct>100 || !timeout) return false;
     }
-    if (!(c.ai_ctrl_flags&NTW2_AI_STANDOFF)) return c.ai_group_params2==0;
-    return !(c.ai_group_params2&~NTW2_AI_STANDOFF_PARAMS2_VALID) && (c.ai_group_params2&NTW2_AI_STANDOFF_K_MASK)!=0;
+    if (!(c.ai_ctrl_flags&NTW2_AI_STANDOFF)) { if (c.ai_group_params2) return false; }
+    else if ((c.ai_group_params2&~NTW2_AI_STANDOFF_PARAMS2_VALID) || !(c.ai_group_params2&NTW2_AI_STANDOFF_K_MASK)) return false;
+    return !(c.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS_ALL) || (c.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS); // --ai-hold-slots=all requires the base bit
 }
 
 static U StartImpl(void* raw) {
@@ -4032,6 +4048,8 @@ static U StartImpl(void* raw) {
     ntw2_record_test::Reset();
     ntw2_claim_once::ResetRow();
     ntw2_group_formup::ResetRow();
+    ntw2_group_hold::ResetRow();
+    for (U i=0;i<NTW2_AI_HOLD_WORDS;++i) ntw2_state.ai_hold_words[i]=0;
     ntw2_retarget_jitter::ResetRow();
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();
