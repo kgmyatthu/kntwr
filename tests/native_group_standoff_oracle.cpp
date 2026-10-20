@@ -258,13 +258,33 @@ static void TestMoving() {
     SetTick(100); Call(); Require(out2[1]==nativeZ && W(so::WFbNoEnemy)>=1,"no enemy left: native centre");
     std::printf("moving: ok\n");
 }
+// Cost: a cached call and a full evaluation against a 60-unit / 12,000-man enemy (every enemy unit in the target region list, front 150..450 m away). Reported, not asserted
+// beyond a generous bound that catches an accidental quadratic walk.
+static void TestCost() {
+    Reset(); const U g=AddUnit(0,Line(-20,20,0,2),110,40); AddToGroup(g);
+    for(U i=0;i<60;++i) {
+        const float x0=-300.0f+(i%20)*30.0f, z=150.0f+(i/20)*150.0f;
+        std::vector<std::pair<float,float>> men; for(U m=0;m<200;++m) men.push_back({x0+(m%40)*0.7f,z+(m/40)*2.5f});
+        const U e=AddUnit(1,men,110,60); AddToRegion(1,e);
+    }
+    so::Configure(true,90,Targets());
+    LARGE_INTEGER f,a,b; QueryPerformanceFrequency(&f);
+    SetTick(1000); Call(); Require(W(so::WApplied)==1,"cost fixture applies");
+    const U n=2000;
+    QueryPerformanceCounter(&a); for(U i=0;i<n;++i) Call(); QueryPerformanceCounter(&b);
+    const double cachedUs=1e6*double(b.QuadPart-a.QuadPart)/double(f.QuadPart)/n;
+    QueryPerformanceCounter(&a); for(U i=0;i<n;++i) { SetTick(2000+10*i); Call(); } QueryPerformanceCounter(&b);
+    const double evalUs=1e6*double(b.QuadPart-a.QuadPart)/double(f.QuadPart)/n;
+    std::printf("cost: cached call %.3f us, full evaluation (60 units / 12000 men, graph walk included) %.1f us\n",cachedUs,evalUs);
+    Require(cachedUs<20.0 && evalUs<20000.0,"cost bounds");
+}
 int main(int argc,char** argv) {
     if(argc!=2) { std::fprintf(stderr,"usage: native_group_standoff_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]);
     w=static_cast<World*>(VirtualAlloc(nullptr,sizeof(World),MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
     Require(w!=nullptr && A(w)>0x10000u && A(w)+sizeof(World)<0xFFFF0000u,"fixture allocation");
     noAccess=VirtualAlloc(nullptr,0x1000,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS); Require(noAccess!=nullptr && A(noAccess)>0x10000u,"no-access page");
-    TestSites(); TestOffAndExcluded(); TestGeometry(); TestHoldAndBounds(); TestMoving();
+    TestSites(); TestOffAndExcluded(); TestGeometry(); TestHoldAndBounds(); TestMoving(); TestCost();
     std::printf("group standoff oracle: %u checks\n",checks);
     return 0;
 }
