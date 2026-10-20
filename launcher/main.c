@@ -254,13 +254,6 @@ typedef struct Options {
     BOOL brain_target_cull_shadow; /* --brain-target-cull-shadow: bit 10 (NTW2_AI_TARGET_CULL_SHADOW) */
     BOOL brain_target_cull;  /* --brain-target-cull: bit 11 (NTW2_AI_TARGET_CULL) */
     BOOL brain_retarget_jitter; /* --brain-retarget-jitter: bit 12 (NTW2_AI_RETARGET_JITTER); opt-in only, never implied by --features all */
-    BOOL ai_formup_gate;     /* --ai-formup-gate[=pct,metres[,ticks]]: bit 13 (NTW2_AI_FORMUP_GATE), parameters in ntw2_config::ai_group_params; opt-in only */
-    uint32_t ai_formup_pct, ai_formup_metres, ai_formup_timeout;
-    BOOL ai_standoff;        /* --ai-standoff[=k]: bit 14 (NTW2_AI_STANDOFF), k x 100 in ntw2_config::ai_group_params2; opt-in only */
-    uint32_t ai_standoff_k;
-    BOOL ai_hold_slots;      /* --ai-hold-slots[=infantry|all]: bit 15 (NTW2_AI_HOLD_SLOTS), plus bit 16 (NTW2_AI_HOLD_SLOTS_ALL) for =all; opt-in only */
-    BOOL ai_hold_slots_all;
-    BOOL ai_march_slots;     /* --ai-march-slots: bit 17 (NTW2_AI_MARCH_SLOTS); AI-only, opt-in only */
     uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
@@ -1645,46 +1638,6 @@ static void print_ai_record_test(const uint32_t *w)
         if (w[i]) say(L" %hs=%lu", k_ai_record_test_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-formup-gate / --ai-standoff (src/ai/ntw2_group_formup.h, src/ai/ntw2_group_standoff.h): ai_group_words[0..15] / [16..31]; prints every nonzero word by label. */
-static void print_ai_group(const uint32_t *w, const uint32_t *hold, uint32_t ai_ctrl_flags)
-{
-    static const char *const formup_names[16] = { NTW2_AI_FORMUP_LABELS }, *const standoff_names[16] = { NTW2_AI_STANDOFF_LABELS };
-    unsigned i;
-    if (ai_ctrl_flags & NTW2_AI_FORMUP_GATE) {
-        say(L"  ai_formup_gate:");
-        for (i = 0; i < 16; ++i) if (w[i]) say(L" %hs=%lu", formup_names[i], (unsigned long)w[i]);
-        say(L"\n");
-    }
-    if (ai_ctrl_flags & NTW2_AI_STANDOFF) {
-        say(L"  ai_standoff:");
-        for (i = 0; i < 16; ++i) if (w[16 + i]) say(L" %hs=%lu", standoff_names[i], (unsigned long)w[16 + i]);
-        say(L"\n");
-    }
-    if (ai_ctrl_flags & NTW2_AI_HOLD_SLOTS) {
-        static const char *const hold_names[NTW2_AI_HOLD_WORDS] = { NTW2_AI_HOLD_LABELS };
-        say(L"  ai_hold:");
-        for (i = 0; i < NTW2_AI_HOLD_WORDS; ++i) if (hold[i]) say(L" %hs=%lu", hold_names[i], (unsigned long)hold[i]);
-        say(L"\n");
-    }
-}
-/* --ai-march-slots (src/ai/ntw2_march_slots.h): ai_march_words; prints every nonzero word by label. */
-static void print_ai_march(const uint32_t *w, uint32_t ai_ctrl_flags)
-{
-    static const char *const march_names[NTW2_AI_MARCH_WORDS] = { NTW2_AI_MARCH_LABELS };
-    unsigned i;
-    if (!(ai_ctrl_flags & NTW2_AI_MARCH_SLOTS)) return;
-    say(L"  ai_march:");
-    for (i = 0; i < NTW2_AI_MARCH_WORDS; ++i) if (w[i]) say(L" %hs=%lu", march_names[i], (unsigned long)w[i]);
-    say(L"\n");
-}
-/* ntw2_config::ai_group_params / ai_group_params2 from the parsed options (ABI packing: include/ntw2_runtime.h NTW2_AI_FORMUP_* / NTW2_AI_STANDOFF_*). */
-static void apply_group_cfg(ntw2_config *c, const Options *o)
-{
-    c->ai_ctrl_flags |= (o->ai_formup_gate ? NTW2_AI_FORMUP_GATE : 0u) | (o->ai_standoff ? NTW2_AI_STANDOFF : 0u) |
-                        (o->ai_hold_slots ? NTW2_AI_HOLD_SLOTS : 0u) | (o->ai_hold_slots_all ? NTW2_AI_HOLD_SLOTS_ALL : 0u) | (o->ai_march_slots ? NTW2_AI_MARCH_SLOTS : 0u);
-    c->ai_group_params = o->ai_formup_gate ? (o->ai_formup_pct | (o->ai_formup_metres << NTW2_AI_FORMUP_METRES_SHIFT) | (o->ai_formup_timeout << NTW2_AI_FORMUP_TIMEOUT_SHIFT)) : 0u;
-    c->ai_group_params2 = o->ai_standoff ? o->ai_standoff_k : 0u;
-}
 /* --ai-claim-once[-census] (src/ai/ntw2_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
 static void print_ai_claim_once(const uint32_t *w)
 {
@@ -2728,8 +2681,6 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
-    print_ai_group(s->ai_group_words, s->ai_hold_words, ai_ctrl_flags);
-    print_ai_march(s->ai_march_words, ai_ctrl_flags);
     if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_retarget_jitter(s->ai_ctrl_reuse_words); /* words 20..23 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under NTW2_AI_CTRL (exclusive) */
     if (s->requested_mask & NTW2_VISUAL) {
@@ -5324,31 +5275,6 @@ static BOOL write_receipt(Run *r, int exit_code)
                (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)(cw[30] & 0xFFu), (unsigned long)((cw[30] >> 8) & 0xFFu),
                (unsigned long)(cw[30] >> 16), (unsigned long)cw[31]);
     } else sb_fmt(&b, "  \"ai_claim_once\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_GROUP_BITS)) {
-        static const char *const formup_names[16] = { NTW2_AI_FORMUP_LABELS }, *const standoff_names[16] = { NTW2_AI_STANDOFF_LABELS };
-        unsigned gi;
-        sb_fmt(&b, "  \"ai_group\": {\"flags\": %lu, \"formup\": %s, \"standoff\": %s, \"formup_pct\": %lu, \"formup_metres\": %lu, \"formup_timeout_ticks\": %lu, \"standoff_k_x100\": %lu",
-               (unsigned long)r->cfg.ai_ctrl_flags, (r->cfg.ai_ctrl_flags & NTW2_AI_FORMUP_GATE) ? "true" : "false", (r->cfg.ai_ctrl_flags & NTW2_AI_STANDOFF) ? "true" : "false",
-               (unsigned long)(r->cfg.ai_group_params & NTW2_AI_FORMUP_PCT_MASK), (unsigned long)((r->cfg.ai_group_params & NTW2_AI_FORMUP_METRES_MASK) >> NTW2_AI_FORMUP_METRES_SHIFT),
-               (unsigned long)(r->cfg.ai_group_params >> NTW2_AI_FORMUP_TIMEOUT_SHIFT), (unsigned long)(r->cfg.ai_group_params2 & NTW2_AI_STANDOFF_K_MASK));
-        for (gi = 0; gi < 16; ++gi) sb_fmt(&b, ", \"%s\": %lu", formup_names[gi], (unsigned long)r->last.ai_group_words[gi]);
-        for (gi = 0; gi < 16; ++gi) sb_fmt(&b, ", \"%s\": %lu", standoff_names[gi], (unsigned long)r->last.ai_group_words[16 + gi]);
-        sb_fmt(&b, "},\n");
-    } else sb_fmt(&b, "  \"ai_group\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_HOLD_SLOTS)) {
-        static const char *const hold_names[NTW2_AI_HOLD_WORDS] = { NTW2_AI_HOLD_LABELS };
-        unsigned hi;
-        sb_fmt(&b, "  \"ai_hold\": {\"flags\": %lu, \"mode\": \"%s\"", (unsigned long)r->cfg.ai_ctrl_flags, (r->cfg.ai_ctrl_flags & NTW2_AI_HOLD_SLOTS_ALL) ? "all" : "infantry");
-        for (hi = 0; hi < NTW2_AI_HOLD_WORDS; ++hi) sb_fmt(&b, ", \"%s\": %lu", hold_names[hi], (unsigned long)r->last.ai_hold_words[hi]);
-        sb_fmt(&b, "},\n");
-    } else sb_fmt(&b, "  \"ai_hold\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_MARCH_SLOTS)) {
-        static const char *const march_names[NTW2_AI_MARCH_WORDS] = { NTW2_AI_MARCH_LABELS };
-        unsigned mi;
-        sb_fmt(&b, "  \"ai_march\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
-        for (mi = 0; mi < NTW2_AI_MARCH_WORDS; ++mi) sb_fmt(&b, ", \"%s\": %lu", march_names[mi], (unsigned long)r->last.ai_march_words[mi]);
-        sb_fmt(&b, "},\n");
-    } else sb_fmt(&b, "  \"ai_march\": null,\n");
     if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_RETARGET_JITTER)) {
         const uint32_t *jw = r->last.ai_ctrl_reuse_words + 20;
         unsigned jitter_index;
@@ -6189,7 +6115,6 @@ static int install_runtime(Run *r)
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
-    apply_group_cfg(&r->cfg, &r->opt);
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + sizeof r->cfg, r->dll_path, plen_bytes);
     {
@@ -6965,27 +6890,6 @@ static void usage(void)
         L"  --ai-claim-once-census  the same claim loop WITHOUT the elision (native recomputes) publishing the same controller-state hash: the native\n"
         L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n");
     say(L"%ls",
-        L"  --ai-formup-gate[=pct,metres[,ticks]]  AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). An AI ATTACK_BATTLEGROUP\n"
-        L"                        leaves REFORM / MOVE_TO_FORMUP only when >= pct % (default 80) of its members are within `metres` (default 25) of their form-up\n"
-        L"                        slot, or after a safety timeout of `ticks` (default 2400 = 4 min) in that state, or when the enemy is within the engine's own 140 m\n"
-        L"                        'no time' distance. Everything else stays native; the player's groups are untouched. Needs a routed tick (e.g. --features all);\n"
-        L"                        excludes ai_ctrl / ai_async2. Row: ai_group (words 0..15, src/ai/ntw2_group_formup.h), receipt ai_group.\n"
-        L"  --ai-standoff[=k]     AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). Stand-off distance of an AI attack group's\n"
-        L"                        move-to-target destination as a factor k (default 0.90, 0.01..2.55) of its weapon range (src/ai/ntw2_group_standoff.h).\n");
-    say(L"%ls",
-        L"  --ai-hold-slots[=infantry|all]  AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). While an AI ATTACK_BATTLEGROUP is\n"
-        L"                        moving to its target and has not arrived, its eligible members keep the posture mark 4 (no new per-unit attack objective) so the\n"
-        L"                        line advances together instead of peeling off piecemeal; once the group has arrived the native marking resumes. Default `infantry`:\n"
-        L"                        only infantry that is not light / skirmisher; `all`: every non-artillery member. Members fighting melee, dead and artillery are\n"
-        L"                        never touched; the shared unit simulation is untouched. Needs a routed tick (e.g. --features all); excludes ai_ctrl / ai_async2.\n"
-        L"                        Row: ai_hold (src/ai/ntw2_group_hold.h), receipt ai_hold.\n");
-    say(L"%ls",
-        L"  --ai-march-slots      AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). The first execute of an AI formation MOVE command\n"
-        L"                        re-solves the man -> slot assignment with the uncapped solver flag and reissues every man's move order, so marching AI line infantry\n"
-        L"                        keeps its rank-and-file slots instead of crossing into a 1 m strip when the new template faces away from the old formation. Player\n"
-        L"                        commands, the shared soldier simulation and everything else are untouched. Needs a routed tick (e.g. --features all); excludes\n"
-        L"                        ai_ctrl / ai_async2. Row: ai_march (src/ai/ntw2_march_slots.h), receipt ai_march.\n");
-    say(L"%ls",
         L"  --brain-retarget-jitter  SHARED-SIMULATION GAMEPLAY DEVIATION (both armies, the player included; replays desync vs vanilla; opt-in, NEVER implied by\n"
         L"                        --features all). A soldier whose melee target became invalid this tick no longer re-searches immediately: its\n"
         L"                        search cooldown is set to (agent+0x2C & 0xF) ticks (the engine's own per-man jitter, 0..15), so a target-loss\n"
@@ -7031,23 +6935,6 @@ static BOOL parse_uint(const wchar_t *s, uint32_t lo, uint32_t hi, uint32_t *out
     v = wcstoul(s, &end, 10);
     if (*end || v < lo || v > hi) return FALSE;
     *out = (uint32_t)v;
-    return TRUE;
-}
-
-/* --ai-formup-gate=pct,metres[,ticks]: share of members that must be within `metres` of their slot, optional safety timeout in ticks (the default timeout stays). */
-static BOOL parse_formup_gate(const wchar_t *s, Options *o)
-{
-    wchar_t buf[64], *metres, *ticks;
-    uint32_t pct, m, t = NTW2_AI_FORMUP_DEFAULT_TIMEOUT;
-    if (wcslen(s) >= 64) return FALSE;
-    wcscpy_s(buf, 64, s);
-    metres = wcschr(buf, L',');
-    if (!metres) return FALSE;
-    *metres++ = 0;
-    ticks = wcschr(metres, L',');
-    if (ticks) *ticks++ = 0;
-    if (!parse_uint(buf, 0, 100, &pct) || !parse_uint(metres, 0, 255, &m) || (ticks && !parse_uint(ticks, 1, 65535, &t))) return FALSE;
-    o->ai_formup_pct = pct; o->ai_formup_metres = m; o->ai_formup_timeout = t;
     return TRUE;
 }
 
@@ -7102,15 +6989,6 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->brain_target_cull_shadow = FALSE;
     o->brain_target_cull = FALSE;
     o->brain_retarget_jitter = FALSE;
-    o->ai_formup_gate = FALSE;
-    o->ai_formup_pct = NTW2_AI_FORMUP_DEFAULT_PCT;
-    o->ai_formup_metres = NTW2_AI_FORMUP_DEFAULT_METRES;
-    o->ai_formup_timeout = NTW2_AI_FORMUP_DEFAULT_TIMEOUT;
-    o->ai_standoff = FALSE;
-    o->ai_standoff_k = NTW2_AI_STANDOFF_DEFAULT_K;
-    o->ai_hold_slots = FALSE;
-    o->ai_hold_slots_all = FALSE;
-    o->ai_march_slots = FALSE;
     o->ai_prepass_flags = 0;
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
@@ -7283,30 +7161,6 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             o->brain_target_cull = TRUE;
         } else if (!wcscmp(name, L"--brain-retarget-jitter")) {
             o->brain_retarget_jitter = TRUE;
-        } else if (!wcscmp(name, L"--ai-formup-gate")) {
-            o->ai_formup_gate = TRUE;
-            if (val && !parse_formup_gate(val, o)) {
-                errsay(L"--ai-formup-gate[=pct,metres[,ticks]]: pct 0..100, metres 0..255, optional safety timeout 1..65535 ticks (defaults %u,%u,%u).\n",
-                       NTW2_AI_FORMUP_DEFAULT_PCT, NTW2_AI_FORMUP_DEFAULT_METRES, NTW2_AI_FORMUP_DEFAULT_TIMEOUT);
-                return -1;
-            }
-        } else if (!wcscmp(name, L"--ai-standoff")) {
-            o->ai_standoff = TRUE;
-            if (val) {
-                wchar_t *end;
-                double k = wcstod(val, &end);
-                if (!*val || *end || !(k >= 0.01 && k <= 2.55)) { errsay(L"--ai-standoff[=k]: k is a factor of the weapon range, 0.01..2.55 (default 0.90).\n"); return -1; }
-                o->ai_standoff_k = (uint32_t)(k * 100.0 + 0.5);
-            }
-        } else if (!wcscmp(name, L"--ai-hold-slots")) {
-            o->ai_hold_slots = TRUE;
-            o->ai_hold_slots_all = FALSE;
-            if (val) {
-                if (!wcscmp(val, L"all")) o->ai_hold_slots_all = TRUE;
-                else if (wcscmp(val, L"infantry")) { errsay(L"--ai-hold-slots[=infantry|all]: unknown mode (default infantry).\n"); return -1; }
-            }
-        } else if (!wcscmp(name, L"--ai-march-slots")) {
-            o->ai_march_slots = TRUE;
         } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
             uint32_t cap;
             NEEDVAL();
@@ -7425,12 +7279,6 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                              !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
         errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
                L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
-        return -1;
-    }
-    if ((o->ai_formup_gate || o->ai_standoff || o->ai_hold_slots || o->ai_march_slots) && ((o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
-                             !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
-        errsay(L"--ai-formup-gate / --ai-standoff / --ai-hold-slots / --ai-march-slots need a routed tick (add profile or a simulation feature, e.g. --features all) "
-               L"and exclude the ai_ctrl and ai_async2 features.\n");
         return -1;
     }
     if ((o->brain_target_cull || o->brain_target_cull_shadow || o->brain_retarget_jitter) &&
@@ -7745,7 +7593,6 @@ int wmain(int argc, wchar_t **argv)
                            (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
-    apply_group_cfg(&r->cfg, &r->opt);
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];
