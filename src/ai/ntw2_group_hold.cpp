@@ -89,7 +89,7 @@ void HoldMembers(U tactic) {
     for (U i = 0; i < count; ++i) {
         const U u = Rd(arr + 4 * i);
         if (!Sane(u)) continue;
-        if (Rd(u + kAliveState) == 2 || static_cast<int>(Rd(u + kLiveCount)) <= 0) { Bump(WDeadSkipped); continue; }
+        if (Rd(u + kAliveState) == 2 || Rd(u + kLiveCount) == 0) { Bump(WDeadSkipped); continue; }
         if (Rd(u + kMark) != 1) { Bump(WSkippedMark); continue; }
         const U cls = Rd(u + kClassPtr);
         if (!Sane(cls)) { Bump(WExemptClass); continue; }
