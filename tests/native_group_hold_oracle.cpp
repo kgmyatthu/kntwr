@@ -12,6 +12,8 @@
 #include <bcrypt.h>
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <utility>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +22,7 @@
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
 #include "ai/ntw2_group_hold.h"
+#include "core/ntw2_guard.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
@@ -74,19 +77,21 @@ static M Inf(U mark=0,U sub=18) { return {2,sub,mark,1,0,0}; }
 struct R {
     U state=4, cls=4, c4c=0, tick=1000, e0=10, bc=0; float f80c=50.0f;
     float W=100.0f, D=60.0f, dx=0.0f, dz=1000.0f; bool nullBox=false;
+    float cx=0.0f, cz=0.0f, ax=1.0f, az=0.0f, fxv=0.0f, fzv=1.0f;   // box centre, axis1 (x,z), forward (x,z)
+    U tickMode=0;                                                    // 1: [t+4] non-sane, 2: [[t+4]+8] non-sane
     std::vector<M> m;
 };
 // Group box: centre (0,0), axis1 = (1,0) (width along x), forward = (0,1) (depth along z). front point = (0,D/2). Default destination (0,1000): outside the box, 940 m from the front.
 static void Build(const R& r) {
     std::memset(&fx,0,sizeof(fx)); std::memset(tac2,0,sizeof(tac2));
     B* t=fx.tactic;
-    Put(t,4,A(fx.mid)); Put(fx.mid,8,A(fx.model)); Put(fx.model,0x58,r.tick);
+    Put(t,4,r.tickMode==1 ? 0x10u : A(fx.mid)); Put(fx.mid,8,r.tickMode==2 ? 0x10u : A(fx.model)); Put(fx.model,0x58,r.tick);
     Put(t,0x40,A(fx.target)); Put(fx.target,0x48,r.cls); Put(fx.target,0x4C,r.c4c);
     Put(t,0x828,r.state); Put(t,0x7E0,r.e0); Put(t,0x7BC,r.bc); PutF(t,0x80C,r.f80c);
     PutF(t,0x7E8,r.dx); PutF(t,0x7EC,r.dz);
     Put(t,0xD8,r.nullBox ? 0u : A(fx.box));
-    PutF(fx.box,8,0.0f); PutF(fx.box,0xC,0.0f); PutF(fx.box,0x14,r.W); PutF(fx.box,0x18,r.D);
-    PutF(fx.box,0x1C,1.0f); PutF(fx.box,0x20,0.0f); PutF(fx.box,0x24,0.0f); PutF(fx.box,0x28,1.0f);
+    PutF(fx.box,8,r.cx); PutF(fx.box,0xC,r.cz); PutF(fx.box,0x14,r.W); PutF(fx.box,0x18,r.D);
+    PutF(fx.box,0x1C,r.ax); PutF(fx.box,0x20,r.az); PutF(fx.box,0x24,r.fxv); PutF(fx.box,0x28,r.fzv);
     Put(t,0x6C,static_cast<U>(r.m.size())); Put(t,0x70,A(fx.arr));
     for(U i=0;i<r.m.size();++i) {
         const M& m=r.m[i]; B* u=fx.unit[i];
@@ -243,18 +248,121 @@ static void TestMechanism() {
 }
 
 static void __fastcall FakeMark(U,U) {}
+static void Expect(std::initializer_list<std::pair<gh::Word,U>> nz,const char* what) {
+    U e[gh::kWords]={}; for(const auto& p:nz) e[p.first]=p.second;
+    ExpectWords(e,what);
+    volatile U snap[gh::kWords]; gh::Snapshot(snap);
+    for(U i=0;i<gh::kWords;++i) Require(snap[i]==gh::words[i],"Snapshot == words");
+}
+// A fault in the post-processing: the ORIGINAL 0x7C8820 stays the marking target (it never reads a member's formation pointer [U+0xADC]); member 1's formation points at a PAGE_NOACCESS page.
 static void TestFaults() {
     B* bad=static_cast<B*>(VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS)); Require(bad!=nullptr,"reserve a no-access page");
     R r; r.m={Inf(),Inf(),Inf()};
-    gh::Targets t=targets; t.marking=Fn(&FakeMark);   // the host marking does nothing, so only the gate touches the bad member
-    gh::Configure(gh::ModeInfantry,t);
-    Build(r); fx.arr[0]=A(bad); Gate(A(fx.tactic));
-    Require(W(gh::WFaults)==1 && W(gh::WCalls)==1,"a faulting member pointer is counted, no crash");
-    Build(r); fx.arr[1]=A(bad); Gate(A(fx.tactic));
-    Require(W(gh::WFaults)==2 && W(gh::WCalls)==2,"a second faulting call");
-    Build(r); Gate(A(fx.tactic)); Require(W(gh::WFaults)==2 && W(gh::WHeldCalls)>=1,"healthy call afterwards");
+    Arm(gh::ModeInfantry);
+    const unsigned depth=ntw2::probeDepth;
+    Build(r); Put(fx.unit[1],0xADC,A(bad)); Gate(A(fx.tactic));
+    Require(Marks(3)==std::vector<U>({4,1,1}),"fault at member 1: member 0 re-marked, walk aborted, member 2 keeps the native mark");
+    Require(ntw2::probeDepth==depth,"probeDepth restored after a fault");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,1},{gh::WGroups,1},{gh::WMaxMembers,3},{gh::WFaults,1}},"fault call row");
+    Build(r); Gate(A(fx.tactic));
+    Require(Marks(3)==std::vector<U>({4,4,4}),"healthy call after a fault re-marks everything");
+    Require(ntw2::probeDepth==depth,"probeDepth unchanged by a healthy call");
+    Expect({{gh::WCalls,2},{gh::WState4,2},{gh::WHeldCalls,2},{gh::WMarked,4},{gh::WGroups,1},{gh::WMaxMembers,3},{gh::WFaults,1}},"fault + healthy rows");
     VirtualFree(bad,0,MEM_RELEASE);
-    std::printf("faults: SEH fault counted, no crash\n");
+    std::printf("faults: SEH fault counted, partial re-mark, probeDepth restored\n");
+}
+
+// Whole-row deltas for the main paths; ResetRow keeps the latch state.
+static void TestRows() {
+    R r; r.m={Inf(),Inf(),Inf()}; const std::vector<U> four{4,4,4}, nat{1,1,1};
+    auto Call=[](const R& x){ Build(x); Gate(A(fx.tactic)); return Marks(static_cast<U>(x.m.size())); };
+    Arm(gh::ModeInfantry);
+    Require(Call(r)==four,"rows: far call holds");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,3},{gh::WGroups,1},{gh::WMaxMembers,3}},"held call row");
+    gh::ResetRow(); R in=r; in.dx=10; in.dz=10;
+    Require(Call(in)==nat,"rows: arrival call keeps native marks");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WArrivals,1},{gh::WReleasedCalls,1}},"arrival call row");
+    gh::ResetRow();
+    Require(Call(r)==nat,"ResetRow keeps the latch: an arrived tactic stays released");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WReleasedCalls,1}},"latched call row after ResetRow");
+    gh::ResetRow(); R s2=r; s2.state=2; Require(Call(s2)==nat,"rows: state 2 native marks");
+    Expect({{gh::WCalls,1}},"state != 4 call on an existing entry: only calls");
+    gh::ResetRow(); Require(Call(r)==four,"rows: held again after leaving state 4");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,3},{gh::WMaxMembers,3}},"held after reset row (no new group)");
+    // a state != 4 call on an unseen tactic creates no entry
+    Arm(gh::ModeInfantry); Require(Call(s2)==nat,"rows: state 2 on an unseen tactic");
+    Expect({{gh::WCalls,1}},"state != 4 on an unseen tactic: no group, no table_full");
+    // stale
+    Arm(gh::ModeInfantry); in.tick=1000; Call(in); gh::ResetRow();
+    r.tick=2000; Require(Call(r)==four,"rows: stale entry holds again");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,3},{gh::WMaxMembers,3}},"stale call row");
+    r.tick=1000;
+    // unmeasured: numeric invalid box, then invalid model tick paths
+    { R b=r; b.W=0; Arm(gh::ModeInfantry); Require(Call(b)==nat,"rows: W == 0 native");
+      Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WUnmeasured,1},{gh::WGroups,1}},"unmeasured box row"); }
+    for(U mode:{1u,2u}) { R b=r; b.tickMode=mode; Arm(gh::ModeInfantry); Require(Call(b)==nat,"rows: invalid model tick path native");
+        Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WUnmeasured,1}},"invalid model tick row (no entry)"); }
+    // out of scope
+    Arm(gh::ModeInfantry); inScope=false; Require(Call(r)==four,"rows: out-of-scope still held"); inScope=true;
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,3},{gh::WGroups,1},{gh::WMaxMembers,3},{gh::WOutOfScope,1}},"out_of_scope row");
+    std::printf("rows: whole-row deltas, ResetRow keeps latch, invalid model tick\n");
+}
+
+// Member-list paths: a non-sane member pointer is skipped (no fault), a member count above the cap (512) is truncated.
+static U bigArr[1000];
+static void TestMemberPaths() {
+    gh::Targets t=targets; t.marking=Fn(&FakeMark);   // the original marking would dereference the non-sane pointer
+    gh::Configure(gh::ModeInfantry,t);
+    R r; r.m={Inf(1),Inf(1),Inf(1)};
+    Build(r); fx.arr[1]=0x10; Gate(A(fx.tactic));
+    Require(Marks(3)[0]==4 && Marks(3)[1]==1 && Marks(3)[2]==4,"non-sane member pointer skipped, neighbours re-marked");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,2},{gh::WGroups,1},{gh::WMaxMembers,3}},"non-sane member row (no fault)");
+    Arm(gh::ModeInfantry);
+    R c; c.m={Inf(0)}; Build(c);
+    for(U& v:bigArr) v=A(fx.unit[0]);
+    Put(fx.tactic,0x6C,1000); Put(fx.tactic,0x70,A(bigArr)); Gate(A(fx.tactic));
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WHeldCalls,1},{gh::WMarked,1},{gh::WGroups,1},{gh::WSkippedMark,511},{gh::WMaxMembers,1000}},"member count 1000 capped at 512 (1 marked + 511 repeats)");
+    std::printf("member paths: non-sane pointer skipped, count capped at 512\n");
+}
+
+// Table capacity is 512 entries: the 513th distinct state-4 tactic (same model tick, nothing stale) is not tracked and keeps the native marks.
+static B bigTac[513][0x900];
+static void TestTableFull() {
+    R r; r.m={Inf(),Inf(),Inf()}; Build(r);
+    for(U i=0;i<513;++i) std::memcpy(bigTac[i],fx.tactic,0x900);
+    Arm(gh::ModeInfantry);
+    for(U i=0;i<512;++i) Gate(A(bigTac[i]));
+    Expect({{gh::WCalls,512},{gh::WState4,512},{gh::WHeldCalls,512},{gh::WMarked,3*512},{gh::WGroups,512},{gh::WMaxMembers,3}},"512 tactics tracked");
+    gh::ResetRow(); Gate(A(bigTac[512]));
+    Require(Marks(3)==std::vector<U>({1,1,1}),"513th tactic: native marks");
+    Expect({{gh::WCalls,1},{gh::WState4,1},{gh::WTableFull,1}},"table_full row");
+    std::printf("table: 512 tracked, 513th counts table_full\n");
+}
+
+// Arrival predicate discrimination on fresh latches: inside-box-only, inclusive edges, strict 50 m front distance, translated + rotated box.
+static bool ArrivesAt(R r,float dx,float dz) {
+    r.dx=dx; r.dz=dz; r.m={Inf(),Inf()}; Arm(gh::ModeInfantry);
+    const std::vector<U> g=GateMarks(r); const bool arrived=W(gh::WArrivals)==1;
+    Require(arrived ? (g[0]==1 && g[1]==1 && W(gh::WHeldCalls)==0) : (g[0]==4 && g[1]==4 && W(gh::WHeldCalls)==1 && W(gh::WArrivals)==0),"arrival result consistent with the marks");
+    return arrived;
+}
+static void TestArrivalGeometry() {
+    R r;                                         // centre (0,0), W 100 (x), D 60 (z), front (0,30)
+    Require(ArrivesAt(r,40,-20) && ArrivesAt(r,0,0) && ArrivesAt(r,45,0),"inside the box only (> 50 m from the front) arrives");
+    Require(ArrivesAt(r,50,0) && ArrivesAt(r,0,-30) && ArrivesAt(r,50,-30) && ArrivesAt(r,-50,30),"inclusive box edges arrive");
+    Require(!ArrivesAt(r,50.5f,0) && !ArrivesAt(r,0,-30.5f) && !ArrivesAt(r,0,-40) && !ArrivesAt(r,-60,0),"just outside the box and far from the front: not arrived");
+    Require(!ArrivesAt(r,0,80),"exactly 50 m from the front is NOT arrived (strict <)");
+    Require(ArrivesAt(r,0,79.5f) && ArrivesAt(r,0,70) && ArrivesAt(r,30,50),"within 50 m of the front (outside the box) arrives");
+    Require(!ArrivesAt(r,0,80.5f) && !ArrivesAt(r,40,60),"beyond 50 m of the front: not arrived");
+    // translated + rotated box: centre (100,200), axis1 = (0.6,0.8), forward = (-0.8,0.6)
+    R q; q.cx=100; q.cz=200; q.ax=0.6f; q.az=0.8f; q.fxv=-0.8f; q.fzv=0.6f;
+    auto Local=[&](float a,float f){ return std::make_pair(q.cx+a*q.ax+f*q.fxv,q.cz+a*q.az+f*q.fzv); };
+    auto In=[&](float a,float f){ const auto p=Local(a,f); return ArrivesAt(q,p.first,p.second); };
+    Require(In(0,0) && In(45,-20) && In(-45,20) && In(0,-25),"rotated box: inside arrives");
+    Require(!In(60,0) && !In(-60,0) && !In(0,-40) && !In(0,-45) && !In(20,-40),"rotated box: outside the box and far from the front is not arrived (axes not swapped)");
+    Require(In(0,70) && In(0,79) && In(20,60),"rotated box: near the front arrives");
+    Require(!In(0,85) && !In(0,90),"rotated box: beyond 50 m from the front is not arrived");
+    std::printf("arrival geometry: inside-only, edges, strict 50 m, rotated box\n");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------- redirect
@@ -300,7 +408,7 @@ int main(int argc,char** argv) {
     Require(FlushInstructionCache(GetCurrentProcess(),image,imageSize)!=0,"flush image");
     targets={A(At(gh::kMarking)),&Scope};
     Require(At(0x7C8924)[0]==0xC3,"0x7C8924 plain ret");
-    TestForwarding(); TestMechanism(); TestFaults(); TestRedirect(); TestCost();
+    TestForwarding(); TestMechanism(); TestFaults(); TestRows(); TestMemberPaths(); TestTableFull(); TestArrivalGeometry(); TestRedirect(); TestCost();
     std::printf("group hold oracle: %u checks\n",checks);
     return 0;
 }
