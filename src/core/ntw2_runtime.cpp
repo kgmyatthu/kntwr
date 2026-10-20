@@ -63,6 +63,7 @@
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
+#include "animation/ntw2_clip_picker_guard.h"
 #include "ai/ntw2_group_standoff.h"
 #include "ai/ntw2_engage_census.h"
 #include "core/ntw2_alloc_census.h"
@@ -3716,6 +3717,10 @@ void PublishMountedOfficer() { // monitor thread: the row is zero without NTW2_M
     if (!(config.va_watch_flags&NTW2_MOUNTED_OFFICER)) return;
     StateBegin(); ntw2_mounted_officer::Snapshot(ntw2_state.mounted_officer_words); StateEnd();
 }
+void PublishAnimGuard() { // monitor thread: hot-path-free counters of the clip picker guard (always installed)
+    static_assert(ntw2_clip_picker_guard::kWords==NTW2_ANIM_GUARD_WORDS, "guard words fill anim_guard_words");
+    StateBegin(); ntw2_clip_picker_guard::Snapshot(ntw2_state.anim_guard_words); StateEnd();
+}
 DWORD WINAPI Monitor(void*) {
     if (!LoadEntries()) RecordError(MissingExport,0);
     if (!failure) BuildClones();
@@ -3728,6 +3733,11 @@ DWORD WINAPI Monitor(void*) {
         mo::Configure((config.va_watch_flags&NTW2_MOUNTED_OFFICER_WIDEN)!=0,targets);
         if (!mo::InstallRedirect(delta,clones.entries[NTW2_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
         PublishMountedOfficer();
+    }
+    if (!failure) {
+        // Clip picker crash guard (always on, no switch): the entry 0xE5F760 jumps into the guarded copy; restored at stop. A refusal (modified bytes) leaves the native picker untouched.
+        if (!ntw2_clip_picker_guard::InstallRedirect(delta)) RecordError(SlotConflict,ntw2_clip_picker_guard::kEntry);
+        PublishAnimGuard();
     }
     if (!failure && (config.ai_ctrl_flags&NTW2_AI_STANDOFF)) {
         // --ai-standoff: both `call 0x78B1C0` sites inside the attack-group destination function 0x7C7DC0 go through RegionGate (restored at stop); no battle is running yet.
@@ -3766,6 +3776,7 @@ DWORD WINAPI Monitor(void*) {
         StateBegin(); ntw2_state.probe=probe; StateEnd();
         VaWatchSample(); // no-op unless --va-watch; rate-limited to 1 Hz
         PublishMountedOfficer(); // the unit constructors run while loading: publish in every phase
+        PublishAnimGuard();
         if (Load(&enabled)) {
             // 0x5EE050 recomputes +0x2829C from the playback/unit rate (0x5B3210), not battle lifetime.
             // At >1x the task route can go dormant while this same world keeps running synchronously.
@@ -3811,6 +3822,8 @@ DWORD WINAPI Monitor(void*) {
     ntw2_profile_stop();
     if (!ntw2_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
     PublishMountedOfficer();
+    if (!ntw2_clip_picker_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_clip_picker_guard::kEntry); clean=false; } // restore the picker entry before the final publish
+    PublishAnimGuard();
     if (config.ai_ctrl_flags&NTW2_AI_STANDOFF) {
         if (!ntw2_group_standoff::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_group_standoff::kSiteFirst); clean=false; } // restore the destination calls before the final publish
         StateBegin(); ntw2_group_standoff::Snapshot(ntw2_state.ai_group_words+16); StateEnd();
@@ -4070,6 +4083,8 @@ static U StartImpl(void* raw) {
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();
     for (U i=0;i<NTW2_MOUNTED_OFFICER_WORDS;++i) ntw2_state.mounted_officer_words[i]=0;
+    ntw2_clip_picker_guard::ResetRow();
+    for (U i=0;i<NTW2_ANIM_GUARD_WORDS;++i) ntw2_state.anim_guard_words[i]=0;
     ntw2_group_standoff::ResetRow();
     for (U i=16;i<NTW2_AI_GROUP_WORDS;++i) ntw2_state.ai_group_words[i]=0; // --ai-standoff half of the shared ai_group row
     ntw2_engage_census::Snapshot(ntw2_state.engage_census_words); // zero row (Reset above) or the armed header

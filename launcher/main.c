@@ -2451,6 +2451,16 @@ static void print_mounted_officer(const uint32_t *w)
     for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
+/* Clip picker crash guard (src/animation/ntw2_clip_picker_guard.h): always installed; printed only when the guard saw a cold request. */
+static void print_anim_guard(const uint32_t *w)
+{
+    static const char *const names[NTW2_ANIM_GUARD_WORDS] = { NTW2_ANIM_GUARD_LABELS };
+    unsigned i;
+    if (!w[7] || !w[0]) return;
+    say(L"  anim_guard:");
+    for (i = 0; i < NTW2_ANIM_GUARD_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
+    say(L"\n");
+}
 static void print_engage_census(const uint32_t *w)
 {
     print_engage_census_line(w);
@@ -2689,6 +2699,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_arena(s->arena_words);
     print_overlay(s->overlay_words);
     print_mounted_officer(s->mounted_officer_words);
+    print_anim_guard(s->anim_guard_words);
     print_engage_census(s->engage_census_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
@@ -4403,6 +4414,19 @@ static void sb_mounted_officer(Sb *b, const Run *r)
     for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+/* Clip picker crash guard (always on): the counters of the entry redirect at 0xE5F760. */
+static void sb_anim_guard(Sb *b, const Run *r)
+{
+    static const char *const names[NTW2_ANIM_GUARD_WORDS] = { NTW2_ANIM_GUARD_LABELS };
+    unsigned i;
+    if (!r->have_status) {
+        sb_fmt(b, "  \"anim_guard\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"anim_guard\": {");
+    for (i = 0; i < NTW2_ANIM_GUARD_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.anim_guard_words[i]);
+    sb_fmt(b, "},\n");
+}
 static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
 {
     unsigned i;
@@ -5220,6 +5244,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_arena(&b, r);
     sb_overlay(&b, r);
     sb_mounted_officer(&b, r);
+    sb_anim_guard(&b, r);
     sb_engage_census(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {

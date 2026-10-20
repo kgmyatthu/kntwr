@@ -369,6 +369,15 @@ enum ntw2_memory_word {
 #define NTW2_AI_HOLD_LABELS \
     "calls", "state4", "held_calls", "marked", "exempt_class", "exempt_melee", "arrivals", "released_calls", \
     "groups", "table_full", "skipped_mark", "dead_skipped", "max_members", "unmeasured", "out_of_scope", "faults"
+/* Clip picker crash guard (src/animation/ntw2_clip_picker_guard.h; analysis/native-crash-divzero-anim.md): ALWAYS ON while the runtime is active (monitor start .. stop),
+   no switch, no config bit. A 5-byte `jmp` at the picker's entry 0xE5F760 (installed with one 8-byte interlocked swap after verifying the original bytes, restored at stop)
+   enters a copy of the native instruction sequence; the n != 0 path (the category has clips) is the same instructions as native, bit-identical, with no counter. Only the
+   request the native code crashes on (#DE 0xC0000094 at 0xE5F77A: the requested category AND category 0 / MISSING_ANIM have no clips - horse/camel/elephant/engine tables
+   asked for a man stance, reachable with --mounted-officer) is answered differently: the clip of the first non-empty category 1..863 (rand % n_k + k*6), or table[0]
+   when all 864 are empty. Publishes anim_guard_words (hot-path-free counters; a run with no hits shows only calls_cold/patch_installed/version). */
+#define NTW2_ANIM_GUARD_WORDS 8u /* anim_guard_words (ntw2_clip_picker_guard::Word, labels NTW2_ANIM_GUARD_LABELS; table_last/cat_last are last-value words, not counters) */
+#define NTW2_ANIM_GUARD_LABELS \
+    "calls_cold", "guarded", "scanned_max", "empty_tables", "table_last", "cat_last", "patch_installed", "version"
 #define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS | NTW2_AI_GROUP_BITS | NTW2_AI_HOLD_SLOTS | NTW2_AI_HOLD_SLOTS_ALL)
 #define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry (--ai-ctrl-geometry) or, without it, 16..19 --brain-target-cull and 20..23 --brain-retarget-jitter (ntw2_retarget_jitter::Word), 24..31 --ai-claim-once (ntw2_claim_once::Word) */
 #define NTW2_AI_CTRL_REUSE_LABELS \
@@ -1155,6 +1164,8 @@ typedef struct ntw2_status {
     uint32_t ai_group_words[NTW2_AI_GROUP_WORDS];
     /* --ai-hold-slots (appended after ai_group_words; owner module src/ai/ntw2_group_hold.*, labels NTW2_AI_HOLD_LABELS). Reset at start, retained after stop; all zero without the bit. */
     uint32_t ai_hold_words[NTW2_AI_HOLD_WORDS];
+    /* Clip picker crash guard (appended after ai_hold_words; owner module src/animation/ntw2_clip_picker_guard.*, labels NTW2_ANIM_GUARD_LABELS). Reset at monitor start, retained after stop. */
+    uint32_t anim_guard_words[NTW2_ANIM_GUARD_WORDS];
 } ntw2_status;
 
 /* DATA export "ntw2_profile", separate from the sequence-locked lifecycle status.
@@ -1619,7 +1630,9 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,mounted_officer_words) + NTW2_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,engage_census_words) &&
               offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_group_words) &&
               offsetof(ntw2_status,ai_group_words) + NTW2_AI_GROUP_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,ai_hold_words) &&
-              offsetof(ntw2_status,ai_hold_words) + NTW2_AI_HOLD_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_AI_GROUP_WORDS == 32u && NTW2_AI_HOLD_WORDS == 16u &&
+              offsetof(ntw2_status,ai_hold_words) + NTW2_AI_HOLD_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,anim_guard_words) &&
+              offsetof(ntw2_status,anim_guard_words) + NTW2_ANIM_GUARD_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS == 8u &&
+              NTW2_AI_GROUP_WORDS == 32u && NTW2_AI_HOLD_WORDS == 16u &&
               NTW2_AI_HOLD_SLOTS == 0x8000u && NTW2_AI_HOLD_SLOTS_ALL == 0x10000u &&
               NTW2_AI_FORMUP_GATE == 0x2000u && NTW2_AI_STANDOFF == 0x4000u && NTW2_AI_CTRL_FLAGS_VALID == 0x1FF0Fu && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
               NTW2_ENGAGE_CENSUS == 0x80000u &&
