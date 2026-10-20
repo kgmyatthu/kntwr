@@ -603,6 +603,8 @@ bool PsScopeThread(U tid) {
                            (config.ai_ctrl_flags&NTW2_AI_CLAIM_BITS)!=0; // --ai-claim-once[-census]: the claim loop runs inside the worker's site-34 scope
     return walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)));
 }
+// --ai-hold-slots: informational scope of the site-34 planner think, the AI worker included (observation only; no routing policy depends on it).
+bool HoldScopeThread(U tid) { return walkScopeThread && (walkScopeThread==tid || (tid==aiThreadId && Load(&aiBusy))); }
 void BeginWalkScope(U planner) {
     if (walkScopeDepth++) return;
     walksInScope=0;
@@ -3728,7 +3730,7 @@ DWORD WINAPI Monitor(void*) {
     if (!failure && (config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS)) {
         // --ai-hold-slots: the single `call 0x7C8820` (ATTACK_BATTLEGROUP posture marking) inside the tactic update 0x7D91D0 goes through MarkGate (restored at stop); no battle is running yet.
         namespace gh=ntw2_group_hold;
-        const gh::Targets targets={V(gh::kMarking),&PsScopeThread};
+        const gh::Targets targets={V(gh::kMarking),&HoldScopeThread};
         gh::Configure((config.ai_ctrl_flags&NTW2_AI_HOLD_SLOTS_ALL) ? gh::ModeAll : gh::ModeInfantry,targets);
         if (!gh::InstallRedirect(delta,FnAddress(&gh::MarkGate))) RecordError(SlotConflict,gh::kCallSite);
         StateBegin(); gh::Snapshot(ntw2_state.ai_hold_words); StateEnd();
