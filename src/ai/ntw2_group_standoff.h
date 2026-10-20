@@ -16,10 +16,10 @@
 //   + D/2 x forward); a not-yet-arrived group keeps its move, an arrived one recomputes 0x7C7DC0 every service.
 //
 // Mechanism: both 0x78B1C0 call sites inside 0x7C7DC0 are redirected (E8 rel32 patch, restored at stop) to RegionGate, which calls the native 0x78B1C0 and, for a tactic
-// whose dump slot ([[tactic]+0x68]) is the ATTACK_BATTLEGROUP dump 0x765540 and whose controller (tactic+0x88) holds a member with a weapon range, replaces the returned
+// whose vtable pointer [tactic] is the ATTACK_BATTLEGROUP vtable 0x13430C8 (stored by its constructor 0x70B9A0 at 0x70B9BF; slot +0x20 is the dump 0x765540) and whose controller (tactic+0x88) holds a member with a weapon range, replaces the returned
 // point by the stand-off point.  Everything downstream is native: the same heading/terrain back-off/re-issue/arrival code then works from the stand-off point, so the 10 m terrain
 // back-off, the 15 m re-issue hysteresis and the 50 m arrival test are unchanged and the group simply "arrives" at the stand-off and keeps being served with the same destination
-// (no region-centre advance, no re-issue).  Outflank (state 5), form-up (3), reform (2) never call 0x7C7DC0; any other tactic fails the dump-slot test and gets the native centre.
+// (no region-centre advance, no re-issue).  Outflank (state 5), form-up (3), reform (2) never call 0x7C7DC0; any other tactic class fails the vtable test and gets the native centre.
 //
 // Stand-off point [group box B = [tactic+0x88+0x50]: centre G = B+8/B+0xC, width W = B+0x14, depth D = B+0x18, forward B+0x24/0x28; C = native centre; h = (C - G)/|C - G|]:
 //   range r = min over group members with a missile weapon (0x5646A0 > 0) of 0x5646A0(unit)  (metres; 0x5646A0 = 0 when the unit cannot shoot)
@@ -45,7 +45,7 @@ namespace ntw2_group_standoff {
 //  5 holds         applied calls whose destination was lifted to the group front (target already inside k x range: hold)
 //  6 fb_no_enemy   native centre kept: no enemy man in the approach corridor
 //  7 fb_no_range   native centre kept: no member with a weapon range (melee-only group)
-//  8 fb_tactic     native centre kept: not the ATTACK_BATTLEGROUP dump / no controller list / no group box / no target region
+//  8 fb_tactic     native centre kept: not the ATTACK_BATTLEGROUP vtable / no controller list / no group box / no target region
 //  9 fb_unreadable native centre kept: unreadable or non-finite engine state, side not found, busy
 // 10 fb_bounds     native centre kept: the stand-off point fell outside the play rect
 // 11 groups        cache entries created
@@ -64,7 +64,7 @@ struct Targets {
     uint32_t regionCentre; // relocated 0x78B1C0 (thiscall ECX = tactic, one stack argument = float[2] out, returns out, ret 4)
     uint32_t regionOf;     // relocated 0x78B070 (thiscall ECX = tactic, returns the target region or 0; pure)
     uint32_t range;        // relocated 0x5646A0 (thiscall ECX = unit, float in ST0, metres, 0 when the unit cannot shoot)
-    uint32_t dump;         // relocated 0x765540 (the ATTACK_BATTLEGROUP dump, vtable slot +0x68)
+    uint32_t vtable;       // relocated 0x13430C8 (the ATTACK_BATTLEGROUP tactic vtable)
 };
 // Arms the gate (k100 = k x 100, 1..255). Zeroes the row. Targets are image-relocated VAs.
 void Configure(bool enabled, uint32_t k100, const Targets& targets);
@@ -74,7 +74,7 @@ void Snapshot(volatile uint32_t* out);  // out[kWords]
 // Replacement for the two `call 0x78B1C0` sites inside 0x7C7DC0 (thiscall ECX = tactic, one stack argument, callee pops 4).
 float* __fastcall RegionGate(uint32_t self, uint32_t, float* out);
 
-constexpr uint32_t kSiteFirst = 0x7C7DD2u, kSiteReset = 0x7C82F6u, kRegionCentreOriginal = 0x78B1C0u, kRegionOf = 0x78B070u, kRange = 0x5646A0u, kDump = 0x765540u;
+constexpr uint32_t kSiteFirst = 0x7C7DD2u, kSiteReset = 0x7C82F6u, kRegionCentreOriginal = 0x78B1C0u, kRegionOf = 0x78B070u, kRange = 0x5646A0u, kVtable = 0x13430C8u;
 // Patch / restore the two call sites (delta = image delta from the preferred base; `gate` = FnAddress(&RegionGate)). Both return false on any mismatch without a partial change.
 bool InstallRedirect(uint32_t delta, uint32_t gate);
 bool RemoveRedirect(uint32_t delta);

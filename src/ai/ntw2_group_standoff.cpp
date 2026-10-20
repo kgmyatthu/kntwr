@@ -15,7 +15,7 @@ volatile U words[kWords];
 namespace {
 constexpr U kMaxSides = 16, kMaxArmies = 128, kMaxUnits = 2048, kMaxMembers = 1024, kMaxGroup = 512, kTableSlots = 128;
 constexpr float kCoordLimit = 16384.0f, kBig = 1e30f;
-constexpr U kDumpSlot = 0x68, kCtrl = 0x88, kCtrlCount = 0x20, kCtrlList = 0x24, kCtrlBox = 0x50;
+constexpr U kCtrl = 0x88, kCtrlCount = 0x20, kCtrlList = 0x24, kCtrlBox = 0x50;
 
 using ThisPtr = U(__fastcall*)(U, U);
 using ThisFloat = float(__fastcall*)(U, U);
@@ -196,8 +196,7 @@ inline float Dist2(float ax, float az, float bx, float bz) { const float dx = ax
 
 // Body of the gate: `out` holds the native region centre; on success it is replaced by the stand-off point.
 void Apply(U tactic, float* out) {
-    const U vt = Rd(tactic);
-    if (!Sane(vt) || Rd(vt + kDumpSlot) != target.dump) { Bump(WFbTactic); return; }
+    if (Rd(tactic) != target.vtable) { Bump(WFbTactic); return; }
     const U ctrl = tactic + kCtrl;
     const U box = Rd(ctrl + kCtrlBox);
     if (!Sane(box)) { Bump(WFbTactic); return; }

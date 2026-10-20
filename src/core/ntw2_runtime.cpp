@@ -3727,7 +3727,7 @@ DWORD WINAPI Monitor(void*) {
     if (!failure && (config.ai_ctrl_flags&NTW2_AI_STANDOFF)) {
         // --ai-standoff: both `call 0x78B1C0` sites inside the attack-group destination function 0x7C7DC0 go through RegionGate (restored at stop); no battle is running yet.
         namespace so=ntw2_group_standoff;
-        const so::Targets targets={V(so::kRegionCentreOriginal),V(so::kRegionOf),V(so::kRange),V(so::kDump)};
+        const so::Targets targets={V(so::kRegionCentreOriginal),V(so::kRegionOf),V(so::kRange),V(so::kVtable)};
         so::Configure(true,config.ai_group_params2&NTW2_AI_STANDOFF_K_MASK,targets);
         if (!so::InstallRedirect(delta,FnAddress(&so::RegionGate))) RecordError(SlotConflict,so::kSiteFirst);
         StateBegin(); so::Snapshot(ntw2_state.ai_group_words+16); StateEnd();

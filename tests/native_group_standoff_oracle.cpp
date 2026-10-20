@@ -67,8 +67,9 @@ static void TestSites() {
     Require(RelOf(so::kSiteFirst)==so::kRegionCentreOriginal-(so::kSiteFirst+5) && RelOf(so::kSiteReset)==so::kRegionCentreOriginal-(so::kSiteReset+5),"both sites call 0x78B1C0");
     // 0x7C7DC0 has exactly two callers (0x7A6910 = state-4 enter, 0x7A6960 = update): E8 rel32 to it at 0x7A691F and 0x7A6ADE; no other E8 in the image text targets it.
     Require(RelOf(0x7A691F)==0x7C7DC0u-(0x7A691F+5) && At(0x7A691F)[0]==0xE8 && RelOf(0x7A6ADE)==0x7C7DC0u-(0x7A6ADE+5) && At(0x7A6ADE)[0]==0xE8,"callers of 0x7C7DC0");
-    // The native tactic dump slot: 0x1343080 + 0x68 -> 0x765540 (ATTACK_BATTLEGROUP dump).
-    Require(Get(At(0x1343080+0x68),0)==so::kDump+delta || Get(At(0x1343080+0x68),0)==so::kDump,"tactic vtable slot +0x68 is the dump 0x765540");
+    // The tactic constructor 0x70B9A0 stores the vtable 0x13430C8 (C7 03 imm32 at 0x70B9BF) whose slot +0x20 is the ATTACK_BATTLEGROUP dump 0x765540.
+    Require(At(0x70B9BF)[0]==0xC7 && At(0x70B9BF)[1]==0x03 && Get(At(0x70B9BF),2)==so::kVtable+delta,"tactic constructor stores the ATTACK_BATTLEGROUP vtable");
+    Require(Get(At(so::kVtable+0x20),0)==0x765540u+delta,"vtable slot +0x20 is the dump 0x765540");
     const U saved0=RelOf(so::kSiteFirst), saved1=RelOf(so::kSiteReset);
     const U gate=Fn(&so::RegionGate);
     Require(so::InstallRedirect(delta,gate),"install");
@@ -99,7 +100,7 @@ static void* noAccess;
 static float rangeOf[2][kUnits];
 static U weaponless;                 // group units with no weapon record
 static float nativeX, nativeZ;       // 0x78B1C0's centre
-static U dumpToken;
+static U vtableToken;
 static U __fastcall FakeRegionOf(U,U) { return A(w->region); }
 static float* __fastcall FakeCentre(U,U,float* out) { out[0]=nativeX; out[1]=nativeZ; return out; }
 static float __fastcall FakeRange(U unit,U) {
@@ -109,8 +110,7 @@ static float __fastcall FakeRange(U unit,U) {
 static void Reset() {
     std::memset(w,0,sizeof(*w));
     std::memset(rangeOf,0,sizeof(rangeOf));
-    dumpToken=0x765540u+0x1000u;
-    w->vtable[0x68/4]=dumpToken; Put(w->tactic,0,A(w->vtable));
+    vtableToken=A(w->vtable); Put(w->tactic,0,vtableToken);
     Put(w->tactic,4,A(w->planner)); Put(w->planner,8,A(w->model));
     Put(w->tactic,0x88+0x50,A(w->box));
     Put(w->tactic,0x88+0x20,0); Put(w->tactic,0x88+0x24,A(w->groupList));
@@ -146,7 +146,7 @@ static std::vector<std::pair<float,float>> Line(float x0,float x1,float z,U rank
     for(U r=0;r<ranks;++r) for(float x=x0;x<=x1;x+=step) v.push_back({x,z+3.0f*r});
     return v;
 }
-static so::Targets Targets() { return so::Targets{Fn(&FakeCentre),Fn(&FakeRegionOf),Fn(&FakeRange),dumpToken}; }
+static so::Targets Targets() { return so::Targets{Fn(&FakeCentre),Fn(&FakeRegionOf),Fn(&FakeRange),vtableToken}; }
 static float out2[2];
 static void Call() { out2[0]=0; out2[1]=0; so::RegionGate(A(w->tactic),0,out2); }
 static U W(so::Word i) { return so::words[i]; }
@@ -160,10 +160,10 @@ static void TestOffAndExcluded() {
     Require(out2[0]==nativeX && out2[1]==nativeZ && W(so::WCalls)==1 && W(so::WApplied)==0,"switch off: native centre bit for bit, only the call counted");
     so::Configure(true,90,Targets()); Call();
     Require(W(so::WApplied)==1 && out2[1]<nativeZ,"switch on: a stand-off point");
-    // A foreign dump slot (another tactic class) keeps the native point.
-    w->vtable[0x68/4]=dumpToken+4; so::Configure(true,90,Targets()); Call();
+    // A foreign tactic class (another vtable) keeps the native point.
+    Put(w->tactic,0,vtableToken+4); so::Configure(true,90,Targets()); Call();
     Require(out2[0]==nativeX && out2[1]==nativeZ && W(so::WFbTactic)==1 && W(so::WApplied)==0,"foreign tactic class: native");
-    w->vtable[0x68/4]=dumpToken;
+    Put(w->tactic,0,vtableToken);
     // Melee-only group (no weapon record anywhere): native.
     Reset(); const U c=AddUnit(0,Line(-20,20,0,2),0,40); AddToGroup(c); const U e2=AddUnit(1,Line(-50,50,300,2),110,60); AddToRegion(1,e2);
     so::Configure(true,90,Targets()); Call();
