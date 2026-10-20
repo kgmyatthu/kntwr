@@ -23,6 +23,7 @@
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
 #include "army/ntw2_mounted_officer.h"
+#include "formation/native_formation_layout.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
@@ -256,6 +257,129 @@ static void Redirect() {
     Require(mo::RemoveRedirect(delta) && !std::memcmp(original,site,5),"remove after the foreign change was undone");
 }
 
+static DWORD WINAPI PlacementPeer(void* event) {
+    return WaitForSingleObject(static_cast<HANDLE>(event),INFINITE) == WAIT_OBJECT_0 ? 0 : 1;
+}
+static void InteriorPlacementRefused(bool removing) {
+    HANDLE event=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    Require(event!=nullptr,"create placement peer event");
+    HANDLE peer=CreateThread(nullptr,0,PlacementPeer,event,CREATE_SUSPENDED,nullptr);
+    Require(peer!=nullptr,"create suspended placement peer");
+    CONTEXT saved{}; saved.ContextFlags=CONTEXT_CONTROL;
+    Require(GetThreadContext(peer,&saved)!=0,"capture peer control context");
+    CONTEXT interior=saved; interior.Eip=A(At(mo::kSlotAdjust))+3;
+    Require(SetThreadContext(peer,&interior)!=0,"place peer inside displaced prologue");
+    B before[8]; std::memcpy(before,At(mo::kSlotAdjust),8);
+    Require(!(removing ? mo::RemovePlacement(delta) : mo::InstallPlacement(delta)),
+        "interior instruction pointer refuses entry replacement");
+    Require(!std::memcmp(before,At(mo::kSlotAdjust),8),"refusal leaves entry bytes unchanged");
+    Require(SuspendThread(peer)==1 && ResumeThread(peer)==2,"refusal preserves existing suspension count");
+    Require(SetThreadContext(peer,&saved)!=0,"restore original peer context");
+    Require(SetEvent(event)!=0 && ResumeThread(peer)==1,"resume owned peer normally");
+    Require(WaitForSingleObject(peer,5000)==WAIT_OBJECT_0,"owned peer exits");
+    CloseHandle(peer); CloseHandle(event);
+}
+
+static void Placement() {
+    alignas(16) B formation[0x700]={}, command[0x40]={}, troops[3][0x80]={};
+    const Shape shape{5,4,2,4,3,0.4f};
+    Build(shape);
+    B* mount=mountMem[0];
+    std::memset(mount,0,sizeof mountMem[0]);
+    Put(mount,0,0x132BA04+delta); Put(mount,0x1F0,A(fx.unit));
+    Put(mount,mo::kMountRiders,1); Put(mount,0x670,A(fx.menArray));
+    U members[]={A(troops[0]),A(mount),A(troops[1]),A(troops[2])};
+    Put(fx.unit,0xADC,A(formation));
+    Put(formation,0x18,4); Put(formation,0x1C,A(members));
+    Put(formation,0x460,1); Put(formation,0x420,A(command));
+    Put(command,0,0x1325470+delta);
+    PutF(At(0x176CFF8),0,0.0f); PutF(At(0x176CFF8),4,1.0f);
+    PutF(At(0x176CFF8+8*0x4000),0,1.0f); PutF(At(0x176CFF8+8*0x4000),4,0.0f);
+    for(U i=0;i<3;++i) { PutF(troops[i],0x48,80.0f+10.0f*i); PutF(troops[i],0x50,180.0f+10.0f*i); }
+    PutF(mount,0x48,-1000.0f); PutF(mount,0x50,-1000.0f);
+    const float world[3]={100.0f,7.0f,200.0f};
+    float out[2]={-999.0f,-999.0f};
+    B original[8]; std::memcpy(original,At(mo::kSlotAdjust),8);
+    Require(!mo::Placement(A(mount),world,out),"disabled placement leaves caller's target alone");
+    InteriorPlacementRefused(false);
+    Require(mo::InstallPlacement(delta),"install native formation offset");
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==205.0f,"march advances only the officer slot five metres");
+    const U rearCommands[]={0x1324B54,0x1325428,0x13239B0,0x13239F0,0x1323A30,0x1323A70,0x1323AB0,0x1323AF0,0x1323B30};
+    for(U vt:rearCommands) {
+        Put(command,0,vt+delta);
+        Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==175.0f,"stationary command uses rear plane, not old front slot");
+    }
+    Put(formation,0x460,0);
+    Require(mo::Placement(A(mount),world,out) && out[1]==175.0f,"empty command queue is stationary");
+    Put(formation,0x460,1);
+    Put(formation,0x64C,0x4000);
+    Require(mo::Placement(A(mount),world,out) && out[0]==75.0f && out[1]==200.0f,"rear rotates with formation facing, not world Z");
+    Put(command,0,0x1325470+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==105.0f && out[1]==200.0f,"new march restores forward slot without cumulative drift");
+    // Wide frontage uses intended ranks even when a soldier has straggled far
+    // behind. The count includes the mount, just as the native slot generator.
+    B controller[0x40]={}, layout[0x20]={}, container[0x40]={}, piece[0xA4]={};
+    std::array<std::array<B,0x80>,501> wideTroops{};
+    std::array<U,502> wideMembers{};
+    wideMembers[0]=A(mount);
+    for(U i=0;i<501;++i) {
+        PutF(wideTroops[i].data(),0x48,100.0f); PutF(wideTroops[i].data(),0x50,180.0f);
+        wideMembers[i+1]=A(wideTroops[i].data());
+    }
+    PutF(wideTroops[0].data(),0x50,-1000.0f);
+    U children[]={A(piece)};
+    Put(fx.unit,0x384,A(controller)); Put(formation,0x628,A(layout)); Put(formation,0x64C,0);
+    Put(formation,0x18,502); Put(formation,0x1C,A(wideMembers.data()));
+    Put(controller,0xC,A(container)); PutF(controller,0x24,251.0f);
+    Put(layout,0,0x1333AA8+delta); PutF(layout,8,1); PutF(layout,0x10,1); PutF(layout,0x14,2);
+    Put(container,0x10,1); Put(container,0x14,A(children)); Put(container,0x2C,502);
+    PutF(container,0x18,100); PutF(container,0x20,200);
+    Put(piece,0,0x1333944+delta); PutF(piece,0xC,100); PutF(piece,0x10,200);
+    PutF(piece,0x14,100); PutF(piece,0x18,0); PutF(piece,0x60,1); PutF(piece,0x70,400); PutF(piece,0x90,-1);
+    Put(command,0,0x1324B54+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100 && out[1]==193,"251 files: last rank z198 minus five, ignoring physical straggler");
+    U copiedLayout[18]{};
+    copiedLayout[9]=delta+0x18ED200;
+    Put(layout,0,A(copiedLayout));
+    Require(mo::Placement(A(mount),world,out) && out[1]==193,"copied gameplay-patch layout uses intended last rank");
+    copiedLayout[9]=delta+0x462CB0;
+    Require(mo::Placement(A(mount),world,out) && out[1]==-1005,"unsupported generator keeps physical-rear policy");
+    copiedLayout[9]=delta+0x18ED200;
+    PutF(piece,0x14,-100); PutF(piece,0x18,200); PutF(piece,0x60,0); PutF(piece,0x64,-1);
+    PutF(piece,0x8C,-1); PutF(piece,0x90,0);
+    Require(mo::Placement(A(mount),world,out) && out[0]==93 && out[1]==200,"wide rear follows intended rank orientation while physical facing lags");
+    PutF(piece,0x14,100); PutF(piece,0x18,0); PutF(piece,0x60,1); PutF(piece,0x64,0);
+    PutF(piece,0x8C,0); PutF(piece,0x90,-1);
+    PutF(controller,0x24,250);
+    Require(mo::Placement(A(mount),world,out) && out[1]==-1005,"exactly 250 files does not enter wide-frontage rule");
+    PutF(controller,0x24,251); Put(command,0,0x1325470+delta);
+    Require(mo::Placement(A(mount),world,out) && out[1]==205,"march takes precedence over wide-frontage rear rule");
+    Put(command,0,0x1323B30+delta);
+    Require(mo::Placement(A(mount),world,out) && out[1]==193,"stationary formation predicate includes seventh reshape family");
+    Put(formation,0x18,4); Put(formation,0x1C,A(members)); Put(fx.unit,0x384,0);
+    Put(command,0,0x1325470+delta);
+    Put(fx.unit,mo::kUnitMounts,1);
+    Require(!mo::Placement(A(mount),world,out),"stock cavalry is unchanged");
+    Put(fx.unit,mo::kUnitMounts,0); Put(fx.unit,mo::kUnitGuns,1);
+    Require(!mo::Placement(A(mount),world,out),"artillery is unchanged");
+    Put(fx.unit,mo::kUnitGuns,0); Put(mount,mo::kMountRiders,0);
+    Require(!mo::Placement(A(mount),world,out),"riderless horse is unchanged");
+    Put(mount,mo::kMountRiders,1); fx.persArray[0]=A(fx.men[1]);
+    Require(!mo::Placement(A(mount),world,out),"non-officer rider is unchanged");
+    fx.persArray[0]=A(fx.men[0]); Put(command,0,0xDEADBEEF);
+    Require(!mo::Placement(A(mount),world,out),"unrecognised order families retain native targeting");
+    // Execute the patched entry's real native passthrough on an unowned agent:
+    // checks the displaced prologue, calling convention, return and all 20 bytes.
+    Put(mount,0x1F0,0);
+    U reference[5]={0x42C80000,0x40E00000,0x43480000,0,0}, nativeOut[5]={};
+    using Adjust=U(__fastcall*)(U,U,U*,const U*);
+    const U returned=reinterpret_cast<Adjust>(At(mo::kSlotAdjust))(A(mount),0,nativeOut,reference);
+    Require(returned==A(nativeOut) && !std::memcmp(nativeOut,reference,sizeof reference),"non-officer executes native descriptor passthrough through hook");
+    InteriorPlacementRefused(true);
+    Require(mo::RemovePlacement(delta) && !std::memcmp(original,At(mo::kSlotAdjust),8),"placement detach restores native offset entry");
+    Require(!mo::Placement(A(mount),world,out),"detached placement is disabled");
+}
+
 int main(int argc,char** argv) {
     if(argc<2) { std::fprintf(stderr,"usage: native_mounted_officer_oracle <Napoleon.exe>\n"); return 2; }
     Map(argv[1]);
@@ -265,6 +389,7 @@ int main(int argc,char** argv) {
     Equivalence();
     Predicates();
     Redirect();
+    Placement();
     std::printf("native_mounted_officer_oracle: OK (%u checks)\n",checks);
     return 0;
 }

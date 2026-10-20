@@ -1,5 +1,6 @@
 #include "native_move_node.h"
 #include "native_node_projection.h"
+#include "army/ntw2_mounted_officer.h"
 #include <intrin.h>
 #include <xmmintrin.h>
 #pragma fenv_access(on)
@@ -87,13 +88,10 @@ bool AdjustmentScale(U group, float& scale) {
     U row = Read<U>(loaded + 0x5c + Read<U>(group + 0x194) * 4);
     scale = Read<float>(row + 0xc); return true;
 }
-Reason AdjustDescriptor(U owner, const U reference[5], const U* entries, U output[5], U* projectionCalls, U* refusedTarget) {
-    memcpy(output, reference, 20);
-    U group = Read<U>(owner + 0x1f0);
-    if (!group) return Ready; // the complete 66AD00 no-group branch
+static bool OriginalOffset(U owner, U group, float& dx, float& dz) {
     float scale;
-    if (!AdjustmentScale(group, scale)) return NeedsColdAdjustment;
-    // Recover the exact x87-rounded distance, then separate SSE products/adds.
+    if (!AdjustmentScale(group, scale)) return false;
+    // Preserve the native x87-rounded distance and separate SSE operations.
     const float multiplier = Read<float>(owner + 0x5d0);
     float distance;
     __asm {
@@ -101,20 +99,29 @@ Reason AdjustDescriptor(U owner, const U reference[5], const U* entries, U outpu
         fmul multiplier
         fstp distance
     }
-    uint16_t angle = static_cast<uint16_t>(Read<uint16_t>(owner + 0x5cc) + Read<uint16_t>(owner + 0x64));
+    const uint16_t angle = static_cast<uint16_t>(Read<uint16_t>(owner + 0x5cc) + Read<uint16_t>(owner + 0x64));
     const __m128 length = _mm_set_ss(distance);
-    float dx = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(Read<float>(Native(0x176cff8) + U(angle) * 8)), length));
-    float dz = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(Read<float>(Native(0x176cffc) + U(angle) * 8)), length));
+    dx = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(Read<float>(Native(0x176cff8) + U(angle) * 8)), length));
+    dz = _mm_cvtss_f32(_mm_mul_ss(_mm_set_ss(Read<float>(Native(0x176cffc) + U(angle) * 8)), length));
+    return true;
+}
+Reason AdjustDescriptor(U owner, const U reference[5], const U* entries, U output[5], U* projectionCalls, U* refusedTarget) {
+    memcpy(output, reference, 20);
+    U group = Read<U>(owner + 0x1f0);
+    if (!group) return Ready; // the complete 66AD00 no-group branch
+    float dx = 0.0f, dz = 0.0f;
+    const bool officer = ntw2_mounted_officer::HasPlacement(owner);
+    if (!officer && !OriginalOffset(owner, group, dx, dz)) return NeedsColdAdjustment;
     U root = Read<U>(owner + 0x28), model = Read<U>(root + 8), query = Read<U>(model + 0xb4);
-    // The private traversal certifies each REACHED world callback before it
-    // executes; accepted cells and grid lookup no longer imply refusal.
     float xyz[3];
     using Materialize = U (__thiscall*)(const U*, float*);
     reinterpret_cast<Materialize>(Native(0x80e9d0))(reference, xyz);
-    float planar[2] = {
-        _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dx), _mm_set_ss(xyz[0]))),
-        _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dz), _mm_set_ss(xyz[2])))
-    };
+    float planar[2];
+    if (!officer || !ntw2_mounted_officer::Placement(owner, xyz, planar)) {
+        if (officer && !OriginalOffset(owner, group, dx, dz)) return NeedsColdAdjustment;
+        planar[0] = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dx), _mm_set_ss(xyz[0])));
+        planar[1] = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dz), _mm_set_ss(xyz[2])));
+    }
     if (!ntw2_node::projection::ProjectCertified(entries, query, output, planar, reference, 3, refusedTarget))
         return NeedsProjection;
     if (projectionCalls) ++*projectionCalls;

@@ -3708,6 +3708,7 @@ DWORD WINAPI Monitor(void*) {
                                    V(mo::kNative.pose),V(mo::kNative.ctor),V(mo::kNative.attach)};
         mo::Configure((config.va_watch_flags&NTW2_MOUNTED_OFFICER_WIDEN)!=0,targets);
         if (!mo::InstallRedirect(delta,clones.entries[NTW2_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
+        if (!failure && !mo::InstallPlacement(delta)) RecordError(SlotConflict,mo::kSlotAdjust);
         PublishMountedOfficer();
     }
     if (!failure) {
@@ -3781,6 +3782,7 @@ DWORD WINAPI Monitor(void*) {
     CrashRemove();
     ntw2_profile_stop();
     if (!ntw2_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
+    if (!ntw2_mounted_officer::RemovePlacement(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kSlotAdjust); clean=false; }
     PublishMountedOfficer();
     if (!ntw2_clip_picker_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_clip_picker_guard::kEntry); clean=false; } // restore the picker entry before the final publish
     PublishAnimGuard();

@@ -1083,6 +1083,14 @@ static void compare_run(Fam& F, const Scenario& S, uint16_t cw, bool mod, const 
     if (st != nf::kOk) { std::snprintf(buf, sizeof buf, "Generate returned status %d", st); fam_fail(F, S, cw, mod, buf, false); return; }
     if (res.count != o.count) { std::snprintf(buf, sizeof buf, "count orig=%u port=%u", o.count, res.count); fam_fail(F, S, cw, mod, buf, false); return; }
     if (res.mark != o.mark) { std::snprintf(buf, sizeof buf, "mark orig=%u port=%u", o.mark, res.mark); fam_fail(F, S, cw, mod, buf, false); }
+    nf::RankOutline outline{};
+    const int outlineStatus = nf::Outline(in, &outline);
+    if (outlineStatus != nf::kOk || outline.count != o.count ||
+        (o.count && outline.angle != o.rec[o.count - 1].angle)) {
+        std::snprintf(buf, sizeof buf, "row-only traversal lost native rank boundary: status=%d count=%u native=%u",
+                      outlineStatus, outline.count, o.count);
+        fam_fail(F, S, cw, mod, buf, false);
+    }
     for (uint32_t i = 0; i < o.count; ++i) {
         const OrigRec& q = o.rec[i];
         const nf::Slot& s = slots[i];

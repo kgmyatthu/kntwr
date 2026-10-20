@@ -26,7 +26,7 @@
 // (0xEDB6A0/0xEDB700 return 0), and a non-empty mount_model with an unknown key makes the whole unit row fail (0xEDBC42); both are covered by the predicate.
 namespace ntw2_mounted_officer {
 // mounted_officer_words (ntw2_status::mounted_officer_words, NTW2_MOUNTED_OFFICER_LABELS):
-//  0 version  1 flags (bit0 gate armed, bit1 widen)  2 units_seen  3 units_eligible ([unit+0x34]==0 and men>0)  4 officer_first (eligible with men[0] == first
+//  0 version  1 flags (bit0 gate armed, bit1 widen, bit2 placement hook)  2 units_seen  3 units_eligible ([unit+0x34]==0 and men>0)  4 officer_first (eligible with men[0] == first
 //  personality)  5 skipped_has_mounts ([unit+0x34]>0, stock loop)  6 skipped_no_refs (eligible, references unresolved)  7 skipped_no_officer (resolved, men[0] is not
 //  the first personality)  8 mounts_created  9 attach_failures (mount has no rider after 0x655B20)  10 alloc_failures  11 serial_last  12 last_rider_vtable
 //  13 skipped_has_guns ([unit+0x38] > 0: artillery; their mount columns name the gun-team horses, the engine section uses them)  14 faults (SEH, the unit was left native)  15 patch_installed (the 0x531340 redirect is live)
@@ -55,6 +55,20 @@ struct Targets {
 };
 constexpr Targets kNative = {0x10D3140, 0x444B40, 0xFF7EF0, 0x531E30, 0xF548D0, 0x80B670, 0x59EED0, 0x655B20};
 constexpr uint32_t kCallSite = 0x531340, kCtor = 0x51B7D0, kGate = 0x51C22E;
+
+// Formation-follow offset (0x66AD00), independent of AI and of the solver. The
+// native path and the owned node port share this read-only planar decision.
+// March: original slot + 5 game units along formation facing. Halt/fire: rear
+// placement, preserving the slot's lateral coordinate. For >250 occupied files,
+// use the intended last rank from the controller's persistent layout, not a
+// physical straggler. Smaller formations use the rearmost OTHER member; the
+// mount is excluded to prevent a self-expanding rear boundary. Native terrain/
+// frame projection and movement remain unchanged; no patrol or extra orders.
+constexpr uint32_t kSlotAdjust = 0x66AD00;
+bool HasPlacement(uint32_t agent);
+bool Placement(uint32_t agent, const float world[3], float planar[2]);
+bool InstallPlacement(uint32_t delta);
+bool RemovePlacement(uint32_t delta);
 
 // Arms the gate (targets are image-relocated VAs); `widen` also raises the unit radius.  Zeroes the row, then sets version/flags/widen.
 void Configure(bool widen, const Targets& targets);
