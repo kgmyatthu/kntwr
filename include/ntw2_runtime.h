@@ -357,8 +357,8 @@ enum ntw2_memory_word {
     "gate_evals", "native_exit", "blocked", "pass_formed", "pass_timeout", "pass_escape", "pass_waived", "blocked_entries_s2_lo16_s3_hi16", "wait_max_ticks", "wait_sum_ticks", \
     "formed_le25", "formed_le50", "formed_le75", "formed_gt75", "unmeasured_members", "faults_lo16_outofscope_hi16"
 #define NTW2_AI_STANDOFF_LABELS \
-    "so_reserved16", "so_reserved17", "so_reserved18", "so_reserved19", "so_reserved20", "so_reserved21", "so_reserved22", "so_reserved23", \
-    "so_reserved24", "so_reserved25", "so_reserved26", "so_reserved27", "so_reserved28", "so_reserved29", "so_reserved30", "so_reserved31"
+    "calls", "applied", "points", "recomputes", "kept", "holds", "fb_no_enemy", "fb_no_range", \
+    "fb_tactic", "fb_unreadable", "fb_bounds", "groups", "table_full", "faults", "src_global", "last_range_m"
 #define NTW2_AI_CTRL_FLAGS_VALID (NTW2_AI_CTRL_MODE_MASK | NTW2_AI_CLAIM_BITS | NTW2_AI_BRAIN_STEP_BITS | NTW2_AI_GROUP_BITS)
 #define NTW2_AI_CTRL_REUSE_WORDS 32u /* ai_ctrl_reuse_words: A half words 0..15 (ntw2_ai_ctrl::Word), B half words 16..23 geometry (--ai-ctrl-geometry) or, without it, 16..19 --brain-target-cull and 20..23 --brain-retarget-jitter (ntw2_retarget_jitter::Word), 24..31 --ai-claim-once (ntw2_claim_once::Word) */
 #define NTW2_AI_CTRL_REUSE_LABELS \

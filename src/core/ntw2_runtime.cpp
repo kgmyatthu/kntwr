@@ -62,6 +62,7 @@
 #include "brain/ntw2_retarget_jitter.h"
 #include "brain/ntw2_target_cull.h"
 #include "army/ntw2_mounted_officer.h"
+#include "ai/ntw2_group_standoff.h"
 #include "ai/ntw2_engage_census.h"
 #include "core/ntw2_alloc_census.h"
 #include "render/ntw2_arena_release.h"
@@ -3405,6 +3406,7 @@ void SampleCounters() {
     PublishAllocatorStatus();
     ntw2_arena_release::Sample(const_cast<U*>(ntw2_state.arena_words));
     if (config.va_watch_flags&NTW2_ENGAGE_CENSUS) ntw2_engage_census::Snapshot(ntw2_state.engage_census_words);
+    if (config.ai_ctrl_flags&NTW2_AI_STANDOFF) ntw2_group_standoff::Snapshot(ntw2_state.ai_group_words+16); // --ai-standoff: words 16..31 of the shared ai_group row
     // The tick-only histogram follows whichever thread currently executes the tick (gate word = that thread id).
     if (config.enabled_mask&NTW2_GRID_CENSUS) ntw2_grid_census_snapshot(&ntw2_state.grid_census);
     if (config.loco_flags&NTW2_LOCO_GRID_PROBATION) ntw2_grid_probation::Snapshot(const_cast<U*>(ntw2_state.grid_probation_words));
@@ -3722,6 +3724,14 @@ DWORD WINAPI Monitor(void*) {
         if (!mo::InstallRedirect(delta,clones.entries[NTW2_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
         PublishMountedOfficer();
     }
+    if (!failure && (config.ai_ctrl_flags&NTW2_AI_STANDOFF)) {
+        // --ai-standoff: both `call 0x78B1C0` sites inside the attack-group destination function 0x7C7DC0 go through RegionGate (restored at stop); no battle is running yet.
+        namespace so=ntw2_group_standoff;
+        const so::Targets targets={V(so::kRegionCentreOriginal),V(so::kRegionOf),V(so::kRange),V(so::kDump)};
+        so::Configure(true,config.ai_group_params2&NTW2_AI_STANDOFF_K_MASK,targets);
+        if (!so::InstallRedirect(delta,FnAddress(&so::RegionGate))) RecordError(SlotConflict,so::kSiteFirst);
+        StateBegin(); so::Snapshot(ntw2_state.ai_group_words+16); StateEnd();
+    }
     ntw2_profile_storm_threshold_ms=(config.va_watch_flags&NTW2_ARMY_STORM_SAMPLE_MASK)>>NTW2_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(NTW2_PROFILE|NTW2_GRID_CENSUS|NTW2_AI_CENSUS))) {
         siteGateIndex=config.profile_site;
@@ -3788,6 +3798,10 @@ DWORD WINAPI Monitor(void*) {
     ntw2_profile_stop();
     if (!ntw2_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
     PublishMountedOfficer();
+    if (config.ai_ctrl_flags&NTW2_AI_STANDOFF) {
+        if (!ntw2_group_standoff::RemoveRedirect(delta)) { RecordError(SlotConflict,ntw2_group_standoff::kSiteFirst); clean=false; } // restore the destination calls before the final publish
+        StateBegin(); ntw2_group_standoff::Snapshot(ntw2_state.ai_group_words+16); StateEnd();
+    }
     if (config.enabled_mask&NTW2_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); ntw2_ai_census::Snapshot(ntw2_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
@@ -4036,6 +4050,8 @@ static U StartImpl(void* raw) {
     ntw2_target_cull::ResetRow();
     ntw2_mounted_officer::ResetRow();
     for (U i=0;i<NTW2_MOUNTED_OFFICER_WORDS;++i) ntw2_state.mounted_officer_words[i]=0;
+    ntw2_group_standoff::ResetRow();
+    for (U i=16;i<NTW2_AI_GROUP_WORDS;++i) ntw2_state.ai_group_words[i]=0; // --ai-standoff half of the shared ai_group row
     ntw2_engage_census::Snapshot(ntw2_state.engage_census_words); // zero row (Reset above) or the armed header
     for (U cls=0;cls<NTW2_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<NTW2_NODE_WORDS;++i) ntw2_state.idle_node_words[cls][i]=0;
