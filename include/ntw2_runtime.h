@@ -421,7 +421,7 @@ enum ntw2_overlay_word {
 #define NTW2_MOUNTED_OFFICER_LABELS \
     "version", "flags", "units_seen", "units_eligible", "officer_first", "skipped_has_mounts", "skipped_no_refs", "skipped_no_officer", \
     "mounts_created", "attach_failures", "alloc_failures", "serial_last", "last_rider_vtable", "skipped_has_guns", "faults", "patch_installed"
-#define NTW2_ENGAGE_CENSUS_WORDS 6432u /* engage_census_words (src/ai/ntw2_engage_census.h): counters, histograms and 20-word event rows */
+#define NTW2_ENGAGE_CENSUS_WORDS 6832u /* engage_census_words (src/ai/ntw2_engage_census.h): counters, histograms and 20-word event rows */
 #define NTW2_AI_POLY_WORDS 32u        /* ai_prepass_words[0..31]: src/ai/ntw2_planner_search.h row layout, version 1 */
 #define NTW2_AI_RECORD_TEST_WORDS 28u /* ai_prepass_words[32..59]: src/ai/ntw2_record_test.h row layout, version 1 */
 #define NTW2_AI_PREPASS_WORDS (NTW2_AI_POLY_WORDS + NTW2_AI_RECORD_TEST_WORDS) /* ai_prepass_words */
@@ -1569,7 +1569,7 @@ static_assert(offsetof(ntw2_status,ai_prepass_census_words) + NTW2_AI_PREPASS_CE
               offsetof(ntw2_status,arena_words) + NTW2_ARENA_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,overlay_words) &&
               offsetof(ntw2_status,overlay_words) + NTW2_OVERLAY_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,mounted_officer_words) &&
               offsetof(ntw2_status,mounted_officer_words) + NTW2_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == offsetof(ntw2_status,engage_census_words) &&
-              offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS == 6432u &&
+              offsetof(ntw2_status,engage_census_words) + NTW2_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == sizeof(ntw2_status) && NTW2_ENGAGE_CENSUS_WORDS == 6832u &&
               NTW2_ENGAGE_CENSUS == 0x80000u &&
               NTW2_ALLOC_CENSUS_WORDS == 1056u && NTW2_ARENA_WORDS == 32u && NTW2_OVERLAY_WORDS == 16u && NTW2_MOUNTED_OFFICER_WORDS == 16u &&
               NTW2_ALLOC_CENSUS == 0x40u && NTW2_ARENA_RELEASE == 0x80u && NTW2_HEAP_OPTIMIZE == 0x10000u && NTW2_ALLOC_FIX == 0x200000u &&

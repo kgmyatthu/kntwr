@@ -12,16 +12,16 @@ namespace ntw2_engage_census {
 using U = uint32_t;
 
 namespace {
-constexpr U kMaxSides = 16, kMaxArmies = 128, kMaxUnits = 1024, kMemberPool = 262144, kStateSlots = 1024, kMaxMembers = 1024, kStaleTicks = 600;
+constexpr U kMaxSides = 16, kMaxArmies = 128, kMaxUnits = 2048, kMemberPool = 262144, kStateSlots = 4096, kMaxMembers = 1024, kStaleTicks = 600;
 constexpr float kCoordLimit = 16384.0f;
-constexpr U kTypeHalt = 1, kTypeFire = 2, kMaxBattleFaults = 64;
+constexpr U kTypeHalt = 1, kTypeFire = 2, kTypeAtk30 = 3, kTypeAtk2C = 4, kMaxBattleFaults = 64;
 
 using ThisBool = unsigned char(__fastcall*)(U, U);
 using ThisFloat = float(__fastcall*)(U, U);
 using ThisPtr = U(__fastcall*)(U, U);
 using ThisPtrOut = U(__fastcall*)(U, U, U);
 
-struct UnitState { U unit, lastSeen; unsigned char prevMoving, prevFiring, used, ever; U ticksStopped, traces; };
+struct UnitState { U unit, lastSeen; unsigned char prevMoving, prevFiring, used, ever, prevA30, prevA2C, pad0, pad1; U ticksStopped, traces; };
 struct Gathered { U unit, side, ai, cx_bits, cz_bits, members, first, formation; float cx, cz, minX, maxX, minZ, maxZ; int loaded; U poolOff, poolCount; };
 
 U words[kWords];
@@ -55,12 +55,20 @@ inline bool Virtual(U obj, U slot, U* fn) {
     return InImage(*fn);
 }
 // 0x55AFE0 (obj = unit) / 0x55C2E0 (obj = formation object): `idx = [obj+0x460]; if (!idx) return 0; o = [obj+0x418+idx*8]; (*vt[slot])()`; the slot array holds idx 1..8.
-bool SlotCallSafe(U obj, U slot) {
+// Returns 0 = safe (or the native returns 0 without further reads), 1 idx > 8, 2 object null, 3 object insane, 4 vtable not in image, 5 slot target not in image.
+int SlotCheck(U obj, U slot, U* idxOut) {
     const U idx = Rd(obj + 0x460);
-    if (idx == 0) return true;
-    U fn;
-    return idx <= 8 && Virtual(Rd(obj + 0x418 + 8 * idx), slot, &fn);
+    if (idxOut) *idxOut = idx;
+    if (idx == 0) return 0;
+    if (idx > 8) return 1;
+    const U o = Rd(obj + 0x418 + 8 * idx);
+    if (!o) return 2;
+    if (!Sane(o)) return 3;
+    const U vt = Rd(o);
+    if (!InImage(vt)) return 4;
+    return InImage(Rd(vt + slot)) ? 0 : 5;
 }
+bool SlotCallSafe(U obj, U slot) { return SlotCheck(obj, slot, nullptr) == 0; }
 // 0x55C320 (is_moving): idx = [U+0xAE8]; idx != 0 -> o = [U+0xADC+idx*4], vt[+0xA4]; idx == 0 -> 0x55C2E0 on [U+0xADC] (SlotCallSafe, vt[+0xC]).
 bool MovingSafe(U unit) {
     const U idx = Rd(unit + 0xAE8);
@@ -125,6 +133,7 @@ UnitState* Find(U unit, U tick) {
     if (!slot->used) ++words[WTableUsed];
     memset(slot, 0, sizeof(*slot));
     slot->unit = unit; slot->used = 1;
+    slot->prevA30 = slot->prevA2C = 2;
     slot->prevMoving = 2; // unseen: the first observation sets it without an event
     return slot;
 }
@@ -224,42 +233,69 @@ void Gather(U model) {
     words[WAiSidesLast] = aiSides;
     gCount = n;
 }
-// Active command row of a unit: count/index/vtable, destination distances (0x844F70), the attack-order predicates. Everything native is pre-validated.
-void Dest(const Gathered& u, const Gathered* enemy, U* cntOut, U* idxOut, U* vtOut, float* destD, float* destEnemyD, U* flagsOut) {
-    const U cnt = Rd(u.unit + 0x930), idxRow = Rd(u.unit + 0x934);
-    U vt = 0xFFFFFFFFu, flags = 0;
+// Active command row of a unit (engine: row = U+0x398+0x90*[U+0x934] whenever [U+0x930] != 0, the 10-row ring ends at U+0x938; no idx < count comparison, 0x57ECA0 / 0x844F70).
+struct RowInfo { U cnt, idx, vt, row; bool ok, p2c, p30, p28; };
+void ReadRow(const Gathered& u, RowInfo& r) {
+    r.cnt = Rd(u.unit + 0x930); r.idx = Rd(u.unit + 0x934); r.vt = 0xFFFFFFFFu; r.row = 0; r.ok = false; r.p2c = r.p30 = r.p28 = false;
+    if (r.cnt == 0 || r.idx >= 10) return;
+    r.row = u.unit + 0x398 + 0x90 * r.idx;
+    const U t = Rd(r.row);
+    r.vt = t ? t - delta : 0;
+    if (!t) return;
+    if (!(InImage(t) && InImage(Rd(t + 0x38)) && InImage(Rd(t + 0x2C)) && InImage(Rd(t + 0x30)) && InImage(Rd(t + 0x28)))) { Bump(WNativeSkipped); return; }
+    r.ok = true;
+    r.p2c = (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(t + 0x2C)))(r.row, 0) & 0xFF) != 0;
+    r.p30 = (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(t + 0x30)))(r.row, 0) & 0xFF) != 0;
+    r.p28 = (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(t + 0x28)))(r.row, 0) & 0xFF) != 0;
+    words[WNativeCalls] += 3;
+}
+// Destination of the active row (0x844F70): pose = vt[+0x38](), vec3 = 0x80E9D0(ECX = pose, out buffer); distances from the unit centre and the nearest enemy centre.
+void Dest(const Gathered& u, const Gathered& enemy, const RowInfo& r, float* destD, float* destEnemyD, U* flagsOut) {
     float dD = -1.0f, dE = -1.0f;
-    if (cnt != 0 && cnt <= 10 && idxRow < cnt) {
-        const U row = u.unit + 0x398 + 0x90 * idxRow;
-        const U table2 = Rd(row);
-        vt = table2 ? table2 - delta : 0;
-        const bool rowOk = table2 && InImage(table2) && InImage(Rd(table2 + 0x38)) && InImage(Rd(table2 + 0x2C)) && InImage(Rd(table2 + 0x30));
-        if (table2 && !rowOk) Bump(WNativeSkipped);
-        if (rowOk) {
-            const U pose = reinterpret_cast<ThisPtr>(static_cast<uintptr_t>(Rd(table2 + 0x38)))(row, 0);
+    U flags = (r.p2c ? 1u : 0u) | (r.p30 ? 2u : 0u) | (r.p28 ? 8u : 0u);
+    if (r.ok) {
+        const U t = Rd(r.row);
+        const U pose = reinterpret_cast<ThisPtr>(static_cast<uintptr_t>(Rd(t + 0x38)))(r.row, 0);
+        words[WNativeCalls] += 1;
+        if (Sane(pose) && (!Rd(pose + 0x10) || Sane(Rd(pose + 0x10)))) {
+            float out[3] = {0, 0, 0};
+            const U v = reinterpret_cast<ThisPtrOut>(static_cast<uintptr_t>(V(0x80E9D0)))(pose, 0, static_cast<U>(reinterpret_cast<uintptr_t>(out)));
             words[WNativeCalls] += 1;
-            if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x2C)))(row, 0) & 0xFF) flags |= 1u;
-            if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x30)))(row, 0) & 0xFF) flags |= 2u;
-            words[WNativeCalls] += 2;
-            if (Sane(pose) && (!Rd(pose + 0x10) || Sane(Rd(pose + 0x10)))) {
-                float out[3] = {0, 0, 0};
-                const U r = reinterpret_cast<ThisPtrOut>(static_cast<uintptr_t>(V(0x80E9D0)))(pose, 0, static_cast<U>(reinterpret_cast<uintptr_t>(out)));
-                words[WNativeCalls] += 1;
-                const float dx = RdF(r), dz = RdF(r + 8);
-                if (Good(dx) && Good(dz)) {
-                    flags |= 4u;
-                    const float ux = dx - u.cx, uz = dz - u.cz, ex = dx - enemy->cx, ez = dz - enemy->cz;
-                    dD = sqrtf(ux * ux + uz * uz); dE = sqrtf(ex * ex + ez * ez);
-                }
+            const float dx = RdF(v), dz = RdF(v + 8);
+            if (Good(dx) && Good(dz)) {
+                flags |= 4u;
+                const float ux = dx - u.cx, uz = dz - u.cz, ex = dx - enemy.cx, ez = dz - enemy.cz;
+                dD = sqrtf(ux * ux + uz * uz); dE = sqrtf(ex * ex + ez * ez);
             }
         }
     }
-    *cntOut = cnt; *idxOut = idxRow; *vtOut = vt; *destD = dD; *destEnemyD = dE; *flagsOut = flags;
+    *destD = dD; *destEnemyD = dE; *flagsOut = flags;
 }
 
 inline void HistRange(U base, float ratio) {
     U bin = static_cast<U>(ratio / 0.05f); if (bin >= kMovingBins) bin = kMovingBins - 1;
     ++words[base + bin];
+}
+// Distinct-vtable tables in the status row (entry used when its vtable word is non-zero).
+void ObjVtCount(U vt) {
+    for (U i = 0; i < 8; ++i) {
+        U* e = &words[kObjVt + 2 * i];
+        if (e[0] == vt) { ++e[1]; return; }
+        if (e[0] == 0) { e[0] = vt; e[1] = 1; return; }
+    }
+    Bump(static_cast<Word>(DSlotVtOther));
+}
+void RowVtCount(const RowInfo& r, bool moving) {
+    for (U i = 0; i < 8; ++i) {
+        U* e = &words[kRowVt + 4 * i];
+        if (e[0] == 0) e[0] = r.vt;
+        if (e[0] == r.vt) {
+            ++e[moving ? 1 : 2];
+            e[3] |= (r.p2c ? 1u : 2u) | (r.p30 ? 4u : 8u) | (r.p28 ? 16u : 32u);
+            return;
+        }
+    }
+    Bump(static_cast<Word>(DRowVtOther));
 }
 
 // One unit (units[i], n gathered); POD locals only (it runs inside __try). Native predicates are called only after the pre-validation above.
@@ -270,27 +306,45 @@ void Observe(U i, U n, U modelTick, U* eligible) {
     const U c8 = cls > 7 ? 7u : cls;
     const bool art = cls == 1;
     const U sd = u.side > 1 ? 1u : u.side;
-    const bool predsOk = MovingSafe(u.unit) && SlotCallSafe(u.unit, 0x10);
+    const U sv = kSideVal + kSideWords * sd, sb = kSideDiag + kSideDiagWords * sd;
+    const bool movingOk = MovingSafe(u.unit);
+    U fIdx = 0;
+    const int fCheck = SlotCheck(u.formation, 0x10, &fIdx);  // 0x55AFE0 runs on the FORMATION [U+0xADC] (0x57ECA0 'firing' branch), not on the unit
     bool moving = false, firing = false;
-    const U sv = kSideVal + kSideWords * sd;
     words[sv + 0] = u.ai; ++words[sv + 1]; ++words[sv + 8 + c8];
-    if (predsOk) {
+    words[sb + SdAi] = u.ai; words[sb + SdRawSide] = u.side;
+    if (movingOk) {
         moving = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55C320)))(u.unit, 0) != 0;
-        firing = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55AFE0)))(u.unit, 0) == 1;
-        words[WNativeCalls] += 2;
+        ++words[WNativeCalls];
         if (moving) { ++words[sv + 2]; ++words[sv + 16 + c8]; }
-        if (firing) { ++words[sv + 3]; ++words[sv + 24 + c8]; ++tickFiring[sd]; }
     } else Bump(WNativeSkipped);
-    if (!u.ai) return;
-    if (firing && !art) { UnitState* fs = Find(u.unit, modelTick); if (fs && !fs->ever) { fs->ever = 1; ++words[WEverFiring]; } } // no range condition: cross-checks the fire-event gating
+    if (fCheck == 0) {
+        firing = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55AFE0)))(u.formation, 0) == 1;
+        ++words[WNativeCalls]; ++words[DFiringCalls];
+        if (firing) { ++words[DFiringTrue]; ++words[sv + 3]; ++words[sv + 24 + c8]; ++tickFiring[sd]; }
+    } else Bump(WNativeSkipped);
+    UnitState* st = Find(u.unit, modelTick);
+    RowInfo ri = {};
+    bool t30 = false, t2C = false;
+    if (!art) {
+        // No range condition on any of this: distinct firing / attack-order units per side cross-check the event gating (and melee units have no range).
+        if (st && firing && !(st->ever & 1u)) { st->ever |= 1u; ++words[WEverFiring]; ++words[sb + SdEverFiring]; }
+        ReadRow(u, ri);
+        if (st) {
+            if (ri.p30 && !(st->ever & 2u)) { st->ever |= 2u; ++words[sb + SdEverAtk30]; }
+            if (ri.p2c && !(st->ever & 4u)) { st->ever |= 4u; ++words[sb + SdEverAtk2C]; }
+            if (st->prevA30 != 2 && !st->prevA30 && ri.p30) { t30 = true; ++words[sb + SdAtk30All]; }
+            if (st->prevA2C != 2 && !st->prevA2C && ri.p2c) { t2C = true; ++words[sb + SdAtk2CAll]; }
+            st->prevA30 = ri.p30; st->prevA2C = ri.p2c;
+        }
+    }
     const int rs = RangeSafe(u.unit);
     float range = 0.0f;
     if (rs < 0) { Bump(WNativeSkipped); return; }
     if (rs > 0) { range = reinterpret_cast<ThisFloat>(static_cast<uintptr_t>(V(0x5646A0)))(u.unit, 0); ++words[WNativeCalls]; }
     if (!(range > 0.0f) || !Good(range)) { ++words[WNoMissile]; return; }
-    if (!predsOk) return;
+    if (!movingOk) return;
     ++*eligible; ++words[WAiUnits];
-    UnitState* st = Find(u.unit, modelTick);
     // Nearest enemy unit by centre, and the three nearest for the member search.
     float d2[3] = {1e30f, 1e30f, 1e30f}; int idx[3] = {-1, -1, -1}; U enemies = 0;
     for (U j = 0; j < n; ++j) {
@@ -340,7 +394,7 @@ void Observe(U i, U n, U modelTick, U* eligible) {
         if (best < 1e29f) { dM = sqrtf(best); ++words[WDmComputed]; }
         if (bestE < 1e29f) dMe = sqrtf(bestE);
     }
-    // Per-class stats (every AI unit with range > 0 and an enemy, artillery included).
+    // Per-class stats (every unit with range > 0 and an enemy, artillery included).
     {
         U* c = &words[kClassStats + 4 * c8];
         ++c[0];
@@ -350,48 +404,76 @@ void Observe(U i, U n, U modelTick, U* eligible) {
     }
     const U b34 = Rd(u.unit + 0xB34);
     if (!art) {
+        ++words[sb + SdObserved];
         if (moving && dM >= 0.0f && dM < 1.5f * range) {
             const float r = dM / range;
             U bin = static_cast<U>(r / 0.05f); if (bin >= kMovingBins) bin = kMovingBins - 1;
             ++words[kMovingAll + bin];
             ++words[(b34 == 0 ? kMovingB0 : b34 == 1 ? kMovingB1 : b34 == 4 ? kMovingB4 : kMovingOther) + bin];
+            ++words[sb + SdMoving + bin];
             ++words[WMovingInRange];
         }
         if (!moving && dM >= 0.0f && dM < 1.5f * range) {
-            HistRange(kStillAll, dM / range);
-            if (firing) HistRange(kStillFiring, dM / range);
+            HistRange(kStillAll, dM / range); HistRange(sb + SdStill, dM / range);
+            if (firing) { HistRange(kStillFiring, dM / range); HistRange(sb + SdStillFiring, dM / range); }
+        }
+        if (dC < 3.0f * range) {  // why is firing false: formation slot index / object / vtable, and the active-row vtable split by moving
+            ++words[kDiagUnits];
+            ++words[kFIdxHist + (fIdx <= 8 ? fIdx : 9u)];
+            if (fCheck == 1) ++words[DRejectIdx];
+            else if (fCheck == 2) ++words[DSlotObjNull];
+            else if (fCheck == 3) ++words[DSlotObjInsane];
+            else if (fCheck == 4) ++words[DSlotVtNotImage];
+            else if (fCheck == 5) ++words[DSlotTargetNotImage];
+            if (fIdx >= 1 && fIdx <= 8) {
+                const U obj = Rd(u.formation + 0x418 + 8 * fIdx);
+                if (Sane(obj)) { const U vt = Rd(obj); if (InImage(vt)) ObjVtCount(vt - delta); }
+            }
+            if (ri.cnt == 0) ++words[DRowNone];
+            else if (ri.idx >= 10) ++words[DRowBadIdx];
+            else if (!ri.ok) ++words[DRowVtRejected];
+            else RowVtCount(ri, moving);
         }
         if ((modelTick % kTraceEvery) == 0 && dC < 3.0f * range + 200.0f) {
-            U cnt, idxRow, vt, flags; float dD, dE;
-            Dest(u, &units[idx[0]], &cnt, &idxRow, &vt, &dD, &dE, &flags);
+            float dD, dE; U fl;
+            Dest(u, units[idx[0]], ri, &dD, &dE, &fl);
             U count = st ? ++st->traces : 1u;
             if (count > 32767u) count = 32767u;
             U* t = &words[kTrace + kTraceWords * (words[WTraceSamples] % kTraceRows)];
             t[0] = modelTick; t[1] = u.unit; t[2] = Bits(dC); t[3] = Bits(dM);
-            t[4] = (moving ? 1u : 0u) | (firing ? 2u : 0u) | ((b34 & 0xFFu) << 8) | (cnt > 0 ? 0x10000u : 0u) | (count << 17);
-            t[5] = vt; t[6] = Bits(dD); t[7] = Bits(dE);
+            t[4] = (moving ? 1u : 0u) | (firing ? 2u : 0u) | (sd << 2) | ((u.ai ? 1u : 0u) << 3) | (ri.p30 ? 0x10u : 0u) | (ri.p2c ? 0x20u : 0u) | ((b34 & 0xFFu) << 8) |
+                   (ri.cnt > 0 ? 0x10000u : 0u) | (count << 17);
+            t[5] = ri.vt; t[6] = Bits(dD); t[7] = Bits(dE);
             ++words[WTraceSamples];
         }
     }
     const float nearLimit = 3.0f * range + 2.0f * RdF(u.formation + 0x670);
     const bool inReach = dC < nearLimit;
+    U types[4]; U nt = 0;
     if (st && st->prevMoving != 2) {
-        U type = 0;
-        if (st->prevMoving && !moving && inReach) type = kTypeHalt;
-        else if (!st->prevFiring && firing && inReach) type = kTypeFire;
-        if (type && art) Bump(type == kTypeHalt ? WArtHalts : WArtFireStarts);
-        else if (type) {
-            const float ratio = dM >= 0.0f ? dM / range : -1.0f;
-            if (type == kTypeHalt) { ++words[WHalts]; Hist(kHaltRatio, kHistBins, ratio, 0.1f); Hist(kHaltMetres, kHistBins, dM, 10.0f); }
-            else { ++words[WFireStarts]; Hist(kFireRatio, kHistBins, ratio, 0.1f); }
-            U cnt, idxRow, vt, flags; float destD, destEnemyD;
-            Dest(u, &units[idx[0]], &cnt, &idxRow, &vt, &destD, &destEnemyD, &flags);
-            U r2[kRowWords] = {};
-            r2[0] = modelTick; r2[1] = u.unit; r2[2] = type; r2[3] = Bits(dC); r2[4] = Bits(dM); r2[5] = Bits(dMe); r2[6] = Bits(range);
-            r2[7] = b34; r2[8] = cnt; r2[9] = idxRow; r2[10] = vt; r2[11] = cls; r2[12] = u.members;
-            r2[13] = st->ticksStopped; r2[14] = units[idx[0]].unit; r2[15] = u.side; r2[16] = Bits(destD); r2[17] = Bits(destEnemyD); r2[18] = flags;
-            Record(type, r2, ratio);
-        }
+        if (st->prevMoving && !moving && inReach) types[nt++] = kTypeHalt;
+        if (!st->prevFiring && firing && inReach) types[nt++] = kTypeFire;
+    }
+    if (!art) {
+        if (t30 && inReach) types[nt++] = kTypeAtk30;
+        if (t2C && inReach) types[nt++] = kTypeAtk2C;
+    }
+    float destD = -1.0f, destEnemyD = -1.0f; U destFlags = 0; bool haveDest = false;
+    for (U k = 0; k < nt; ++k) {
+        const U type = types[k];
+        if (art) { Bump(type == kTypeHalt ? WArtHalts : WArtFireStarts); continue; }
+        const float ratio = dM >= 0.0f ? dM / range : -1.0f;
+        if (type == kTypeHalt) { ++words[WHalts]; ++words[sb + SdHalts]; Hist(kHaltRatio, kHistBins, ratio, 0.1f); Hist(kHaltMetres, kHistBins, dM, 10.0f); Hist(sb + SdHaltHist, kHistBins, ratio, 0.1f); }
+        else if (type == kTypeFire) { ++words[WFireStarts]; ++words[sb + SdFires]; Hist(kFireRatio, kHistBins, ratio, 0.1f); Hist(sb + SdFireHist, kHistBins, ratio, 0.1f); }
+        else if (type == kTypeAtk30) { ++words[WAtk30Events]; ++words[sb + SdAtk30]; }
+        else { ++words[WAtk2CEvents]; ++words[sb + SdAtk2C]; }
+        if (!haveDest) { Dest(u, units[idx[0]], ri, &destD, &destEnemyD, &destFlags); haveDest = true; }
+        U r2[kRowWords] = {};
+        r2[0] = modelTick; r2[1] = u.unit; r2[2] = type; r2[3] = Bits(dC); r2[4] = Bits(dM); r2[5] = Bits(dMe); r2[6] = Bits(range);
+        r2[7] = b34; r2[8] = ri.cnt; r2[9] = ri.idx; r2[10] = ri.vt; r2[11] = cls; r2[12] = u.members;
+        r2[13] = st ? st->ticksStopped : 0; r2[14] = units[idx[0]].unit; r2[15] = u.side; r2[16] = Bits(destD); r2[17] = Bits(destEnemyD); r2[18] = destFlags;
+        r2[19] = (u.ai ? 1u : 0u) | (sd << 1);
+        Record(type, r2, ratio);
     }
     if (st) {
         st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped);

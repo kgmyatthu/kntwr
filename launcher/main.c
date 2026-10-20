@@ -1469,6 +1469,12 @@ static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] =
 #define EC_TRACE 2336u
 #define EC_TRACE_WORDS 8u
 #define EC_TRACE_ROWS 512u
+#define EC_FIDX_HIST 6432u
+#define EC_DIAG_UNITS 6442u
+#define EC_OBJ_VT 6456u
+#define EC_ROW_VT 6472u
+#define EC_SIDE_DIAG 6512u
+#define EC_SIDE_DIAG_WORDS 160u
 static float ec_f(uint32_t u)
 {
     float f;
@@ -1510,12 +1516,15 @@ static void print_engage_census_line(const uint32_t *w)
         unsigned sd;
         for (sd = 0; sd < 2; ++sd) {
             const uint32_t *v = w + EC_SIDE_VAL + EC_SIDE_WORDS * sd;
-            say(L"  engage_census side%u(%ls): unit_ticks=%lu moving=%lu firing=%lu max_simul_firing=%lu live_units=%lu live_members=%lu firing_now=%lu\n", sd,
-                v[0] ? L"AI" : L"non-AI", (unsigned long)v[1], (unsigned long)v[2], (unsigned long)v[3], (unsigned long)v[4], (unsigned long)v[5], (unsigned long)v[6],
-                (unsigned long)v[7]);
+            const uint32_t *x = w + EC_SIDE_DIAG + EC_SIDE_DIAG_WORDS * sd;
+            say(L"  engage_census side%u(raw=%lu %ls): unit_ticks=%lu moving=%lu firing=%lu max_simul_firing=%lu live_units=%lu live_members=%lu firing_now=%lu | halts=%lu "
+                L"fire_starts=%lu atk30=%lu atk2C=%lu ever(firing=%lu atk30=%lu atk2C=%lu)\n", sd, (unsigned long)x[143], v[0] ? L"AI" : L"non-AI", (unsigned long)v[1], (unsigned long)v[2],
+                (unsigned long)v[3], (unsigned long)v[4], (unsigned long)v[5], (unsigned long)v[6], (unsigned long)v[7], (unsigned long)x[134], (unsigned long)x[135],
+                (unsigned long)x[136], (unsigned long)x[137], (unsigned long)x[140], (unsigned long)x[141], (unsigned long)x[142]);
         }
-        say(L"  engage_census: ever_firing_ai_nonart=%lu art_halts=%lu art_fire_starts=%lu trace_samples=%lu\n", (unsigned long)w[250], (unsigned long)w[31], (unsigned long)w[248],
-            (unsigned long)w[249]);
+        say(L"  engage_census: ever_firing_nonart=%lu art_halts=%lu art_fire_starts=%lu trace_samples=%lu atk30_events=%lu atk2C_events=%lu firing_calls=%lu firing_true=%lu "
+            L"diag_units=%lu\n", (unsigned long)w[250], (unsigned long)w[31], (unsigned long)w[248], (unsigned long)w[249], (unsigned long)w[251], (unsigned long)w[252],
+            (unsigned long)w[6448], (unsigned long)w[6449], (unsigned long)w[EC_DIAG_UNITS]);
     }
 }
 /* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
@@ -4387,8 +4396,10 @@ static void sb_engage_census(Sb *b, const Run *r)
     }
     sb_fmt(b, "  \"engage_census\": {\"have_status\": %s, \"counters\": {", r->have_status ? "true" : "false");
     for (i = 0; i < EC_HDR; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_engage_census_metrics[i], (unsigned long)w[i]);
-    sb_fmt(b, ", \"art_halts\": %lu, \"art_fire_starts\": %lu, \"trace_samples\": %lu, \"ever_firing_ai_nonart\": %lu},\n    ",
-           (unsigned long)w[31], (unsigned long)w[248], (unsigned long)w[249], (unsigned long)w[250]);
+    sb_fmt(b, ", \"art_halts\": %lu, \"art_fire_starts\": %lu, \"trace_samples\": %lu, \"ever_firing_nonart\": %lu, \"atk30_events\": %lu, \"atk2C_events\": %lu, "
+           "\"firing_calls\": %lu, \"firing_true\": %lu},\n    ",
+           (unsigned long)w[31], (unsigned long)w[248], (unsigned long)w[249], (unsigned long)w[250], (unsigned long)w[251], (unsigned long)w[252], (unsigned long)w[6448],
+           (unsigned long)w[6449]);
     sb_u32_array(b, "halt_ratio_hist", w + EC_HALT_RATIO, 22);
     sb_fmt(b, ",\n    ");
     sb_u32_array(b, "halt_metres_hist", w + EC_HALT_METRES, 22);
@@ -4427,6 +4438,42 @@ static void sb_engage_census(Sb *b, const Run *r)
         sb_u32_array(b, "class_firing_ticks", v + 24, 8);
         sb_fmt(b, "}");
     }
+    sb_fmt(b, "],\n    \"firing_diag\": {\"diag_units\": %lu, ", (unsigned long)w[EC_DIAG_UNITS]);
+    sb_u32_array(b, "formation_slot_idx_hist_0_8_other", w + EC_FIDX_HIST, 10);
+    sb_fmt(b, ", \"slot_obj_null\": %lu, \"reject_idx\": %lu, \"slot_obj_insane\": %lu, \"slot_vt_not_image\": %lu, \"slot_target_not_image\": %lu, \"slot_vt_other\": %lu, "
+           "\"rowvt_other\": %lu, \"row_none\": %lu, \"row_bad_idx\": %lu, \"row_vt_rejected\": %lu, \"object_vtables\": [",
+           (unsigned long)w[6443], (unsigned long)w[6444], (unsigned long)w[6445], (unsigned long)w[6446], (unsigned long)w[6447], (unsigned long)w[6450], (unsigned long)w[6451],
+           (unsigned long)w[6452], (unsigned long)w[6453], (unsigned long)w[6454]);
+    for (i = 0; i < 8; ++i) {
+        const uint32_t *e = w + EC_OBJ_VT + 2 * i;
+        if (e[0]) sb_fmt(b, "%s{\"vtable\": \"0x%08lX\", \"count\": %lu}", i ? ", " : "", (unsigned long)e[0], (unsigned long)e[1]);
+    }
+    sb_fmt(b, "], \"row_vtables\": [");
+    for (i = 0; i < 8; ++i) {
+        const uint32_t *e = w + EC_ROW_VT + 4 * i;
+        if (e[0])
+            sb_fmt(b, "%s{\"vtable\": \"0x%08lX\", \"moving\": %lu, \"not_moving\": %lu, \"vt2C\": \"%s%s\", \"vt30\": \"%s%s\", \"vt28\": \"%s%s\"}", i ? ", " : "",
+                   (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (e[3] & 1u) ? "T" : "", (e[3] & 2u) ? "F" : "", (e[3] & 4u) ? "T" : "", (e[3] & 8u) ? "F" : "",
+                   (e[3] & 16u) ? "T" : "", (e[3] & 32u) ? "F" : "");
+    }
+    sb_fmt(b, "]},\n    \"per_side\": [");
+    for (i = 0; i < 2; ++i) {
+        const uint32_t *x = w + EC_SIDE_DIAG + EC_SIDE_DIAG_WORDS * i;
+        sb_fmt(b, "%s{\"side\": %u, \"raw_side_index\": %lu, \"ai_flag\": %lu, \"observed_unit_ticks\": %lu, \"halts\": %lu, \"fire_starts\": %lu, \"atk30_events\": %lu, "
+               "\"atk2C_events\": %lu, \"atk30_transitions_any_distance\": %lu, \"atk2C_transitions_any_distance\": %lu, \"ever_firing_units\": %lu, \"ever_atk30_units\": %lu, "
+               "\"ever_atk2C_units\": %lu, ", i ? ", " : "", i, (unsigned long)x[143], (unsigned long)x[144], (unsigned long)x[145], (unsigned long)x[134], (unsigned long)x[135],
+               (unsigned long)x[136], (unsigned long)x[137], (unsigned long)x[138], (unsigned long)x[139], (unsigned long)x[140], (unsigned long)x[141], (unsigned long)x[142]);
+        sb_u32_array(b, "halt_ratio_hist", x + 0, 22);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "fire_ratio_hist", x + 22, 22);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "moving_hist", x + 44, 30);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "still_hist", x + 74, 30);
+        sb_fmt(b, ", ");
+        sb_u32_array(b, "still_firing_hist", x + 104, 30);
+        sb_fmt(b, "}");
+    }
     sb_fmt(b, "],\n    ");
     sb_engage_rows(b, "first_halt_rows", w + EC_FIRST_ROWS, w[23] > EC_ROWS ? EC_ROWS : w[23], 0);
     sb_fmt(b, ",\n    ");
@@ -4435,17 +4482,18 @@ static void sb_engage_census(Sb *b, const Run *r)
     ev = w[25];
     ring_n = ev > EC_ROWS ? EC_ROWS : ev;
     sb_engage_rows(b, "last_events_oldest_first", w + EC_RING_ROWS, ring_n, ev > EC_ROWS ? ev % EC_ROWS : 0);
-    /* Infantry trace ring, oldest first, decoded: [tick, unit, dC, dM, moving, firing, B34, ncmd>0, unit_samples, cmd_vtable, destD, destEnemyD]. */
-    sb_fmt(b, ",\n    \"trace_columns\": [\"tick\",\"unit\",\"dC\",\"dM\",\"moving\",\"firing\",\"b34\",\"has_cmd\",\"unit_samples\",\"cmd_vtable\",\"destD\",\"destEnemyD\"],\n    \"trace\": [");
+    /* Infantry trace ring, oldest first, decoded: [tick, unit, dC, dM, moving, firing, B34, ncmd>0, unit_samples, cmd_vtable, destD, destEnemyD, side, ai, atk30, atk2C]. */
+    sb_fmt(b, ",\n    \"trace_columns\": [\"tick\",\"unit\",\"dC\",\"dM\",\"moving\",\"firing\",\"b34\",\"has_cmd\",\"unit_samples\",\"cmd_vtable\",\"destD\",\"destEnemyD\",\"side\",\"ai\",\"atk30\",\"atk2C\"],\n    \"trace\": [");
     {
         const unsigned tn = w[249] > EC_TRACE_ROWS ? EC_TRACE_ROWS : w[249];
         const unsigned t0 = w[249] > EC_TRACE_ROWS ? w[249] % EC_TRACE_ROWS : 0;
         unsigned k;
         for (k = 0; k < tn; ++k) {
             const uint32_t *t = w + EC_TRACE + EC_TRACE_WORDS * ((t0 + k) % EC_TRACE_ROWS);
-            sb_fmt(b, "%s[%lu,%lu,%.1f,%.1f,%lu,%lu,%lu,%lu,%lu,%lu,%.1f,%.1f]", k ? "," : "", (unsigned long)t[0], (unsigned long)t[1], (double)ec_f(t[2]), (double)ec_f(t[3]),
+            sb_fmt(b, "%s[%lu,%lu,%.1f,%.1f,%lu,%lu,%lu,%lu,%lu,%lu,%.1f,%.1f,%lu,%lu,%lu,%lu]", k ? "," : "", (unsigned long)t[0], (unsigned long)t[1], (double)ec_f(t[2]), (double)ec_f(t[3]),
                    (unsigned long)(t[4] & 1u), (unsigned long)(t[4] >> 1 & 1u), (unsigned long)(t[4] >> 8 & 0xFFu), (unsigned long)(t[4] >> 16 & 1u), (unsigned long)(t[4] >> 17),
-                   (unsigned long)t[5], (double)ec_f(t[6]), (double)ec_f(t[7]));
+                   (unsigned long)t[5], (double)ec_f(t[6]), (double)ec_f(t[7]), (unsigned long)(t[4] >> 2 & 1u), (unsigned long)(t[4] >> 3 & 1u),
+                   (unsigned long)(t[4] >> 4 & 1u), (unsigned long)(t[4] >> 5 & 1u));
         }
     }
     sb_fmt(b, "]");
