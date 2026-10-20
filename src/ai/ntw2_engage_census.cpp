@@ -282,6 +282,7 @@ void Observe(U i, U n, U modelTick, U* eligible) {
         if (firing) { ++words[sv + 3]; ++words[sv + 24 + c8]; ++tickFiring[sd]; }
     } else Bump(WNativeSkipped);
     if (!u.ai) return;
+    if (firing && !art) { UnitState* fs = Find(u.unit, modelTick); if (fs && !fs->ever) { fs->ever = 1; ++words[WEverFiring]; } } // no range condition: cross-checks the fire-event gating
     const int rs = RangeSafe(u.unit);
     float range = 0.0f;
     if (rs < 0) { Bump(WNativeSkipped); return; }
@@ -290,7 +291,6 @@ void Observe(U i, U n, U modelTick, U* eligible) {
     if (!predsOk) return;
     ++*eligible; ++words[WAiUnits];
     UnitState* st = Find(u.unit, modelTick);
-    if (st && firing && !art && !st->ever) { st->ever = 1; ++words[WEverFiring]; }
     // Nearest enemy unit by centre, and the three nearest for the member search.
     float d2[3] = {1e30f, 1e30f, 1e30f}; int idx[3] = {-1, -1, -1}; U enemies = 0;
     for (U j = 0; j < n; ++j) {
