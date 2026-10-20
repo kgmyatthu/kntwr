@@ -25,7 +25,7 @@
 // FALSE path costs two compares), so the per-tick cost is a handful of unit reads per exiting group.
 //   pass waived:   [t+0x81E] == 0 (the engine itself waives form-up: single-unit group, region/tactic kinds 5/6/7, ...): native behaviour.
 //   pass escape:   [t+0x80C] <= 140.0f (the engine's own 'no time' enemy distance, the same constant 0x7B5640 uses): native behaviour.
-//   pass timeout:  model ticks since the state was entered >= timeoutTicks (entry recorded by the enter gates; default 600 = 60 s).
+//   pass timeout:  model ticks since the state was entered >= timeoutTicks (entry recorded by the enter gates; default 2400 = 4 min).
 //   pass formed:   formed% >= pct, where formed% = members whose unit centre ([[U+0xADC]+0x644/0x648]) is within `metres` of the destination of their active command (the slot position
 //                  the group move gave them: row = U+0x398+0x90*[U+0x934], pose = row.vt[+0x38](), vec3 = 0x80E9D0(pose)), counted over the live members under group control
 //                  ([U+0xAA0] != 2, [U+0x2CC] > 0, [U+0xB34] not 6/7, [U+0xB42] == 0).  A member with no active command ([U+0x930] == 0) is at its slot; a member whose active command is

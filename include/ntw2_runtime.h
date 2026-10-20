@@ -335,7 +335,7 @@ enum ntw2_memory_word {
    site-34 planner think. Same routed-tick / no-ai_async2 / no-ai_ctrl validation as the claim bits; they publish ai_group_words (own row, no geometry exclusion).
    Parameters travel in the two appended config words ai_group_params / ai_group_params2 (both ZERO unless the bit they belong to is set):
      ai_group_params  (FORMUP_GATE): bits 0..6 pct (0..100: share of members that must sit within `metres` of their slot), bit 7 reserved 0,
-                      bits 8..15 metres (0..255), bits 16..31 safety timeout in ticks (1..65535, ticks since the state was entered; the launcher default is 600 = 60 s).
+                     bits 8..15 metres (0..255), bits 16..31 safety timeout in ticks (1..65535, ticks since the state was entered; the launcher default is 2400 = 4 min).
      ai_group_params2 (STANDOFF):    bits 0..7 k = stand-off factor x 100 (1..255, launcher default 90), bits 8..31 reserved 0 (owned by the stand-off slice). */
 #define NTW2_AI_FORMUP_GATE 0x2000u
 #define NTW2_AI_STANDOFF 0x4000u
@@ -348,7 +348,7 @@ enum ntw2_memory_word {
 #define NTW2_AI_FORMUP_PARAMS_VALID (NTW2_AI_FORMUP_PCT_MASK | NTW2_AI_FORMUP_METRES_MASK | NTW2_AI_FORMUP_TIMEOUT_MASK)
 #define NTW2_AI_FORMUP_DEFAULT_PCT 80u
 #define NTW2_AI_FORMUP_DEFAULT_METRES 25u
-#define NTW2_AI_FORMUP_DEFAULT_TIMEOUT 600u
+#define NTW2_AI_FORMUP_DEFAULT_TIMEOUT 2400u
 #define NTW2_AI_STANDOFF_K_MASK 0xFFu
 #define NTW2_AI_STANDOFF_PARAMS2_VALID 0xFFu
 #define NTW2_AI_STANDOFF_DEFAULT_K 90u

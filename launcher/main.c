@@ -6826,7 +6826,7 @@ static void usage(void)
     say(L"%ls",
         L"  --ai-formup-gate[=pct,metres[,ticks]]  AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). An AI ATTACK_BATTLEGROUP\n"
         L"                        leaves REFORM / MOVE_TO_FORMUP only when >= pct % (default 80) of its members are within `metres` (default 25) of their form-up\n"
-        L"                        slot, or after a safety timeout of `ticks` (default 600 = 60 s) in that state, or when the enemy is within the engine's own 140 m\n"
+        L"                        slot, or after a safety timeout of `ticks` (default 2400 = 4 min) in that state, or when the enemy is within the engine's own 140 m\n"
         L"                        'no time' distance. Everything else stays native; the player's groups are untouched. Needs a routed tick (e.g. --features all);\n"
         L"                        excludes ai_ctrl / ai_async2. Row: ai_group (words 0..15, src/ai/ntw2_group_formup.h), receipt ai_group.\n"
         L"  --ai-standoff[=k]     AI-ONLY GAMEPLAY DEVIATION (user-approved, opt-in, never implied by --features all). Stand-off distance of an AI attack group's\n"
