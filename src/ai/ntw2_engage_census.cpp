@@ -6,6 +6,7 @@
 #include <string.h>
 #include <windows.h>
 #include "ntw2_engage_census.h"
+#include "core/ntw2_guard.h"
 
 namespace ntw2_engage_census {
 using U = uint32_t;
@@ -13,7 +14,7 @@ using U = uint32_t;
 namespace {
 constexpr U kMaxSides = 16, kMaxArmies = 128, kMaxUnits = 1024, kMemberPool = 262144, kStateSlots = 1024, kMaxMembers = 1024, kStaleTicks = 600;
 constexpr float kCoordLimit = 16384.0f;
-constexpr U kTypeHalt = 1, kTypeFire = 2;
+constexpr U kTypeHalt = 1, kTypeFire = 2, kMaxBattleFaults = 64;
 
 using ThisBool = unsigned char(__fastcall*)(U, U);
 using ThisFloat = float(__fastcall*)(U, U);
@@ -25,7 +26,7 @@ struct Gathered { U unit, side, ai, cx_bits, cz_bits, members, first, formation;
 
 U words[kWords];
 bool enabled, disabled;
-U delta, lastModel;
+U delta, imageLo, imageSize, lastModel, battleFaults, gCount;
 UnitState table[kStateSlots];
 Gathered units[kMaxUnits];
 float pool[kMemberPool * 2];
@@ -37,6 +38,77 @@ inline float RdF(U a) { return *reinterpret_cast<const volatile float*>(static_c
 inline bool Good(float v) { return v == v && fabsf(v) < kCoordLimit; }
 inline U Bits(float f) { U u; memcpy(&u, &f, 4); return u; }
 inline U V(U preferred) { return preferred + delta; }
+inline void Bump(Word w) { ++words[w]; }
+
+// Pre-validation: a native predicate must never fault (a first-chance AV is also a crash-recorder event). Each check mirrors exactly what the callee dereferences;
+// anything the checks cannot prove is caught by the per-unit SEH bracket (silent through ntw2::probeDepth).
+inline bool Sane(U p) { return p >= 0x10000u && p < 0xFFFF0000u; }
+inline bool InImage(U p) { return p - imageLo < imageSize; }
+// Virtual-call target through `obj`: vtable in the image, slot target in the image.
+inline bool Virtual(U obj, U slot, U* fn) {
+    if (!Sane(obj)) return false;
+    const U vt = Rd(obj);
+    if (!InImage(vt)) return false;
+    *fn = Rd(vt + slot);
+    return InImage(*fn);
+}
+// 0x55AFE0 (obj = unit) / 0x55C2E0 (obj = formation object): `idx = [obj+0x460]; if (!idx) return 0; o = [obj+0x418+idx*8]; (*vt[slot])()`; the slot array holds idx 1..8.
+bool SlotCallSafe(U obj, U slot) {
+    const U idx = Rd(obj + 0x460);
+    if (idx == 0) return true;
+    U fn;
+    return idx <= 8 && Virtual(Rd(obj + 0x418 + 8 * idx), slot, &fn);
+}
+// 0x55C320 (is_moving): idx = [U+0xAE8]; idx != 0 -> o = [U+0xADC+idx*4], vt[+0xA4]; idx == 0 -> 0x55C2E0 on [U+0xADC] (SlotCallSafe, vt[+0xC]).
+bool MovingSafe(U unit) {
+    const U idx = Rd(unit + 0xAE8);
+    U fn;
+    if (idx == 0) { const U f = Rd(unit + 0xADC); return Sane(f) && SlotCallSafe(f, 0xC); }
+    return idx <= 2 && Virtual(Rd(unit + 0xADC + 4 * idx), 0xA4, &fn);
+}
+// 0x55C9A0(ECX = &vector, key) -> 0x57ACA0 scans {count [+0xC], data [+0x10]} of 0x2C-byte records.
+bool VectorSafe(U vec) {
+    const U count = Rd(vec + 0xC), data = Rd(vec + 0x10);
+    return count == 0 || (count <= 4096 && Sane(data) && Sane(data + count * 0x2C - 1));
+}
+// 0x5646A0 (missile range): returns 1 = safe to call, 0 = the native returns 0 without further reads, -1 = unproven (skip, never call).
+int RangeSafe(U unit) {
+    const U d = Rd(unit + 0xDC4);
+    if (!d) return 0;                                   // 0x53EFE0: no weapon record -> false -> 0
+    if (!Sane(d)) return -1;
+    const U kind = Rd(d + 0x24);
+    if (!Sane(kind)) return -1;
+    (void)Rd(kind + 0x10); (void)Rd(d + 0x60);
+    const U cls = Rd(unit + 0x2C);
+    if (!Sane(cls)) return -1;                          // 0x55ABF0 / 0x55AB80
+    (void)Rd(cls + 0x1C);
+    if (!VectorSafe(unit + 0xDAC)) return -1;           // 0x55C9A0 on U+0xDAC (0x55C2A0 and the final branch)
+    const U f = Rd(unit + 0xADC);
+    if (!Sane(f)) return -1;
+    const U p = Rd(f + 0x62C + 0x11C);                  // 0x56AE70(ECX = F+0x62C)
+    if (p) {
+        if (!Sane(p)) return -1;
+        const U q = Rd(p + 0x14);
+        if (!Sane(q)) return -1;
+        if (*reinterpret_cast<const volatile unsigned char*>(static_cast<uintptr_t>(q + 0x231))) {
+            // bonus branch: [[[[U+0x14]+8]]+0x2804C]+0x10 -> 0xE20560 (lazily CREATES [e+0x6CC] when null: refuse so the census stays read-only) -> [[e+0x6CC]+0x1E70+0x5C]
+            const U a = Rd(unit + 0x14);
+            if (!Sane(a)) return -1;
+            const U b = Rd(a + 8);
+            if (!Sane(b)) return -1;
+            const U c = Rd(b);
+            if (!Sane(c)) return -1;
+            const U dd = Rd(c + 0x2804C);
+            if (!Sane(dd)) return -1;
+            const U e = Rd(dd + 0x10);
+            if (!Sane(e)) return -1;
+            const U g = Rd(e + 0x6CC);
+            if (!Sane(g)) return -1;
+            (void)Rd(g + 0x1E70 + 0x5C);
+        }
+    } else if (!VectorSafe(unit + 0xDAC)) return -1;
+    return 1;
+}
 
 UnitState* Find(U unit, U tick) {
     U h = (unit >> 4) * 2654435761u;
@@ -111,15 +183,9 @@ void Record(U type, const U* row, float ratio) {
     ++words[WEventsTotal];
 }
 
-// The whole observation; POD locals only (it runs inside __try).
-void Body(U model, U modelTick) {
-    if (model != lastModel) {
-        memset(table, 0, sizeof(table)); words[WTableUsed] = 0;
-        if (lastModel) ++words[WModelChanges];
-        lastModel = model; words[WFlags] &= ~2u; disabled = false;
-    }
-    poolUsed = 0;
-    ++words[WTicks]; words[WLastModelTick] = modelTick;
+// Graph walk into units[0..gCount); POD locals only (it runs inside __try).
+void Gather(U model) {
+    gCount = 0;
     const U M = Rd(model + 0xB0);
     if (!M) { ++words[WBadGraph]; return; }
     const U sideCount = Rd(M + 0x84), sideArr = Rd(M + 0x88);
@@ -154,15 +220,20 @@ void Body(U model, U modelTick) {
         }
     }
     words[WAiSidesLast] = aiSides;
-    U aiEligible = 0;
-    for (U i = 0; i < n; ++i) {
+    gCount = n;
+}
+// One AI unit (units[i], n gathered); POD locals only (it runs inside __try). Native predicates are called only after the pre-validation above.
+void Observe(U i, U n, U modelTick, U* eligible) {
+    {
         Gathered& u = units[i];
-        if (!u.ai) continue;
-        // Native predicates (thiscall, ECX = unit; never hooked).
-        const float range = reinterpret_cast<ThisFloat>(static_cast<uintptr_t>(V(0x5646A0)))(u.unit, 0);
-        ++words[WNativeCalls];
-        if (!(range > 0.0f) || !Good(range)) { ++words[WNoMissile]; continue; }
-        ++aiEligible; ++words[WAiUnits];
+        if (!u.ai) return;
+        const int rs = RangeSafe(u.unit);
+        float range = 0.0f;
+        if (rs < 0) { Bump(WNativeSkipped); return; }
+        if (rs > 0) { range = reinterpret_cast<ThisFloat>(static_cast<uintptr_t>(V(0x5646A0)))(u.unit, 0); ++words[WNativeCalls]; }
+        if (!(range > 0.0f) || !Good(range)) { ++words[WNoMissile]; return; }
+        if (!MovingSafe(u.unit) || !SlotCallSafe(u.unit, 0x10)) { Bump(WNativeSkipped); return; }
+        ++*eligible; ++words[WAiUnits];
         const bool moving = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55C320)))(u.unit, 0) != 0;
         const bool firing = reinterpret_cast<ThisBool>(static_cast<uintptr_t>(V(0x55AFE0)))(u.unit, 0) == 1;
         words[WNativeCalls] += 2;
@@ -184,7 +255,7 @@ void Body(U model, U modelTick) {
         if (enemies == 0 || idx[0] < 0) {
             ++words[WEnemyless];
             if (st) { st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick; st->ticksStopped = moving ? 0 : (st->ticksStopped < 0xFFFFFFFFu ? st->ticksStopped + 1 : st->ticksStopped); }
-            continue;
+            return;
         }
         words[WEnemyUnitsLast] = enemies;
         const float dC = sqrtf(d2[0]);
@@ -242,13 +313,15 @@ void Body(U model, U modelTick) {
                     const U row = u.unit + 0x398 + 0x90 * idxRow;
                     const U table2 = Rd(row);
                     vt = table2 ? table2 - delta : 0;
-                    if (table2) {
+                    const bool rowOk = table2 && InImage(table2) && InImage(Rd(table2 + 0x38)) && InImage(Rd(table2 + 0x2C)) && InImage(Rd(table2 + 0x30));
+                    if (table2 && !rowOk) Bump(WNativeSkipped);
+                    if (rowOk) {
                         const U pose = reinterpret_cast<ThisPtr>(static_cast<uintptr_t>(Rd(table2 + 0x38)))(row, 0);
                         words[WNativeCalls] += 1;
                         if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x2C)))(row, 0) & 0xFF) flags |= 1u;
                         if (reinterpret_cast<ThisBool>(static_cast<uintptr_t>(Rd(table2 + 0x30)))(row, 0) & 0xFF) flags |= 2u;
                         words[WNativeCalls] += 2;
-                        if (pose) {
+                        if (Sane(pose) && (!Rd(pose + 0x10) || Sane(Rd(pose + 0x10)))) {
                             float out[3] = {0, 0, 0};
                             const U r = reinterpret_cast<ThisPtrOut>(static_cast<uintptr_t>(V(0x80E9D0)))(pose, 0, static_cast<U>(reinterpret_cast<uintptr_t>(out)));
                             words[WNativeCalls] += 1;
@@ -273,15 +346,28 @@ void Body(U model, U modelTick) {
             st->prevMoving = moving; st->prevFiring = firing; st->lastSeen = modelTick;
         }
     }
-    words[WAiUnitsLast] = aiEligible;
+}
+
+bool ObserveGuarded(U i, U n, U modelTick, U* eligible) {
+    __try { Observe(i, n, modelTick, eligible); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool GatherGuarded(U model) {
+    __try { Gather(model); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void Fault(bool perUnit) {
+    ++words[WFaults]; ++battleFaults; words[WBattleFaults] = battleFaults;
+    if (perUnit) ++words[WFaultsPerUnit];
+    if (battleFaults > kMaxBattleFaults) { disabled = true; words[WFlags] |= 2u; }
 }
 }  // namespace
 
-void Reset(bool enable, U imageDelta) {
+void Reset(bool enable, U imageDelta, U base, U size) {
     memset(words, 0, sizeof(words));
     memset(table, 0, sizeof(table));
     memset(deepRatio, 0, sizeof(deepRatio));
-    enabled = enable; disabled = false; delta = imageDelta; lastModel = 0; poolUsed = 0;
+    enabled = enable; disabled = false; delta = imageDelta; imageLo = base; imageSize = size; lastModel = 0; poolUsed = 0; battleFaults = 0; gCount = 0;
     words[WVersion] = kVersion; words[WDelta] = imageDelta;
     words[WFlags] = enable ? 1u : 0u;
 }
@@ -290,8 +376,22 @@ void Tick(U model, U modelTick) {
     if (!enabled || disabled) return;
     LARGE_INTEGER t0, t1, f;
     QueryPerformanceCounter(&t0);
-    __try { Body(model, modelTick); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { ++words[WFaults]; disabled = true; words[WFlags] |= 2u; }
+    ++ntw2::probeDepth; // every fault below is an expected, caught one: not a crash capture (CrashVeh)
+    if (model != lastModel) {
+        memset(table, 0, sizeof(table)); words[WTableUsed] = 0;
+        if (lastModel) ++words[WModelChanges];
+        lastModel = model; words[WFlags] &= ~2u; disabled = false; battleFaults = 0; words[WBattleFaults] = 0;
+    }
+    poolUsed = 0;
+    ++words[WTicks]; words[WLastModelTick] = modelTick;
+    if (!GatherGuarded(model)) Fault(false);
+    else {
+        U eligible = 0;
+        for (U i = 0; i < gCount && !disabled; ++i)
+            if (!ObserveGuarded(i, gCount, modelTick, &eligible)) Fault(true);
+        words[WAiUnitsLast] = eligible;
+    }
+    --ntw2::probeDepth;
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
     const U us = static_cast<U>((t1.QuadPart - t0.QuadPart) * 1000000ll / f.QuadPart);
     words[WCostUsTotal] += us;

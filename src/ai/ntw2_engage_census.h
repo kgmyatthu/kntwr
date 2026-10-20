@@ -17,7 +17,7 @@
 //   0x55CB50 = [U+0xAA0] != 2 && [U+0x2CC] > 0; AI state [U+0xB34]; command ring: count [U+0x930], index [U+0x934], rows of 0x90 bytes at U+0x398+0x90*idx, row[0] = vtable.
 //
 // ntw2_status::engage_census_words layout (NTW2_ENGAGE_CENSUS_WORDS = 2176 uint32 words):
-//   header 0..31   (Word enum below; floats are stored as IEEE-754 bit patterns, -1.0f = unknown)
+//   header 0..30   (Word enum below; floats are stored as IEEE-754 bit patterns, -1.0f = unknown)
 //   32..53         HALT dM/range histogram:  [0..19] bins of 0.1 (0.0..2.0), [20] overflow (>= 2.0), [21] dM unknown
 //   54..75         HALT dM metres histogram: [0..19] bins of 10 m (0..200), [20] overflow (>= 200 m), [21] dM unknown
 //   76..97         FIRE_START dM/range histogram (same layout as the first)
@@ -42,7 +42,7 @@ constexpr uint32_t kRowWords = 20, kRowsPerSet = 32, kFirstRows = 256, kDeepRows
 enum Word : uint32_t {
     WVersion, WFlags, WTicks, WAiUnits, WHalts, WFireStarts, WFaults, WBadMember, WEnemyless, WTableFull, WNativeCalls, WCostUsTotal, WCostUsMax, WLastModelTick,
     WAiSidesLast, WAiUnitsLast, WEnemyUnitsLast, WDmComputed, WMovingInRange, WInactiveUnits, WNoMissile, WBadGraph, WTableUsed, WFirstCount, WDeepCount,
-    WEventsTotal, WModelChanges, WDelta
+    WEventsTotal, WModelChanges, WDelta, WNativeSkipped, WFaultsPerUnit, WBattleFaults
 };
 // WFlags: bit0 armed (Reset with enabled), bit1 disabled by a fault for the current battle model.
 // Counter meanings: WTicks ticks observed; WAiUnits sum over ticks of AI units with missile range > 0 and members > 0; WHalts/WFireStarts events; WFaults SEH faults;
@@ -51,10 +51,13 @@ enum Word : uint32_t {
 // WLastModelTick model tick of the last observed tick; WAiSidesLast/WAiUnitsLast/WEnemyUnitsLast last tick's AI sides, eligible AI units and enemy units;
 // WDmComputed unit-ticks whose dM was computed (dC < 4*range+100); WMovingInRange samples added to the moving histograms; WInactiveUnits unit-ticks skipped by the
 // liveness test; WNoMissile AI unit-ticks with range <= 0; WBadGraph object-graph reads rejected (counts/pointers out of range); WTableUsed occupied table entries;
-// WModelChanges battle model changes seen; WDelta image delta from the preferred base.
+// WModelChanges battle model changes seen; WDelta image delta from the preferred base; WNativeSkipped unit-ticks (or command rows) where pre-validation of what a native
+// predicate dereferences failed, so the native function was NOT called; WFaultsPerUnit SEH faults caught around a single unit (the unit is skipped for the tick, the
+// census stays armed); WBattleFaults faults in the current battle model (the census disables itself, flag bit1, once it exceeds 64; WFaults is the all-battles total
+// and also counts graph-walk faults, which skip the tick).
 
-// Zero the row and arm/disarm the census.  `delta` = image delta from the preferred base (V(va) = va + delta).
-void Reset(bool enabled, uint32_t delta);
+// Zero the row and arm/disarm the census.  `delta` = image delta from the preferred base (V(va) = va + delta); [imageBase, imageBase+imageSize) is the live main image (vtable / slot-target validation).
+void Reset(bool enabled, uint32_t delta, uint32_t imageBase, uint32_t imageSize);
 // Owner thread, right after the native private tick returned.  `model` = tick gate argument, `modelTick` = [model+0x58].
 void Tick(uint32_t model, uint32_t modelTick);
 void Snapshot(volatile uint32_t* out);  // out[kWords]

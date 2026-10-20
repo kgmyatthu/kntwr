@@ -3924,7 +3924,7 @@ static U StartImpl(void* raw) {
     ntw2_alloc_census::Configure(imageBase,imageSize,delta,allocCensusRequestedMode);
     CpuTopologyInit(); // tick core census + NTW2_TICK_PCORE / NTW2_TICK_CORE_AB masks; no tick is routed before activation
     ntw2_grid_census_reset((config.enabled_mask&NTW2_GRID_CENSUS)!=0); // sampler is stopped; disabled starts publish an all-zero row
-    ntw2_engage_census::Reset((config.va_watch_flags&NTW2_ENGAGE_CENSUS)!=0,delta);
+    ntw2_engage_census::Reset((config.va_watch_flags&NTW2_ENGAGE_CENSUS)!=0,delta,imageBase,imageSize);
     ntw2_ai_census::Reset((config.enabled_mask&NTW2_AI_CENSUS)!=0,imageBase,imageSize,delta,config.main_thread_id,&tickInProgress,&aiThreadId,&ntw2_grid_census_site);
     ntw2_ai_async2::Reset(false,delta,&tickOwner,&aiThreadId); // zero row until a generation activates
     ntw2_ai_ctrl::Reset(0,delta,0); ntw2_ai_ctrl_geometry::Reset(); // zero rows until a generation activates (Activate configures)

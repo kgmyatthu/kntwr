@@ -1446,8 +1446,8 @@ static const char *const k_alloc_census_metrics[32] = { NTW2_ALLOC_CENSUS_LABELS
 static const char *const k_arena_metrics[NTW2_ARENA_WORDS] = { NTW2_ARENA_LABELS };
 static const char *const k_overlay_metrics[NTW2_OVERLAY_WORDS] = { NTW2_OVERLAY_LABELS };
 static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] = { NTW2_MOUNTED_OFFICER_LABELS };
-/* --engage-census (src/ai/ntw2_engage_census.h): header words 0..27, histograms 32..247, 20-word rows from 256. */
-#define EC_HDR 28u
+/* --engage-census (src/ai/ntw2_engage_census.h): header words 0..30, histograms 32..247, 20-word rows from 256. */
+#define EC_HDR 31u
 #define EC_HALT_RATIO 32u
 #define EC_HALT_METRES 54u
 #define EC_FIRE_RATIO 76u
@@ -1464,7 +1464,7 @@ static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] =
 static const char *const k_engage_census_metrics[EC_HDR] = {
     "version", "flags", "ticks", "ai_units", "halts", "fire_starts", "faults", "bad_member", "enemyless", "table_full", "native_calls", "cost_us_total", "cost_us_max",
     "last_model_tick", "ai_sides_last", "ai_units_last", "enemy_units_last", "dm_computed", "moving_in_range", "inactive_units", "no_missile", "bad_graph", "table_used",
-    "first_count", "deep_count", "events_total", "model_changes", "image_delta" };
+    "first_count", "deep_count", "events_total", "model_changes", "image_delta", "native_skipped", "faults_per_unit", "battle_faults" };
 /* Percentile (0..1) of a histogram of `bins` equal-width bins plus one overflow bin; the bin centre, or bins*step when it lands in the overflow. */
 static double ec_percentile(const uint32_t *h, unsigned bins, double step, double pct, unsigned long *total_out)
 {
