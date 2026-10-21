@@ -502,7 +502,9 @@ static void CheckBlob(const char* name, const uint8_t* blob, uint32_t size, cons
 
 // Diagnostic bisection (--gameplay-patch-only-runs / --gameplay-patch-skip-runs): the filter only decides which non-header runs reach the live image.
 //   ONLY={}  : no code run is written: the image is the stock loader image with the patched header and the appended sections;
-//   SKIP={44,48}: the two relocated-operand runs (RVA 0x43C70C / 0x43F2F1) stay stock, every other byte is the loader-equivalent patched image.
+//   SKIP={44,48}: the two relocated-operand runs (RVA 0x43C70C / 0x43F2F1) stay stock, every other byte is the loader-equivalent patched image;
+//   launcher default (ntw2_gp_filter_exclude_d3d9_swap on ALL): exactly the rel32 fields of the two Direct3DCreate9 calls (RVA 0xCA6203 / 0xDFD3FF,
+//   4 bytes after the E8 opcode) stay stock, every other byte is the loader-equivalent patched image.
 static void RunFilter(const Case& c, uint32_t base) {
     ntw2_gp_filter parsed;
     std::memset(&parsed, 0, sizeof parsed);
@@ -511,17 +513,35 @@ static void RunFilter(const Case& c, uint32_t base) {
             "filter bits: 14-16, 36, 44");
     const char* bad[] = {"", "x", "1-", "-3", "5-2", "3,,4", "3,", "128", "1 2"};
     for (const char* s : bad) { ntw2_gp_filter f; std::memset(&f, 0, sizeof f); RequireF(ntw2_gp_filter_parse(s, &f) != 0, "malformed run list \"%s\" refused", s); }
+    {
+        const uint32_t d3dA = 1u << (NTW2_GP_RUN_D3D9_FACTORY_A & 31u), d3dB = 1u << (NTW2_GP_RUN_D3D9_FACTORY_B & 31u);
+        ntw2_gp_filter skip, only;
+        std::memset(&skip, 0, sizeof skip); std::memset(&only, 0, sizeof only);
+        skip.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44", &skip) == 0, "skip list parses");
+        only.mode = NTW2_GP_ONLY; Require(ntw2_gp_filter_parse("14,65,92", &only) == 0, "only list parses");
+        ntw2_gp_filter_exclude_d3d9_swap(&skip);
+        ntw2_gp_filter_exclude_d3d9_swap(&only);
+        Require(skip.mode == NTW2_GP_SKIP && (skip.runs[1] & (1u << 12)) && (skip.runs[2] & d3dA) && (skip.runs[2] & d3dB), "exclude keeps a SKIP list and adds 65, 92");
+        Require(only.mode == NTW2_GP_ONLY && (only.runs[0] & (1u << 14)) && !(only.runs[2] & d3dA) && !(only.runs[2] & d3dB), "exclude keeps an ONLY list without 65, 92");
+    }
 
     Bytes patchedImage = LoaderImage(c.patched, base, "patched");
     Bytes stockImage = LoaderImage(c.stock, base, "stock");
     const uint32_t windows[2] = {0x43C70Cu, 0x43F2F1u};
-    for (int variant = 0; variant < 2; ++variant) {
+    const uint32_t d3dSites[2] = {0xCA6203u, 0xDFD3FFu};
+    const char* names[3] = {"ONLY={}", "SKIP={44,48}", "default"};
+    for (int variant = 0; variant < 3; ++variant) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image (filter)");
         ntw2_gp_filter f;
         std::memset(&f, 0, sizeof f);
         if (variant == 0) f.mode = NTW2_GP_ONLY;
-        else { f.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44,48", &f) == 0, "skip list parses"); }
+        else if (variant == 1) { f.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44,48", &f) == 0, "skip list parses"); }
+        else ntw2_gp_filter_exclude_d3d9_swap(&f);
+        if (variant == 2)
+            for (uint32_t s : d3dSites)
+                RequireF(std::memcmp(&stockImage[s], &patchedImage[s], 4) != 0 && patchedImage[s - 1] == 0xE8u && stockImage[s - 1] == 0xE8u,
+                         "D3D9 swap site %#x is the rel32 of a patched call", s);
         ntw2_gp_report rep;
         ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
         Require(ntw2_gp_apply_filtered(&mem, base, c.sp.base, c.blob, c.blobSize, &f, &rep) == 0, "filtered apply");
@@ -532,9 +552,12 @@ static void RunFilter(const Case& c, uint32_t base) {
             uint8_t want = patchedImage[i];
             if (variant == 0) {
                 if (i >= soh && i < c.sp.soi) want = stockImage[i];
-            } else {
+            } else if (variant == 1) {
                 for (uint32_t w : windows)
                     if (i >= w && i < w + 8u && m.base[i] == stockImage[i] && m.base[i] != patchedImage[i]) { want = stockImage[i]; ++stockWindowBytes; }
+            } else {
+                for (uint32_t s : d3dSites)
+                    if (i >= s && i < s + 4u) { want = stockImage[i]; if (stockImage[i] != patchedImage[i]) ++stockWindowBytes; }
             }
             if (m.base[i] != want) {
                 if (bad < 6) std::fprintf(stderr, "  filter variant %d mismatch rva %#x: live %02x want %02x\n", variant, i, m.base[i], want);
@@ -545,11 +568,14 @@ static void RunFilter(const Case& c, uint32_t base) {
         if (variant == 0) {
             Require(rep.runs_applied == 0 && rep.runs_skipped == rep.runs_total - rep.runs_header && rep.runs_skipped > 90, "ONLY={} writes no run");
             Require(rep.sections_mapped == c.pp.nsec - c.sp.nsec, "ONLY={} still maps the appended sections");
-        } else {
+        } else if (variant == 1) {
             Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "SKIP={44,48} skips exactly two runs");
             Require(stockWindowBytes >= 2, "the two skipped runs stay stock in the live image");
+        } else {
+            Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "default skips exactly the two D3D9 runs");
+            Require(stockWindowBytes >= 2, "both Direct3DCreate9 call sites stay stock in the live image");
         }
-        std::printf("  filter %-10s applied %u skipped %u header %u: live image matches its expectation over [0, %#x)\n", variant == 0 ? "ONLY={}" : "SKIP={44,48}",
+        std::printf("  filter %-12s applied %u skipped %u header %u: live image matches its expectation over [0, %#x)\n", names[variant],
                     rep.runs_applied, rep.runs_skipped, rep.runs_header, c.pp.soi);
         Unmap(&m);
     }

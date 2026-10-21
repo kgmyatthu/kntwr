@@ -372,6 +372,18 @@ int ntw2_gp_filter_parse(const char *list, ntw2_gp_filter *f)
     return 0;
 }
 
+void ntw2_gp_filter_exclude_d3d9_swap(ntw2_gp_filter *f)
+{
+    const uint32_t runs[2] = { NTW2_GP_RUN_D3D9_FACTORY_A, NTW2_GP_RUN_D3D9_FACTORY_B };
+    int k;
+    if (f->mode == NTW2_GP_ALL) f->mode = NTW2_GP_SKIP;
+    for (k = 0; k < 2; ++k) {
+        const uint32_t bit = 1u << (runs[k] & 31u);
+        if (f->mode == NTW2_GP_ONLY) f->runs[runs[k] >> 5] &= ~bit;
+        else f->runs[runs[k] >> 5] |= bit;
+    }
+}
+
 int ntw2_gp_apply_filtered(const ntw2_gp_memory *mem, uint32_t base, uint32_t preferred, const uint8_t *blob, uint32_t blob_size,
                            const ntw2_gp_filter *filter, ntw2_gp_report *rep)
 {

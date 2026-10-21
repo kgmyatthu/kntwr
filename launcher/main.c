@@ -228,7 +228,9 @@ typedef struct Options {
     wchar_t formation_census_csv[MAXP]; /* --formation-census-csv FILE */
     BOOL formation_census_men; /* --formation-census-men: also write FILE.men.csv (per-man steering detail of a few tracked units; NTW2_FORMATION_CENSUS_MEN) */
     BOOL no_gameplay_patch;  /* --no-gameplay-patch: stock bytes in memory (diagnostic bisection; the runtime refuses a stock image, so it needs --no-activate) */
-    ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes */
+    ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes (the D3D9 swap runs are removed unless --d3d9-swap) */
+    BOOL gp_filter_listed;   /* an explicit --gameplay-patch-*-runs list was given */
+    BOOL d3d9_swap;          /* --d3d9-swap: also write the patch's Direct3DCreate9 swap (runs 65, 92); default leaves both call sites stock */
     wchar_t game_exe[MAXP];  /* --game-exe NAME */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
@@ -5099,7 +5101,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                    "    \"sections_mapped\": %lu,\n    \"section_bytes\": %lu,\n    \"section_fixups\": %lu,\n"
                    "    \"section_base_va\": \"0x%08lX\",\n    \"proof_site_va\": \"0x%08lX\",\n    \"proof_target_va\": \"0x%08lX\",\n"
                    "    \"proof_site_bytes\": \"%02x%02x%02x%02x%02x\",\n    \"proof_section_va\": \"0x%08lX\",\n"
-                   "    \"proof_section_bytes\": \"%02x%02x%02x%02x%02x%02x%02x%02x\",\n    \"live_verified\": %s,\n"
+                   "    \"proof_section_bytes\": \"%02x%02x%02x%02x%02x%02x%02x%02x\",\n    \"live_verified\": %s,\n    \"d3d9_swap\": %s,\n"
                    "    \"mss32_on_disk\": \"%s\",\n    \"mss32_applied\": %s,\n    \"mss32_runs_applied\": %lu,\n    \"mss32_bytes_applied\": %lu\n  },\n",
                r->exe_is_stock ? "stock" : "patched", r->gp_applied ? "true" : "false", (unsigned long)g->status,
                (unsigned long)g->runs_total, (unsigned long)g->runs_header, (unsigned long)g->runs_applied, (unsigned long)g->runs_skipped, (unsigned long)g->bytes_applied,
@@ -5111,6 +5113,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                g->proof_section_bytes[0], g->proof_section_bytes[1], g->proof_section_bytes[2], g->proof_section_bytes[3],
                g->proof_section_bytes[4], g->proof_section_bytes[5], g->proof_section_bytes[6], g->proof_section_bytes[7],
                r->gp_live_verified ? "true" : "false",
+               (r->gp_applied ? r->opt.d3d9_swap : !r->exe_is_stock) ? "true" : "false",
                k_mss_state_name[r->mss32_state], r->mss32_applied ? "true" : "false",
                (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied);
     }
@@ -6600,10 +6603,15 @@ static BOOL launch_game(Run *r)
         say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
             (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u), r->opt.formation_census_csv);
     if (r->opt.no_gameplay_patch) say(L"  gameplay patch: NOT applied (--no-gameplay-patch, stock bytes in memory)\n");
-    else if (r->opt.gp_filter.mode != NTW2_GP_ALL)
-        say(L"  gameplay patch: SUBSET (--gameplay-patch-%ls-runs: %lu run bits listed; header and appended sections always applied)\n",
-            r->opt.gp_filter.mode == NTW2_GP_ONLY ? L"only" : L"skip",
-            (unsigned long)(__popcnt(r->opt.gp_filter.runs[0]) + __popcnt(r->opt.gp_filter.runs[1]) + __popcnt(r->opt.gp_filter.runs[2]) + __popcnt(r->opt.gp_filter.runs[3])));
+    else {
+        if (r->opt.gp_filter_listed)
+            say(L"  gameplay patch: SUBSET (--gameplay-patch-%ls-runs: %lu run bits listed; header and appended sections always applied)\n",
+                r->opt.gp_filter.mode == NTW2_GP_ONLY ? L"only" : L"skip",
+                (unsigned long)(__popcnt(r->opt.gp_filter.runs[0]) + __popcnt(r->opt.gp_filter.runs[1]) + __popcnt(r->opt.gp_filter.runs[2]) + __popcnt(r->opt.gp_filter.runs[3])));
+        if (r->opt.d3d9_swap) say(L"  gameplay patch: D3D9 swap ON (--d3d9-swap: Direct3DCreate9 runs 65, 92 written)\n");
+        else if (r->exe_is_stock) say(L"  gameplay patch: D3D9 swap OFF (Direct3DCreate9 runs 65, 92 left stock; --d3d9-swap writes them)\n");
+        else say(L"  note: Napoleon.exe is patched on disk, so its D3D9 swap is already in the file and cannot be left out.\n");
+    }
     if (r->opt.formation_census && r->opt.activate) {   /* the in-process census reads its path / period from the game's environment */
         wchar_t ev[16];
         SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_CSV", r->opt.formation_census_csv);
@@ -6785,6 +6793,8 @@ static void usage(void)
         L"  --no-gameplay-patch   diagnostic bisection, needs --no-activate: resume the stock image unpatched (no in-memory gameplay patch)\n"
         L"  --gameplay-patch-only-runs LIST / --gameplay-patch-skip-runs LIST  diagnostic bisection: write only (or all but) the listed non-header runs of the 103-run\n"
         L"                        gameplay patch (LIST like 14-16,36-38,44); the PE header, relocations and the five appended sections are always applied\n"
+        L"  --d3d9-swap           also write the patch's Direct3DCreate9 swap (runs 65, 92: both factory calls -> .aistbl 0x18F3000, SysWOW64 d3d9.dll\n"
+        L"                        force-load). Default: both call sites stay stock; every other gameplay-patch run is written\n"
         L"  --game-exe NAME       diagnostic: the game executable inside the game folder (default Napoleon.exe; e.g. a copy of the pinned patched image)\n"
         L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
         L"                        the infantry spacing)\n"
@@ -7070,6 +7080,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             wcscpy_s(o->formation_census_csv, MAXP, val);
         }
         else if (!wcscmp(name, L"--no-gameplay-patch")) o->no_gameplay_patch = TRUE;
+        else if (!wcscmp(name, L"--d3d9-swap")) o->d3d9_swap = TRUE;
         else if (!wcscmp(name, L"--gameplay-patch-only-runs") || !wcscmp(name, L"--gameplay-patch-skip-runs")) {
             const uint32_t want = name[wcslen(L"--gameplay-patch-")] == L'o' ? NTW2_GP_ONLY : NTW2_GP_SKIP;
             char narrow[256];
@@ -7080,6 +7091,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                 return -1;
             }
             o->gp_filter.mode = want;
+            o->gp_filter_listed = TRUE;
         }
         else if (!wcscmp(name, L"--game-exe")) {
             NEEDVAL();
@@ -7339,10 +7351,12 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--formation-census-csv needs --formation-census.\n");
         return -1;
     }
-    if (o->no_gameplay_patch && (o->activate || o->gp_filter.mode != NTW2_GP_ALL)) {
-        errsay(L"--no-gameplay-patch needs --no-activate (the runtime requires the patched image) and excludes --gameplay-patch-only-runs/--gameplay-patch-skip-runs.\n");
+    if (o->no_gameplay_patch && (o->activate || o->gp_filter.mode != NTW2_GP_ALL || o->d3d9_swap)) {
+        errsay(L"--no-gameplay-patch needs --no-activate (the runtime requires the patched image) and excludes --gameplay-patch-only-runs/--gameplay-patch-skip-runs/--d3d9-swap.\n");
         return -1;
     }
+    /* Default: the gameplay patch without its Direct3DCreate9 swap (runs 65, 92; no clone, pin or binding depends on them). */
+    if (!o->no_gameplay_patch && !o->d3d9_swap) ntw2_gp_filter_exclude_d3d9_swap(&o->gp_filter);
     if (o->tick_pcore && o->tick_core_ab) {
         errsay(L"--tick-pcore and --tick-core-ab are exclusive.\n");
         return -1;

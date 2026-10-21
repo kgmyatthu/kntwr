@@ -117,6 +117,13 @@ typedef struct ntw2_gp_filter {
 } ntw2_gp_filter;
 /* "14-16,36,44": ORs the listed runs (0..127) into f->runs.  0 on success, -1 on a malformed list. */
 int ntw2_gp_filter_parse(const char *list, ntw2_gp_filter *f);
+/* The patch's Direct3DCreate9 swap: runs 65 (RVA 0xCA6203) and 92 (RVA 0xDFD3FF) redirect both factory calls to .aistbl 0x18F3000, which calls the
+   original factory and then force-loads SysWOW64\d3d9.dll (analysis/native-gameplay-patch-sites.md, cluster 4).  No clone, pin or runtime binding
+   depends on them.  The launcher leaves both stock unless --d3d9-swap is given. */
+#define NTW2_GP_RUN_D3D9_FACTORY_A 65u
+#define NTW2_GP_RUN_D3D9_FACTORY_B 92u
+/* Removes the two D3D9 swap runs from the selection in every mode: ALL becomes SKIP {65, 92}, SKIP adds them, ONLY drops them. */
+void ntw2_gp_filter_exclude_d3d9_swap(ntw2_gp_filter *f);
 int ntw2_gp_apply_filtered(const ntw2_gp_memory *mem, uint32_t image_base, uint32_t preferred_base,
                            const uint8_t *blob, uint32_t blob_size, const ntw2_gp_filter *filter, ntw2_gp_report *rep);
 
