@@ -9,7 +9,7 @@
 #include "native_contact.h"
 
 #pragma float_control(precise, on, push)
-namespace ntw2_collide {
+namespace kntwr_collide {
 namespace {
 using U = uint32_t;
 using B = unsigned char;
@@ -54,7 +54,7 @@ struct Arena {
     uint16_t* ids;
     // Contact-response plans (native_contact.h), one per accepted contact at acceptedFirst[i]+n;
     // reserved only when a contact mode is bound.
-    ntw2_contact::Plan* plans;
+    kntwr_contact::Plan* plans;
 };
 Binding binding;
 Arena storage;
@@ -103,7 +103,7 @@ size_t Layout(Arena& a,B* base,const Limits& limits) {
 #undef BUFFER
     return bytes;
 }
-bool CapacityLimits(const ntw2_workload::Capacity& capacity,Limits& limits) {
+bool CapacityLimits(const kntwr_workload::Capacity& capacity,Limits& limits) {
     if (capacity.primary>131072 || capacity.records<capacity.primary || capacity.records>131072 ||
         !capacity.cells || capacity.cells>1048576 ||
         capacity.memberships>2097152 || capacity.pairs>4194304) return false;
@@ -142,9 +142,9 @@ struct Job {
     bool rebuild,owned;
     B* manager;
     // Borrowed owned-grid publication; null on the native-chain-audit path.
-    const ntw2_loco::GridView* view;
+    const kntwr_loco::GridView* view;
     // Admitted contact-response stage of this Apply (null: every contact runs the original callback).
-    const ntw2_contact::Stage* contact;
+    const kntwr_contact::Stage* contact;
     U* work;
     U* nativeCells;
     float scale, bump, one, weightR, weightS, crossover, farScale;
@@ -280,7 +280,7 @@ void Gather(Job& j,U i) {
     if (j.owned && j.view->node_type[i]!=8) { Diagnose(OwnType,i,nullptr,0xffffffffu); Fail(j,LayoutFallbacks); return; }
     // Published position/height/extent/radius are identity of the CSR geometry: any bitwise change is stale.
     if (j.owned) {
-        const ntw2_loco::GridView& v=*j.view;
+        const kntwr_loco::GridView& v=*j.view;
         if (memcmp(&x,&v.x[i],sizeof(float)) || memcmp(&y,&v.y[i],sizeof(float)) ||
             memcmp(&z,&v.z[i],sizeof(float)) || memcmp(&extent,&v.extent[i],sizeof(float)) ||
             memcmp(&baseRadius,&v.radius[i],sizeof(float))) {
@@ -422,7 +422,7 @@ template<bool Rebuild> bool Enumerate(Job& j,U chunk,U i,U& queued) {
         U first,last; const U* occupant;
         if (j.owned) {
             // Borrowed CSR, read-only: compact cell -> [offsets[k],offsets[k+1]) of view slot indices.
-            const ntw2_loco::GridView& v=*j.view;
+            const kntwr_loco::GridView& v=*j.view;
             const U dense=v.cell_dense[cell];
             if (!dense || dense>v.cells) { Fail(j,LayoutFallbacks); a.span[i]=0; return false; }
             first=v.offsets[dense-1]; last=v.offsets[dense]; occupant=v.occupants;
@@ -533,7 +533,7 @@ void Body(Job& j,U chunk) {
             if (!a.nativeRecord[i] && a.active[i] && (a.flags[i]&3)) {
                 B* r=a.rec[i];
                 for (U n=at;n<last;++n)
-                    ntw2_contact::Predict(*j.contact,a.plans[n],r,a.rec[a.packets[a.outgoing[n]].other]);
+                    kntwr_contact::Predict(*j.contact,a.plans[n],r,a.rec[a.packets[a.outgoing[n]].other]);
                 j.chunkPlanned[chunk]+=last-at;
             }
             at=last;
@@ -722,7 +722,7 @@ bool BuildOrder(Job& j) {
 // Entry identity of the borrowed publication against live manager/model/grid layout. Per-record
 // serial/membership/geometry/node consistency is checked in Gather; no native chain is read.
 bool ValidView(const Job& j,void* manager,B* model,B* grid) {
-    const ntw2_loco::GridView& v=*j.view;
+    const kntwr_loco::GridView& v=*j.view;
     float scale=v.inverse_scale; U published,live=At<U>(grid,0x24);
     memcpy(&published,&scale,sizeof(published));
     if (!v.record || !v.serial || !v.inserted || !v.left || !v.right || !v.top || !v.bottom ||
@@ -971,11 +971,11 @@ void ApplyRecord(Job& j,U i,bool& continuedAfterFault,U& contactIndex) {
         if (j.contact) {
             // Planned contact: shadow runs the original and compares; workers mode replays the
             // same-team effects (or runs the original for every other plan kind).
-            const ntw2_contact::Plan& plan=a.plans[a.acceptedFirst[i]+n];
-            ntw2_contact::CountPlan(plan);
-            completed=binding.contact_mode==ntw2_contact::ModeShadow ?
-                ntw2_contact::Shadow(*j.contact,plan,contactIndex,r,s,&ContactOriginal,&j) :
-                ntw2_contact::Replay(*j.contact,plan,r,s,&ContactOriginal,&j);
+            const kntwr_contact::Plan& plan=a.plans[a.acceptedFirst[i]+n];
+            kntwr_contact::CountPlan(plan);
+            completed=binding.contact_mode==kntwr_contact::ModeShadow ?
+                kntwr_contact::Shadow(*j.contact,plan,contactIndex,r,s,&ContactOriginal,&j) :
+                kntwr_contact::Replay(*j.contact,plan,r,s,&ContactOriginal,&j);
         } else completed=CallbackGuard(j,s,r);
         ++contactIndex;
         if (!completed) {
@@ -1022,10 +1022,10 @@ void Apply(Job& j) {
     }
     // Contact responses: plans are decided on the pool from the state the callbacks see (every
     // effect a callback writes is outside the plan inputs, or revalidated at replay).
-    ntw2_contact::Stage contactStage;
+    kntwr_contact::Stage contactStage;
     bool contactStageOpen=false;
     j.contact=nullptr;
-    if (binding.contact_mode && a.plans && ntw2_contact::BeginStage(contactStage,ContactModel(j.manager))) {
+    if (binding.contact_mode && a.plans && kntwr_contact::BeginStage(contactStage,ContactModel(j.manager))) {
         contactStageOpen=true;
         ULONGLONG wall=Clock(); j.contact=&contactStage;
         // Each chunk >=kPlanGrain contacts (one owner-only chunk below 2*kPlanGrain, no wake),
@@ -1035,14 +1035,14 @@ void Apply(Job& j) {
         ULONGLONG busy=0;
         for (U n=0;n<j.planChunks;++n) { busy+=j.chunkBusy[n]; planPredicted+=j.chunkPlanned[n]; }
         planRows=j.acceptedTotal;
-        ntw2_contact::AddPlanTime(Micros(wall),static_cast<U>(busy*1000000/frequency.QuadPart));
+        kntwr_contact::AddPlanTime(Micros(wall),static_cast<U>(busy*1000000/frequency.QuadPart));
         if (j.failure) j.contact=nullptr; // a solver-side chunk fault: no plan is trusted
     }
     // Approved split-pass visibility: supported callbacks see final sums, velocities,
     // conditional labels and processed bytes. Callback order itself is unchanged.
     bool continuedAfterFault=false; U contactIndex=0; Timing callbacks=Begin(j);
     for (U n=0;n<j.workCount;++n) ApplyRecord(j,a.order[n],continuedAfterFault,contactIndex);
-    if (contactStageOpen) ntw2_contact::EndStage(contactStage,contactIndex);
+    if (contactStageOpen) kntwr_contact::EndStage(contactStage,contactIndex);
     if (!j.nativeQueries) End(j,callbacks,CallbackUs,CallbackThreadUs);
     // After numeric commit, native-query fallback for a solver suffix would apply impulses twice.
     // Finish its precomputed owner work instead; sticky ORIGINAL-stage fallback begins next tick.
@@ -1055,15 +1055,15 @@ U Original(void* manager) {
 bool Start(const Binding& value) {
     Stop(); binding=value; memset(words,0,sizeof(words)); memset(sourceWords,0,sizeof(sourceWords));
     faulted=false; diagnosticClaim=0;
-    ntw2_contact::Start(binding.image_delta,binding.contact_mode);
+    kntwr_contact::Start(binding.image_delta,binding.contact_mode);
     QueryPerformanceFrequency(&frequency);
     return true;
 }
-U EstimateActivationBytes(const ntw2_workload::Capacity& capacity) {
+U EstimateActivationBytes(const kntwr_workload::Capacity& capacity) {
     Limits limits;
     return CapacityLimits(capacity,limits)?ReservationBytes(limits):0xffffffffu;
 }
-bool Activate(void* manager,const ntw2_workload::Capacity& capacity) {
+bool Activate(void* manager,const kntwr_workload::Capacity& capacity) {
     Stop();
     Limits limits;
     if (!manager || !CapacityLimits(capacity,limits)) return false;
@@ -1087,7 +1087,7 @@ void Stop() {
 }
 void Sample(U out[WordCount]) { memcpy(out,words,sizeof(words)); }
 void SampleSource(U out[SourceWordCount]) { memcpy(out,sourceWords,sizeof(sourceWords)); }
-const ntw2_contact::Plan* ContactPlans(U& rows,U& predicted) {
+const kntwr_contact::Plan* ContactPlans(U& rows,U& predicted) {
     rows=planRows; predicted=planPredicted;
     return arena?arena->plans:nullptr;
 }

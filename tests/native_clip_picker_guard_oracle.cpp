@@ -1,4 +1,4 @@
-// Oracle for src/animation/ntw2_clip_picker_guard.{h,cpp} (the always-on clip picker crash guard) on a private relocated mapping of the owned image.
+// Oracle for src/animation/kntwr_clip_picker_guard.{h,cpp} (the always-on clip picker crash guard) on a private relocated mapping of the owned image.
 //  * HOT PATH: the ORIGINAL bytes of FUN_00e5f760 (0xE5F760, 53 bytes, run in the private mapping) against Picker over random tables whose requested category has a
 //    non-zero count: the returned clip must be bit-identical, nothing may be counted, ESI/EDI/EBX are preserved and the callee pops its 8 argument bytes.
 //  * COLD PATH, category 0 non-empty: requested category empty -> native result (rand % table[5]) is reproduced exactly; only calls_cold moves.
@@ -18,12 +18,12 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "animation/ntw2_clip_picker_guard.h"
+#include "kntwr_runtime.h"
+#include "animation/kntwr_clip_picker_guard.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
-namespace g=ntw2_clip_picker_guard;
+namespace g=kntwr_clip_picker_guard;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 static B* image;
 static U delta, checks, imageSize;
@@ -41,7 +41,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;

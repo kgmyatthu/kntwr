@@ -8,7 +8,7 @@
 // Source-pinned Napoleon.exe SHA256
 // 13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4.
 // Owner-serial differential execution only: no live writes or replacement vtable.
-namespace ntw2_idle_node {
+namespace kntwr_idle_node {
 namespace {
 static_assert(sizeof(void*) == 4, "idle node ABI is Win32");
 U imageBase, words[kClassCount][kWords], eventWords[kClassCount][kEventWords], sequence;
@@ -186,7 +186,7 @@ void Tail() {
         else Emit(Order, LatchThenFinish, 7);
         return;
     }
-    if (ntw2_move_node::AdjustOrder(a, 0, 0) == 4) { Emit(Order, LatchThenFinish, 4); return; }
+    if (kntwr_move_node::AdjustOrder(a, 0, 0) == 4) { Emit(Order, LatchThenFinish, 4); return; }
     if (Read<U>(a + 0x1d8)) { Emit(Order, LatchThenFinish); return; }
     float random = NodeDraw();
     B related;
@@ -227,10 +227,10 @@ void Predict(Continuation phase) {
         if (answer == 1) return;
     }
     frame.special = false;
-    if (ntw2_move_node::First(frame.owner)) {
+    if (kntwr_move_node::First(frame.owner)) {
         // Second reaches +F0 only after the already-certified false +EC.
         if (!related && !Getter(frame.owner, 0xf0, answer)) { Refuse(); return; }
-        if (!ntw2_move_node::Second(frame.owner, answer)) { Refuse(); return; }
+        if (!kntwr_move_node::Second(frame.owner, answer)) { Refuse(); return; }
         frame.special = answer == 1;
     }
     if (frame.special) Emit(Order, CommonTail, 5);
@@ -346,4 +346,4 @@ void After(U token) {
     }
     active = false;
 }
-} // namespace ntw2_idle_node
+} // namespace kntwr_idle_node

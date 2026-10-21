@@ -25,29 +25,29 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_unit_posture_engage.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace policy = ntw2_unit_policy;
-namespace ue = ntw2_unit_posture_engage;
+namespace policy = kntwr_unit_policy;
+namespace ue = kntwr_unit_posture_engage;
 static_assert(sizeof(void*) == 4, "x86 native ABI");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
 
 // The oracle owns the occurrence record and the drain sink (native_unit_policy.cpp is not linked).
-namespace ntw2_unit_policy {
+namespace kntwr_unit_policy {
 Occurrence g_occ;
 static U drainCalls, drainMechanic, drainCode;
 void Drain(U, U mechanic, U code) { ++drainCalls; drainMechanic = mechanic; drainCode = code; }
-} // namespace ntw2_unit_policy
+} // namespace kntwr_unit_policy
 
 static B* image;
 static U delta, checks, cases;
 static const char* currentCase = "mapping";
-static ntw2_clone_set clones{};
-static U bindings[NTW2_BIND_COUNT];
+static kntwr_clone_set clones{};
+static U bindings[KNTWR_BIND_COUNT];
 [[noreturn]] static void Fail(const char* fmt, ...) {
     std::fprintf(stderr, "FAIL [%s]: ", currentCase);
     va_list ap; va_start(ap, fmt); std::vfprintf(stderr, fmt, ap); va_end(ap);
@@ -109,12 +109,12 @@ static void Map(const char* path) {
     Put(At(0x1841bb8), 0, U(_tls_index)); tlsPad[0] = 0;
     std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
     Require(ue::Bind(A(image), bindings), "unit posture/engage gates bind");
-    bindings[NTW2_BIND_U_OCC] = A(&policy::g_occ);
-    bindings[NTW2_BIND_S0_NODE_BEGIN] = Fn(&S0NodeBegin);
-    bindings[NTW2_BIND_S0_NODE_STEP] = Fn(&S0NodeStep);
-    bindings[NTW2_BIND_S0_FINALIZE] = Fn(&S0Finalize);
+    bindings[KNTWR_BIND_U_OCC] = A(&policy::g_occ);
+    bindings[KNTWR_BIND_S0_NODE_BEGIN] = Fn(&S0NodeBegin);
+    bindings[KNTWR_BIND_S0_NODE_STEP] = Fn(&S0NodeStep);
+    bindings[KNTWR_BIND_S0_FINALIZE] = Fn(&S0Finalize);
     U detail = 0;
-    const U error = ntw2_build_clones(A(image), bindings, &clones, &detail);
+    const U error = kntwr_build_clones(A(image), bindings, &clones, &detail);
     if (error) Fail("clone construction error=%u detail=%u", error, detail);
 }
 
@@ -404,7 +404,7 @@ static void SetNextTrap(bool on) {
 }
 static U gNativeMatches, gNativePairs[13][13];
 static void PostureGateCases() {
-    const U gate = bindings[NTW2_BIND_U_POSTURE];
+    const U gate = bindings[KNTWR_BIND_U_POSTURE];
     const U original = A(At(0x10fc370));
     // --- mask 0 / mismatching entity / no target: native pass-through, bit-exact against the original 10FC370.
     currentCase = "posture gate pass-through";
@@ -484,7 +484,7 @@ static void PostureGateCases() {
     }
     U distinct = 0, intoRest = 0;
     for (U i = 0; i < 13; ++i) for (U j = 0; j < 13; ++j) if (gNativePairs[i][j]) { ++distinct; if (j == 12) ++intoRest; }
-    if (std::getenv("NTW2_ORACLE_TRACE"))
+    if (std::getenv("KNTWR_ORACLE_TRACE"))
         std::fprintf(stderr, "posture native cross-check: runs=%u matches=%u distinct pairs=%u into rest=%u\n", nativeRuns, gNativeMatches, distinct, intoRest);
     Require(gNativeMatches >= 20 && distinct >= 4, "native single-step runs cover several (old, new) pairs");
     // --- unsupported contexts: the original runs and the unit drains (a state that is not one of the 13 singletons, an fsm
@@ -724,8 +724,8 @@ static const Scenario kScenarios[] = {
 enum Body { Driver, DriverUS, Finalizer, Path };
 static U BodyOriginal(Body b) { return A(At(b <= DriverUS ? 0x658c50 : b == Finalizer ? 0x6543d0 : 0x819770)); }
 static U BodyClone(Body b) {
-    return clones.entries[b == Driver ? NTW2_CLONE_BRAIN_U_DRIVER : b == DriverUS ? NTW2_CLONE_BRAIN_US_DRIVER :
-                          b == Finalizer ? NTW2_CLONE_BRAIN_U_FINALIZE : NTW2_CLONE_BRAIN_U_PATH];
+    return clones.entries[b == Driver ? KNTWR_CLONE_BRAIN_U_DRIVER : b == DriverUS ? KNTWR_CLONE_BRAIN_US_DRIVER :
+                          b == Finalizer ? KNTWR_CLONE_BRAIN_U_FINALIZE : KNTWR_CLONE_BRAIN_U_PATH];
 }
 static void RunBody(Body b, U entry, Case& c, U gate) {
     ResetFp();
@@ -841,13 +841,13 @@ static void GateCases() {
     // admitted: the frozen values; every ABI contract holds
     SetOcc(a, policy::kMaskEngage, postureSlot, ev, &view);
     currentCase = "649520 gate";
-    ResetFp(); U got = Checked(bindings[NTW2_BIND_U_UNIT_MODIFIER], a); RequireCleanAbi("649520 gate");
+    ResetFp(); U got = Checked(bindings[KNTWR_BIND_U_UNIT_MODIFIER], a); RequireCleanAbi("649520 gate");
     Require(got == 0xDEADBEEF, "modifier row served from the unit slot");
     currentCase = "64F8F0 gate";
-    ResetFp(); got = Checked(bindings[NTW2_BIND_U_ORDER_PREDICATE], a); RequireCleanAbi("64F8F0 gate");
+    ResetFp(); got = Checked(bindings[KNTWR_BIND_U_ORDER_PREDICATE], a); RequireCleanAbi("64F8F0 gate");
     Require((got & 0xFF) == 0, "predicate served from the unit slot (native would be 1)");
     currentCase = "57E1F0 gate";
-    ResetFp(); Checked(bindings[NTW2_BIND_U_UNIT_ARRIVAL], A(c->unit.data())); RequireCleanAbi("57E1F0 gate", true);
+    ResetFp(); Checked(bindings[KNTWR_BIND_U_UNIT_ARRIVAL], A(c->unit.data())); RequireCleanAbi("57E1F0 gate", true);
     float arrived; __asm fstp dword ptr [arrived]
     Require(arrived == 3.5f, "arrival served from the unit slot as an x87 float");
     // not admitted / not this soldier / lookup not valid: the original function
@@ -857,12 +857,12 @@ static void GateCases() {
         const U validBefore = ev[ue::LkValid];
         if (variant == 2) ev[ue::LkValid] = 0;
         SetOcc(entity, mask, postureSlot, ev, &view);
-        ResetFp(); const U nativeRow = Thiscall0(V(0x649520), a); ResetFp(); got = Checked(bindings[NTW2_BIND_U_UNIT_MODIFIER], a);
+        ResetFp(); const U nativeRow = Thiscall0(V(0x649520), a); ResetFp(); got = Checked(bindings[KNTWR_BIND_U_UNIT_MODIFIER], a);
         RequireCleanAbi("649520 gate native"); Require(got == nativeRow && nativeRow == 0x5151, "original 649520 result");
-        ResetFp(); const U nativePredicate = Thiscall0(V(0x64F8F0), a) & 0xFF; ResetFp(); got = Checked(bindings[NTW2_BIND_U_ORDER_PREDICATE], a) & 0xFF;
+        ResetFp(); const U nativePredicate = Thiscall0(V(0x64F8F0), a) & 0xFF; ResetFp(); got = Checked(bindings[KNTWR_BIND_U_ORDER_PREDICATE], a) & 0xFF;
         RequireCleanAbi("64F8F0 gate native"); Require(got == nativePredicate && nativePredicate == 1, "original 64F8F0 result");
         const float nativeArrival = NativeArrival(A(c->unit.data()));
-        ResetFp(); Checked(bindings[NTW2_BIND_U_UNIT_ARRIVAL], A(c->unit.data())); RequireCleanAbi("57E1F0 gate native", true);
+        ResetFp(); Checked(bindings[KNTWR_BIND_U_UNIT_ARRIVAL], A(c->unit.data())); RequireCleanAbi("57E1F0 gate native", true);
         __asm fstp dword ptr [arrived]
         if (variant == 1) Require(arrived == 3.5f, "the arrival lookup is keyed by the unit, not the soldier: served for any soldier of the admitted unit");
         else Require(std::memcmp(&arrived, &nativeArrival, 4) == 0, "original 57E1F0 result");
@@ -879,7 +879,7 @@ static void GateCases() {
         before.Restore(*c, *world);
         policy::drainCalls = 0;
         SetOcc(A(c->agent.data()), variant ? policy::kMaskEngage : 0, postureSlot, ev, &view, 5);
-        ResetFp(); Checked(bindings[NTW2_BIND_U_DRIVER_ALT], A(c->agent.data())); RequireCleanAbi("alternate driver gate");
+        ResetFp(); Checked(bindings[KNTWR_BIND_U_DRIVER_ALT], A(c->agent.data())); RequireCleanAbi("alternate driver gate");
         ClearOcc();
         Memo got2; got2.Take(*c, *world);
         CompareMemo(want, got2, "the alternate driver runs the original exactly");
@@ -892,7 +892,7 @@ static void GateCases() {
     for (U kind = 0; kind < 2; ++kind) {
         fakeVtable[1] = fakeVtable[2] = Fn(&NodeProbe);
         gNodeEcx = 0;
-        CallNodeGate(bindings[kind ? NTW2_BIND_U_NODE_STEP : NTW2_BIND_U_NODE_BEGIN], A(fakeVtable), 0x5000);
+        CallNodeGate(bindings[kind ? KNTWR_BIND_U_NODE_STEP : KNTWR_BIND_U_NODE_BEGIN], A(fakeVtable), 0x5000);
         RequireCleanAbi("node dispatch gate");
         Require(gNodeEcx == 0x5000, "unknown node class runs the original target with ECX = node");
         ++cases;

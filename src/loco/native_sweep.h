@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#define NTW2_SWEEP_WORD_LABELS \
+#define KNTWR_SWEEP_WORD_LABELS \
  "version", "enabled", "graph_compared", "calls", "compared", "r0_mismatches", "r1_mismatches", "r2_mismatches", \
  "faults", "first_entity", "first_call", "first_list", "first_index", "first_expected", "first_actual", "shadow_us", \
  "owner_target0", "owner_target0_calls", "owner_target1", "owner_target1_calls", \
@@ -9,7 +9,7 @@
  "other_owner_target0", "other_owner_target0_calls", "other_owner_target1", "other_owner_target1_calls"
 #ifdef __cplusplus
 #include <vector>
-namespace ntw2_sweep {
+namespace kntwr_sweep {
 using U = uint32_t;
 constexpr U WordCount = 32;
 struct Agent;

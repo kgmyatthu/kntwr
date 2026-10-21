@@ -1,19 +1,19 @@
 #pragma once
 #include <stdint.h>
 
-// Site-18 storm census (--army-storm-census, ntw2_config::va_watch_flags NTW2_ARMY_STORM_CENSUS): performance data gathering only,
+// Site-18 storm census (--army-storm-census, kntwr_config::va_watch_flags KNTWR_ARMY_STORM_CENSUS): performance data gathering only,
 // no behaviour change. Question measured: what a site-18 tail storm (ARMY_UPDATE clone 0x580390 calling 0x581F30 per unit through
 // timed sites 101 (call 0x5804C2, main list) and 103 (call 0x5804FF, alternate list)) spends its 100-260 ms on, how many units take
 // the command/formation route per storm tick (one unit x 250 ms or 50 units x 5 ms), and which army/side they belong to.
 //
 // Hooks (runtime host data only): siteCallees[101]/[103] -> Unit (tick owner inside a routed epoch; every other caller runs the
 // native 0x581F30 directly). Inside the epoch the unit runs as the ARMY_UNIT clone (instruction-identical to 0x581F30 except its
-// bound call sites; see ntw2_runtime.cpp), whose preparation call 581FFB (-> 57F070), FSM call 58202E (-> 582530) and formation
+// bound call sites; see kntwr_runtime.cpp), whose preparation call 581FFB (-> 57F070), FSM call 58202E (-> 582530) and formation
 // update call 5820DE (-> 585D50) reach Call() inclusive QPC brackets. Two pinned .rdata slots (installed only with the census) reach
 // the route gates: 0x1325474 (0x581AE0, the per-tick execute of the class-1325470 assignment command, "R2") and 0x1331E74
 // (0x617510, the state-enter that builds that command on an order/FSM transition, "R1"). All native effects are unchanged and
-// authoritative; this module only READS native memory (ranges proven readable first, ntw2_region::Table, SEH bracketed by
-// ntw2::probeDepth) and writes its own row.
+// authoritative; this module only READS native memory (ranges proven readable first, kntwr_region::Table, SEH bracketed by
+// kntwr::probeDepth) and writes its own row.
 //
 // Route evidence [proven by disasm, analysis/army-storm-route-decode.md; StormDecode]: 0x581AE0 (ECX = C) calls 0x576B30 (fresh
 // terrain container 0x7F2D70, assignment kernel) iff byte [C+3C]==0 or (byte [F+278C]!=0 and dword [F+2788]==0), F = [C+4]; both
@@ -25,13 +25,13 @@
 // Per unit occurrence: cost = QPC of the clone call alone; every own read, bracket and bookkeeping QPC is subtracted and reported
 // as observer_us. Per tick (TickEnd, owner thread, from the tick trace writer): storm tick = site-18 us > 3 x the running median of
 // the previous 256 routed ticks that ran site 18 (no storm is declared before 16 samples exist); the ring is updated afterwards.
-// Trace slots 110/111 of the tick log carry four per-tick words (ntw2_runtime.h NTW2_TRACE_SITES).
+// Trace slots 110/111 of the tick log carry four per-tick words (kntwr_runtime.h KNTWR_TRACE_SITES).
 //
-// Row layout (ntw2_status::army_storm_words, NTW2_ARMY_STORM_WORDS == 128): header 12 words, storm aggregate 14, non-storm
+// Row layout (kntwr_status::army_storm_words, KNTWR_ARMY_STORM_WORDS == 128): header 12 words, storm aggregate 14, non-storm
 // aggregate 14, top-8 storm-tick table of 11 words each (largest site-18 us first). Aggregate word 0 is the largest single-unit us of that class of ticks (storm ticks = header storm_ticks; calm ticks are only roughly ticks - storm_ticks, because routed menu/loading ticks where site 18 never ran are in header ticks but not in the calm aggregate; exact per-tick counts live in the tick log; global max = max of the two). Header/aggregate/entry word meanings are the
 // Word / AggWord / EntryWord enums below. units/unit_us/route totals are the storm + non-storm sums (not repeated in the header).
 // Left out (word budget / unproven): per-unit member/command-count changes, R1 inclusive us, formation/prep call counts.
-#define NTW2_ARMY_STORM_LABELS \
+#define KNTWR_ARMY_STORM_LABELS \
  "version", "enabled", "ticks", "storm_ticks", \
  "median_site18_us", "storm_factor", "observer_us", "unreadable", \
  "sample_threshold_ms", "sample_admitted", "sample_rejected", "route_outside", \
@@ -65,8 +65,8 @@
  "top7_units_route_units", "top7_max_unit_us", "top7_max_ord_side", "top7_prep_us", \
  "top7_fsm_us", "top7_formation_us", "top7_r2_us", "top7_ge5ms_r2full_r1entries"
 #ifdef __cplusplus
-namespace ntw2_region { struct Table; }
-namespace ntw2_army_storm {
+namespace kntwr_region { struct Table; }
+namespace kntwr_army_storm {
 using U = uint32_t;
 constexpr U kVersion = 1;
 constexpr U kStormFactor = 3;     // storm tick: site-18 us > kStormFactor x running median
@@ -95,7 +95,7 @@ enum AggWord : U {
 enum EntryWord : U {
     ETick, ESite18Us, ESite34Us, EUnitsRoute, EMaxUnitUs, EMaxOrdSide, EPrepUs, EFsmUs, EFormationUs, ER2Us, ECounts
 };
-static_assert(WordCount == 128 && TopTable == 40 && kEntryWords == 11 && kTop == 8, "army storm status row geometry (NTW2_ARMY_STORM_WORDS)");
+static_assert(WordCount == 128 && TopTable == 40 && kEntryWords == 11 && kTop == 8, "army storm status row geometry (KNTWR_ARMY_STORM_WORDS)");
 constexpr U kWords = WordCount;
 constexpr U kSideUnproven = 0xFFFFu;
 
@@ -124,5 +124,5 @@ U Call(Bracket which, void* ecx, Native native);
 void TickEnd(U tick, U site18Us, U site34Us, U out[4]);
 // Copies the row; the sampler counters (profile gate admissions/rejections) come from the profile module.
 void Snapshot(U* words /*[kWords]*/, U sampleAdmitted, U sampleRejected);
-} // namespace ntw2_army_storm
+} // namespace kntwr_army_storm
 #endif

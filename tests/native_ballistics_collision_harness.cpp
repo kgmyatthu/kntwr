@@ -24,7 +24,7 @@
 //   topology must be able to disagree (mutated-topology-disagrees counter), which proves the test sees late reads.
 //
 //   CMake target native_ballistics_collision_harness (x86, C++20 /EHsc /O2 /arch:SSE2 /fp:precise /W4) linked with the shipped
-//      import-free object ntw2_ballistics_collision (native_ballistics_collision.cpp)
+//      import-free object kntwr_ballistics_collision (native_ballistics_collision.cpp)
 //   native_ballistics_collision_harness.exe reference-kit.bin worker-kit.bin native_worker_dispatch.dll [cases]
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX

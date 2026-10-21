@@ -5,14 +5,14 @@
 #include <stddef.h>
 #include <string.h>
 #include "native_unit_policy.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_unit_select.h"
 
-namespace ntw2_unit_policy {
+namespace kntwr_unit_policy {
 Occurrence g_occ;
 namespace {
 static_assert(sizeof(void*) == 4, "unit policy reads the Win32 game image");
-constexpr const char* kLabels[] = { NTW2_UNIT_POLICY_HEADER_LABELS };
+constexpr const char* kLabels[] = { KNTWR_UNIT_POLICY_HEADER_LABELS };
 static_assert(sizeof(kLabels) / sizeof(kLabels[0]) == kHeaderWords, "one label per header word");
 static_assert(offsetof(Occurrence, entity) == 0 && offsetof(Occurrence, unitIndex) == 4 && offsetof(Occurrence, mask) == 8 &&
               offsetof(Occurrence, unit) == 12 && offsetof(Occurrence, slot) == 16, "g_occ layout read by the BRAIN_U clones");
@@ -43,7 +43,7 @@ struct Unit {
 Storage* g_store;
 Unit g_units[kMaxUnits];
 Config g_cfg;
-ntw2_unit_select::Rules g_rules;
+kntwr_unit_select::Rules g_rules;
 U g_words[kHeaderWords];
 U g_unitCount, g_stage, g_generation, g_coreEntry, g_bruEntry;
 U g_observeLive, g_observeShadow; // mechanic bits whose provider has observe (Live / Shadow mode); 0 = no observe work
@@ -83,7 +83,7 @@ void RetireUnit(U ui) {
 // ---- selection ---------------------------------------------------------------------------------------------------------
 bool Accept(void*, U unit, U ordinal, U army) {
     U n, list, admissible;
-    if (g_rules.Qualify(unit, n, list, admissible) != ntw2_unit_select::RejectNone) { ++g_words[UnitsRejected]; return false; }
+    if (g_rules.Qualify(unit, n, list, admissible) != kntwr_unit_select::RejectNone) { ++g_words[UnitsRejected]; return false; }
     if (g_unitCount >= kMaxUnits) { RecordFault(FaultCapacity); ++g_words[UnitsRejected]; return false; }
     const U ui = g_unitCount++;
     Unit& u = g_units[ui];
@@ -96,7 +96,7 @@ bool Accept(void*, U unit, U ordinal, U army) {
 }
 bool SelectGuarded(U manager) {
     __try {
-        ntw2_unit_select::Scan(g_rules, manager, &Accept, nullptr, kMaxUnits);
+        kntwr_unit_select::Scan(g_rules, manager, &Accept, nullptr, kMaxUnits);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -162,7 +162,7 @@ void Disable(U code) {
 
 bool Bind(U imageBase, U* bindings) {
     if (!imageBase || !bindings) return false;
-    bindings[NTW2_BIND_U_OCC] = static_cast<U>(reinterpret_cast<uintptr_t>(&g_occ));
+    bindings[KNTWR_BIND_U_OCC] = static_cast<U>(reinterpret_cast<uintptr_t>(&g_occ));
     return true;
 }
 bool Started() { return g_started; }
@@ -185,7 +185,7 @@ bool Start(const Config& config) {
     if (D(g_rules.classVt + kRoutedFatigueSlot) != V(kFatigueFn) || D(g_rules.classVt + kRoutedFinalizeSlot) != V(kFinalizeFn))
         return false;
     g_coreEntry = V(kBrainStep);
-    g_bruEntry = config.cloneEntries ? config.cloneEntries[NTW2_CLONE_BRAIN_U] : 0;
+    g_bruEntry = config.cloneEntries ? config.cloneEntries[KNTWR_CLONE_BRAIN_U] : 0;
     if (!config.s0 && !g_bruEntry) return false;
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_frequency = f.QuadPart ? f.QuadPart : 1;
     g_words[Modes] = 0; g_observeLive = g_observeShadow = 0;
@@ -312,14 +312,14 @@ void AbandonOccurrence() {
 }
 void RunOccurrence(U entity, U cls, U original, const U* cloneEntries) {
     using Step = void (__thiscall*)(void*);
-    // The caller (ntw2_brain2::RunOccurrence) already holds the occurrence's SEH frame; none here.
+    // The caller (kntwr_brain2::RunOccurrence) already holds the occurrence's SEH frame; none here.
     if (cls != 0 || original != g_coreEntry || !BeginOccurrence(entity)) {
         reinterpret_cast<Step>(original)(reinterpret_cast<void*>(entity));
         if (g_occ.entity == entity) EndOccurrence(); // member of a non-live unit (shadow observe / clear); a stale g_occ
                                                      // left by an exception never matches another occurrence's entity
         return;
     }
-    reinterpret_cast<Step>(cloneEntries[NTW2_CLONE_BRAIN_U])(reinterpret_cast<void*>(entity));
+    reinterpret_cast<Step>(cloneEntries[KNTWR_CLONE_BRAIN_U])(reinterpret_cast<void*>(entity));
     EndOccurrence();
 }
 void Drain(U unitIndex, U mechanic, U code) {
@@ -346,4 +346,4 @@ bool UnitListStable(U unitIndex) {
         return hash == u.listHash;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-} // namespace ntw2_unit_policy
+} // namespace kntwr_unit_policy

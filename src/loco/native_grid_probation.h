@@ -1,9 +1,9 @@
 #pragma once
 #include <stdint.h>
 
-struct ntw2_clone_set;
+struct kntwr_clone_set;
 
-// --grid-probation (NTW2_LOCO_GRID_PROBATION): native soft-grid reader detector for relink retirement.
+// --grid-probation (KNTWR_LOCO_GRID_PROBATION): native soft-grid reader detector for relink retirement.
 //
 // The engine keeps dual-writing its own cell chains; nothing native is skipped or rerouted. The model+A4
 // header (620AD0: +0 cell-head array, +4 head count = rows << 10, +8 row shift, +C rows, +14 clamp) owns one
@@ -29,13 +29,13 @@ struct ntw2_clone_set;
 // in-flight handlers before clearing it, so a fault raised while the span was armed is still resolved and
 // resumed even when it is dispatched after retirement. A restored page re-faulting later was not armed by us
 // any more and is passed through (foreign_faults).
-namespace ntw2_grid_probation {
+namespace kntwr_grid_probation {
 using U = uint32_t;
 
 constexpr U kHeaderWords = 32, kCallers = 256, kRowWords = 8, kWords = kHeaderWords + kCallers * kRowWords;
 constexpr U kHeadSlack = 64;
 
-// Header words (NTW2_GRID_PROBATION_LABELS in ntw2_runtime.h has the same order).
+// Header words (KNTWR_GRID_PROBATION_LABELS in kntwr_runtime.h has the same order).
 enum Word : U {
     Version, Enabled, State, Isolated, Arms, WindowOpens, Traps, CellTraps,
     EdgeTraps, WriteTraps, RestoreFailures, ForeignFaults, CallersUsed, CallersDropped, ArmedPages, UncoveredBytes,
@@ -59,7 +59,7 @@ enum ThreadClass : U { ThreadTick, ThreadPool, ThreadAi, ThreadMain, ThreadOther
 struct Binding {
     U image_base, image_size;          // live image; image rows report preferred-base VAs (0x400000 + rva)
     U runtime_lo, runtime_hi;          // this DLL's image range
-    const ntw2_clone_set* clones;      // primary clone arena (lives until process exit once published)
+    const kntwr_clone_set* clones;      // primary clone arena (lives until process exit once published)
     volatile U* site;                  // timed-site tracker: site + 1, 0 outside sites
     volatile U* tick;                  // nonzero while a routed tick executes
     U (*thread_class)();               // ThreadClass of the calling thread; must not fault or block
@@ -71,7 +71,7 @@ bool Start(const Binding& binding);
 // Monitor thread, after the tick owner drained: retires the armed span (restore + graveyard + handler drain)
 // and marks the detector retired. The handler stays registered; counters stay for the final snapshot.
 void Stop();
-// Owner thread inside ntw2_loco::Stage. open=1 lifts protection for the owner's relink window; open=0 re-derives
+// Owner thread inside kntwr_loco::Stage. open=1 lifts protection for the owner's relink window; open=0 re-derives
 // the [manager]->+8->+A4 layout and re-arms. Never faults outward; refusals are counted and retried next close.
 void __cdecl Window(void* manager, U open);
 // True when a first-chance access violation lies in the currently armed span (crash capture must ignore it).

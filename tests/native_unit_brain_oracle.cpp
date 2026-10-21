@@ -1,6 +1,6 @@
 // Per-unit brain Stage A (native_unit_brain.h) on synthetic soldiers and units: no game image is needed.
 // Covers the decision extraction (unit-level inputs, signature, soldier fields, exception bits), readability proofs
-// without first-chance faults, the ntw2_brain2::RunWorklist observer seam (after each native step, duplicates, ==1
+// without first-chance faults, the kntwr_brain2::RunWorklist observer seam (after each native step, duplicates, ==1
 // filter, no native write), held/tick/exception accounting over consecutive stages, signature changes, strict
 // majority, the class vtable census and parallel-decide equivalence with inline decide.
 #include <windows.h>
@@ -13,7 +13,7 @@
 #include "native_unit_brain.h"
 #include "native_region_table.h"
 #include "native_brain2.h"
-using namespace ntw2_unit_brain;
+using namespace kntwr_unit_brain;
 
 namespace {
 U failures, checks;
@@ -99,11 +99,11 @@ void __stdcall ThreadDispatch(U pool, U fn, U chunks, void* context) {
         });
     for (auto& t : threads) t.join();
 }
-const ntw2_brain2::StageObserver kObserver = {&BeginStage, &Observe, &EndStage};
+const kntwr_brain2::StageObserver kObserver = {&BeginStage, &Observe, &EndStage};
 U FieldWord(const U* w, U field, U column) { return w[FieldWords + field * kFieldStride + column]; }
 
 void InputCases(World& w) {
-    ntw2_region::Table* table = new ntw2_region::Table(); table->Clear();
+    kntwr_region::Table* table = new kntwr_region::Table(); table->Clear();
     U q = 0, in[kInputs], again[kInputs];
     const U u = w.Unit();
     Check(ReadUnitInputs(u, *table, q, in), "unit inputs readable");
@@ -146,7 +146,7 @@ void InputCases(World& w) {
 }
 
 void SoldierCases(World& w) {
-    ntw2_region::Table* table = new ntw2_region::Table(); table->Clear();
+    kntwr_region::Table* table = new kntwr_region::Table(); table->Clear();
     U q = 0;
     Soldier s;
     const U unit = w.Unit(), other = w.Unit();
@@ -209,7 +209,7 @@ void SoldierCases(World& w) {
 
 U RunStage(U manager, std::vector<U>& list) {
     W(manager + 0x260, static_cast<U>(list.size())); W(manager + 0x264, Addr(list.data()));
-    ntw2_brain2::RunWorklist(manager, nullptr);
+    kntwr_brain2::RunWorklist(manager, nullptr);
     return 0;
 }
 
@@ -235,7 +235,7 @@ void StageCases(World& w) {
     RunStage(manager, list);
     plain.assign(w.arena.base, w.arena.base + w.arena.used);
     memcpy(w.arena.base, before.data(), before.size());
-    ntw2_brain2::SetStageObserver(&kObserver);
+    kntwr_brain2::SetStageObserver(&kObserver);
     RunStage(manager, list); // stage 1
     Check(!memcmp(w.arena.base, plain.data(), plain.size()), "observer and decide write no native byte");
     Check(R(a[0] + kStepCount) == 2 && R(inactive + kStepCount) == 0, "==1 filter and duplicate occurrence");
@@ -301,7 +301,7 @@ void StageCases(World& w) {
           FieldWord(words, Activity, TickDisagree) - FieldWord(prior, Activity, TickDisagree) == 1,
           "no-majority unit-stage counted as tick_none, neither agreement nor disagreement");
     Check(words[ObserveUs] >= prior[ObserveUs], "observe time accumulates");
-    ntw2_brain2::SetStageObserver(nullptr);
+    kntwr_brain2::SetStageObserver(nullptr);
     Reset();
     Snapshot(words);
     zero = true; for (U x : words) zero = zero && !x;
@@ -326,12 +326,12 @@ void ParallelCases(World& w) {
         memcpy(w.arena.base, before.data(), before.size());
         Check(Start({g_delta + 0x400000, mode ? &ThreadDispatch : nullptr, mode ? 3u : 0u, mode ? 3u : 0u}), "start");
         Reset();
-        ntw2_brain2::SetStageObserver(&kObserver);
+        kntwr_brain2::SetStageObserver(&kObserver);
         for (U stage = 0; stage < 4; ++stage) {
             if (stage == 2) for (U u = 0; u < 120; u += 9) W(units[u] + 0xAA0, 4);
             RunStage(manager, list);
         }
-        ntw2_brain2::SetStageObserver(nullptr);
+        kntwr_brain2::SetStageObserver(nullptr);
         Snapshot(mode ? poolWords : inlineWords);
         Stop();
     }

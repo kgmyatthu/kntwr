@@ -1,4 +1,4 @@
-// Oracle for src/ai/ntw2_spiral.{h,cpp} (--ai-spiral-census / --ai-spiral-cap-m) on a private relocated mapping of the owned image:
+// Oracle for src/ai/kntwr_spiral.{h,cpp} (--ai-spiral-census / --ai-spiral-cap-m) on a private relocated mapping of the owned image:
 //  * clone wiring: the four PS_* call groups reach the host forwarders, PS_7FCA40 still calls PS_7FCA90;
 //  * spiral: the forwarder path (PS_7FCA40 -> PS_7FCA90 -> SpiralProbe) equals native 0x7FCA40 byte for byte with N = 0 (candidate
 //    sequence, out record, return, x87/MXCSR), and with a cap N equals native 0x7FCA40 handed spec+0x24 = (float)N; not-found exactly
@@ -24,14 +24,14 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_spiral.h"
+#include "clones/kntwr_clones.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_spiral.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;
 using B=unsigned char;
-namespace sp=ntw2_spiral;
+namespace sp=kntwr_spiral;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
@@ -60,7 +60,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;
@@ -128,7 +128,7 @@ static bool Scope(U) { return inScope; }
 
 using Spiral3=U(__fastcall*)(U,U,U,U,U);
 using Ladder5=U(__fastcall*)(U,U,U,U,U,U,U);
-static ntw2_clone_set clones;
+static kntwr_clone_set clones;
 static sp::Targets targets;
 static void Configure(U cap) { sp::Configure(true,cap,targets); }
 
@@ -313,7 +313,7 @@ static void LadderCase(const std::vector<U>& t,U reject,bool clamp,U found,U cap
 static void TestLadder() {
     // Wiring of the clone chain.
     U t=0;
-    const U l=clones.entries[NTW2_CLONE_PS_6C71D0], s=clones.entries[NTW2_CLONE_PS_7FCA40], s90=clones.entries[NTW2_CLONE_PS_7FCA90], o=clones.entries[NTW2_CLONE_PS_6A95A0];
+    const U l=clones.entries[KNTWR_CLONE_PS_6C71D0], s=clones.entries[KNTWR_CLONE_PS_7FCA40], s90=clones.entries[KNTWR_CLONE_PS_7FCA90], o=clones.entries[KNTWR_CLONE_PS_6A95A0];
     Require(CloneCall(o,0x6A994F-0x6A95A0,t) && t==Fn(&sp::Ladder),"PS_6A95A0 0x6A994F calls the Ladder forwarder");
     Require(CloneCall(o,0x6A9699-0x6A95A0,t) && t==s,"PS_6A95A0 0x6A9699 still calls PS_7FCA40");
     for(U site:{0x6C7316u,0x6C7410u,0x6C77E2u}) Require(CloneCall(l,site-0x6C71D0,t) && t==Fn(&sp::LadderProbe),"PS_6C71D0 0x6CC730 calls -> LadderProbe");
@@ -393,18 +393,18 @@ static void TestFallback() {
 int main(int argc,char** argv) {
     if(argc!=2) { std::fprintf(stderr,"usage: native_spiral_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]);
-    U bindings[NTW2_BIND_COUNT];
+    U bindings[KNTWR_BIND_COUNT];
     for(U& b:bindings) b=A(At(0x6dca08)); // unreached bindings: valid image addresses, never executed here
-    bindings[NTW2_BIND_PS_LADDER]=Fn(&sp::Ladder);
-    bindings[NTW2_BIND_PS_LADDER_PROBE]=Fn(&sp::LadderProbe);
-    bindings[NTW2_BIND_PS_SPIRAL]=Fn(&sp::Spiral);
-    bindings[NTW2_BIND_PS_SPIRAL_PROBE]=Fn(&sp::SpiralProbe);
-    U detail=0; Require(ntw2_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
+    bindings[KNTWR_BIND_PS_LADDER]=Fn(&sp::Ladder);
+    bindings[KNTWR_BIND_PS_LADDER_PROBE]=Fn(&sp::LadderProbe);
+    bindings[KNTWR_BIND_PS_SPIRAL]=Fn(&sp::Spiral);
+    bindings[KNTWR_BIND_PS_SPIRAL_PROBE]=Fn(&sp::SpiralProbe);
+    U detail=0; Require(kntwr_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
     // Scripted world callees (after the clones copied their pinned sources).
     Jump(0x808040,Fn(&Fake808040)); Jump(0x7FCFF0,Fn(&Fake7FCFF0)); Jump(0x7F6ED0,Fn(&Fake7F6ED0)); Jump(0x6DA460,Fn(&Fake6DA460));
     Jump(0x6CC730,Fn(&FakeProbe)); Jump(0x74F400,Fn(&Fake74F400)); Jump(0x84B1D0,Fn(&Fake84B1D0));
     Require(FlushInstructionCache(GetCurrentProcess(),image,imageSize)!=0,"flush image");
-    targets={clones.entries[NTW2_CLONE_PS_6C71D0],clones.entries[NTW2_CLONE_PS_6CC730],clones.entries[NTW2_CLONE_PS_7FCA40],Fn(&Fake808040),
+    targets={clones.entries[KNTWR_CLONE_PS_6C71D0],clones.entries[KNTWR_CLONE_PS_6CC730],clones.entries[KNTWR_CLONE_PS_7FCA40],Fn(&Fake808040),
              A(At(0x7524A0)),Fn(&Fake826E80),&Scope};
     TestSpiral(); TestLadder(); TestFallback();
     std::printf("spiral cap oracle: %u checks\n",checks);

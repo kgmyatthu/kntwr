@@ -5,9 +5,9 @@
 #include <string.h>
 #include <algorithm>
 #include <new>
-#include "core/ntw2_guard.h"
+#include "core/kntwr_guard.h"
 
-namespace ntw2_army_storm {
+namespace kntwr_army_storm {
 namespace {
 using u64 = unsigned long long;
 constexpr U kRouteBytes = 0x40;             // C+3C
@@ -17,7 +17,7 @@ constexpr U kMaxAlliances = 32, kMaxArmies = 64;
 U D(U a) { return *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(a)); }
 U B(U a) { return *reinterpret_cast<const volatile uint8_t*>(static_cast<uintptr_t>(a)); }
 
-struct Storage { ntw2_region::Table table; };
+struct Storage { kntwr_region::Table table; };
 Storage* g_s;
 U g_sampleMs, g_inUnit, g_queries, g_root;
 LARGE_INTEGER g_frequency;
@@ -60,9 +60,9 @@ U Median() {
 struct RouteRead { bool ok, reach, full; };
 RouteRead ReadRoute2(U c) {
     RouteRead r = {};
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     t.Clear();
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         if (c && t.Readable(c, kRouteBytes, g_queries)) {
             r.ok = true;
@@ -75,7 +75,7 @@ RouteRead ReadRoute2(U c) {
             } else r.ok = false; // F unreadable: reach is only partly known
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { r = {}; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     return r;
 }
 
@@ -83,9 +83,9 @@ RouteRead ReadRoute2(U c) {
 U SideOf(U u) {
     U side = kSideUnproven;
     if (!g_root) return side;
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     t.Clear();
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         if (t.Readable(u + 0x1EC, 4, g_queries) && t.Readable(g_root + 0x84, 8, g_queries) && t.Readable(g_root + 0x2378, 4, g_queries)) {
             const U army = D(u + 0x1EC), n = D(g_root + 0x84), data = D(g_root + 0x88), special = D(g_root + 0x2378);
@@ -103,7 +103,7 @@ U SideOf(U u) {
                 }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { side = kSideUnproven; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     return side;
 }
 
@@ -262,4 +262,4 @@ void Snapshot(U* words, U sampleAdmitted, U sampleRejected) {
     if (!g_words[Enabled]) return;
     words[SampleAdmitted] = sampleAdmitted; words[SampleRejected] = sampleRejected;
 }
-} // namespace ntw2_army_storm
+} // namespace kntwr_army_storm

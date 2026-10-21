@@ -16,7 +16,7 @@
 #include "native_image_relocation.h"
 #include "native_env.h"
 #pragma fenv_access(on)
-namespace e=ntw2_env;
+namespace e=kntwr_env;
 using U=uint32_t; using B=uint8_t;
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];

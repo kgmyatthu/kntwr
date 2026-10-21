@@ -5,7 +5,7 @@
    it fits these bounds; otherwise the complete untouched native stage is used.
    C-compatible: launcher/main.c includes loco/native_loco.h for the label macros. */
 #ifdef __cplusplus
-namespace ntw2_workload {
+namespace kntwr_workload {
 struct Capacity {
     uint32_t primary;     // movement occurrence / primary collision index slots
     uint32_t records;     // primary + unique secondary grid records (upper bound)

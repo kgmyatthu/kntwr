@@ -1,6 +1,6 @@
 #include "native_move_node.h"
 #include "native_node_projection.h"
-#include "army/ntw2_mounted_officer.h"
+#include "army/kntwr_mounted_officer.h"
 #include <intrin.h>
 #include <xmmintrin.h>
 #pragma fenv_access(on)
@@ -10,7 +10,7 @@
 // step 819310..819389, deleting dtor 7EDD00..7EDD24 (exclusive ends).
 // All observations are owner-serial. No fake vtable, live writes, or duplicate
 // order/request transaction is used by this differential implementation.
-namespace ntw2_move_node {
+namespace kntwr_move_node {
 namespace {
 static_assert(sizeof(void*) == 4, "hot movement-node ABI is Win32");
 U imageBase, words[kWords], eventWords[kEventWords], sequence;
@@ -110,19 +110,19 @@ Reason AdjustDescriptor(U owner, const U reference[5], const U* entries, U outpu
     U group = Read<U>(owner + 0x1f0);
     if (!group) return Ready; // the complete 66AD00 no-group branch
     float dx = 0.0f, dz = 0.0f;
-    const bool officer = ntw2_mounted_officer::HasPlacement(owner);
+    const bool officer = kntwr_mounted_officer::HasPlacement(owner);
     if (!officer && !OriginalOffset(owner, group, dx, dz)) return NeedsColdAdjustment;
     U root = Read<U>(owner + 0x28), model = Read<U>(root + 8), query = Read<U>(model + 0xb4);
     float xyz[3];
     using Materialize = U (__thiscall*)(const U*, float*);
     reinterpret_cast<Materialize>(Native(0x80e9d0))(reference, xyz);
     float planar[2];
-    if (!officer || !ntw2_mounted_officer::Placement(owner, xyz, planar)) {
+    if (!officer || !kntwr_mounted_officer::Placement(owner, xyz, planar)) {
         if (officer && !OriginalOffset(owner, group, dx, dz)) return NeedsColdAdjustment;
         planar[0] = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dx), _mm_set_ss(xyz[0])));
         planar[1] = _mm_cvtss_f32(_mm_add_ss(_mm_set_ss(dz), _mm_set_ss(xyz[2])));
     }
-    if (!ntw2_node::projection::ProjectCertified(entries, query, output, planar, reference, 3, refusedTarget))
+    if (!kntwr_node::projection::ProjectCertified(entries, query, output, planar, reference, 3, refusedTarget))
         return NeedsProjection;
     if (projectionCalls) ++*projectionCalls;
     return Ready;
@@ -388,4 +388,4 @@ void After(U token) {
     }
     --depth;
 }
-} // namespace ntw2_move_node
+} // namespace kntwr_move_node

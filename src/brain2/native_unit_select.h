@@ -12,7 +12,7 @@
 // table, unit backlink +1F0 == the unit, no crew list (+66C), no enabled crew node 0x133AE34 and a registry serial +2C
 // below 2^20 (the gates' serial bitsets cover that range only). Every other member (officer/ensign classes, crew, foreign
 // backlink, serial out of range) stays native and is counted by the caller.
-namespace ntw2_unit_select {
+namespace kntwr_unit_select {
 using U = uint32_t;
 // Infantry class tables of the 13-table family (native-loco-consumer-seams.md 3.1) whose slots +08/+0C/+130/+134/+188/
 // +1A4/+1A8/+108/+B8/+FC equal 0x1333714's on the approved image (verified by Rules::Pin; a mismatching table is
@@ -61,4 +61,4 @@ struct Rules {
 // records seen in the registry (all of them, also after the limits). Not reentrant (file-static examined set).
 using AcceptFn = bool (*)(void* ctx, U unit, U ordinal, U army);
 U Scan(const Rules& rules, U manager, AcceptFn accept, void* ctx, U maxSelected);
-} // namespace ntw2_unit_select
+} // namespace kntwr_unit_select

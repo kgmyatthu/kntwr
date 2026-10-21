@@ -9,201 +9,201 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "ntw2_runtime.h"
+#include "kntwr_runtime.h"
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 
-static_assert(NTW2_TRACE_ABI==8u && NTW2_TRACE_ENTRIES==1024u, "trace ABI 8 ring contract");
-static_assert(NTW2_TRACE_SITES==112u && NTW2_TIMED_SITES==110u, "trace site capacity and populated range");
-static_assert(sizeof(ntw2_trace_entry)==944u, "trace ABI 8 entry layout");
-static_assert(sizeof(ntw2_trace_ring)==966688u, "trace ABI 8 ring layout");
-static_assert(offsetof(ntw2_trace_entry,site_us)==32u && offsetof(ntw2_trace_entry,site_calls)==480u &&
-              offsetof(ntw2_trace_entry,qpc_start_lo)==928u && offsetof(ntw2_trace_entry,qpc_end_lo)==936u,
+static_assert(KNTWR_TRACE_ABI==8u && KNTWR_TRACE_ENTRIES==1024u, "trace ABI 8 ring contract");
+static_assert(KNTWR_TRACE_SITES==112u && KNTWR_TIMED_SITES==110u, "trace site capacity and populated range");
+static_assert(sizeof(kntwr_trace_entry)==944u, "trace ABI 8 entry layout");
+static_assert(sizeof(kntwr_trace_ring)==966688u, "trace ABI 8 ring layout");
+static_assert(offsetof(kntwr_trace_entry,site_us)==32u && offsetof(kntwr_trace_entry,site_calls)==480u &&
+              offsetof(kntwr_trace_entry,qpc_start_lo)==928u && offsetof(kntwr_trace_entry,qpc_end_lo)==936u,
               "raw gate QPC fields preserve site offsets");
-static_assert(offsetof(ntw2_trace_ring,ring)==32u && offsetof(ntw2_trace_ring,qpc_freq_lo)==20u,
+static_assert(offsetof(kntwr_trace_ring,ring)==32u && offsetof(kntwr_trace_ring,qpc_freq_lo)==20u,
               "QPC frequency reuses trace header reserved words");
-static_assert(NTW2_PROFILE_ABI==8u && sizeof(ntw2_profile_status)==15748u &&
-              offsetof(ntw2_profile_status,main_modules)==10832u && NTW2_PROFILE_MODULE_COUNT==9,
+static_assert(KNTWR_PROFILE_ABI==8u && sizeof(kntwr_profile_status)==15748u &&
+              offsetof(kntwr_profile_status,main_modules)==10832u && KNTWR_PROFILE_MODULE_COUNT==9,
               "split tick phases preserve module counter offsets");
-static_assert(NTW2_PROFILE_MAIN_PHASES==4u && NTW2_PROFILE_INLINE_PHASES==3u &&
-              offsetof(ntw2_profile_status,main_start_tick_ms)==10948u &&
-              offsetof(ntw2_profile_status,main_rest)==10952u && sizeof(ntw2_profile_phase_status)==184u,
+static_assert(KNTWR_PROFILE_MAIN_PHASES==4u && KNTWR_PROFILE_INLINE_PHASES==3u &&
+              offsetof(kntwr_profile_status,main_start_tick_ms)==10948u &&
+              offsetof(kntwr_profile_status,main_rest)==10952u && sizeof(kntwr_profile_phase_status)==184u,
               "A2 and A1 chains are appended after ABI 6");
-static_assert(NTW2_PROFILE_START_TICK_MS==25u && NTW2_PROFILE_POST_TICK_MS==40u &&
-              NTW2_PROFILE_PHASE_A1==0 && NTW2_PROFILE_PHASE_B==1 &&
-              NTW2_PROFILE_PHASE_C==2 && NTW2_PROFILE_PHASE_A2==3,
+static_assert(KNTWR_PROFILE_START_TICK_MS==25u && KNTWR_PROFILE_POST_TICK_MS==40u &&
+              KNTWR_PROFILE_PHASE_A1==0 && KNTWR_PROFILE_PHASE_B==1 &&
+              KNTWR_PROFILE_PHASE_C==2 && KNTWR_PROFILE_PHASE_A2==3,
               "split-phase timing and histogram storage order");
-static constexpr uint32_t kSiteCallees[]=NTW2_SITE_CALLEE_VAS;
-static_assert(sizeof(kSiteCallees)/sizeof(kSiteCallees[0])==NTW2_TIMED_SITES, "all timed sites have labels");
+static constexpr uint32_t kSiteCallees[]=KNTWR_SITE_CALLEE_VAS;
+static_assert(sizeof(kSiteCallees)/sizeof(kSiteCallees[0])==KNTWR_TIMED_SITES, "all timed sites have labels");
 static_assert(kSiteCallees[18]==0x580390u && kSiteCallees[95]==0x55CB50u &&
               kSiteCallees[101]==0x581F30u && kSiteCallees[105]==0x579AD0u, "army direct callees appended without renumbering");
 static_assert(kSiteCallees[106]==0x81A790u && kSiteCallees[107]==0x56EE80u &&
               kSiteCallees[108]==0x81A670u && kSiteCallees[109]==0x44u, "collision sites append without renumbering");
-static_assert(NTW2_AI_ASYNC==0x08u && (NTW2_ALL&NTW2_AI_ASYNC)==NTW2_AI_ASYNC && !(NTW2_PROFILE&NTW2_AI_ASYNC), "ai feature bit");
-static_assert(NTW2_AI_CTRL==0x800u && !(NTW2_ALL&NTW2_AI_CTRL) && (NTW2_VALID_MASK&NTW2_AI_CTRL), "controller feature is opt-in");
-static_assert(NTW2_AI_BUDGET_EMA==0x1000u && NTW2_AI_SAFE_PARK==0x2000u &&
-              !(NTW2_ALL&(NTW2_AI_BUDGET_EMA|NTW2_AI_SAFE_PARK)) &&
-              !(NTW2_VALID_MASK&(NTW2_AI_BUDGET_EMA|NTW2_AI_SAFE_PARK)),
+static_assert(KNTWR_AI_ASYNC==0x08u && (KNTWR_ALL&KNTWR_AI_ASYNC)==KNTWR_AI_ASYNC && !(KNTWR_PROFILE&KNTWR_AI_ASYNC), "ai feature bit");
+static_assert(KNTWR_AI_CTRL==0x800u && !(KNTWR_ALL&KNTWR_AI_CTRL) && (KNTWR_VALID_MASK&KNTWR_AI_CTRL), "controller feature is opt-in");
+static_assert(KNTWR_AI_BUDGET_EMA==0x1000u && KNTWR_AI_SAFE_PARK==0x2000u &&
+              !(KNTWR_ALL&(KNTWR_AI_BUDGET_EMA|KNTWR_AI_SAFE_PARK)) &&
+              !(KNTWR_VALID_MASK&(KNTWR_AI_BUDGET_EMA|KNTWR_AI_SAFE_PARK)),
               "retired policy bits cannot bypass same-tick completion");
-static_assert(NTW2_BRAIN==0x40u && !(NTW2_ALL&NTW2_BRAIN) && !(NTW2_PROFILE&NTW2_BRAIN), "brain feature bit is opt-in and outside NTW2_ALL");
-static_assert(NTW2_BRAIN2==0x80u && !(NTW2_ALL&NTW2_BRAIN2) && (NTW2_VALID_MASK&NTW2_BRAIN2)==NTW2_BRAIN2 && !(NTW2_PROFILE&NTW2_BRAIN2) && !(NTW2_BRAIN&NTW2_BRAIN2), "brain2 feature bit is an opt-in simulation feature, valid but outside NTW2_ALL");
-static_assert(NTW2_VISUAL==0x100u && (NTW2_ALL&NTW2_VISUAL)==NTW2_VISUAL && !(NTW2_PROFILE&NTW2_VISUAL) && !(NTW2_BRAIN2&NTW2_VISUAL), "visual feature bit is a main-thread feature inside the shipping set NTW2_ALL");
-static_assert(NTW2_COLLIDE==0x200u && (NTW2_ALL&NTW2_COLLIDE)==NTW2_COLLIDE && (NTW2_VALID_MASK&NTW2_COLLIDE)==NTW2_COLLIDE, "collide is part of the shipping set");
-static_assert(NTW2_COLLIDE_LOD==0x400u && !(NTW2_ALL&NTW2_COLLIDE_LOD) &&
-              (NTW2_VALID_MASK&NTW2_COLLIDE_LOD)==NTW2_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
-static_assert(NTW2_ALL==(NTW2_AI_ASYNC|NTW2_BATCH64|NTW2_VISUAL|NTW2_PROFILE|NTW2_LOCO|NTW2_COLLIDE), "NTW2_ALL is exactly the shipping set batch64,ai,visual,profile,loco,collide");
-static_assert(NTW2_BRAIN_SLOTS==23u && NTW2_BRAIN_FAMILIES==5u && NTW2_BRAIN_SITE_FIRST==46u && NTW2_BRAIN_SITES==49u && NTW2_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(ntw2_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+NTW2_ALLOCATOR_WORDS+2+NTW2_BRAIN_STATE_WORDS+NTW2_COLLISION_WORDS+NTW2_COLLIDE_WORDS+NTW2_BRAIN2_WORDS+NTW2_COLLIDE_LOD_WORDS+16+NTW2_AI_SLICE_BUDGET_WORDS+8+NTW2_LOCO_WORDS+NTW2_LOCO_GATE_WORDS+NTW2_LOCO_SERVICE_WORDS+NTW2_LOCO_GRID_WORDS+NTW2_LOCO_PARALLEL_WORDS+NTW2_SWEEP_WORDS+NTW2_RESOLVE_WORDS+NTW2_ENV_WORDS+NTW2_ENV_TARGET_WORDS+NTW2_RESOLVE_FRAME_WORDS+NTW2_LOCO_OWNED_WORDS+NTW2_LOCO_OWNED_DETAIL_WORDS+NTW2_LOCO_OWNED_PHASE_WORDS+NTW2_LOCO_OWNED_LOAD_WORDS+NTW2_LOCO_GRID_V2_WORDS+NTW2_COLLIDE_SOURCE_WORDS+NTW2_MEMORY_WORDS+NTW2_AI_COMPLETION_WORDS+NTW2_AI_CENSUS_WORDS+NTW2_BRAIN2_CENSUS_WORDS+NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS+NTW2_FIRE_WORDS+NTW2_BRAIN2_ROUTE_WORDS+NTW2_FIRE_COMMIT_WORDS+NTW2_MOVE_NODE_WORDS+NTW2_MOVE_NODE_EVENT_WORDS+NTW2_BRAIN2_NODE_TARGET_WORDS+(NTW2_IDLE_NODE_CLASSES+NTW2_ACTION_NODE_CLASSES)*(NTW2_NODE_WORDS+NTW2_NODE_EVENT_WORDS)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS+NTW2_BRAIN_WORKER_WORDS+NTW2_AI_ASYNC2_WORDS+NTW2_BRAIN_WORKER_PHASE_WORDS+NTW2_BRAIN_UNIT_WORDS+NTW2_COLLIDE_CONTACT_WORDS+NTW2_GRID_PROBATION_WORDS+NTW2_AI_ASYNC2_ROUTE_WORDS+NTW2_ARMY_UNIT_WORDS+NTW2_VA_WATCH_WORDS+NTW2_ARMY_B0_WORDS+NTW2_ARMY_STORM_WORDS+NTW2_BRAIN_S0_WORDS+NTW2_AI_DEFERRED_WORDS+NTW2_AI_CTRL_REUSE_WORDS+NTW2_LOCO_RELINK_WORDS+NTW2_LOCO_CW_WORDS+NTW2_LOCO_GRID_BUILD_WORDS+NTW2_BRAIN_UNIT_POLICY_WORDS+NTW2_AI_PREPASS_CENSUS_WORDS+NTW2_AI_PREPASS_WORDS+NTW2_AI_SPIRAL_WORDS+NTW2_ARMY_SOLVER_WORDS+NTW2_ALLOC_CENSUS_WORDS+NTW2_ARENA_WORDS+NTW2_OVERLAY_WORDS+NTW2_MOUNTED_OFFICER_WORDS+NTW2_ENGAGE_CENSUS_WORDS+NTW2_ANIM_GUARD_WORDS)+sizeof(ntw2_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census and anim guard words without changing existing words");
-static_assert(NTW2_AI_SLICE_BUDGET_WORDS==8u && offsetof(ntw2_status,ai_slice_budget_words)==offsetof(ntw2_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
-static_assert(offsetof(ntw2_status,ai_park_words)==offsetof(ntw2_status,ai_slice_budget_words)+NTW2_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
-              offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(ntw2_status,loco_words), "parking refusal histogram keeps its shipped offset");
-static_assert(NTW2_LOCO_WORDS==48u && offsetof(ntw2_status,loco_words)==offsetof(ntw2_status,ai_park_words)+8*sizeof(uint32_t) &&
-              offsetof(ntw2_status,loco_words)+NTW2_LOCO_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_gate_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_words)==48*sizeof(uint32_t), "loco telemetry preserves its shipped layout");
-static_assert(NTW2_LOCO_GATE_WORDS==48u &&
-              offsetof(ntw2_status,loco_gate_words)+NTW2_LOCO_GATE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_service_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_gate_words)==48*sizeof(uint32_t), "loco all-gates telemetry preserves its shipped layout");
-static_assert(NTW2_LOCO_SERVICE_WORDS==40u &&
-              offsetof(ntw2_status,loco_service_words)+NTW2_LOCO_SERVICE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_grid_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_service_words)==40*sizeof(uint32_t), "loco service timing telemetry preserves its shipped layout");
-static_assert(NTW2_LOCO_GRID_WORDS==32u &&
-              offsetof(ntw2_status,loco_grid_words)+NTW2_LOCO_GRID_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_parallel_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_grid_words)==32*sizeof(uint32_t), "loco grid telemetry is append-only");
-static_assert(NTW2_LOCO_PARALLEL_WORDS==32u &&
-              offsetof(ntw2_status,loco_parallel_words)+NTW2_LOCO_PARALLEL_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,sweep_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_parallel_words)==32*sizeof(uint32_t), "loco parallel telemetry is append-only");
-static_assert(NTW2_SWEEP_WORDS==32u && NTW2_RESOLVE_WORDS==32u &&
-              offsetof(ntw2_status,sweep_words)+32*sizeof(uint32_t)==offsetof(ntw2_status,resolve_words) &&
-              offsetof(ntw2_status,resolve_words)+32*sizeof(uint32_t)==offsetof(ntw2_status,env_words) &&
-              offsetof(ntw2_status,env_words)+32*sizeof(uint32_t)==offsetof(ntw2_status,env_target_words) &&
-              offsetof(ntw2_status,env_target_words)+64*sizeof(uint32_t)==offsetof(ntw2_status,resolve_frame_words) &&
-              offsetof(ntw2_status,resolve_frame_words)+4*sizeof(uint32_t)==offsetof(ntw2_status,loco_owned_words) &&
-              NTW2_LOCO_OWNED_WORDS==32u && offsetof(ntw2_status,loco_owned_words)+NTW2_LOCO_OWNED_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_owned_detail_words) &&
-              NTW2_LOCO_OWNED_DETAIL_WORDS==16u && offsetof(ntw2_status,loco_owned_detail_words)+NTW2_LOCO_OWNED_DETAIL_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_owned_phase_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_owned_detail_words)==16*sizeof(uint32_t) &&
-              NTW2_LOCO_OWNED_PHASE_WORDS==32u && offsetof(ntw2_status,loco_owned_phase_words)+NTW2_LOCO_OWNED_PHASE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_owned_load_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_owned_phase_words)==32*sizeof(uint32_t) &&
-              NTW2_LOCO_OWNED_LOAD_WORDS==16u && offsetof(ntw2_status,loco_owned_load_words)+NTW2_LOCO_OWNED_LOAD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_grid_v2_words) &&
-              sizeof(((ntw2_status*)nullptr)->loco_owned_load_words)==16*sizeof(uint32_t), "shadow, owned, detail, phase and load arrays append without moving existing words");
-static_assert(NTW2_LOCO_GRID_V2_WORDS==16u && NTW2_COLLIDE_SOURCE_WORDS==4u &&
-              offsetof(ntw2_status,loco_grid_v2_words)+16*sizeof(uint32_t)==offsetof(ntw2_status,collide_source_words) &&
-              offsetof(ntw2_status,collide_source_words)+4*sizeof(uint32_t)==offsetof(ntw2_status,memory_words),
+static_assert(KNTWR_BRAIN==0x40u && !(KNTWR_ALL&KNTWR_BRAIN) && !(KNTWR_PROFILE&KNTWR_BRAIN), "brain feature bit is opt-in and outside KNTWR_ALL");
+static_assert(KNTWR_BRAIN2==0x80u && !(KNTWR_ALL&KNTWR_BRAIN2) && (KNTWR_VALID_MASK&KNTWR_BRAIN2)==KNTWR_BRAIN2 && !(KNTWR_PROFILE&KNTWR_BRAIN2) && !(KNTWR_BRAIN&KNTWR_BRAIN2), "brain2 feature bit is an opt-in simulation feature, valid but outside KNTWR_ALL");
+static_assert(KNTWR_VISUAL==0x100u && (KNTWR_ALL&KNTWR_VISUAL)==KNTWR_VISUAL && !(KNTWR_PROFILE&KNTWR_VISUAL) && !(KNTWR_BRAIN2&KNTWR_VISUAL), "visual feature bit is a main-thread feature inside the shipping set KNTWR_ALL");
+static_assert(KNTWR_COLLIDE==0x200u && (KNTWR_ALL&KNTWR_COLLIDE)==KNTWR_COLLIDE && (KNTWR_VALID_MASK&KNTWR_COLLIDE)==KNTWR_COLLIDE, "collide is part of the shipping set");
+static_assert(KNTWR_COLLIDE_LOD==0x400u && !(KNTWR_ALL&KNTWR_COLLIDE_LOD) &&
+              (KNTWR_VALID_MASK&KNTWR_COLLIDE_LOD)==KNTWR_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
+static_assert(KNTWR_ALL==(KNTWR_AI_ASYNC|KNTWR_BATCH64|KNTWR_VISUAL|KNTWR_PROFILE|KNTWR_LOCO|KNTWR_COLLIDE), "KNTWR_ALL is exactly the shipping set batch64,ai,visual,profile,loco,collide");
+static_assert(KNTWR_BRAIN_SLOTS==23u && KNTWR_BRAIN_FAMILIES==5u && KNTWR_BRAIN_SITE_FIRST==46u && KNTWR_BRAIN_SITES==49u && KNTWR_BRAIN_WORDS==512u, "brain profiling geometry");
+static_assert(sizeof(kntwr_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+KNTWR_ALLOCATOR_WORDS+2+KNTWR_BRAIN_STATE_WORDS+KNTWR_COLLISION_WORDS+KNTWR_COLLIDE_WORDS+KNTWR_BRAIN2_WORDS+KNTWR_COLLIDE_LOD_WORDS+16+KNTWR_AI_SLICE_BUDGET_WORDS+8+KNTWR_LOCO_WORDS+KNTWR_LOCO_GATE_WORDS+KNTWR_LOCO_SERVICE_WORDS+KNTWR_LOCO_GRID_WORDS+KNTWR_LOCO_PARALLEL_WORDS+KNTWR_SWEEP_WORDS+KNTWR_RESOLVE_WORDS+KNTWR_ENV_WORDS+KNTWR_ENV_TARGET_WORDS+KNTWR_RESOLVE_FRAME_WORDS+KNTWR_LOCO_OWNED_WORDS+KNTWR_LOCO_OWNED_DETAIL_WORDS+KNTWR_LOCO_OWNED_PHASE_WORDS+KNTWR_LOCO_OWNED_LOAD_WORDS+KNTWR_LOCO_GRID_V2_WORDS+KNTWR_COLLIDE_SOURCE_WORDS+KNTWR_MEMORY_WORDS+KNTWR_AI_COMPLETION_WORDS+KNTWR_AI_CENSUS_WORDS+KNTWR_BRAIN2_CENSUS_WORDS+KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS+KNTWR_FIRE_WORDS+KNTWR_BRAIN2_ROUTE_WORDS+KNTWR_FIRE_COMMIT_WORDS+KNTWR_MOVE_NODE_WORDS+KNTWR_MOVE_NODE_EVENT_WORDS+KNTWR_BRAIN2_NODE_TARGET_WORDS+(KNTWR_IDLE_NODE_CLASSES+KNTWR_ACTION_NODE_CLASSES)*(KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS+KNTWR_BRAIN_WORKER_WORDS+KNTWR_AI_ASYNC2_WORDS+KNTWR_BRAIN_WORKER_PHASE_WORDS+KNTWR_BRAIN_UNIT_WORDS+KNTWR_COLLIDE_CONTACT_WORDS+KNTWR_GRID_PROBATION_WORDS+KNTWR_AI_ASYNC2_ROUTE_WORDS+KNTWR_ARMY_UNIT_WORDS+KNTWR_VA_WATCH_WORDS+KNTWR_ARMY_B0_WORDS+KNTWR_ARMY_STORM_WORDS+KNTWR_BRAIN_S0_WORDS+KNTWR_AI_DEFERRED_WORDS+KNTWR_AI_CTRL_REUSE_WORDS+KNTWR_LOCO_RELINK_WORDS+KNTWR_LOCO_CW_WORDS+KNTWR_LOCO_GRID_BUILD_WORDS+KNTWR_BRAIN_UNIT_POLICY_WORDS+KNTWR_AI_PREPASS_CENSUS_WORDS+KNTWR_AI_PREPASS_WORDS+KNTWR_AI_SPIRAL_WORDS+KNTWR_ARMY_SOLVER_WORDS+KNTWR_ALLOC_CENSUS_WORDS+KNTWR_ARENA_WORDS+KNTWR_OVERLAY_WORDS+KNTWR_MOUNTED_OFFICER_WORDS+KNTWR_ENGAGE_CENSUS_WORDS+KNTWR_ANIM_GUARD_WORDS)+sizeof(kntwr_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census and anim guard words without changing existing words");
+static_assert(KNTWR_AI_SLICE_BUDGET_WORDS==8u && offsetof(kntwr_status,ai_slice_budget_words)==offsetof(kntwr_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
+static_assert(offsetof(kntwr_status,ai_park_words)==offsetof(kntwr_status,ai_slice_budget_words)+KNTWR_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
+              offsetof(kntwr_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(kntwr_status,loco_words), "parking refusal histogram keeps its shipped offset");
+static_assert(KNTWR_LOCO_WORDS==48u && offsetof(kntwr_status,loco_words)==offsetof(kntwr_status,ai_park_words)+8*sizeof(uint32_t) &&
+              offsetof(kntwr_status,loco_words)+KNTWR_LOCO_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_gate_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_words)==48*sizeof(uint32_t), "loco telemetry preserves its shipped layout");
+static_assert(KNTWR_LOCO_GATE_WORDS==48u &&
+              offsetof(kntwr_status,loco_gate_words)+KNTWR_LOCO_GATE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_service_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_gate_words)==48*sizeof(uint32_t), "loco all-gates telemetry preserves its shipped layout");
+static_assert(KNTWR_LOCO_SERVICE_WORDS==40u &&
+              offsetof(kntwr_status,loco_service_words)+KNTWR_LOCO_SERVICE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_grid_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_service_words)==40*sizeof(uint32_t), "loco service timing telemetry preserves its shipped layout");
+static_assert(KNTWR_LOCO_GRID_WORDS==32u &&
+              offsetof(kntwr_status,loco_grid_words)+KNTWR_LOCO_GRID_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_parallel_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_grid_words)==32*sizeof(uint32_t), "loco grid telemetry is append-only");
+static_assert(KNTWR_LOCO_PARALLEL_WORDS==32u &&
+              offsetof(kntwr_status,loco_parallel_words)+KNTWR_LOCO_PARALLEL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,sweep_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_parallel_words)==32*sizeof(uint32_t), "loco parallel telemetry is append-only");
+static_assert(KNTWR_SWEEP_WORDS==32u && KNTWR_RESOLVE_WORDS==32u &&
+              offsetof(kntwr_status,sweep_words)+32*sizeof(uint32_t)==offsetof(kntwr_status,resolve_words) &&
+              offsetof(kntwr_status,resolve_words)+32*sizeof(uint32_t)==offsetof(kntwr_status,env_words) &&
+              offsetof(kntwr_status,env_words)+32*sizeof(uint32_t)==offsetof(kntwr_status,env_target_words) &&
+              offsetof(kntwr_status,env_target_words)+64*sizeof(uint32_t)==offsetof(kntwr_status,resolve_frame_words) &&
+              offsetof(kntwr_status,resolve_frame_words)+4*sizeof(uint32_t)==offsetof(kntwr_status,loco_owned_words) &&
+              KNTWR_LOCO_OWNED_WORDS==32u && offsetof(kntwr_status,loco_owned_words)+KNTWR_LOCO_OWNED_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_owned_detail_words) &&
+              KNTWR_LOCO_OWNED_DETAIL_WORDS==16u && offsetof(kntwr_status,loco_owned_detail_words)+KNTWR_LOCO_OWNED_DETAIL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_owned_phase_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_owned_detail_words)==16*sizeof(uint32_t) &&
+              KNTWR_LOCO_OWNED_PHASE_WORDS==32u && offsetof(kntwr_status,loco_owned_phase_words)+KNTWR_LOCO_OWNED_PHASE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_owned_load_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_owned_phase_words)==32*sizeof(uint32_t) &&
+              KNTWR_LOCO_OWNED_LOAD_WORDS==16u && offsetof(kntwr_status,loco_owned_load_words)+KNTWR_LOCO_OWNED_LOAD_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_grid_v2_words) &&
+              sizeof(((kntwr_status*)nullptr)->loco_owned_load_words)==16*sizeof(uint32_t), "shadow, owned, detail, phase and load arrays append without moving existing words");
+static_assert(KNTWR_LOCO_GRID_V2_WORDS==16u && KNTWR_COLLIDE_SOURCE_WORDS==4u &&
+              offsetof(kntwr_status,loco_grid_v2_words)+16*sizeof(uint32_t)==offsetof(kntwr_status,collide_source_words) &&
+              offsetof(kntwr_status,collide_source_words)+4*sizeof(uint32_t)==offsetof(kntwr_status,memory_words),
               "Stage C telemetry keeps all shipped offsets");
-static_assert(offsetof(ntw2_status,memory_words)+NTW2_MEMORY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_completion_words) &&
-              offsetof(ntw2_status,ai_completion_words)+NTW2_AI_COMPLETION_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,grid_census) &&
-              offsetof(ntw2_status,grid_census)+sizeof(ntw2_grid_census_status)==offsetof(ntw2_status,ai_census_words) &&
-              offsetof(ntw2_status,ai_census_words)+NTW2_AI_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain2_census_words) &&
-              offsetof(ntw2_status,brain2_census_words)+NTW2_BRAIN2_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,node_words) &&
-              offsetof(ntw2_status,node_words)+NTW2_NODE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,node_event_words) &&
-              offsetof(ntw2_status,node_event_words)+NTW2_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,fire_words) &&
-              offsetof(ntw2_status,fire_words)+NTW2_FIRE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain2_route_words) &&
-              offsetof(ntw2_status,brain2_route_words)+NTW2_BRAIN2_ROUTE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,fire_commit_words) &&
-              offsetof(ntw2_status,fire_commit_words)+NTW2_FIRE_COMMIT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,move_node_words) &&
-              offsetof(ntw2_status,move_node_words)+NTW2_MOVE_NODE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,move_node_event_words) &&
-              offsetof(ntw2_status,move_node_event_words)+NTW2_MOVE_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain2_node_target_words) &&
-              offsetof(ntw2_status,brain2_node_target_words)+NTW2_BRAIN2_NODE_TARGET_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,idle_node_words) &&
-              offsetof(ntw2_status,idle_node_words)+NTW2_IDLE_NODE_CLASSES*NTW2_NODE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,idle_node_event_words) &&
-              offsetof(ntw2_status,idle_node_event_words)+NTW2_IDLE_NODE_CLASSES*NTW2_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,action_node_words) &&
-              offsetof(ntw2_status,action_node_words)+NTW2_ACTION_NODE_CLASSES*NTW2_NODE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,action_node_event_words) &&
-              offsetof(ntw2_status,action_node_event_words)+NTW2_ACTION_NODE_CLASSES*NTW2_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain2_unknown_site_words) &&
-              offsetof(ntw2_status,brain2_unknown_site_words)+NTW2_BRAIN2_UNKNOWN_SITE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_worker_words) &&
-              offsetof(ntw2_status,brain_worker_words)+NTW2_BRAIN_WORKER_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_async2_words) &&
-              offsetof(ntw2_status,ai_async2_words)+NTW2_AI_ASYNC2_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_worker_phase_words) &&
-              offsetof(ntw2_status,brain_worker_phase_words)+NTW2_BRAIN_WORKER_PHASE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_unit_words) &&
-              offsetof(ntw2_status,brain_unit_words)+NTW2_BRAIN_UNIT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,collide_contact_words) && NTW2_BRAIN_UNIT_WORDS==176u &&
-              offsetof(ntw2_status,collide_contact_words)+NTW2_COLLIDE_CONTACT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,grid_probation_words) && NTW2_COLLIDE_CONTACT_WORDS==48u &&
-              offsetof(ntw2_status,grid_probation_words)+NTW2_GRID_PROBATION_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_async2_route_words) && NTW2_GRID_PROBATION_WORDS==32u+256u*8u &&
-              offsetof(ntw2_status,ai_async2_route_words)+NTW2_AI_ASYNC2_ROUTE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_unit_words) && NTW2_AI_ASYNC2_ROUTE_WORDS==65u &&
-              offsetof(ntw2_status,army_unit_words)+NTW2_ARMY_UNIT_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,va_watch_words) && NTW2_ARMY_UNIT_WORDS==192u &&
-              offsetof(ntw2_status,va_watch_words)+NTW2_VA_WATCH_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_b0_words) && NTW2_VA_WATCH_WORDS==64u &&
-              offsetof(ntw2_status,army_b0_words)+NTW2_ARMY_B0_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_storm_words) && NTW2_ARMY_B0_WORDS==160u &&
-              offsetof(ntw2_status,army_storm_words)+NTW2_ARMY_STORM_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_s0_words) && NTW2_ARMY_STORM_WORDS==128u &&
-              offsetof(ntw2_status,brain_s0_words)+NTW2_BRAIN_S0_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_deferred_words) && NTW2_BRAIN_S0_WORDS==560u &&
-              offsetof(ntw2_status,ai_deferred_words)+NTW2_AI_DEFERRED_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_ctrl_reuse_words) && NTW2_AI_DEFERRED_WORDS==64u &&
-              offsetof(ntw2_status,ai_ctrl_reuse_words)+NTW2_AI_CTRL_REUSE_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_relink_words) && NTW2_AI_CTRL_REUSE_WORDS==32u &&
-              offsetof(ntw2_status,loco_relink_words)+NTW2_LOCO_RELINK_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_cw_words) && NTW2_LOCO_RELINK_WORDS==32u &&
-              offsetof(ntw2_status,loco_cw_words)+NTW2_LOCO_CW_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,loco_grid_build_words) && NTW2_LOCO_CW_WORDS==32u &&
-              offsetof(ntw2_status,loco_grid_build_words)+NTW2_LOCO_GRID_BUILD_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,brain_unit_policy_words) && NTW2_LOCO_GRID_BUILD_WORDS==16u &&
-              offsetof(ntw2_status,brain_unit_policy_words)+NTW2_BRAIN_UNIT_POLICY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_census_words) && NTW2_BRAIN_UNIT_POLICY_WORDS==256u &&
-              offsetof(ntw2_status,ai_prepass_census_words)+NTW2_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_prepass_words) && NTW2_AI_PREPASS_CENSUS_WORDS==82u &&
-              offsetof(ntw2_status,ai_prepass_words)+NTW2_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,ai_spiral_words) && NTW2_AI_PREPASS_WORDS==60u && NTW2_AI_POLY_WORDS==32u && NTW2_AI_RECORD_TEST_WORDS==28u &&
-              offsetof(ntw2_status,ai_spiral_words)+NTW2_AI_SPIRAL_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,army_solver_words) && NTW2_AI_SPIRAL_WORDS==32u &&
-              offsetof(ntw2_status,army_solver_words)+NTW2_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,alloc_census_words) && NTW2_ARMY_SOLVER_WORDS==519u &&
-              offsetof(ntw2_status,alloc_census_words)+NTW2_ALLOC_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,arena_words) && NTW2_ALLOC_CENSUS_WORDS==1056u &&
-              offsetof(ntw2_status,arena_words)+NTW2_ARENA_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,overlay_words) && NTW2_ARENA_WORDS==32u &&
-              offsetof(ntw2_status,overlay_words)+NTW2_OVERLAY_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,mounted_officer_words) && NTW2_OVERLAY_WORDS==16u &&
-              offsetof(ntw2_status,mounted_officer_words)+NTW2_MOUNTED_OFFICER_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,engage_census_words) && NTW2_MOUNTED_OFFICER_WORDS==16u &&
-              offsetof(ntw2_status,engage_census_words)+NTW2_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==offsetof(ntw2_status,anim_guard_words) && NTW2_ENGAGE_CENSUS_WORDS==6832u && NTW2_ENGAGE_CENSUS==0x80000u &&
-              offsetof(ntw2_status,anim_guard_words)+NTW2_ANIM_GUARD_WORDS*sizeof(uint32_t)==sizeof(ntw2_status) && NTW2_ANIM_GUARD_WORDS==8u &&
-              NTW2_AI_CTRL_FLAGS_VALID==0x1F0Fu &&
-              NTW2_AI_POLY_SHADOW==0x4u && NTW2_AI_POLY==0x8u && NTW2_AI_SPIRAL_CENSUS==0x10u && NTW2_AI_SPIRAL_CAP_SHIFT==16u &&
-              NTW2_AI_RECORD_TEST_SHADOW==0x20u && NTW2_AI_RECORD_TEST==0x40u && NTW2_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
-              NTW2_AI_ASYNC2==0x20000u && !(NTW2_ALL&NTW2_AI_ASYNC2) && (NTW2_VALID_MASK&NTW2_AI_ASYNC2)==NTW2_AI_ASYNC2,
+static_assert(offsetof(kntwr_status,memory_words)+KNTWR_MEMORY_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_completion_words) &&
+              offsetof(kntwr_status,ai_completion_words)+KNTWR_AI_COMPLETION_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,grid_census) &&
+              offsetof(kntwr_status,grid_census)+sizeof(kntwr_grid_census_status)==offsetof(kntwr_status,ai_census_words) &&
+              offsetof(kntwr_status,ai_census_words)+KNTWR_AI_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain2_census_words) &&
+              offsetof(kntwr_status,brain2_census_words)+KNTWR_BRAIN2_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,node_words) &&
+              offsetof(kntwr_status,node_words)+KNTWR_NODE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,node_event_words) &&
+              offsetof(kntwr_status,node_event_words)+KNTWR_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,fire_words) &&
+              offsetof(kntwr_status,fire_words)+KNTWR_FIRE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain2_route_words) &&
+              offsetof(kntwr_status,brain2_route_words)+KNTWR_BRAIN2_ROUTE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,fire_commit_words) &&
+              offsetof(kntwr_status,fire_commit_words)+KNTWR_FIRE_COMMIT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,move_node_words) &&
+              offsetof(kntwr_status,move_node_words)+KNTWR_MOVE_NODE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,move_node_event_words) &&
+              offsetof(kntwr_status,move_node_event_words)+KNTWR_MOVE_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain2_node_target_words) &&
+              offsetof(kntwr_status,brain2_node_target_words)+KNTWR_BRAIN2_NODE_TARGET_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,idle_node_words) &&
+              offsetof(kntwr_status,idle_node_words)+KNTWR_IDLE_NODE_CLASSES*KNTWR_NODE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,idle_node_event_words) &&
+              offsetof(kntwr_status,idle_node_event_words)+KNTWR_IDLE_NODE_CLASSES*KNTWR_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,action_node_words) &&
+              offsetof(kntwr_status,action_node_words)+KNTWR_ACTION_NODE_CLASSES*KNTWR_NODE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,action_node_event_words) &&
+              offsetof(kntwr_status,action_node_event_words)+KNTWR_ACTION_NODE_CLASSES*KNTWR_NODE_EVENT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain2_unknown_site_words) &&
+              offsetof(kntwr_status,brain2_unknown_site_words)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain_worker_words) &&
+              offsetof(kntwr_status,brain_worker_words)+KNTWR_BRAIN_WORKER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_async2_words) &&
+              offsetof(kntwr_status,ai_async2_words)+KNTWR_AI_ASYNC2_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain_worker_phase_words) &&
+              offsetof(kntwr_status,brain_worker_phase_words)+KNTWR_BRAIN_WORKER_PHASE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain_unit_words) &&
+              offsetof(kntwr_status,brain_unit_words)+KNTWR_BRAIN_UNIT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,collide_contact_words) && KNTWR_BRAIN_UNIT_WORDS==176u &&
+              offsetof(kntwr_status,collide_contact_words)+KNTWR_COLLIDE_CONTACT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,grid_probation_words) && KNTWR_COLLIDE_CONTACT_WORDS==48u &&
+              offsetof(kntwr_status,grid_probation_words)+KNTWR_GRID_PROBATION_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_async2_route_words) && KNTWR_GRID_PROBATION_WORDS==32u+256u*8u &&
+              offsetof(kntwr_status,ai_async2_route_words)+KNTWR_AI_ASYNC2_ROUTE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_unit_words) && KNTWR_AI_ASYNC2_ROUTE_WORDS==65u &&
+              offsetof(kntwr_status,army_unit_words)+KNTWR_ARMY_UNIT_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,va_watch_words) && KNTWR_ARMY_UNIT_WORDS==192u &&
+              offsetof(kntwr_status,va_watch_words)+KNTWR_VA_WATCH_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_b0_words) && KNTWR_VA_WATCH_WORDS==64u &&
+              offsetof(kntwr_status,army_b0_words)+KNTWR_ARMY_B0_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_storm_words) && KNTWR_ARMY_B0_WORDS==160u &&
+              offsetof(kntwr_status,army_storm_words)+KNTWR_ARMY_STORM_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain_s0_words) && KNTWR_ARMY_STORM_WORDS==128u &&
+              offsetof(kntwr_status,brain_s0_words)+KNTWR_BRAIN_S0_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_deferred_words) && KNTWR_BRAIN_S0_WORDS==560u &&
+              offsetof(kntwr_status,ai_deferred_words)+KNTWR_AI_DEFERRED_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_ctrl_reuse_words) && KNTWR_AI_DEFERRED_WORDS==64u &&
+              offsetof(kntwr_status,ai_ctrl_reuse_words)+KNTWR_AI_CTRL_REUSE_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_relink_words) && KNTWR_AI_CTRL_REUSE_WORDS==32u &&
+              offsetof(kntwr_status,loco_relink_words)+KNTWR_LOCO_RELINK_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_cw_words) && KNTWR_LOCO_RELINK_WORDS==32u &&
+              offsetof(kntwr_status,loco_cw_words)+KNTWR_LOCO_CW_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,loco_grid_build_words) && KNTWR_LOCO_CW_WORDS==32u &&
+              offsetof(kntwr_status,loco_grid_build_words)+KNTWR_LOCO_GRID_BUILD_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,brain_unit_policy_words) && KNTWR_LOCO_GRID_BUILD_WORDS==16u &&
+              offsetof(kntwr_status,brain_unit_policy_words)+KNTWR_BRAIN_UNIT_POLICY_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_prepass_census_words) && KNTWR_BRAIN_UNIT_POLICY_WORDS==256u &&
+              offsetof(kntwr_status,ai_prepass_census_words)+KNTWR_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_prepass_words) && KNTWR_AI_PREPASS_CENSUS_WORDS==82u &&
+              offsetof(kntwr_status,ai_prepass_words)+KNTWR_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_spiral_words) && KNTWR_AI_PREPASS_WORDS==60u && KNTWR_AI_POLY_WORDS==32u && KNTWR_AI_RECORD_TEST_WORDS==28u &&
+              offsetof(kntwr_status,ai_spiral_words)+KNTWR_AI_SPIRAL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_solver_words) && KNTWR_AI_SPIRAL_WORDS==32u &&
+              offsetof(kntwr_status,army_solver_words)+KNTWR_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,alloc_census_words) && KNTWR_ARMY_SOLVER_WORDS==519u &&
+              offsetof(kntwr_status,alloc_census_words)+KNTWR_ALLOC_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,arena_words) && KNTWR_ALLOC_CENSUS_WORDS==1056u &&
+              offsetof(kntwr_status,arena_words)+KNTWR_ARENA_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,overlay_words) && KNTWR_ARENA_WORDS==32u &&
+              offsetof(kntwr_status,overlay_words)+KNTWR_OVERLAY_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,mounted_officer_words) && KNTWR_OVERLAY_WORDS==16u &&
+              offsetof(kntwr_status,mounted_officer_words)+KNTWR_MOUNTED_OFFICER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,engage_census_words) && KNTWR_MOUNTED_OFFICER_WORDS==16u &&
+              offsetof(kntwr_status,engage_census_words)+KNTWR_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,anim_guard_words) && KNTWR_ENGAGE_CENSUS_WORDS==6832u && KNTWR_ENGAGE_CENSUS==0x80000u &&
+              offsetof(kntwr_status,anim_guard_words)+KNTWR_ANIM_GUARD_WORDS*sizeof(uint32_t)==sizeof(kntwr_status) && KNTWR_ANIM_GUARD_WORDS==8u &&
+              KNTWR_AI_CTRL_FLAGS_VALID==0x1F0Fu &&
+              KNTWR_AI_POLY_SHADOW==0x4u && KNTWR_AI_POLY==0x8u && KNTWR_AI_SPIRAL_CENSUS==0x10u && KNTWR_AI_SPIRAL_CAP_SHIFT==16u &&
+              KNTWR_AI_RECORD_TEST_SHADOW==0x20u && KNTWR_AI_RECORD_TEST==0x40u && KNTWR_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
+              KNTWR_AI_ASYNC2==0x20000u && !(KNTWR_ALL&KNTWR_AI_ASYNC2) && (KNTWR_VALID_MASK&KNTWR_AI_ASYNC2)==KNTWR_AI_ASYNC2,
               "class shadow and target rows append after the existing fire commit tail");
-static_assert(NTW2_ARMY_UNIT_SHADOW==0x40000u && !(NTW2_ALL&NTW2_ARMY_UNIT_SHADOW) &&
-              (NTW2_VALID_MASK&NTW2_ARMY_UNIT_SHADOW)==NTW2_ARMY_UNIT_SHADOW && !(NTW2_ARMY_UNIT_SHADOW&NTW2_PROFILE),
+static_assert(KNTWR_ARMY_UNIT_SHADOW==0x40000u && !(KNTWR_ALL&KNTWR_ARMY_UNIT_SHADOW) &&
+              (KNTWR_VALID_MASK&KNTWR_ARMY_UNIT_SHADOW)==KNTWR_ARMY_UNIT_SHADOW && !(KNTWR_ARMY_UNIT_SHADOW&KNTWR_PROFILE),
               "army unit shadow is its own opt-in observation bit outside the shipping set");
-static_assert(!(NTW2_VALID_MASK&0x80000u),"the retired puppet probe mask bit stays refused");
-static_assert(NTW2_AI_CENSUS==0x10000u && !(NTW2_ALL&NTW2_AI_CENSUS) && (NTW2_VALID_MASK&NTW2_AI_CENSUS)==NTW2_AI_CENSUS &&
-              !(NTW2_AI_CENSUS&(NTW2_PROFILE|NTW2_GRID_CENSUS)) && NTW2_AI_CENSUS_WORDS==768u,
+static_assert(!(KNTWR_VALID_MASK&0x80000u),"the retired puppet probe mask bit stays refused");
+static_assert(KNTWR_AI_CENSUS==0x10000u && !(KNTWR_ALL&KNTWR_AI_CENSUS) && (KNTWR_VALID_MASK&KNTWR_AI_CENSUS)==KNTWR_AI_CENSUS &&
+              !(KNTWR_AI_CENSUS&(KNTWR_PROFILE|KNTWR_GRID_CENSUS)) && KNTWR_AI_CENSUS_WORDS==768u,
               "ai census is its own opt-in bit outside the shipping set");
-static_assert(NTW2_GRID_CENSUS==0x8000u && !(NTW2_ALL&NTW2_GRID_CENSUS) &&
-              (NTW2_VALID_MASK&NTW2_GRID_CENSUS)==NTW2_GRID_CENSUS && !(NTW2_GRID_CENSUS&NTW2_PROFILE),
+static_assert(KNTWR_GRID_CENSUS==0x8000u && !(KNTWR_ALL&KNTWR_GRID_CENSUS) &&
+              (KNTWR_VALID_MASK&KNTWR_GRID_CENSUS)==KNTWR_GRID_CENSUS && !(KNTWR_GRID_CENSUS&KNTWR_PROFILE),
               "grid census is independent of PROFILE and off in the shipping set");
-static_assert(NTW2_GRID_READERS==64u && NTW2_GRID_EDGES==512u &&
-              NTW2_GRID_SITES==113u && NTW2_GRID_UNKNOWN_SITE==112u &&
-              NTW2_GRID_PHASES==4u && NTW2_GRID_THREADS==3u,
+static_assert(KNTWR_GRID_READERS==64u && KNTWR_GRID_EDGES==512u &&
+              KNTWR_GRID_SITES==113u && KNTWR_GRID_UNKNOWN_SITE==112u &&
+              KNTWR_GRID_PHASES==4u && KNTWR_GRID_THREADS==3u,
               "grid census reader, edge and attribution capacities are bounded");
-static_assert(sizeof(ntw2_grid_reader_status)==1008u && sizeof(ntw2_grid_edge_status)==32u &&
-              sizeof(ntw2_grid_census_status)==80936u &&
-              offsetof(ntw2_grid_census_status,readers)==40u &&
-              offsetof(ntw2_grid_census_status,edges)==64552u &&
-              offsetof(ntw2_grid_reader_status,calls_phase)==48u &&
-              offsetof(ntw2_grid_reader_status,calls_site)==104u,
+static_assert(sizeof(kntwr_grid_reader_status)==1008u && sizeof(kntwr_grid_edge_status)==32u &&
+              sizeof(kntwr_grid_census_status)==80936u &&
+              offsetof(kntwr_grid_census_status,readers)==40u &&
+              offsetof(kntwr_grid_census_status,edges)==64552u &&
+              offsetof(kntwr_grid_reader_status,calls_phase)==48u &&
+              offsetof(kntwr_grid_reader_status,calls_site)==104u,
               "grid census v1 is a fixed-width append-only status payload");
-static_assert(NTW2_LOCO==0x4000u && (NTW2_ALL&NTW2_LOCO)==NTW2_LOCO && (NTW2_VALID_MASK&NTW2_LOCO)==NTW2_LOCO &&
-              !(NTW2_LOCO&(NTW2_BRAIN|NTW2_BRAIN2|NTW2_COLLIDE|NTW2_COLLIDE_LOD)), "loco is part of the shipping set NTW2_ALL");
-static_assert(offsetof(ntw2_status,ai_ctrl_words)==offsetof(ntw2_status,collide_lod_words)+NTW2_COLLIDE_LOD_WORDS*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->ai_ctrl_words)==16*sizeof(uint32_t), "controller counters preserve all previous offsets");
-static_assert(offsetof(ntw2_status,ai_slice_words)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80), "slice counters preserve all previous offsets");
-static_assert(offsetof(ntw2_status,ai_validation_words)==offsetof(ntw2_status,ai_slice_words)+32, "validation counters preserve all previous offsets");
-static_assert(offsetof(ntw2_status,visual_words)==offsetof(ntw2_status,ai_validation_words)+32 && sizeof(((ntw2_status*)nullptr)->visual_words)==32*sizeof(uint32_t), "visual words are appended after validation counters");
-static_assert(offsetof(ntw2_status,allocator_words)==offsetof(ntw2_status,visual_words)+32*sizeof(uint32_t), "allocator words preserve visual offsets");
-static_assert(offsetof(ntw2_status,ai_slice_site_words)==offsetof(ntw2_status,allocator_words)+NTW2_ALLOCATOR_WORDS*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->ai_slice_site_words)==2*sizeof(uint32_t), "slice-location counters preserve all previous offsets");
-static_assert(offsetof(ntw2_status,brain_state_words)==offsetof(ntw2_status,ai_slice_site_words)+2*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->brain_state_words)==288*sizeof(uint32_t), "brain census preserves all previous offsets");
-static_assert(NTW2_BRAIN_STATE_BUCKETS==64 && NTW2_BRAIN_SUBSTATE_BUCKETS==80 &&
-              NTW2_BRAIN_STATE_COUNTS==16 && NTW2_BRAIN_SUBSTATE_COUNTS==80 &&
-              NTW2_BRAIN_TRANSITION_COUNTS==160 && NTW2_BRAIN_TRANSITION_UNITS==224, "brain census histogram geometry");
-static_assert(offsetof(ntw2_status,collision_words)==offsetof(ntw2_status,brain_state_words)+NTW2_BRAIN_STATE_WORDS*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->collision_words)==32*sizeof(uint32_t), "collision census preserves all previous offsets");
-static_assert(offsetof(ntw2_status,collide_words)==offsetof(ntw2_status,collision_words)+NTW2_COLLISION_WORDS*sizeof(uint32_t) &&
-              NTW2_COLLIDE_WORDS==61u && sizeof(((ntw2_status*)nullptr)->collide_words)==61*sizeof(uint32_t),
+static_assert(KNTWR_LOCO==0x4000u && (KNTWR_ALL&KNTWR_LOCO)==KNTWR_LOCO && (KNTWR_VALID_MASK&KNTWR_LOCO)==KNTWR_LOCO &&
+              !(KNTWR_LOCO&(KNTWR_BRAIN|KNTWR_BRAIN2|KNTWR_COLLIDE|KNTWR_COLLIDE_LOD)), "loco is part of the shipping set KNTWR_ALL");
+static_assert(offsetof(kntwr_status,ai_ctrl_words)==offsetof(kntwr_status,collide_lod_words)+KNTWR_COLLIDE_LOD_WORDS*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->ai_ctrl_words)==16*sizeof(uint32_t), "controller counters preserve all previous offsets");
+static_assert(offsetof(kntwr_status,ai_slice_words)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80), "slice counters preserve all previous offsets");
+static_assert(offsetof(kntwr_status,ai_validation_words)==offsetof(kntwr_status,ai_slice_words)+32, "validation counters preserve all previous offsets");
+static_assert(offsetof(kntwr_status,visual_words)==offsetof(kntwr_status,ai_validation_words)+32 && sizeof(((kntwr_status*)nullptr)->visual_words)==32*sizeof(uint32_t), "visual words are appended after validation counters");
+static_assert(offsetof(kntwr_status,allocator_words)==offsetof(kntwr_status,visual_words)+32*sizeof(uint32_t), "allocator words preserve visual offsets");
+static_assert(offsetof(kntwr_status,ai_slice_site_words)==offsetof(kntwr_status,allocator_words)+KNTWR_ALLOCATOR_WORDS*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->ai_slice_site_words)==2*sizeof(uint32_t), "slice-location counters preserve all previous offsets");
+static_assert(offsetof(kntwr_status,brain_state_words)==offsetof(kntwr_status,ai_slice_site_words)+2*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->brain_state_words)==288*sizeof(uint32_t), "brain census preserves all previous offsets");
+static_assert(KNTWR_BRAIN_STATE_BUCKETS==64 && KNTWR_BRAIN_SUBSTATE_BUCKETS==80 &&
+              KNTWR_BRAIN_STATE_COUNTS==16 && KNTWR_BRAIN_SUBSTATE_COUNTS==80 &&
+              KNTWR_BRAIN_TRANSITION_COUNTS==160 && KNTWR_BRAIN_TRANSITION_UNITS==224, "brain census histogram geometry");
+static_assert(offsetof(kntwr_status,collision_words)==offsetof(kntwr_status,brain_state_words)+KNTWR_BRAIN_STATE_WORDS*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->collision_words)==32*sizeof(uint32_t), "collision census preserves all previous offsets");
+static_assert(offsetof(kntwr_status,collide_words)==offsetof(kntwr_status,collision_words)+KNTWR_COLLISION_WORDS*sizeof(uint32_t) &&
+              KNTWR_COLLIDE_WORDS==61u && sizeof(((kntwr_status*)nullptr)->collide_words)==61*sizeof(uint32_t),
               "collision solver appends diagnostics, then shaped-pair/thread/sub-timer words, without moving earlier fields");
-static_assert(NTW2_BRAIN2_WORDS==48u && offsetof(ntw2_status,brain2_words)==offsetof(ntw2_status,collide_words)+NTW2_COLLIDE_WORDS*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->brain2_words)==48*sizeof(uint32_t) &&
-              offsetof(ntw2_status,brain2_reason_words)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512) &&
-              offsetof(ntw2_status,brain2_gate_words)==offsetof(ntw2_status,brain2_reason_words)+32*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->brain2_reason_words)==32*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->brain2_gate_words)==80*sizeof(uint32_t),
+static_assert(KNTWR_BRAIN2_WORDS==48u && offsetof(kntwr_status,brain2_words)==offsetof(kntwr_status,collide_words)+KNTWR_COLLIDE_WORDS*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->brain2_words)==48*sizeof(uint32_t) &&
+              offsetof(kntwr_status,brain2_reason_words)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512) &&
+              offsetof(kntwr_status,brain2_gate_words)==offsetof(kntwr_status,brain2_reason_words)+32*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->brain2_reason_words)==32*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->brain2_gate_words)==80*sizeof(uint32_t),
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
-static_assert(offsetof(ntw2_status,collide_lod_words)==offsetof(ntw2_status,brain2_words)+NTW2_BRAIN2_WORDS*sizeof(uint32_t) &&
-              sizeof(((ntw2_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(NTW2_ABI==2u && sizeof(ntw2_config)==64 && offsetof(ntw2_config,ai_prepass_flags)==60 && offsetof(ntw2_config,ai_ctrl_flags)==56 && offsetof(ntw2_config,ai_deferred)==52 && offsetof(ntw2_config,va_watch_flags)==48 && NTW2_VA_WATCH==1u && NTW2_VA_WATCH_FLAGS_VALID==(NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK|NTW2_TICK_PCORE|NTW2_TICK_CORE_AB|NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW|NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE|NTW2_ALLOC_FIX|NTW2_MOUNTED_OFFICER|NTW2_MOUNTED_OFFICER_WIDEN|NTW2_ENGAGE_CENSUS|NTW2_FORMATION_CENSUS|NTW2_VA_FLOOR_MASK|NTW2_VA_HOLE_MASK) && NTW2_FORMATION_CENSUS==0x100000u && NTW2_ARMY_STORM_CENSUS==2u && NTW2_ARMY_STORM_SAMPLE_MASK==0xFF00u && NTW2_TICK_PCORE==4u && NTW2_TICK_CORE_AB==8u && NTW2_ARMY_SOLVER_MEMO==0x10u && NTW2_ARMY_SOLVER_SHADOW==0x20u && NTW2_ALLOC_CENSUS==0x40u && NTW2_ARENA_RELEASE==0x80u && NTW2_HEAP_OPTIMIZE==0x10000u && NTW2_ALLOC_FIX==0x200000u && NTW2_VA_FLOOR_SHIFT==22u && NTW2_VA_HOLE_SHIFT==27u && offsetof(ntw2_config,collide_lod_m)==32 && offsetof(ntw2_config,loco_flags)==36 &&
-              offsetof(ntw2_config,collide_flags)==44 && NTW2_COLLIDE_CONTACT_SHADOW==1u && NTW2_COLLIDE_CONTACT_WORKERS==2u &&
-              NTW2_COLLIDE_FLAGS_VALID==3u &&
-              offsetof(ntw2_config,brain_flags)==40 && NTW2_BRAIN2_VERSION==2u &&
-              NTW2_BRAIN_CENSUS==1u && NTW2_BRAIN_TIMING==2u &&
-              NTW2_BRAIN_NODE_SHADOW==4u && NTW2_BRAIN_FIRE_SHADOW==8u && NTW2_BRAIN_PARALLEL==16u &&
-              NTW2_BRAIN_FINALIZER_SHADOW==32u && NTW2_BRAIN_QUIET==64u && NTW2_BRAIN_UNIT_SHADOW==128u && NTW2_BRAIN_S0==256u &&
-              NTW2_BRAIN_UNIT_FATIGUE==512u && NTW2_BRAIN_UNIT_FATIGUE_SHADOW==1024u && NTW2_BRAIN_UNIT_POSTURE==2048u &&
-              NTW2_BRAIN_UNIT_POSTURE_SHADOW==4096u && NTW2_BRAIN_UNIT_ENGAGE==8192u && NTW2_BRAIN_UNIT_ENGAGE_SHADOW==16384u &&
-              NTW2_BRAIN_LOCALITY==32768u && NTW2_BRAIN_LOCALITY_WARM==65536u && NTW2_BRAIN_LOCALITY_PREFETCH==131072u &&
-              NTW2_BRAIN_LOCALITY_PREFETCH2==262144u && NTW2_BRAIN_LOCALITY_MARK==524288u && NTW2_BRAIN_FLAGS_VALID==1048575u,
+static_assert(offsetof(kntwr_status,collide_lod_words)==offsetof(kntwr_status,brain2_words)+KNTWR_BRAIN2_WORDS*sizeof(uint32_t) &&
+              sizeof(((kntwr_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
+static_assert(KNTWR_ABI==2u && sizeof(kntwr_config)==64 && offsetof(kntwr_config,ai_prepass_flags)==60 && offsetof(kntwr_config,ai_ctrl_flags)==56 && offsetof(kntwr_config,ai_deferred)==52 && offsetof(kntwr_config,va_watch_flags)==48 && KNTWR_VA_WATCH==1u && KNTWR_VA_WATCH_FLAGS_VALID==(KNTWR_VA_WATCH|KNTWR_ARMY_STORM_CENSUS|KNTWR_ARMY_STORM_SAMPLE_MASK|KNTWR_TICK_PCORE|KNTWR_TICK_CORE_AB|KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW|KNTWR_ALLOC_CENSUS|KNTWR_ARENA_RELEASE|KNTWR_HEAP_OPTIMIZE|KNTWR_ALLOC_FIX|KNTWR_MOUNTED_OFFICER|KNTWR_MOUNTED_OFFICER_WIDEN|KNTWR_ENGAGE_CENSUS|KNTWR_FORMATION_CENSUS|KNTWR_VA_FLOOR_MASK|KNTWR_VA_HOLE_MASK) && KNTWR_FORMATION_CENSUS==0x100000u && KNTWR_ARMY_STORM_CENSUS==2u && KNTWR_ARMY_STORM_SAMPLE_MASK==0xFF00u && KNTWR_TICK_PCORE==4u && KNTWR_TICK_CORE_AB==8u && KNTWR_ARMY_SOLVER_MEMO==0x10u && KNTWR_ARMY_SOLVER_SHADOW==0x20u && KNTWR_ALLOC_CENSUS==0x40u && KNTWR_ARENA_RELEASE==0x80u && KNTWR_HEAP_OPTIMIZE==0x10000u && KNTWR_ALLOC_FIX==0x200000u && KNTWR_VA_FLOOR_SHIFT==22u && KNTWR_VA_HOLE_SHIFT==27u && offsetof(kntwr_config,collide_lod_m)==32 && offsetof(kntwr_config,loco_flags)==36 &&
+              offsetof(kntwr_config,collide_flags)==44 && KNTWR_COLLIDE_CONTACT_SHADOW==1u && KNTWR_COLLIDE_CONTACT_WORKERS==2u &&
+              KNTWR_COLLIDE_FLAGS_VALID==3u &&
+              offsetof(kntwr_config,brain_flags)==40 && KNTWR_BRAIN2_VERSION==2u &&
+              KNTWR_BRAIN_CENSUS==1u && KNTWR_BRAIN_TIMING==2u &&
+              KNTWR_BRAIN_NODE_SHADOW==4u && KNTWR_BRAIN_FIRE_SHADOW==8u && KNTWR_BRAIN_PARALLEL==16u &&
+              KNTWR_BRAIN_FINALIZER_SHADOW==32u && KNTWR_BRAIN_QUIET==64u && KNTWR_BRAIN_UNIT_SHADOW==128u && KNTWR_BRAIN_S0==256u &&
+              KNTWR_BRAIN_UNIT_FATIGUE==512u && KNTWR_BRAIN_UNIT_FATIGUE_SHADOW==1024u && KNTWR_BRAIN_UNIT_POSTURE==2048u &&
+              KNTWR_BRAIN_UNIT_POSTURE_SHADOW==4096u && KNTWR_BRAIN_UNIT_ENGAGE==8192u && KNTWR_BRAIN_UNIT_ENGAGE_SHADOW==16384u &&
+              KNTWR_BRAIN_LOCALITY==32768u && KNTWR_BRAIN_LOCALITY_WARM==65536u && KNTWR_BRAIN_LOCALITY_PREFETCH==131072u &&
+              KNTWR_BRAIN_LOCALITY_PREFETCH2==262144u && KNTWR_BRAIN_LOCALITY_MARK==524288u && KNTWR_BRAIN_FLAGS_VALID==1048575u,
               "brain flags append without moving existing configuration fields");
-static_assert((NTW2_COLLIDE_CENSUS&NTW2_COLLIDE_LOD_METRES_MASK)==0 &&
-              (NTW2_COLLIDE_CENSUS|NTW2_COLLIDE_LOD_METRES_MASK)==UINT32_MAX, "census flag keeps collide_lod_m self-contained");
+static_assert((KNTWR_COLLIDE_CENSUS&KNTWR_COLLIDE_LOD_METRES_MASK)==0 &&
+              (KNTWR_COLLIDE_CENSUS|KNTWR_COLLIDE_LOD_METRES_MASK)==UINT32_MAX, "census flag keeps collide_lod_m self-contained");
 
 using U=uint32_t;
 static uint8_t* image;
@@ -214,7 +214,7 @@ static HMODULE WINAPI TestModule(LPCWSTR name) { return name ? realModule(name) 
 static U A(const void* p) { return static_cast<U>(reinterpret_cast<uintptr_t>(p)); }
 static void Check(bool ok,const char* what) { ++checks; if(!ok) { ++failures; fprintf(stderr,"FAIL %s (%lu)\n",what,GetLastError()); } }
 static bool InRuntime(U address);
-static bool AiEventWorker(const ntw2_status& s) {
+static bool AiEventWorker(const kntwr_status& s) {
     if(s.ai_slice_words[6] || !s.ai_slice_words[7]) return false;
     HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME,FALSE,s.ai_slice_words[7]);
     if(!thread) return false;
@@ -287,22 +287,22 @@ static bool Replace(U* cell,U value) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(cell),static_cast<LONG>(value));
     return VirtualProtect(cell,4,old,&ignored)!=FALSE;
 }
-static bool ReadState(volatile ntw2_status* state,ntw2_status& out) {
+static bool ReadState(volatile kntwr_status* state,kntwr_status& out) {
     for(unsigned i=0;i<1000;++i) {
         const U before=static_cast<U>(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&state->sequence),0,0));
         if(before&1) { if(i>=8) Sleep(0); continue; } // writer in progress (may be preempted mid-copy): yield instead of hot-spinning
-        memcpy(&out,const_cast<const ntw2_status*>(state),sizeof(out));
+        memcpy(&out,const_cast<const kntwr_status*>(state),sizeof(out));
         const U after=static_cast<U>(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&state->sequence),0,0));
         if(before==after && !(after&1)) return true;
     }
     return false;
 }
-static ntw2_activation_boundary_fn activationBoundary;
+static kntwr_activation_boundary_fn activationBoundary;
 static U activationBoundaries;
-static void PumpActivation(const ntw2_status& state) {
+static void PumpActivation(const kntwr_status& state) {
     // The fixture owns this synthetic model exclusively; production calls the
     // identical seam from TickGate before executing the native tick.
-    if (state.phase==NTW2_ACTIVATING && activationBoundary) {
+    if (state.phase==KNTWR_ACTIVATING && activationBoundary) {
         Check(activationBoundary(reinterpret_cast<void*>(state.model+4))==0,"foreign model cannot consume an activation request");
         if (activationBoundary(reinterpret_cast<void*>(state.model))) {
             Check(state.active_mask==0,"capture completes before any feature epoch is enabled");
@@ -310,14 +310,14 @@ static void PumpActivation(const ntw2_status& state) {
         }
     }
 }
-static bool WaitActive(volatile ntw2_status* state,U mask=NTW2_BATCH64) {
+static bool WaitActive(volatile kntwr_status* state,U mask=KNTWR_BATCH64) {
     const ULONGLONG end=GetTickCount64()+3000;
     do {
-        ntw2_status value={};
+        kntwr_status value={};
         if(ReadState(state,value)) {
             PumpActivation(value);
-            if(value.phase==NTW2_ACTIVE && value.active_mask==mask) return true;
-            if(value.phase==NTW2_FAILED) { fprintf(stderr,"runtime error=%u detail=%08x\n",value.error,value.error_detail); return false; }
+            if(value.phase==KNTWR_ACTIVE && value.active_mask==mask) return true;
+            if(value.phase==KNTWR_FAILED) { fprintf(stderr,"runtime error=%u detail=%08x\n",value.error,value.error_detail); return false; }
         }
         Sleep(1);
     } while(GetTickCount64()<end);
@@ -327,7 +327,7 @@ static bool ReadOnly(U* cell) { MEMORY_BASIC_INFORMATION m={}; return VirtualQue
 static void __fastcall ForeignWorker(void*) {}
 static uint8_t engine[0x200], root[0x29000], model[0x800], armyManager[0x400];
 static void Put(uint8_t* p,U offset,U value) { memcpy(p+offset,&value,4); }
-// Minimal real immutable owned scene read by NTW2_LOCO_OWNED_SERVICES activation: [model+A8] obstacle grid (empty 32x32 cell heads)
+// Minimal real immutable owned scene read by KNTWR_LOCO_OWNED_SERVICES activation: [model+A8] obstacle grid (empty 32x32 cell heads)
 // and [model+C0] kd root node whose bounds straddle everything. Bound only around loco cycles; absent it activation fails closed.
 static uint8_t locoGrid[0x40], locoCells[4096], locoKd[0x80], locoTree[0x40];
 static void BindLocoScene(bool on) {
@@ -379,12 +379,12 @@ static bool InstallAllocatorTlsFixture() {
 // are fixtures; the runtime's provider, dispatch, native per-slot allocation and restoration are real.
 constexpr U kArenaItems=256;
 alignas(4) static uint8_t arenaContext[0x200], arenaRoot[0x4c], arenaSelf[0x140], arenaEntity[0x200];
-static U arenaBuckets[3][NTW2_ALLOCATOR_THREADS], arenaItems[kArenaItems][8], arenaRecords[kArenaItems][2];
+static U arenaBuckets[3][KNTWR_ALLOCATOR_THREADS], arenaItems[kArenaItems][8], arenaRecords[kArenaItems][2];
 static U arenaList[kArenaItems], arenaPose[8], arenaEntityMethods[8], arenaOwnerMethods[2], arenaOwner[1];
 static unsigned char arenaStatus[kArenaItems];
-static volatile LONG arenaSlotOwners[NTW2_ALLOCATOR_THREADS], arenaSeen, arenaCalls, arenaProblems, arenaResets, arenaTails;
+static volatile LONG arenaSlotOwners[KNTWR_ALLOCATOR_THREADS], arenaSeen, arenaCalls, arenaProblems, arenaResets, arenaTails;
 static HANDLE arenaOverlap;
-static volatile LONG arenaArrivals, arenaArrived[NTW2_ALLOCATOR_THREADS];
+static volatile LONG arenaArrivals, arenaArrived[KNTWR_ALLOCATOR_THREADS];
 static U ArenaAddress(U i) { return i==0 ? A(arenaRoot) : A(arenaContext)+(i==1 ? 0x80 : 0x118); }
 static void __fastcall TestArenaPrepare(U context) {
     auto bytes=reinterpret_cast<uint8_t*>(context);
@@ -446,7 +446,7 @@ static void __fastcall TestArenaPose(U context,void*,U item) {
     InterlockedIncrement(&arenaCalls);
 }
 
-struct StopCall { ntw2_stop_fn stop; U result; };
+struct StopCall { kntwr_stop_fn stop; U result; };
 static DWORD WINAPI ConcurrentStop(void* value) {
     auto call=static_cast<StopCall*>(value);
     call->result=call->stop(nullptr);
@@ -456,7 +456,7 @@ static DWORD WINAPI ConcurrentStop(void* value) {
 // Independent copy of the census (analysis/native-agent-loop-structure.md 2.1): the 23 registry vtables whose slot +0x0C the brain
 // profiling publishes, and the exact value each must hold before it is touched.
 struct BrainSlot { U table, original; };
-static const BrainSlot kBrain[NTW2_BRAIN_SLOTS]={
+static const BrainSlot kBrain[KNTWR_BRAIN_SLOTS]={
     {0x1333714,0x66ce00},{0x13473d0,0x66ce00},{0x13475e4,0x66ce00},{0x13477f8,0x66ce00},{0x13479b4,0x66ce00},{0x1347b70,0x66ce00},
     {0x1347d2c,0x66ce00},{0x134841c,0x66ce00},{0x1347ee8,0x66ce00},{0x13480a4,0x66ce00},{0x1348260,0x66ce00},
     {0x132b7d8,0x6f50f0},
@@ -470,92 +470,92 @@ static bool InRuntime(U address) {
     MEMORY_BASIC_INFORMATION m={};
     return VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(address)),&m,sizeof(m)) && m.AllocationBase==runtimeModule;
 }
-static bool AllBrainWordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_BRAIN_WORDS;++i) if(s.brain_words[i]) return false;
-    for(unsigned i=0;i<NTW2_BRAIN_STATE_WORDS;++i) if(s.brain_state_words[i]) return false;
+static bool AllBrainWordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_BRAIN_WORDS;++i) if(s.brain_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_BRAIN_STATE_WORDS;++i) if(s.brain_state_words[i]) return false;
     return true;
 }
-static bool AllCollisionWordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_COLLISION_WORDS;++i) if(s.collision_words[i]) return false;
+static bool AllCollisionWordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_COLLISION_WORDS;++i) if(s.collision_words[i]) return false;
     return true;
 }
-static bool AllCollideWordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_COLLIDE_WORDS;++i) if(s.collide_words[i]) return false;
-    for(unsigned i=0;i<NTW2_COLLIDE_SOURCE_WORDS;++i) if(s.collide_source_words[i]) return false;
+static bool AllCollideWordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_COLLIDE_WORDS;++i) if(s.collide_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_COLLIDE_SOURCE_WORDS;++i) if(s.collide_source_words[i]) return false;
     return true;
 }
-static bool GridCensusWithoutCalls(const ntw2_status& s, bool enabled) {
+static bool GridCensusWithoutCalls(const kntwr_status& s, bool enabled) {
     const auto& c=s.grid_census;
     if(!enabled) {
-        static const ntw2_grid_census_status zero={};
+        static const kntwr_grid_census_status zero={};
         return !memcmp(&c,&zero,sizeof(c));
     }
-    if(c.version!=1u || !c.reader_count || c.reader_count>NTW2_GRID_READERS ||
-       !c.edge_count || c.edge_count>NTW2_GRID_EDGES || c.routed_ticks || c.edge_dropped) return false;
+    if(c.version!=1u || !c.reader_count || c.reader_count>KNTWR_GRID_READERS ||
+       !c.edge_count || c.edge_count>KNTWR_GRID_EDGES || c.routed_ticks || c.edge_dropped) return false;
     for(U i=0;i<c.reader_count;++i) {
         const auto& r=c.readers[i];
         if(r.va>=r.end || (i && r.va<=c.readers[i-1].va) ||
            r.route_calls || r.route_tick_calls || r.entry_calls || r.entry_tick_calls) return false;
-        for(U j=0;j<NTW2_GRID_PHASES;++j) if(r.calls_phase[j]) return false;
-        for(U j=0;j<NTW2_GRID_THREADS;++j) if(r.calls_thread[j]) return false;
-        for(U j=0;j<NTW2_GRID_SITES;++j) if(r.calls_site[j]) return false;
+        for(U j=0;j<KNTWR_GRID_PHASES;++j) if(r.calls_phase[j]) return false;
+        for(U j=0;j<KNTWR_GRID_THREADS;++j) if(r.calls_thread[j]) return false;
+        for(U j=0;j<KNTWR_GRID_SITES;++j) if(r.calls_site[j]) return false;
     }
     for(U i=0;i<c.edge_count;++i) {
         const auto& e=c.edges[i];
         if(e.reader>=c.reader_count || !e.site || !e.source_clone ||
-           e.route>NTW2_GRID_ROUTE_OTHER || e.route_calls || e.route_tick_calls) return false;
+           e.route>KNTWR_GRID_ROUTE_OTHER || e.route_calls || e.route_tick_calls) return false;
     }
     return true; // Sampler attempts/failures/occupancy may advance independently of exact calls.
 }
 // Work excludes loco 0,42..45, gate 0/4, service 0/1, grid 0/16/18 (version/generation/storage bytes) and parallel 0/1 metadata.
-static bool AllLocoWorkWordsZero(const ntw2_status& s) {
+static bool AllLocoWorkWordsZero(const kntwr_status& s) {
     for(unsigned i=1;i<=41;++i) if(s.loco_words[i]) return false;
-    for(unsigned i=1;i<NTW2_LOCO_GATE_WORDS;++i) if(i!=4 && s.loco_gate_words[i]) return false;
-    for(unsigned i=2;i<NTW2_LOCO_SERVICE_WORDS;++i) if(s.loco_service_words[i]) return false;
-    for(unsigned i=1;i<NTW2_LOCO_GRID_WORDS;++i) if(i!=16 && i!=18 && s.loco_grid_words[i]) return false;
-    for(unsigned i=2;i<NTW2_LOCO_PARALLEL_WORDS;++i) if(s.loco_parallel_words[i]) return false;
-    for(unsigned i=2;i<NTW2_SWEEP_WORDS;++i) if(s.sweep_words[i]) return false;
-    for(unsigned i=2;i<NTW2_RESOLVE_WORDS;++i) if(s.resolve_words[i]) return false;
-    for(unsigned i=2;i<NTW2_ENV_WORDS;++i) if(i!=30 && s.env_words[i]) return false;
-    for(unsigned i=0;i<NTW2_ENV_TARGET_WORDS;++i) if(s.env_target_words[i]) return false;
-    for(unsigned i=0;i<NTW2_RESOLVE_FRAME_WORDS;++i) if(s.resolve_frame_words[i]) return false;
-    for(unsigned i=2;i<NTW2_LOCO_OWNED_WORDS;++i) if(s.loco_owned_words[i]) return false;
-    for(unsigned i=2;i<NTW2_LOCO_OWNED_DETAIL_WORDS;++i) if(s.loco_owned_detail_words[i]) return false;
-    for(unsigned i=1;i<NTW2_LOCO_OWNED_PHASE_WORDS;++i) if(s.loco_owned_phase_words[i]) return false;
-    for(unsigned i=7;i<NTW2_LOCO_OWNED_LOAD_WORDS;++i) if(s.loco_owned_load_words[i]) return false;
-    for(unsigned i=3;i<NTW2_LOCO_GRID_V2_WORDS;++i) if(s.loco_grid_v2_words[i]) return false; // builds..epoch are work; no stage has run
+    for(unsigned i=1;i<KNTWR_LOCO_GATE_WORDS;++i) if(i!=4 && s.loco_gate_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_LOCO_SERVICE_WORDS;++i) if(s.loco_service_words[i]) return false;
+    for(unsigned i=1;i<KNTWR_LOCO_GRID_WORDS;++i) if(i!=16 && i!=18 && s.loco_grid_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_LOCO_PARALLEL_WORDS;++i) if(s.loco_parallel_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_SWEEP_WORDS;++i) if(s.sweep_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_RESOLVE_WORDS;++i) if(s.resolve_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_ENV_WORDS;++i) if(i!=30 && s.env_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_ENV_TARGET_WORDS;++i) if(s.env_target_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_RESOLVE_FRAME_WORDS;++i) if(s.resolve_frame_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_LOCO_OWNED_WORDS;++i) if(s.loco_owned_words[i]) return false;
+    for(unsigned i=2;i<KNTWR_LOCO_OWNED_DETAIL_WORDS;++i) if(s.loco_owned_detail_words[i]) return false;
+    for(unsigned i=1;i<KNTWR_LOCO_OWNED_PHASE_WORDS;++i) if(s.loco_owned_phase_words[i]) return false;
+    for(unsigned i=7;i<KNTWR_LOCO_OWNED_LOAD_WORDS;++i) if(s.loco_owned_load_words[i]) return false;
+    for(unsigned i=3;i<KNTWR_LOCO_GRID_V2_WORDS;++i) if(s.loco_grid_v2_words[i]) return false; // builds..epoch are work; no stage has run
     return !s.loco_words[46] && !s.loco_words[47];
 }
-static bool AllLocoWordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_LOCO_WORDS;++i) if(s.loco_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_GATE_WORDS;++i) if(s.loco_gate_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_SERVICE_WORDS;++i) if(s.loco_service_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_GRID_WORDS;++i) if(s.loco_grid_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_PARALLEL_WORDS;++i) if(s.loco_parallel_words[i]) return false;
-    for(unsigned i=0;i<NTW2_SWEEP_WORDS;++i) if(s.sweep_words[i]) return false;
-    for(unsigned i=0;i<NTW2_RESOLVE_WORDS;++i) if(s.resolve_words[i]) return false;
-    for(unsigned i=0;i<NTW2_ENV_WORDS;++i) if(s.env_words[i]) return false;
-    for(unsigned i=0;i<NTW2_ENV_TARGET_WORDS;++i) if(s.env_target_words[i]) return false;
-    for(unsigned i=0;i<NTW2_RESOLVE_FRAME_WORDS;++i) if(s.resolve_frame_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_OWNED_WORDS;++i) if(s.loco_owned_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_OWNED_DETAIL_WORDS;++i) if(s.loco_owned_detail_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_OWNED_PHASE_WORDS;++i) if(s.loco_owned_phase_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_OWNED_LOAD_WORDS;++i) if(s.loco_owned_load_words[i]) return false;
-    for(unsigned i=0;i<NTW2_LOCO_GRID_V2_WORDS;++i) if(s.loco_grid_v2_words[i]) return false;
+static bool AllLocoWordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_LOCO_WORDS;++i) if(s.loco_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_GATE_WORDS;++i) if(s.loco_gate_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_SERVICE_WORDS;++i) if(s.loco_service_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_GRID_WORDS;++i) if(s.loco_grid_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_PARALLEL_WORDS;++i) if(s.loco_parallel_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_SWEEP_WORDS;++i) if(s.sweep_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_RESOLVE_WORDS;++i) if(s.resolve_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_ENV_WORDS;++i) if(s.env_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_ENV_TARGET_WORDS;++i) if(s.env_target_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_RESOLVE_FRAME_WORDS;++i) if(s.resolve_frame_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_OWNED_WORDS;++i) if(s.loco_owned_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_OWNED_DETAIL_WORDS;++i) if(s.loco_owned_detail_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_OWNED_PHASE_WORDS;++i) if(s.loco_owned_phase_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_OWNED_LOAD_WORDS;++i) if(s.loco_owned_load_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_LOCO_GRID_V2_WORDS;++i) if(s.loco_grid_v2_words[i]) return false;
     return true;
 }
 // Quiet disables per-service QPC timing even with clone execution; version stays 1 while LOCO is active.
-static bool LocoServiceMetadata(const ntw2_status& s, bool clone, bool quiet=false) {
+static bool LocoServiceMetadata(const kntwr_status& s, bool clone, bool quiet=false) {
     return s.loco_service_words[0]==1u && s.loco_service_words[1]==((clone && !quiet) ? 1u : 0u);
 }
 // Stage C grid v2 metadata: version 2 and enabled/verify mirror the effective flags while LOCO is active; every later word is work.
-static bool LocoGridV2Metadata(const ntw2_status& s, bool grid, bool verify) {
+static bool LocoGridV2Metadata(const kntwr_status& s, bool grid, bool verify) {
     return s.loco_grid_v2_words[0]==2u && s.loco_grid_v2_words[1]==(grid ? 1u : 0u) && s.loco_grid_v2_words[2]==(verify ? 1u : 0u);
 }
 // Detail tail: version 1, quiet_enabled mirrors --loco-quiet, every other word is work. Quiet requires owned services.
-static bool LocoOwnedMetadata(const ntw2_status& s, bool parallel, bool owned=false, bool quiet=false, bool grid=false) {
+static bool LocoOwnedMetadata(const kntwr_status& s, bool parallel, bool owned=false, bool quiet=false, bool grid=false) {
     if (!grid)
-        for(unsigned i=1;i<NTW2_LOCO_GRID_WORDS;++i) if(s.loco_grid_words[i]) return false;
+        for(unsigned i=1;i<KNTWR_LOCO_GRID_WORDS;++i) if(s.loco_grid_words[i]) return false;
     return s.loco_grid_words[0]==1u && s.loco_grid_words[16]==(grid ? s.loco_words[43] : 0u) &&
            s.loco_owned_phase_words[0]==(owned ? 1u : 0u) &&
            s.loco_owned_load_words[0]==(owned ? 1u : 0u) && s.loco_owned_load_words[1]==(owned ? 1u : 0u) &&
@@ -563,7 +563,7 @@ static bool LocoOwnedMetadata(const ntw2_status& s, bool parallel, bool owned=fa
            s.loco_owned_words[0]==1u && s.loco_owned_words[1]==(owned ? 1u : 0u) &&
            s.loco_owned_detail_words[0]==1u && s.loco_owned_detail_words[1]==(quiet ? 1u : 0u) && (!quiet || owned);
 }
-static bool LocoPortMetadata(const ntw2_status& s, bool ports) {
+static bool LocoPortMetadata(const kntwr_status& s, bool ports) {
     const U enabled=ports ? 1u : 0u;
     return s.sweep_words[0]==(ports ? 2u : 0u) && s.sweep_words[1]==enabled &&
            s.sweep_words[2]==0 &&
@@ -571,22 +571,22 @@ static bool LocoPortMetadata(const ntw2_status& s, bool ports) {
            s.env_words[0]==enabled && s.env_words[1]==enabled &&
            s.env_words[30]==(ports ? s.loco_words[43] : 0u);
 }
-static bool AllCollideLodWordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_COLLIDE_LOD_WORDS;++i) if(s.collide_lod_words[i]) return false;
+static bool AllCollideLodWordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_COLLIDE_LOD_WORDS;++i) if(s.collide_lod_words[i]) return false;
     return true;
 }
 // No dispatch means every BRAIN2 v2 work/attribution/census word stays zero.
-static bool AllBrain2WordsZero(const ntw2_status& s) {
-    for(unsigned i=0;i<NTW2_BRAIN2_WORDS;++i) if(s.brain2_words[i]) return false;
+static bool AllBrain2WordsZero(const kntwr_status& s) {
+    for(unsigned i=0;i<KNTWR_BRAIN2_WORDS;++i) if(s.brain2_words[i]) return false;
     for(unsigned i=0;i<32;++i) if(s.brain2_reason_words[i]) return false;
     for(unsigned i=0;i<80;++i) if(s.brain2_gate_words[i]) return false;
-    for(unsigned i=0;i<NTW2_BRAIN2_CENSUS_WORDS;++i) if(s.brain2_census_words[i]) return false;
-    for(unsigned i=0;i<NTW2_BRAIN_UNIT_WORDS;++i) if(s.brain_unit_words[i]) return false;
-    for(unsigned i=0;i<NTW2_COLLIDE_CONTACT_WORDS;++i) if(s.collide_contact_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_BRAIN2_CENSUS_WORDS;++i) if(s.brain2_census_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_BRAIN_UNIT_WORDS;++i) if(s.brain_unit_words[i]) return false;
+    for(unsigned i=0;i<KNTWR_COLLIDE_CONTACT_WORDS;++i) if(s.collide_contact_words[i]) return false;
     return true;
 }
 
-// NTW2_VISUAL: the runtime publishes the host thunk into the single read-only .rdata word holding the relocated original 0x779E60.
+// KNTWR_VISUAL: the runtime publishes the host thunk into the single read-only .rdata word holding the relocated original 0x779E60.
 // The test finds that slot by an independent scan of the mapped real image and never takes its address from the runtime.
 constexpr U kVisualOriginalVa=0x779e60;
 constexpr U kVisualScanError=13; // runtime Error::VisualSlotScan; error_detail = hit count
@@ -610,7 +610,7 @@ static unsigned VisualHits(U** first) {
     return hits;
 }
 // Every visual word except word 13 (live slot metadata, not a work counter) is zero.
-static bool AllVisualWorkWordsZero(const ntw2_status& s) {
+static bool AllVisualWorkWordsZero(const kntwr_status& s) {
     for(unsigned i=0;i<32;++i) if(i!=13 && s.visual_words[i]) return false;
     return true;
 }
@@ -618,14 +618,14 @@ static bool AllVisualWorkWordsZero(const ntw2_status& s) {
 // Terminal scenarios run in child processes (each leaves the runtime FAILED for the life of its process): the slot scan finding zero
 // or several original-value words refuses activation with runtime error 13 (detail = hit count) without touching any slot, and a
 // foreign value in the published slot makes stop refuse restoration (error 6) without overwriting the foreign value.
-static int VisualFixture(const char* mode,ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int VisualFixture(const char* mode,kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     const bool zero=!strcmp(mode,"--visual-scan-zero"), multiple=!strcmp(mode,"--visual-scan-multiple"), stopConflict=!strcmp(mode,"--visual-stop-conflict");
     if(!zero && !multiple && !stopConflict) { fprintf(stderr,"unknown child mode %s\n",mode); return 2; }
     const U original=kVisualOriginalVa+delta, foreign=A(reinterpret_cast<void*>(&ForeignWorker));
     U* slot=nullptr; U* extra=nullptr;
     Check(VisualHits(&slot)==1 && slot && *slot==original && ReadOnly(slot),"visual fixture: exactly one pristine read-only slot");
     if(!slot) return 1;
-    config.enabled_mask=NTW2_VISUAL; config.main_thread_id=0; config.workers=0;
+    config.enabled_mask=KNTWR_VISUAL; config.main_thread_id=0; config.workers=0;
     if(zero) {
         Check(Replace(slot,foreign) && VisualHits(nullptr)==0,"scan fixture: no word holds the original");
     }
@@ -636,19 +636,19 @@ static int VisualFixture(const char* mode,ntw2_start_fn start,ntw2_stop_fn stop,
         Check(extra && Replace(extra,original) && VisualHits(nullptr)==2,"scan fixture: a second word holds the original");
     }
     Check(start(&config)==0,"visual start accepted");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     if(stopConflict) {
-        Check(WaitActive(state,NTW2_VISUAL),"visual became active for the stop conflict");
+        Check(WaitActive(state,KNTWR_VISUAL),"visual became active for the stop conflict");
         Check(*slot!=original && ReadOnly(slot) && Replace(slot,foreign),"foreign value replaces the published visual slot");
         Check(stop(nullptr)!=0,"stop reports refused visual restoration");
         Check(*slot==foreign && ReadOnly(slot),"stop does not overwrite the foreign visual value");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED && snapshot.error==kSlotConflict,"foreign-value stop refusal is runtime error 6");
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED && snapshot.error==kSlotConflict,"foreign-value stop refusal is runtime error 6");
         Check(start(&config)!=0,"failed restoration prevents restart");
         Replace(slot,original);
     } else {
         bool failed=false;
         for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
-            if(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED) { failed=true; break; }
+            if(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED) { failed=true; break; }
         Check(failed,"visual slot scan refusal published");
         Check(failed && snapshot.error==kVisualScanError && snapshot.error_detail==(zero ? 0u : 2u) && !snapshot.active_mask,"scan refusal is error 13 with the hit count as detail");
         Check(failed && AllVisualWorkWordsZero(snapshot),"no visual work counter after a refused scan");
@@ -666,19 +666,19 @@ static int VisualFixture(const char* mode,ntw2_start_fn start,ntw2_stop_fn stop,
 // Terminal scenario run in a child process (a refused install leaves the runtime FAILED for the life of its process): the last of the
 // 23 slots holds a foreign hook before start, so the install must be refused, every slot published before it rolled back, and the
 // foreign hook never overwritten.
-static int InstallConflict(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
-    U* cells[NTW2_BRAIN_SLOTS];
-    for(unsigned i=0;i<NTW2_BRAIN_SLOTS;++i) cells[i]=At(kBrain[i].table+0x0c);
-    const unsigned bad=NTW2_BRAIN_SLOTS-1;
+static int InstallConflict(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    U* cells[KNTWR_BRAIN_SLOTS];
+    for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) cells[i]=At(kBrain[i].table+0x0c);
+    const unsigned bad=KNTWR_BRAIN_SLOTS-1;
     const U foreign=A(reinterpret_cast<void*>(&ForeignWorker));
     U* task=At(0x132e954); U* walk=At(0x133e2dc);
     Check(*cells[bad]==kBrain[bad].original+delta && ReadOnly(cells[bad]) && Replace(cells[bad],foreign),"foreign hook installed in the last brain slot");
-    config.enabled_mask=NTW2_PROFILE|NTW2_BRAIN; config.main_thread_id=GetCurrentThreadId();
+    config.enabled_mask=KNTWR_PROFILE|KNTWR_BRAIN; config.main_thread_id=GetCurrentThreadId();
     Check(start(&config)==0,"brain start accepted for the foreign-slot scenario");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     bool failed=false;
     for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
-        if(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED) { failed=true; break; }
+        if(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED) { failed=true; break; }
     Check(failed,"a brain slot that does not hold the expected original is refused");
     Check(failed && snapshot.error==kSlotConflict && snapshot.error_detail==A(cells[bad]) && !snapshot.active_mask,"slot conflict names the foreign slot");
     bool rolledBack=true;
@@ -694,11 +694,11 @@ static int InstallConflict(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     printf("native host lifecycle (brain install conflict): checks=%u failures=%u\n",checks,failures);
     return failures ? 1 : 0;
 }
-static int AllocatorFailureFixture(bool ai,U faultMode,ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int AllocatorFailureFixture(bool ai,U faultMode,kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     static uint8_t manager[0x100]={};
     Put(model,0xB0,A(manager));
     root[0x2829c]=ai ? 1 : 0;
-    config.enabled_mask=NTW2_VISUAL|(ai ? NTW2_AI_ASYNC : 0);
+    config.enabled_mask=KNTWR_VISUAL|(ai ? KNTWR_AI_ASYNC : 0);
     config.workers=2;
     U* visual=nullptr;
     Check(VisualHits(&visual)==1 && visual,"allocator refusal fixture finds the visual slot");
@@ -706,22 +706,22 @@ static int AllocatorFailureFixture(bool ai,U faultMode,ntw2_start_fn start,ntw2_
     const U original=*visual;
     InterlockedExchange(&allocatorProbeFault,static_cast<LONG>(faultMode));
     Check(start(&config)==0,"allocator refusal start accepted for asynchronous admission");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     bool failed=false;
     const ULONGLONG deadline=GetTickCount64()+3000;
     do {
-        if(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED) { failed=true; break; }
+        if(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED) { failed=true; break; }
         Sleep(1);
     } while(GetTickCount64()<deadline);
-    const U row=ai ? NTW2_ALLOCATOR_THREADS-1 : 0;
+    const U row=ai ? KNTWR_ALLOCATOR_THREADS-1 : 0;
     const U result=faultMode==1 ? 0x103u : 0x105u;
-    Check(failed && snapshot.error==NTW2_ERROR_ALLOCATOR && snapshot.error_detail==((row<<16)|result),
+    Check(failed && snapshot.error==KNTWR_ERROR_ALLOCATOR && snapshot.error_detail==((row<<16)|result),
           "allocator SEH has a distinct admission error and worker index");
     Check(!snapshot.active_mask && *visual==original && ReadOnly(visual),"failed admission publishes no visual hook");
-    Check(snapshot.allocator_words[row*NTW2_ALLOCATOR_ROW_WORDS]==result &&
-          snapshot.allocator_words[row*NTW2_ALLOCATOR_ROW_WORDS+4]==EXCEPTION_ACCESS_VIOLATION,
+    Check(snapshot.allocator_words[row*KNTWR_ALLOCATOR_ROW_WORDS]==result &&
+          snapshot.allocator_words[row*KNTWR_ALLOCATOR_ROW_WORDS+4]==EXCEPTION_ACCESS_VIOLATION,
           "allocator stage and exception survive failed startup unwind");
-    if(!ai) Check(snapshot.allocator_words[NTW2_ALLOCATOR_ROW_WORDS]==result,"every created pool worker reports its failed probe");
+    if(!ai) Check(snapshot.allocator_words[KNTWR_ALLOCATOR_ROW_WORDS]==result,"every created pool worker reports its failed probe");
     Check(!snapshot.crash_words[0],"caught admission fault is not reported as a gameplay crash");
     Check(stop(nullptr)==0,"failed allocator admission joins its workers");
     printf("native host lifecycle (allocator %s refusal): checks=%u failures=%u\n",ai ? "AI" : "pool",checks,failures);
@@ -744,10 +744,10 @@ static BOOL WINAPI TestMemoryStatus(LPMEMORYSTATUSEX memory) {
         static_cast<ULONGLONG>(InterlockedCompareExchange64(&virtualAvailOverride,0,0));
     return TRUE;
 }
-static ULONGLONG MemoryValue(const ntw2_status& state,U at) {
+static ULONGLONG MemoryValue(const kntwr_status& state,U at) {
     return state.memory_words[at] | (static_cast<ULONGLONG>(state.memory_words[at+1])<<32);
 }
-static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int VirtualBudgetFixture(bool post,kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     U* import=ModuleImport(runtimeModule,"GlobalMemoryStatusEx");
     Check(import!=nullptr,"runtime exposes actual GlobalMemoryStatusEx admission seam");
     if(!import) return 1;
@@ -755,16 +755,16 @@ static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,
     Check(Replace(import,A(reinterpret_cast<void*>(&TestMemoryStatus))),"install bounded-VA memory query fixture");
     InterlockedExchange64(&virtualAvailOverride,2ll<<30);
     InterlockedExchange(&virtualMemoryCalls,0); InterlockedExchange(&virtualLowAfter,0);
-    root[0x2829c]=1; config.enabled_mask=NTW2_BATCH64; config.workers=0;
-    Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"ample VA admits the original workload");
-    ntw2_status snapshot={};
-    Check(ReadState(state,snapshot) && MemoryValue(snapshot,NTW2_MEM_ACTIVATION_AVAIL_LO)==2ull<<30 &&
-          MemoryValue(snapshot,NTW2_MEM_POST_ALLOC_AVAIL_LO)==2ull<<30,"activation and post-reservation VA are measured separately");
+    root[0x2829c]=1; config.enabled_mask=KNTWR_BATCH64; config.workers=0;
+    Check(start(&config)==0 && WaitActive(state,KNTWR_BATCH64),"ample VA admits the original workload");
+    kntwr_status snapshot={};
+    Check(ReadState(state,snapshot) && MemoryValue(snapshot,KNTWR_MEM_ACTIVATION_AVAIL_LO)==2ull<<30 &&
+          MemoryValue(snapshot,KNTWR_MEM_POST_ALLOC_AVAIL_LO)==2ull<<30,"activation and post-reservation VA are measured separately");
     InterlockedExchange64(&virtualAvailOverride,3ll<<29);
     bool sampled=false;
     for(const ULONGLONG end=GetTickCount64()+2500;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && MemoryValue(snapshot,NTW2_MEM_MIN_AVAIL_LO)==3ull<<29) { sampled=true; break; }
-    Check(sampled && snapshot.memory_words[NTW2_MEM_SAMPLES]>=4,"periodic memory sampling records a decreasing available-VA minimum");
+        if(ReadState(state,snapshot) && MemoryValue(snapshot,KNTWR_MEM_MIN_AVAIL_LO)==3ull<<29) { sampled=true; break; }
+    Check(sampled && snapshot.memory_words[KNTWR_MEM_SAMPLES]>=4,"periodic memory sampling records a decreasing available-VA minimum");
     Check(stop(nullptr)==0,"periodic memory fixture stops");
     // Admission failure is terminal for this DLL lifetime. Each refusal mode
     // runs in its own child rather than restarting a Failed runtime.
@@ -774,23 +774,23 @@ static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,
         // Activation floor, thread reserve, collision reserve, and movement
         // reserve pass; pressure arrives at the final pre-publication check.
         InterlockedExchange(&virtualLowAfter,post ? 5 : 0);
-        config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE; config.workers=2;
-        config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID_VERIFY;
+        config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE; config.workers=2;
+        config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID_VERIFY;
         BindLocoScene(true);
         Check(start(&config)==0,"low-VA admission is monitored asynchronously");
         bool failed=false;
         for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
             if(ReadState(state,snapshot)) {
                 PumpActivation(snapshot);
-                if(snapshot.phase==NTW2_FAILED) { failed=true; break; }
+                if(snapshot.phase==KNTWR_FAILED) { failed=true; break; }
             }
-        Check(failed && snapshot.error==NTW2_ERROR_VA_BUDGET && !snapshot.active_mask &&
-              snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1 &&
-              snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_TOTAL,"low VA refuses activation without enabling a feature epoch");
-        Check(MemoryValue(snapshot,post ? NTW2_MEM_POST_ALLOC_AVAIL_LO : NTW2_MEM_ACTIVATION_AVAIL_LO)==255ull<<20,
+        Check(failed && snapshot.error==KNTWR_ERROR_VA_BUDGET && !snapshot.active_mask &&
+              snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS]==1 &&
+              snapshot.memory_words[KNTWR_MEM_LATCH_REASON]==KNTWR_LATCH_REASON_TOTAL,"low VA refuses activation without enabling a feature epoch");
+        Check(MemoryValue(snapshot,post ? KNTWR_MEM_POST_ALLOC_AVAIL_LO : KNTWR_MEM_ACTIVATION_AVAIL_LO)==255ull<<20,
               "the failing available-VA sample is retained exactly");
-        Check((snapshot.memory_words[NTW2_MEM_LOCO_BYTES]>0)==(post!=0) &&
-              (snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0)==(post!=0),
+        Check((snapshot.memory_words[KNTWR_MEM_LOCO_BYTES]>0)==(post!=0) &&
+              (snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES]>0)==(post!=0),
               "post-allocation refusal records owned bytes; early refusal reserves no workload arenas");
         U* task=At(0x132e954);
         Check(*task==0x5cc390+delta && ReadOnly(task),"VA refusal restores the task slot and native fallback");
@@ -800,113 +800,113 @@ static int VirtualBudgetFixture(bool post,ntw2_start_fn start,ntw2_stop_fn stop,
     printf("native host lifecycle (VA budget %s): checks=%u failures=%u\n",post ? "post-allocation" : "early",checks,failures);
     return failures ? 1 : 0;
 }
-static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int PeriodicBudgetFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     U* import=ModuleImport(runtimeModule,"GlobalMemoryStatusEx");
     Check(import!=nullptr,"runtime exposes periodic available-VA seam");
     if(!import) return 1;
-    const U original=*import, owned=NTW2_LOCO|NTW2_COLLIDE;
+    const U original=*import, owned=KNTWR_LOCO|KNTWR_COLLIDE;
     Check(Replace(import,A(reinterpret_cast<void*>(&TestMemoryStatus))),"install periodic VA pressure fixture");
     InterlockedExchange64(&virtualAvailOverride,2ll<<30);
     InterlockedExchange(&virtualMemoryCalls,0); InterlockedExchange(&virtualLowAfter,0);
     root[0x2829c]=1; BindLocoScene(true);
-    config.enabled_mask=NTW2_BATCH64|owned; config.workers=2;
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID_VERIFY;
+    config.enabled_mask=KNTWR_BATCH64|owned; config.workers=2;
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID_VERIFY;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"periodic pressure starts real owned modules plus an unrelated feature");
-    ntw2_status before={}, snapshot={};
+    kntwr_status before={}, snapshot={};
     Check(ReadState(state,before),"capture allocated owned storage before pressure");
     U breakdown=0;
-    for(U i=NTW2_MEM_LOCO_MOVEMENT_BYTES;i<=NTW2_MEM_LOCO_ENV_SCRATCH_BYTES;++i) breakdown+=before.memory_words[i];
-    Check(before.memory_words[NTW2_MEM_LOCO_BYTES]>0 && before.memory_words[NTW2_MEM_COLLIDE_BYTES]>0 &&
-          breakdown==before.memory_words[NTW2_MEM_LOCO_BYTES],"LOCO categories exactly reconcile with actual reserved storage");
-    Check(before.memory_words[NTW2_MEM_NATIVE_GRID_SHIFT]==5 &&
-          before.memory_words[NTW2_MEM_NATIVE_GRID_MAXIMUM]==31 &&
-          before.memory_words[NTW2_MEM_NATIVE_GRID_DIMENSION]==32 &&
-          before.memory_words[NTW2_MEM_CELL_CAPACITY]==1024,"grid capacity and dimensions come from the captured native header");
+    for(U i=KNTWR_MEM_LOCO_MOVEMENT_BYTES;i<=KNTWR_MEM_LOCO_ENV_SCRATCH_BYTES;++i) breakdown+=before.memory_words[i];
+    Check(before.memory_words[KNTWR_MEM_LOCO_BYTES]>0 && before.memory_words[KNTWR_MEM_COLLIDE_BYTES]>0 &&
+          breakdown==before.memory_words[KNTWR_MEM_LOCO_BYTES],"LOCO categories exactly reconcile with actual reserved storage");
+    Check(before.memory_words[KNTWR_MEM_NATIVE_GRID_SHIFT]==5 &&
+          before.memory_words[KNTWR_MEM_NATIVE_GRID_MAXIMUM]==31 &&
+          before.memory_words[KNTWR_MEM_NATIVE_GRID_DIMENSION]==32 &&
+          before.memory_words[KNTWR_MEM_CELL_CAPACITY]==1024,"grid capacity and dimensions come from the captured native header");
     U catalogBytes=0;
-    for(U i=NTW2_MEM_LOCO_CATALOG_RING_BYTES;i<=NTW2_MEM_LOCO_CATALOG_POLYGON_BYTES;++i) catalogBytes+=before.memory_words[i];
-    Check(catalogBytes==before.memory_words[NTW2_MEM_LOCO_CATALOG_BYTES],"catalog backing categories reconcile with its retained allocation");
+    for(U i=KNTWR_MEM_LOCO_CATALOG_RING_BYTES;i<=KNTWR_MEM_LOCO_CATALOG_POLYGON_BYTES;++i) catalogBytes+=before.memory_words[i];
+    Check(catalogBytes==before.memory_words[KNTWR_MEM_LOCO_CATALOG_BYTES],"catalog backing categories reconcile with its retained allocation");
     // A single low sample is filtered by the 2-sample jitter guard when VA recovers before the next sample;
     // 2 consecutive samples latch and retire.
-    const U preDipSamples=before.memory_words[NTW2_MEM_SAMPLES];
+    const U preDipSamples=before.memory_words[KNTWR_MEM_SAMPLES];
     InterlockedExchange64(&virtualAvailOverride,255ll<<20);
     bool oneDip=false;
     for(const ULONGLONG end=GetTickCount64()+2000;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_SAMPLES]>preDipSamples) { oneDip=true; break; }
+        if(ReadState(state,snapshot) && snapshot.memory_words[KNTWR_MEM_SAMPLES]>preDipSamples) { oneDip=true; break; }
     InterlockedExchange64(&virtualAvailOverride,2ll<<30);
-    Check(oneDip && !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS] &&
-          !snapshot.memory_words[NTW2_MEM_LATCH_REASON] && snapshot.active_mask==(NTW2_BATCH64|owned),
+    Check(oneDip && !snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS] &&
+          !snapshot.memory_words[KNTWR_MEM_LATCH_REASON] && snapshot.active_mask==(KNTWR_BATCH64|owned),
           "single periodic low-VA sample does not trip the 2-sample latch");
-    const U postRecoverySamples=snapshot.memory_words[NTW2_MEM_SAMPLES];
+    const U postRecoverySamples=snapshot.memory_words[KNTWR_MEM_SAMPLES];
     bool recoveredOnce=false;
     for(const ULONGLONG end=GetTickCount64()+2000;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_SAMPLES]>postRecoverySamples) { recoveredOnce=true; break; }
-    Check(recoveredOnce && !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK],"recovery resets the breach streak before sustained pressure");
+        if(ReadState(state,snapshot) && snapshot.memory_words[KNTWR_MEM_SAMPLES]>postRecoverySamples) { recoveredOnce=true; break; }
+    Check(recoveredOnce && !snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK],"recovery resets the breach streak before sustained pressure");
     InterlockedExchange64(&virtualAvailOverride,255ll<<20);
     bool retired=false;
     for(const ULONGLONG end=GetTickCount64()+4000;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_BUDGET_RELEASES]==1) { retired=true; break; }
-    Check(retired && snapshot.phase==NTW2_ACTIVE && snapshot.active_mask==NTW2_BATCH64 && !snapshot.error,
+        if(ReadState(state,snapshot) && snapshot.memory_words[KNTWR_MEM_BUDGET_RELEASES]==1) { retired=true; break; }
+    Check(retired && snapshot.phase==KNTWR_ACTIVE && snapshot.active_mask==KNTWR_BATCH64 && !snapshot.error,
           "periodic low VA disables only owned stages without failing unrelated features");
-    Check(snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1 &&
-          snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK]==owned &&
-          !snapshot.memory_words[NTW2_MEM_BUDGET_RELEASE_PENDING] &&
-          snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_TOTAL &&
-          snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]>=NTW2_MEMORY_MIN_LARGEST_HOLE &&
-          MemoryValue(snapshot,NTW2_MEM_MIN_AVAIL_LO)==255ull<<20,"pressure latches one exact budget refusal and completes quiescent retirement");
-    Check(!snapshot.memory_words[NTW2_MEM_LOCO_BYTES] && !snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES] &&
-          snapshot.memory_words[NTW2_MEM_RELEASED_LOCO_BYTES]==before.memory_words[NTW2_MEM_LOCO_BYTES] &&
-          snapshot.memory_words[NTW2_MEM_RELEASED_COLLIDE_BYTES]==before.memory_words[NTW2_MEM_COLLIDE_BYTES],
+    Check(snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS]==1 &&
+          snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK]==owned &&
+          !snapshot.memory_words[KNTWR_MEM_BUDGET_RELEASE_PENDING] &&
+          snapshot.memory_words[KNTWR_MEM_LATCH_REASON]==KNTWR_LATCH_REASON_TOTAL &&
+          snapshot.memory_words[KNTWR_MEM_MIN_LARGEST_HOLE]>=KNTWR_MEMORY_MIN_LARGEST_HOLE &&
+          MemoryValue(snapshot,KNTWR_MEM_MIN_AVAIL_LO)==255ull<<20,"pressure latches one exact budget refusal and completes quiescent retirement");
+    Check(!snapshot.memory_words[KNTWR_MEM_LOCO_BYTES] && !snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES] &&
+          snapshot.memory_words[KNTWR_MEM_RELEASED_LOCO_BYTES]==before.memory_words[KNTWR_MEM_LOCO_BYTES] &&
+          snapshot.memory_words[KNTWR_MEM_RELEASED_COLLIDE_BYTES]==before.memory_words[KNTWR_MEM_COLLIDE_BYTES],
           "retirement releases both real module arenas and records exact released sizes");
-    for(U i=NTW2_MEM_LOCO_MOVEMENT_BYTES;i<=NTW2_MEM_LOCO_TREE_ENTRIES;++i)
+    for(U i=KNTWR_MEM_LOCO_MOVEMENT_BYTES;i<=KNTWR_MEM_LOCO_TREE_ENTRIES;++i)
         Check(snapshot.memory_words[i]==before.memory_words[i],"retirement retains allocation attribution");
-    for(U i=NTW2_MEM_NATIVE_GRID_SHIFT;i<=NTW2_MEM_LOCO_CATALOG_POLYGON_POINTS;++i)
+    for(U i=KNTWR_MEM_NATIVE_GRID_SHIFT;i<=KNTWR_MEM_LOCO_CATALOG_POLYGON_POINTS;++i)
         Check(snapshot.memory_words[i]==before.memory_words[i],"retirement retains header and distinct catalog geometry attribution");
     Check(*At(0x1345374)!=0x78bac0+delta && ReadOnly(At(0x1345374)),"unrelated batch hook survives owned retirement");
-    const U samples=snapshot.memory_words[NTW2_MEM_SAMPLES];
+    const U samples=snapshot.memory_words[KNTWR_MEM_SAMPLES];
     InterlockedExchange64(&virtualAvailOverride,2ll<<30);
     bool recovered=false;
     for(const ULONGLONG end=GetTickCount64()+2500;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_SAMPLES]>samples) { recovered=true; break; }
-    Check(recovered && snapshot.active_mask==NTW2_BATCH64 &&
-          snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS]==1 && snapshot.memory_words[NTW2_MEM_BUDGET_RELEASES]==1 &&
-          !snapshot.memory_words[NTW2_MEM_LOCO_BYTES] && !snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES],
+        if(ReadState(state,snapshot) && snapshot.memory_words[KNTWR_MEM_SAMPLES]>samples) { recovered=true; break; }
+    Check(recovered && snapshot.active_mask==KNTWR_BATCH64 &&
+          snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS]==1 && snapshot.memory_words[KNTWR_MEM_BUDGET_RELEASES]==1 &&
+          !snapshot.memory_words[KNTWR_MEM_LOCO_BYTES] && !snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES],
           "restored VA does not silently re-enable or reallocate retired stages");
     Check(snapshot.loco_owned_load_words[0]==1,"retired owned activation counters survive later monitoring samples");
     root[0x2829c]=0;
     bool waiting=false;
     for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
-        if(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE) { waiting=true; break; }
+        if(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE) { waiting=true; break; }
     Check(waiting,"budget fallback can leave the current battle normally");
     root[0x2829c]=1;
-    Check(WaitActive(state,NTW2_BATCH64) && ReadState(state,snapshot) &&
-          snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK]==owned &&
-          !snapshot.memory_words[NTW2_MEM_LOCO_BYTES] && !snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES],
+    Check(WaitActive(state,KNTWR_BATCH64) && ReadState(state,snapshot) &&
+          snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK]==owned &&
+          !snapshot.memory_words[KNTWR_MEM_LOCO_BYTES] && !snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES],
           "a new battle generation preserves the sticky native fallback");
     Check(stop(nullptr)==0,"periodic fallback stops cleanly");
     Put(locoGrid,0x14,15); // valid 16-by-16 coordinates with native row stride 32
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask) && ReadState(state,snapshot) &&
-          !snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS] &&
-          !snapshot.memory_words[NTW2_MEM_LATCH_REASON] &&
-          snapshot.memory_words[NTW2_MEM_LOCO_BYTES]>0 && snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0,
+          !snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK] && !snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS] &&
+          !snapshot.memory_words[KNTWR_MEM_LATCH_REASON] &&
+          snapshot.memory_words[KNTWR_MEM_LOCO_BYTES]>0 && snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES]>0,
           "explicit runtime restart clears the latch and admits owned stages again");
-    Check(snapshot.memory_words[NTW2_MEM_NATIVE_GRID_SHIFT]==5 &&
-          snapshot.memory_words[NTW2_MEM_NATIVE_GRID_MAXIMUM]==15 &&
-          snapshot.memory_words[NTW2_MEM_NATIVE_GRID_DIMENSION]==16 &&
-          snapshot.memory_words[NTW2_MEM_CELL_CAPACITY]==496,"header sizing preserves native row-stride padding without a fixed million-cell reserve");
+    Check(snapshot.memory_words[KNTWR_MEM_NATIVE_GRID_SHIFT]==5 &&
+          snapshot.memory_words[KNTWR_MEM_NATIVE_GRID_MAXIMUM]==15 &&
+          snapshot.memory_words[KNTWR_MEM_NATIVE_GRID_DIMENSION]==16 &&
+          snapshot.memory_words[KNTWR_MEM_CELL_CAPACITY]==496,"header sizing preserves native row-stride padding without a fixed million-cell reserve");
     Check(stop(nullptr)==0,"restarted periodic fixture stops cleanly");
     // Verify va_watch_flags floor/hole encoding validation and custom thresholds (e.g. 512 MiB total floor, 256 MiB hole floor).
-    config.va_watch_flags=(1u<<NTW2_VA_FLOOR_SHIFT);
+    config.va_watch_flags=(1u<<KNTWR_VA_FLOOR_SHIFT);
     Check(start(&config)!=0,"va_floor_mib encoding 1 (32 MiB < 64 MiB min) is refused");
-    config.va_watch_flags=(18u<<NTW2_VA_FLOOR_SHIFT);
+    config.va_watch_flags=(18u<<KNTWR_VA_FLOOR_SHIFT);
     Check(start(&config)!=0,"va_floor_mib encoding 18 (>17 max) is refused");
-    config.va_watch_flags=(17u<<NTW2_VA_HOLE_SHIFT);
+    config.va_watch_flags=(17u<<KNTWR_VA_HOLE_SHIFT);
     Check(start(&config)!=0,"va_hole_mib encoding 17 (>512 MiB max) is refused");
-    config.va_watch_flags=(17u<<NTW2_VA_FLOOR_SHIFT)|(8u<<NTW2_VA_HOLE_SHIFT); // 1024 MiB total floor, 256 MiB hole floor
+    config.va_watch_flags=(17u<<KNTWR_VA_FLOOR_SHIFT)|(8u<<KNTWR_VA_HOLE_SHIFT); // 1024 MiB total floor, 256 MiB hole floor
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask) && ReadState(state,snapshot) &&
-          snapshot.memory_words[NTW2_MEM_FLOOR_BYTES]==(1024u<<20) &&
-          snapshot.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES]==(256u<<20),
+          snapshot.memory_words[KNTWR_MEM_FLOOR_BYTES]==(1024u<<20) &&
+          snapshot.memory_words[KNTWR_MEM_HOLE_FLOOR_BYTES]==(256u<<20),
           "custom va_floor_mib=1024 and va_hole_mib=256 decode into floor_bytes and hole_floor_bytes");
-    // Test hole-only periodic latch (latch_reason == NTW2_LATCH_REASON_HOLE) while total avail (2 GiB) stays above floor (1024 MiB).
+    // Test hole-only periodic latch (latch_reason == KNTWR_LATCH_REASON_HOLE) while total avail (2 GiB) stays above floor (1024 MiB).
     U* vqImport=ModuleImport(runtimeModule,"VirtualQuery");
     Check(vqImport!=nullptr,"runtime exposes VirtualQuery seam for hole-floor test");
     if(vqImport) {
@@ -916,12 +916,12 @@ static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile 
         InterlockedExchange(&virtualHoleCapBytes,255<<20); // cap largest free hole to 255 MiB (< 256 MiB hole floor)
         bool holeRetired=false;
         for(const ULONGLONG end=GetTickCount64()+4000;GetTickCount64()<end;Sleep(5))
-            if(ReadState(state,snapshot) && snapshot.memory_words[NTW2_MEM_BUDGET_RELEASES]==1) { holeRetired=true; break; }
-        Check(holeRetired && snapshot.active_mask==NTW2_BATCH64 &&
-              snapshot.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK]==owned &&
-              snapshot.memory_words[NTW2_MEM_LATCH_REASON]==NTW2_LATCH_REASON_HOLE &&
-              snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]==(255u<<20),
-              "2 consecutive low-hole samples latch NTW2_LATCH_REASON_HOLE and retire owned arenas while total VA is ample");
+            if(ReadState(state,snapshot) && snapshot.memory_words[KNTWR_MEM_BUDGET_RELEASES]==1) { holeRetired=true; break; }
+        Check(holeRetired && snapshot.active_mask==KNTWR_BATCH64 &&
+              snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK]==owned &&
+              snapshot.memory_words[KNTWR_MEM_LATCH_REASON]==KNTWR_LATCH_REASON_HOLE &&
+              snapshot.memory_words[KNTWR_MEM_MIN_LARGEST_HOLE]==(255u<<20),
+              "2 consecutive low-hole samples latch KNTWR_LATCH_REASON_HOLE and retire owned arenas while total VA is ample");
         InterlockedExchange(&virtualHoleCapBytes,0);
         Check(Replace(vqImport,vqOriginal),"restore real VirtualQuery import");
     }
@@ -961,21 +961,21 @@ static int PeriodicBudgetFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile 
 }
 // Owned services with no real scene at the quiescent boundary: activation refuses,
 // restores the temporary disabled task route and never enables a feature epoch.
-static int LocoOwnedActivationRefusalFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int LocoOwnedActivationRefusalFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     U* taskSlot=At(0x132e954);
     const U taskOriginal=0x5cc390+delta;
     root[0x2829c]=1; BindLocoScene(false);
-    config.enabled_mask=NTW2_LOCO; config.workers=2; config.main_thread_id=0;
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES;
+    config.enabled_mask=KNTWR_LOCO; config.workers=2; config.main_thread_id=0;
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES;
     Check(start(&config)==0,"owned activation refusal start accepted for asynchronous admission");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     bool failed=false;
     for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
         if(ReadState(state,snapshot)) {
             PumpActivation(snapshot);
-            if(snapshot.phase==NTW2_FAILED) { failed=true; break; }
+            if(snapshot.phase==KNTWR_FAILED) { failed=true; break; }
         }
-    Check(failed && snapshot.error==5u && snapshot.error_detail==NTW2_LOCO && !snapshot.active_mask,"missing owned scene fails activation as module error 5 for LOCO");
+    Check(failed && snapshot.error==5u && snapshot.error_detail==KNTWR_LOCO && !snapshot.active_mask,"missing owned scene fails activation as module error 5 for LOCO");
     Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"refused owned activation restores the temporary tick route");
     Check(failed && snapshot.loco_owned_load_words[0]==1u && snapshot.loco_owned_load_words[9]==0u,
           "refused activation publishes load metadata and no tick ever ran");
@@ -985,7 +985,7 @@ static int LocoOwnedActivationRefusalFixture(ntw2_start_fn start,ntw2_stop_fn st
     printf("native host lifecycle (owned activation refusal): checks=%u failures=%u\n",checks,failures);
     return failures ? 1 : 0;
 }
-static int VisualArenaFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int VisualArenaFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     const struct { U va; const void* fn; } redirects[]={
         {0x75d280,reinterpret_cast<const void*>(&TestArenaPrepare)},
         {0x611a60,reinterpret_cast<const void*>(&TestAnimationOwner)},
@@ -1008,25 +1008,25 @@ static int VisualArenaFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw
     }
     for(U i=0;i<3;++i) {
         U* arena=reinterpret_cast<U*>(ArenaAddress(i));
-        arena[0x28/4]=NTW2_ALLOCATOR_THREADS; arena[0x30/4]=A(arenaBuckets[i]);
+        arena[0x28/4]=KNTWR_ALLOCATOR_THREADS; arena[0x30/4]=A(arenaBuckets[i]);
         InitializeCriticalSection(reinterpret_cast<CRITICAL_SECTION*>(ArenaAddress(i)+0x34));
     }
     U* slot=nullptr;
     Check(VisualHits(&slot)==1 && slot,"native-arena fixture finds visual slot");
-    config.enabled_mask=NTW2_VISUAL; config.workers=2;
+    config.enabled_mask=KNTWR_VISUAL; config.workers=2;
     root[0x2829c]=0;
     arenaOverlap=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     Check(arenaOverlap!=nullptr,"create the three-participant overlap barrier");
     U maxDispatchUs=0;
     LARGE_INTEGER frequency={};
     QueryPerformanceFrequency(&frequency);
-    Check(start(&config)==0 && WaitActive(state,NTW2_VISUAL),"native arena fixture activates");
+    Check(start(&config)==0 && WaitActive(state,KNTWR_VISUAL),"native arena fixture activates");
     if(slot && !failures) {
         for(U tick=0;tick<2;++tick) {
             arenaContext[0x16c]=0;
             ResetEvent(arenaOverlap);
             arenaArrivals=0;
-            for(U i=0;i<NTW2_ALLOCATOR_THREADS;++i) arenaArrived[i]=0;
+            for(U i=0;i<KNTWR_ALLOCATOR_THREADS;++i) arenaArrived[i]=0;
             LARGE_INTEGER begin,finish;
             QueryPerformanceCounter(&begin);
             reinterpret_cast<void (__fastcall*)(void*,void*,U)>(*slot)(arenaSelf,nullptr,0);
@@ -1035,7 +1035,7 @@ static int VisualArenaFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw
             if(elapsed>maxDispatchUs) maxDispatchUs=elapsed;
             Check(elapsed<1000000,"256-item native-arena dispatch completes below one second without injected timer delays");
         }
-        ntw2_status snapshot={};
+        kntwr_status snapshot={};
         const ULONGLONG deadline=GetTickCount64()+3000;
         do {
             // calls counts entries, not completions. A sequence-consistent monitor snapshot can be mid-call.
@@ -1082,12 +1082,12 @@ static void __fastcall AiFakeThink(AiFakePlanner* planner,void*,U flag) {
         reinterpret_cast<void (__fastcall*)(AiFakeUnit*,void*)>(cached[i]->vtable[10])(cached[i],nullptr);
     ++planner->calls;
 }
-static int AiCompletionFixture(bool controller,ntw2_start_fn start,ntw2_stop_fn stop,
-                               volatile ntw2_status* state,ntw2_config config) {
-    auto boundary=reinterpret_cast<ntw2_ai_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_boundary"));
+static int AiCompletionFixture(bool controller,kntwr_start_fn start,kntwr_stop_fn stop,
+                               volatile kntwr_status* state,kntwr_config config) {
+    auto boundary=reinterpret_cast<kntwr_ai_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_boundary"));
     Check(boundary!=nullptr,"AI lifecycle completion boundary export exists");
     root[0x2829c]=1; Put(model,0xB0,A(armyManager));
-    config.enabled_mask=NTW2_AI_ASYNC|(controller ? NTW2_AI_CTRL : 0);
+    config.enabled_mask=KNTWR_AI_ASYNC|(controller ? KNTWR_AI_CTRL : 0);
     config.workers=0;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"AI completion fixture activates");
     // Redirect only the oracle's private image, after clone byte validation. No installed executable is patched.
@@ -1111,7 +1111,7 @@ static int AiCompletionFixture(bool controller,ntw2_start_fn start,ntw2_stop_fn 
               "subordinate destruction between ticks never causes stale slot +0x28 dispatch");
     }
     Check(stop(nullptr)==0,"AI completion fixture joins before teardown");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     Check(ReadState(state,snapshot),"AI completion telemetry remains readable after stop");
     U thinks=0, barriers=0, longThinks=0;
     for(U i=0;i<9;++i) {
@@ -1135,23 +1135,23 @@ static int AiCompletionFixture(bool controller,ntw2_start_fn start,ntw2_stop_fn 
     return failures ? 1 : 0;
 }
 
-static int GridCensusFixture(bool lateEnable,ntw2_start_fn start,ntw2_stop_fn stop,
-                             volatile ntw2_status* state,ntw2_config config) {
-    auto profile=reinterpret_cast<volatile ntw2_profile_status*>(GetProcAddress(runtimeModule,"ntw2_profile"));
+static int GridCensusFixture(bool lateEnable,kntwr_start_fn start,kntwr_stop_fn stop,
+                             volatile kntwr_status* state,kntwr_config config) {
+    auto profile=reinterpret_cast<volatile kntwr_profile_status*>(GetProcAddress(runtimeModule,"kntwr_profile"));
     Check(profile!=nullptr,"canonical profiler export present for grid census");
     U* taskSlot=At(0x132e954);
     const U taskOriginal=*taskSlot;
     root[0x2829c]=1; BindLocoScene(true);
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     if(lateEnable) {
-        config.enabled_mask=NTW2_LOCO;
+        config.enabled_mask=KNTWR_LOCO;
         Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"build resident clones with census disabled");
         Check(stop(nullptr)==0,"stop disabled-first generation");
-        config.enabled_mask|=NTW2_GRID_CENSUS; config.main_thread_id=GetCurrentThreadId();
+        config.enabled_mask|=KNTWR_GRID_CENSUS; config.main_thread_id=GetCurrentThreadId();
         Check(start(&config)==0,"late census request reaches asynchronous clone admission");
         bool refused=false;
         for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
-            if(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED) { refused=true; break; }
+            if(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED) { refused=true; break; }
         Check(refused && snapshot.error && snapshot.error_detail==0x7f000001u && !snapshot.active_mask,
               "late census enable refuses non-instrumented resident clones rather than claiming coverage");
         Check(stop(nullptr)==0 && *taskSlot==taskOriginal && ReadOnly(taskSlot),
@@ -1160,35 +1160,35 @@ static int GridCensusFixture(bool lateEnable,ntw2_start_fn start,ntw2_stop_fn st
     }
     struct Cycle { U mask, flags, workers; };
     const Cycle cycles[]={
-        {NTW2_LOCO|NTW2_GRID_CENSUS,0,0},
-        {NTW2_LOCO,0,0},
-        {NTW2_LOCO|NTW2_GRID_CENSUS,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL,2},
-        {NTW2_LOCO|NTW2_PROFILE|NTW2_GRID_CENSUS,NTW2_LOCO_CLONE,1},
-        {NTW2_BATCH64,0,0}
+        {KNTWR_LOCO|KNTWR_GRID_CENSUS,0,0},
+        {KNTWR_LOCO,0,0},
+        {KNTWR_LOCO|KNTWR_GRID_CENSUS,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL,2},
+        {KNTWR_LOCO|KNTWR_PROFILE|KNTWR_GRID_CENSUS,KNTWR_LOCO_CLONE,1},
+        {KNTWR_BATCH64,0,0}
     };
     for(U i=0;i<2*(sizeof(cycles)/sizeof(cycles[0])) && !failures;++i) {
         const auto& c=cycles[i%(sizeof(cycles)/sizeof(cycles[0]))];
         config.enabled_mask=c.mask; config.loco_flags=c.flags; config.workers=c.workers;
-        config.main_thread_id=(c.mask&(NTW2_PROFILE|NTW2_GRID_CENSUS)) ? GetCurrentThreadId() : 0;
+        config.main_thread_id=(c.mask&(KNTWR_PROFILE|KNTWR_GRID_CENSUS)) ? GetCurrentThreadId() : 0;
         Check(start(&config)==0 && WaitActive(state,c.mask),"census-first mixed cycle activates exactly the requested mask");
         Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask &&
-              GridCensusWithoutCalls(snapshot,(c.mask&NTW2_GRID_CENSUS)!=0),
+              GridCensusWithoutCalls(snapshot,(c.mask&KNTWR_GRID_CENSUS)!=0),
               "census metadata is bounded, route/entry counts stay zero without work, and disabled starts clear the tail");
-        if(c.mask&NTW2_GRID_CENSUS)
-            Check(profile && profile->abi==NTW2_PROFILE_ABI && profile->size==sizeof(ntw2_profile_status) &&
+        if(c.mask&KNTWR_GRID_CENSUS)
+            Check(profile && profile->abi==KNTWR_PROFILE_ABI && profile->size==sizeof(kntwr_profile_status) &&
                   profile->hist_va && profile->tick_hist_va,
                   "census-only starts canonical sampler storage without setting PROFILE");
         Check(stop(nullptr)==0 && *taskSlot==taskOriginal && ReadOnly(taskSlot),
               "census cycle stops sampler and restores the tick route");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask &&
-              GridCensusWithoutCalls(snapshot,(c.mask&NTW2_GRID_CENSUS)!=0),
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask &&
+              GridCensusWithoutCalls(snapshot,(c.mask&KNTWR_GRID_CENSUS)!=0),
               "census stop retains metadata and zero route/entry counts, never treating occupancy as calls");
     }
     return failures ? 1 : 0;
 }
 
-// ---- NTW2_AI_CENSUS: pinned vtable-slot gates + AI_CONTROLLER clone-call gate, in the owned (relocated) image --------------------------
-// Same table as src/ai/ntw2_ai_census.cpp, restated here from the audited image scan: delegate replacement virtual 0x6EA520 is slot 19 of five
+// ---- KNTWR_AI_CENSUS: pinned vtable-slot gates + AI_CONTROLLER clone-call gate, in the owned (relocated) image --------------------------
+// Same table as src/ai/kntwr_ai_census.cpp, restated here from the audited image scan: delegate replacement virtual 0x6EA520 is slot 19 of five
 // vtables, its sibling 0x6B3010 slot 20 of three; observer vtables 0x13432A0/0x1343318 slot 0 hold the `ret 4` no-op 0x44A780; delegate
 // destructors 0x69D710/0x69D750 are slot 0 of 0x13376FC/0x13376AC.
 struct CensusPin { U vtable, slot, original, target; };
@@ -1216,14 +1216,14 @@ static bool CloneBranch(U clone,U offset,uint8_t opcode,U& target) {
     target=clone+offset+5+static_cast<U>(rel);
     return p[0]==opcode;
 }
-template<class F> static bool WaitFor(volatile ntw2_status* state,ntw2_status& out,F ok) {
+template<class F> static bool WaitFor(volatile kntwr_status* state,kntwr_status& out,F ok) {
     for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(2))
         if(ReadState(state,out) && ok(out)) return true;
     return false;
 }
-static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
-    auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(runtimeModule,"ntw2_site_callee"));
-    auto boundary=reinterpret_cast<ntw2_ai_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_boundary"));
+static int AiCensusFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(runtimeModule,"kntwr_site_callee"));
+    auto boundary=reinterpret_cast<kntwr_ai_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_boundary"));
     Check(siteCallee!=nullptr && boundary!=nullptr,"census fixture exports present");
     if(!siteCallee || !boundary) return 1;
     root[0x2829c]=1; Put(model,0xB0,A(armyManager));
@@ -1231,17 +1231,17 @@ static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     for(unsigned i=0;i<12;++i)
         Check(*CensusCell(i)==kCensusPins[i].original+delta && ReadOnly(CensusCell(i)),"census pin holds the pinned original word and is read-only before start");
     // 1. AI alone never touches a census slot, never clones the controller into the site, and leaves every census word zero.
-    config.enabled_mask=NTW2_AI_ASYNC; config.workers=0; config.main_thread_id=GetCurrentThreadId();
+    config.enabled_mask=KNTWR_AI_ASYNC; config.workers=0; config.main_thread_id=GetCurrentThreadId();
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without census activates");
     for(unsigned i=0;i<12;++i) Check(*CensusCell(i)==kCensusPins[i].original+delta,"ai alone leaves census slots untouched");
     Check(siteCallee(33)==controllerOriginal,"ai alone keeps the original controller callee");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     bool zero=ReadState(state,snapshot);
-    for(unsigned i=0;i<NTW2_AI_CENSUS_WORDS;++i) zero=zero && !snapshot.ai_census_words[i];
+    for(unsigned i=0;i<KNTWR_AI_CENSUS_WORDS;++i) zero=zero && !snapshot.ai_census_words[i];
     Check(zero,"census words are all zero without the feature");
     Check(stop(nullptr)==0,"stop ai-only generation");
     // 2. Census generation.
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CENSUS;
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CENSUS;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai census activates (sampler thread admitted)");
     U gates[7]={};
     for(unsigned i=0;i<12;++i) {
@@ -1272,7 +1272,7 @@ static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
         }
         Check(inside,"controller switch table is rebased into the clone");
     }
-    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_census_words[0]==1 && s.ai_census_words[7]==12; }),
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.ai_census_words[0]==1 && s.ai_census_words[7]==12; }),
           "census publishes version 1 with all twelve slots owned");
     Check(snapshot.ai_census_words[1]==7 && snapshot.ai_census_words[2]==256 && snapshot.ai_census_words[4]==8 &&
           snapshot.ai_census_words[8]==12 && snapshot.ai_census_words[9]==3 && snapshot.ai_census_words[5]==0,"census geometry metadata and zero calls before any caller");
@@ -1322,7 +1322,7 @@ static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     HANDLE helper=CreateThread(nullptr,0,CensusHelper,CensusCell(9),0,nullptr);
     Check(helper!=nullptr && WaitForSingleObject(helper,3000)==WAIT_OBJECT_0,"helper thread calls through the second observer slot");
     if(helper) CloseHandle(helper);
-    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_census_words[5]==3; }),"census publishes the three calls");
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.ai_census_words[5]==3; }),"census publishes the three calls");
     {
         const U* w=snapshot.ai_census_words;
         const U* t2=w+kCensusHeaderWords+2*kCensusTargetWords;
@@ -1351,8 +1351,8 @@ static int AiCensusFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     return failures ? 1 : 0;
 }
 
-// ---- NTW2_AI_ASYNC2 boundary schedule ------------------------------------------------------------------------------------
-// Every ntw2_ai_async2_boundary call is one synthetic tick: the blocking tick-start lifetime join, site-34 queueing, a
+// ---- KNTWR_AI_ASYNC2 boundary schedule ------------------------------------------------------------------------------------
+// Every kntwr_ai_async2_boundary call is one synthetic tick: the blocking tick-start lifetime join, site-34 queueing, a
 // tick-side callback, the optional TICK quadtree join and the tick-end publish. The planner 0x7D99F0, the delegate
 // destructor 0x69D750 (slot 0 of 0x13376AC, ret 4), the observer owner destructor 0x73E180 (slot 2 of 0x1343318, ret 4)
 // and the observer 0x6A95A0 (slot 16 of 0x13376FC, ret 0xC) are redirected in the owned image to probes. No installed
@@ -1404,7 +1404,7 @@ static_assert(sizeof(Ai2Node)==0x30 && offsetof(Ai2Node,list)==0x1C && offsetof(
 constexpr U kAi2WalkIterations=2000, kAi2Hits=5;
 static const U kAi2ExpectedHits[kAi2Hits]={0x100,0x200,0x302,0x303,0x220};
 struct Ai2WalkTest {
-    ntw2_ai_async2_private_entry_fn entry;
+    kntwr_ai_async2_private_entry_fn entry;
     U walker[1], query[0x20], aux[8], hits[16];
     volatile U hitCount;
     U walkEntry, observerEntry, badEntry, thread, correct, wrong;
@@ -1463,9 +1463,9 @@ static void Ai2BuildTree() {
 static void Ai2WalkThink() {
     Ai2WalkTest& t=ai2Walk;
     t.thread=GetCurrentThreadId();
-    t.walkEntry=t.entry(NTW2_CLONE_AI2_WALK);
-    t.observerEntry=t.entry(NTW2_CLONE_AI2_6A95A0);
-    t.badEntry=t.entry(NTW2_CLONE_TICK);
+    t.walkEntry=t.entry(KNTWR_CLONE_AI2_WALK);
+    t.observerEntry=t.entry(KNTWR_CLONE_AI2_6A95A0);
+    t.badEntry=t.entry(KNTWR_CLONE_TICK);
     if(!t.walkEntry) return;
     const auto walk=reinterpret_cast<U (__fastcall*)(void*,void*,void*)>(static_cast<uintptr_t>(t.walkEntry)); // thiscall, ret 4
     for(U i=0;i<kAi2WalkIterations;++i) {
@@ -1545,32 +1545,32 @@ static void Ai2TeardownWhileThinking(Ai2Planner& p,U* cell,LONG started,U callsA
 // image: untouched without the flags, published read-only while active, restored on stop with the row retained; an out-of-scope call through a
 // node gate runs the original 0x7D7BF0 unchanged and records nothing.
 static const U kPrepassNodeSlots[10]={0x13429b4,0x13429e8,0x1342a1c,0x1342a50,0x1342a84,0x1342ac4,0x1342afc,0x1342b34,0x1342b6c,0x1342bac};
-static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
+static int AiPrepassFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
     root[0x2829c]=1; Put(model,0xB0,A(armyManager));
     const U nodeOriginal=0x7D7BF0+delta, presizeOriginal=0x56A610+delta, walkOriginal=0x702BB0+delta;
     U* presizeSlot=At(0x13247EC); U* walkSlot=At(0x133e2dc);
     for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal && ReadOnly(At(slot)),"prepass node slot holds the pinned 0x7D7BF0 and is read-only before start");
     Check(*presizeSlot==presizeOriginal && ReadOnly(presizeSlot) && *walkSlot==walkOriginal,"presize and walk-state slots pristine before start");
-    config.enabled_mask=NTW2_AI_ASYNC; config.workers=0; config.main_thread_id=GetCurrentThreadId(); config.ai_prepass_flags=0;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.workers=0; config.main_thread_id=GetCurrentThreadId(); config.ai_prepass_flags=0;
     // 1. AI alone: nothing published, row all zero.
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without prepass flags activates");
     for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"no flags leave the node slots untouched");
     Check(*presizeSlot==presizeOriginal && *walkSlot==walkOriginal,"no flags leave the presize and walk slots untouched");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     bool zero=ReadState(state,snapshot);
-    for(unsigned i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) zero=zero && !snapshot.ai_prepass_census_words[i];
-    for(unsigned i=0;i<NTW2_AI_PREPASS_WORDS;++i) zero=zero && !snapshot.ai_prepass_words[i];
+    for(unsigned i=0;i<KNTWR_AI_PREPASS_CENSUS_WORDS;++i) zero=zero && !snapshot.ai_prepass_census_words[i];
+    for(unsigned i=0;i<KNTWR_AI_PREPASS_WORDS;++i) zero=zero && !snapshot.ai_prepass_words[i];
     Check(zero,"prepass row is all zero without the flags");
     Check(stop(nullptr)==0,"stop prepass-free generation");
     // 2. Census.
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai prepass census activates");
     const U gate=*At(kPrepassNodeSlots[0]);
     Check(gate!=nodeOriginal && InRuntime(gate),"census node slot holds a runtime gate");
     for(U slot:kPrepassNodeSlots) Check(*At(slot)==gate && ReadOnly(At(slot)),"all ten node slots hold the same read-only gate");
     Check(*walkSlot!=walkOriginal && InRuntime(*walkSlot),"census publishes the walk-state gate");
     Check(*presizeSlot==presizeOriginal,"census alone leaves the presize slot untouched");
-    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==NTW2_AI_PREPASS_CENSUS; }),
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==KNTWR_AI_PREPASS_CENSUS; }),
           "census row publishes version 1 and the latched flag");
     {   // Out of any site-34 scope: the gate tail-jumps the original think (one child with an empty guard, nothing to do).
         static uint8_t nodeBuf[0x200], childBuf[0x100]; static U childList[1];
@@ -1595,18 +1595,18 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
     Check(stop(nullptr)==0,"stop census generation");
     for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal && ReadOnly(At(slot)),"stop restores every node slot read-only");
     Check(*walkSlot==walkOriginal && *presizeSlot==presizeOriginal,"stop restores the walk-state slot");
-    Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.ai_prepass_census_words[0]==1,"stop retains the census row");
+    Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && snapshot.ai_prepass_census_words[0]==1,"stop retains the census row");
     // 3. Presize alone.
-    config.ai_prepass_flags=NTW2_AI_PRESIZE;
+    config.ai_prepass_flags=KNTWR_AI_PRESIZE;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai presize activates");
     Check(*presizeSlot!=presizeOriginal && !InRuntime(*presizeSlot) && ReadOnly(presizeSlot),"presize publishes the PRESIZE clone chain entry read-only");
     for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"presize alone leaves the node slots untouched");
     Check(*walkSlot==walkOriginal,"presize alone leaves the walk-state slot untouched");
-    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==NTW2_AI_PRESIZE; }),
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.ai_prepass_census_words[0]==1 && s.ai_prepass_census_words[63]==KNTWR_AI_PRESIZE; }),
           "presize row publishes version 1 and the latched flag");
     Check(stop(nullptr)==0 && *presizeSlot==presizeOriginal,"stop restores the presize slot");
     // 4. Both.
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE;
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_PRESIZE;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"census+presize activates");
     Check(*presizeSlot!=presizeOriginal && *At(kPrepassNodeSlots[9])!=nodeOriginal,"both sets of slots published");
     Check(stop(nullptr)==0 && *presizeSlot==presizeOriginal && *At(kPrepassNodeSlots[9])==nodeOriginal && *walkSlot==walkOriginal,"stop restores both sets");
@@ -1615,7 +1615,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
     {
         U* observerSlot=At(0x13376fc+4*16); const U observerOriginal=0x6A95A0+delta;
         Check(*observerSlot==observerOriginal && ReadOnly(observerSlot),"observer slot pristine before the poly modes");
-        const U modes[2]={NTW2_AI_POLY_SHADOW,NTW2_AI_POLY};
+        const U modes[2]={KNTWR_AI_POLY_SHADOW,KNTWR_AI_POLY};
         for(U k=0;k<2;++k) {
             config.ai_prepass_flags=modes[k];
             Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai poly mode activates");
@@ -1625,7 +1625,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
             bool published=false;
             for(U i=0;i<300 && !published;++i) { if(ReadState(state,snapshot) && snapshot.ai_prepass_words[0]==1 && snapshot.ai_prepass_words[1]==k+1) published=true; else Sleep(10); }
             Check(published,"poly row publishes version 1 and its mode (1 shadow, 2 live)");
-            bool censusZero=true; for(unsigned i=0;i<NTW2_AI_PREPASS_CENSUS_WORDS;++i) censusZero=censusZero && !snapshot.ai_prepass_census_words[i];
+            bool censusZero=true; for(unsigned i=0;i<KNTWR_AI_PREPASS_CENSUS_WORDS;++i) censusZero=censusZero && !snapshot.ai_prepass_census_words[i];
             Check(censusZero,"poly leaves the census row zero");
             Check(stop(nullptr)==0 && *observerSlot==observerOriginal && ReadOnly(observerSlot) && *walkSlot==walkOriginal,"stop restores the observer and walk-state slots");
             Check(ReadState(state,snapshot) && snapshot.ai_prepass_words[0]==1,"stop retains the poly row");
@@ -1633,7 +1633,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
         config.ai_prepass_flags=0;
         Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without prepass flags activates after the poly generations");
         bool rowZero=ReadState(state,snapshot);
-        for(unsigned i=0;i<NTW2_AI_PREPASS_WORDS;++i) rowZero=rowZero && !snapshot.ai_prepass_words[i];
+        for(unsigned i=0;i<KNTWR_AI_PREPASS_WORDS;++i) rowZero=rowZero && !snapshot.ai_prepass_words[i];
         Check(rowZero && *observerSlot==observerOriginal,"poly row is all zero and the observer slot pristine without the bits");
         Check(stop(nullptr)==0,"stop poly-free generation");
     }
@@ -1644,7 +1644,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
         U* altSlot=At(0x13376ac+4*16); U* observerSlot=At(0x13376fc+4*16);
         const U altOriginal=0x6A99E0+delta, observerOriginal=0x6A95A0+delta;
         Check(*altSlot==altOriginal && ReadOnly(altSlot),"alternate delegate slot pristine before the record-test modes");
-        const U modes[2]={NTW2_AI_POLY|NTW2_AI_RECORD_TEST_SHADOW,NTW2_AI_POLY_SHADOW|NTW2_AI_RECORD_TEST};
+        const U modes[2]={KNTWR_AI_POLY|KNTWR_AI_RECORD_TEST_SHADOW,KNTWR_AI_POLY_SHADOW|KNTWR_AI_RECORD_TEST};
         for(U k=0;k<2;++k) {
             config.ai_prepass_flags=modes[k];
             Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai record-test mode activates");
@@ -1652,17 +1652,17 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
             Check(*observerSlot!=observerOriginal && InRuntime(*observerSlot),"record-test keeps the poly observer gate");
             bool published=false;
             for(U i=0;i<300 && !published;++i) {
-                if(ReadState(state,snapshot) && snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS]==1 && snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS+1]==(k==0?1u:2u)) published=true;
+                if(ReadState(state,snapshot) && snapshot.ai_prepass_words[KNTWR_AI_POLY_WORDS]==1 && snapshot.ai_prepass_words[KNTWR_AI_POLY_WORDS+1]==(k==0?1u:2u)) published=true;
                 else Sleep(10);
             }
             Check(published,"record-test row publishes version 1 and its own mode (1 shadow, 2 live)");
             Check(snapshot.ai_prepass_words[0]==1 && snapshot.ai_prepass_words[1]==(k==0?2u:1u),"record-test leaves the poly row mode independent");
             Check(stop(nullptr)==0 && *altSlot==altOriginal && ReadOnly(altSlot) && *observerSlot==observerOriginal,"stop restores the alternate delegate and observer slots");
         }
-        config.ai_prepass_flags=NTW2_AI_POLY;
+        config.ai_prepass_flags=KNTWR_AI_POLY;
         Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai poly without record-test bits activates");
         bool recordZero=ReadState(state,snapshot);
-        for(unsigned i=0;i<NTW2_AI_RECORD_TEST_WORDS;++i) recordZero=recordZero && !snapshot.ai_prepass_words[NTW2_AI_POLY_WORDS+i];
+        for(unsigned i=0;i<KNTWR_AI_RECORD_TEST_WORDS;++i) recordZero=recordZero && !snapshot.ai_prepass_words[KNTWR_AI_POLY_WORDS+i];
         Check(recordZero && *altSlot==altOriginal,"record-test row is zero and the alternate slot pristine without the bits");
         Check(stop(nullptr)==0,"stop record-test-free generation");
     }
@@ -1674,7 +1674,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
         const U observerOriginal=0x6A95A0+delta, fallbackOriginal=0x7524A0+delta, controllerOriginal=0x826E80+delta;
         Check(*observerSlot==observerOriginal && *fallbackSlot==fallbackOriginal && *controllerSlot==controllerOriginal &&
               ReadOnly(fallbackSlot) && ReadOnly(controllerSlot),"spiral slots pristine before start");
-        const U modes[3]={NTW2_AI_SPIRAL_CENSUS,200u<<NTW2_AI_SPIRAL_CAP_SHIFT,NTW2_AI_POLY|NTW2_AI_SPIRAL_CENSUS|(20u<<NTW2_AI_SPIRAL_CAP_SHIFT)};
+        const U modes[3]={KNTWR_AI_SPIRAL_CENSUS,200u<<KNTWR_AI_SPIRAL_CAP_SHIFT,KNTWR_AI_POLY|KNTWR_AI_SPIRAL_CENSUS|(20u<<KNTWR_AI_SPIRAL_CAP_SHIFT)};
         const U caps[3]={0,200,20};
         for(U k=0;k<3;++k) {
             config.ai_prepass_flags=modes[k];
@@ -1682,7 +1682,7 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
             Check(*observerSlot!=observerOriginal && InRuntime(*observerSlot) && ReadOnly(observerSlot),"spiral publishes the read-only observer gate");
             Check(*fallbackSlot!=fallbackOriginal && InRuntime(*fallbackSlot) && ReadOnly(fallbackSlot),"spiral publishes the read-only fallback gate");
             Check(*controllerSlot!=controllerOriginal && InRuntime(*controllerSlot) && ReadOnly(controllerSlot),"spiral publishes the read-only controller gate");
-            Check((*walkSlot!=walkOriginal)==((modes[k]&NTW2_AI_POLY)!=0),"spiral alone leaves the walk-state slot untouched");
+            Check((*walkSlot!=walkOriginal)==((modes[k]&KNTWR_AI_POLY)!=0),"spiral alone leaves the walk-state slot untouched");
             for(U slot:kPrepassNodeSlots) Check(*At(slot)==nodeOriginal,"spiral leaves the node slots untouched");
             bool published=false;
             for(U i=0;i<300 && !published;++i) { if(ReadState(state,snapshot) && snapshot.ai_spiral_words[0]==1 && snapshot.ai_spiral_words[1]==caps[k]) published=true; else Sleep(10); }
@@ -1694,28 +1694,28 @@ static int AiPrepassFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_
         config.ai_prepass_flags=0;
         Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai without prepass flags activates after the spiral generations");
         bool rowZero=ReadState(state,snapshot);
-        for(unsigned i=0;i<NTW2_AI_SPIRAL_WORDS;++i) rowZero=rowZero && !snapshot.ai_spiral_words[i];
+        for(unsigned i=0;i<KNTWR_AI_SPIRAL_WORDS;++i) rowZero=rowZero && !snapshot.ai_spiral_words[i];
         Check(rowZero && *fallbackSlot==fallbackOriginal && *controllerSlot==controllerOriginal,"spiral row is all zero and its slots pristine without the bits");
         Check(stop(nullptr)==0,"stop spiral-free generation");
     }
     return failures ? 1 : 0;
 }
-static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
-    auto boundary=reinterpret_cast<ntw2_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_boundary"));
-    auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(runtimeModule,"ntw2_site_callee"));
-    ai2Walk.entry=reinterpret_cast<ntw2_ai_async2_private_entry_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_private_entry"));
+static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    auto boundary=reinterpret_cast<kntwr_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_async2_boundary"));
+    auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(runtimeModule,"kntwr_site_callee"));
+    ai2Walk.entry=reinterpret_cast<kntwr_ai_async2_private_entry_fn>(GetProcAddress(runtimeModule,"kntwr_ai_async2_private_entry"));
     Check(boundary!=nullptr && siteCallee!=nullptr && ai2Walk.entry!=nullptr,"ai_async2 lifecycle exports present");
     if(!boundary || !siteCallee || !ai2Walk.entry) return 1;
     root[0x2829c]=1; Put(model,0xB0,A(armyManager));
     config.workers=0; config.main_thread_id=GetCurrentThreadId();
-    config.enabled_mask=NTW2_AI_ASYNC2; Check(start(&config)==1,"ai_async2 without ai is refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CTRL; Check(start(&config)==1,"ai_async2 with ai_ctrl is refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CENSUS; Check(start(&config)==1,"ai_async2 with ai_census is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai_async2 without ai is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2|KNTWR_AI_CTRL; Check(start(&config)==1,"ai_async2 with ai_ctrl is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2|KNTWR_AI_CENSUS; Check(start(&config)==1,"ai_async2 with ai_census is refused");
     const U destroyOriginal=*Ai2DestroyCell(), walkOriginal=*At(0x133E2DC), observerOriginal=*Ai2ObserverCell(),
             ownerOriginal=*Ai2OwnerCell();
     Check(destroyOriginal==0x69D750+delta && walkOriginal==0x702BB0+delta && observerOriginal==0x6A95A0+delta &&
           ownerOriginal==0x73E180+delta,"pinned originals before start");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai_async2 activates");
     // Probes go in only after the first activation validated and copied the clone sources (0x7D99F0 and 0x6A95A0 are
     // sources); the resident clones call the probed entries as kept externals.
@@ -1787,7 +1787,7 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     // T17: sticky fallback: the planner now runs through the synchronous same-call barrier.
     m={};
     Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==11 && p.calls==11,"T17: fallback think completes before site 34 returns");
-    ntw2_status snapshot={};
+    kntwr_status snapshot={};
     Check(stop(nullptr)==0,"ai_async2 generation stops");
     Check(*Ai2DestroyCell()==destroyOriginal && ReadOnly(Ai2DestroyCell()) && *At(0x133E2DC)==walkOriginal &&
           *Ai2ObserverCell()==observerOriginal && ReadOnly(Ai2ObserverCell()) && *Ai2OwnerCell()==ownerOriginal &&
@@ -1821,11 +1821,11 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     // Second generation: the fallback is sticky only for its generation; the AI-thread private walk runs on the real
     // clones against a synthetic tree while the original scratch is continuously rewritten by another thread; then the
     // generation stops with a worker marshal pending and no tick to service it.
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
     Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"second ai_async2 generation activates");
     Check(ai2CtorCalls==0,"no private search object is constructed at activation");
     Ai2BuildTree();
-    Check(ai2Walk.entry(NTW2_CLONE_AI2_WALK)==0,"private clone entries are refused to a non-worker thread");
+    Check(ai2Walk.entry(KNTWR_CLONE_AI2_WALK)==0,"private clone entries are refused to a non-worker thread");
     m={};
     Check(tick(&p,10,0,&m)==1 && m.thinksAtMid==11 && Ai2WaitCalls(p,12,3000),"new generation queues asynchronously again");
     Check(tick(nullptr,0,0,nullptr)==1,"second generation joins its first batch");
@@ -1883,7 +1883,7 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     Sleep(100);
     Check(ai2Probe.calls==5 && p.calls==14,"world-loss: the worker is blocked in its marshalled call");
     Put(model,0,0); // the model no longer names the root: the battle is gone
-    Check(WaitFor(state,snapshot,[](const ntw2_status& s){ return s.phase==NTW2_WAITING_BATTLE; }) && Ai2WaitCalls(p,15,3000),
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.phase==KNTWR_WAITING_BATTLE; }) && Ai2WaitCalls(p,15,3000),
           "world-loss: the monitor deactivated and the think returned");
     Check(ai2Probe.calls==5,"world-loss: the aborted call never executed the destructor");
     Check(stop(nullptr)==0 && ReadState(state,snapshot) && snapshot.ai_async2_words[93]==1 && snapshot.ai_async2_words[92]==0,
@@ -1893,7 +1893,7 @@ static int AiAsync2Fixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_s
     return failures ? 1 : 0;
 }
 
-// ---- NTW2_AI_ASYNC2 deferred schedule (--ai-deferred) -------------------------------------------------------------------
+// ---- KNTWR_AI_ASYNC2 deferred schedule (--ai-deferred) -------------------------------------------------------------------
 // A synthetic planner (P+9C/A0 node list, P+B0/B4 second array, P+B8 round-robin counter, P->vt+8->+64->+80 full-walk
 // gate) whose node bodies record their order. 0x7CD010 / 0x7CCF80 are redirected in the owned image to recorders;
 // decomposable nodes carry 0x7D7BF0 in their think slot (redirected to a trap: the driver must never call it), whole
@@ -1973,21 +1973,21 @@ static const char kDfExpected[]=
 // Deferred-row words that are functions of the schedule only (everything except the timing words).
 static const U kDfDeterministic[]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,21,24,25,26,27,28,29,30,31,39,40,41,42,43,
                                    44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59};
-static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
-    auto boundary=reinterpret_cast<ntw2_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"ntw2_ai_async2_boundary"));
-    auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(runtimeModule,"ntw2_site_callee"));
+static int AiDeferredFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    auto boundary=reinterpret_cast<kntwr_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_async2_boundary"));
+    auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(runtimeModule,"kntwr_site_callee"));
     Check(boundary!=nullptr && siteCallee!=nullptr,"ai_deferred lifecycle exports present");
     if(!boundary || !siteCallee) return 1;
     root[0x2829c]=1; Put(model,0xB0,A(armyManager));
     config.workers=0; config.main_thread_id=GetCurrentThreadId();
-    const U deferred=1u|(2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT);
-    config.enabled_mask=NTW2_AI_ASYNC; config.ai_deferred=deferred;
+    const U deferred=1u|(2u<<KNTWR_AI_DEFERRED_BUDGET_SHIFT);
+    config.enabled_mask=KNTWR_AI_ASYNC; config.ai_deferred=deferred;
     Check(start(&config)==1,"ai_deferred without ai_async2 is refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CTRL; Check(start(&config)==1,"ai_deferred with ai_ctrl is refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2|NTW2_AI_CENSUS; Check(start(&config)==1,"ai_deferred with ai_census is refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2;
-    config.ai_deferred=2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT; Check(start(&config)==1,"K = 0 is refused");
-    config.ai_deferred=(NTW2_AI_DEFERRED_MAX_K+1)|(2u<<NTW2_AI_DEFERRED_BUDGET_SHIFT); Check(start(&config)==1,"K above the maximum is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2|KNTWR_AI_CTRL; Check(start(&config)==1,"ai_deferred with ai_ctrl is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2|KNTWR_AI_CENSUS; Check(start(&config)==1,"ai_deferred with ai_census is refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
+    config.ai_deferred=2u<<KNTWR_AI_DEFERRED_BUDGET_SHIFT; Check(start(&config)==1,"K = 0 is refused");
+    config.ai_deferred=(KNTWR_AI_DEFERRED_MAX_K+1)|(2u<<KNTWR_AI_DEFERRED_BUDGET_SHIFT); Check(start(&config)==1,"K above the maximum is refused");
     config.ai_deferred=1u; Check(start(&config)==1,"budget 0 is refused");
     config.ai_deferred=deferred|0x1000000u; Check(start(&config)==1,"unknown ai_deferred bits are refused");
     const U destroyOriginal=*Ai2DestroyCell();
@@ -1997,7 +1997,7 @@ static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2
         ++tickIndex;
         return boundary(model,planner,flag,&DfMid,&tickIndex,options);
     };
-    ntw2_status reference={};
+    kntwr_status reference={};
     char referenceLog[sizeof(dfLog)]={};
     // workers, sleep in the worker's node bodies, sleep on the tick thread, sleep between ticks
     struct Run { U workers, childSleepMs, midSleepMs, gapMs; };
@@ -2032,7 +2032,7 @@ static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2
         tick(nullptr,0,0); // think 6 consumed on time
         Check(stop(nullptr)==0,"ai_deferred generation stops");
         Check(*Ai2DestroyCell()==destroyOriginal && ReadOnly(Ai2DestroyCell()),"stop restores the gated destructor slot");
-        ntw2_status snapshot={};
+        kntwr_status snapshot={};
         Check(ReadState(state,snapshot),"ai_deferred telemetry readable after stop");
         Check(dfLen<sizeof(dfLog) && !strcmp(dfLog,kDfExpected),"node order and slice/tick interleaving match the driver contract");
         if(strcmp(dfLog,kDfExpected)) fprintf(stderr,"run %u log:%s\n",r,dfLog);
@@ -2066,13 +2066,13 @@ static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2
         DfBuild(); x={}; x.vtable=A(dfWholeVt); x.id=9; arrayX[0]=A(&x);
         dfPlanner[0x9C/4]=1; dfPlanner[0xA0/4]=A(arrayX); dfPlanner[0xB0/4]=1; dfPlanner[0xB4/4]=A(arrayX);
         dfChildSleepMs=dfMidSleepMs=0; gapMs=0; tickIndex=0;
-        config.workers=1; config.ai_deferred=2u|(1u<<NTW2_AI_DEFERRED_BUDGET_SHIFT);
+        config.workers=1; config.ai_deferred=2u|(1u<<KNTWR_AI_DEFERRED_BUDGET_SHIFT);
         Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"K=2 generation activates");
         for(U t=0;t<4;++t) tick(dfPlanner,0,0);
         Sleep(50);
         const ULONGLONG stopBegin=GetTickCount64();
         Check(stop(nullptr)==0 && GetTickCount64()-stopBegin<5000,"stop with a think parked between slices completes");
-        ntw2_status snapshot={};
+        kntwr_status snapshot={};
         Check(ReadState(state,snapshot),"K=2 telemetry readable");
         const U* d=snapshot.ai_deferred_words;
         Check(!strcmp(dfLog," T1 A9 B9 W9 T2 W9 T3 A9 B9 W9 T4 W9"),"K=2: two slices per think, consumption at the second seam");
@@ -2085,7 +2085,7 @@ static int AiDeferredFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2
 
 // --grid-probation: the real runtime's vectored handler traps, logs and resumes accesses to a synthetic
 // PAGE_NOACCESS range armed through the same handler path the owner window uses for the native cell heads.
-typedef U (__stdcall *ntw2_grid_probation_probe_fn)(void* base,U bytes);
+typedef U (__stdcall *kntwr_grid_probation_probe_fn)(void* base,U bytes);
 static __declspec(noinline) U ProbationRead(const volatile U* p) { return *p; }
 static __declspec(noinline) void ProbationWrite(volatile U* p,U value) { *p=value; }
 // Distinct instruction (different displacement) so the foreign-thread trap forms its own {EIP, caller} row.
@@ -2104,26 +2104,26 @@ static DWORD WINAPI ProbationGatedReader(void* raw) { // spin-gate: both threads
     return ProbationReadNext(static_cast<const volatile U*>(raw));
 }
 static U PageProtection(const void* p) { MEMORY_BASIC_INFORMATION m={}; return VirtualQuery(p,&m,sizeof(m)) ? m.Protect : 0; }
-static int GridProbationFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile ntw2_status* state,ntw2_config config) {
-    auto probe=reinterpret_cast<ntw2_grid_probation_probe_fn>(GetProcAddress(runtimeModule,"ntw2_grid_probation_probe"));
+static int GridProbationFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    auto probe=reinterpret_cast<kntwr_grid_probation_probe_fn>(GetProcAddress(runtimeModule,"kntwr_grid_probation_probe"));
     Check(probe!=nullptr,"grid probation probe export present");
     if(!probe) return 1;
     root[0x2829c]=1; BindLocoScene(true);
-    config.enabled_mask=NTW2_LOCO; config.workers=2; config.main_thread_id=GetCurrentThreadId();
-    const U owned=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES;
-    config.loco_flags=owned|NTW2_LOCO_GRID_PROBATION; Check(start(&config)==1,"probation without the owned grid is refused");
-    config.enabled_mask=NTW2_LOCO|NTW2_BALLISTICS; config.loco_flags=owned|NTW2_LOCO_GRID|NTW2_LOCO_GRID_PROBATION;
+    config.enabled_mask=KNTWR_LOCO; config.workers=2; config.main_thread_id=GetCurrentThreadId();
+    const U owned=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES;
+    config.loco_flags=owned|KNTWR_LOCO_GRID_PROBATION; Check(start(&config)==1,"probation without the owned grid is refused");
+    config.enabled_mask=KNTWR_LOCO|KNTWR_BALLISTICS; config.loco_flags=owned|KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_PROBATION;
     Check(start(&config)==1,"probation with the ballistics query cache is refused");
-    config.enabled_mask=NTW2_BATCH64; config.loco_flags=NTW2_LOCO_GRID|NTW2_LOCO_GRID_PROBATION;
+    config.enabled_mask=KNTWR_BATCH64; config.loco_flags=KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_PROBATION;
     Check(start(&config)==1,"probation without the loco feature is refused");
     U* pages=static_cast<U*>(VirtualAlloc(nullptr,4*4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
     Check(pages!=nullptr,"synthetic probation pages allocated");
     if(!pages) return 1;
     for(U i=0;i<4*1024;++i) pages[i]=0xC0DE0000u+i;
     Check(probe(pages,4*4096)==0,"probe refused while no probation generation runs");
-    config.enabled_mask=NTW2_LOCO; config.loco_flags=owned|NTW2_LOCO_GRID|NTW2_LOCO_GRID_PROBATION;
-    Check(start(&config)==0 && WaitActive(state,NTW2_LOCO),"probation generation activates with owned grid");
-    ntw2_status snapshot={};
+    config.enabled_mask=KNTWR_LOCO; config.loco_flags=owned|KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_PROBATION;
+    Check(start(&config)==0 && WaitActive(state,KNTWR_LOCO),"probation generation activates with owned grid");
+    kntwr_status snapshot={};
     Check(ReadState(state,snapshot) && snapshot.grid_probation_words[0]==1 && snapshot.grid_probation_words[1]==1 &&
           snapshot.grid_probation_words[2]==0 && snapshot.grid_probation_words[4]==0,
           "detector starts enabled, idle and unarmed until the first owner window closes");
@@ -2154,8 +2154,8 @@ static int GridProbationFixture(ntw2_start_fn start,ntw2_stop_fn stop,volatile n
     Check(w[25]==0 && w[26]==0 && w[27]==0 && w[28]==2 && w[29]==1,"thread classes: two main-thread traps, one foreign-thread trap");
     Check(w[12]==3 && w[13]==0,"three distinct caller rows recorded, none dropped");
     U rows=0, mainMask=0, otherMask=0, writes=0;
-    for(U i=0;i<NTW2_GRID_PROBATION_CALLERS;++i) {
-        const U* row=w+NTW2_GRID_PROBATION_HEADER_WORDS+8*i;
+    for(U i=0;i<KNTWR_GRID_PROBATION_CALLERS;++i) {
+        const U* row=w+KNTWR_GRID_PROBATION_HEADER_WORDS+8*i;
         if(!row[4]) continue;
         ++rows; writes+=row[5];
         Check(row[0] && (row[2]&0xF)==3 && row[4]>=1 && (row[2]>>16)==0,"test-module EIP rows carry no clone id");
@@ -2268,16 +2268,16 @@ static bool RunChild(const char* image,const char* dllPath,const char* mode) {
 int main(int argc,char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     const bool child=argc==4 && !strncmp(argv[3],"--",2);
-    if(argc!=3 && !child) { fprintf(stderr,"usage: native_runtime_lifecycle Napoleon.exe ntw2_runtime.dll\n"); return 2; }
+    if(argc!=3 && !child) { fprintf(stderr,"usage: native_runtime_lifecycle Napoleon.exe kntwr_runtime.dll\n"); return 2; }
     HMODULE dll=LoadLibraryA(argv[2]);
     runtimeModule=dll;
     if(!dll || !MapImage(argv[1])) { fprintf(stderr,"cannot load test inputs (%lu)\n",GetLastError()); return 2; }
-    auto start=reinterpret_cast<ntw2_start_fn>(GetProcAddress(dll,"ntw2_start"));
-    auto stop=reinterpret_cast<ntw2_stop_fn>(GetProcAddress(dll,"ntw2_stop"));
-    auto state=reinterpret_cast<volatile ntw2_status*>(GetProcAddress(dll,"ntw2_state"));
-    activationBoundary=reinterpret_cast<ntw2_activation_boundary_fn>(GetProcAddress(dll,"ntw2_activation_boundary"));
+    auto start=reinterpret_cast<kntwr_start_fn>(GetProcAddress(dll,"kntwr_start"));
+    auto stop=reinterpret_cast<kntwr_stop_fn>(GetProcAddress(dll,"kntwr_stop"));
+    auto state=reinterpret_cast<volatile kntwr_status*>(GetProcAddress(dll,"kntwr_state"));
+    activationBoundary=reinterpret_cast<kntwr_activation_boundary_fn>(GetProcAddress(dll,"kntwr_activation_boundary"));
     if(!start || !stop || !state || !activationBoundary) return 2;
-    ntw2_config config={NTW2_ABI,sizeof(config),NTW2_BATCH64,0,A(image),10,0,0,0};
+    kntwr_config config={KNTWR_ABI,sizeof(config),KNTWR_BATCH64,0,A(image),10,0,0,0};
     Check(stop(nullptr)==0,"stop before start");
     Check(start(nullptr)==1,"null configuration refused");
     void* unreadable=VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS);
@@ -2285,302 +2285,302 @@ int main(int argc,char** argv) {
     if(unreadable) VirtualFree(unreadable,0,MEM_RELEASE);
     Check(start(&config)==2,"valid 10ms configuration refuses a foreign main image");
     config.poll_ms=9; Check(start(&config)==1,"poll below supported boundary refused"); config.poll_ms=10;
-    config.abi=1u; Check(start(&config)==1,"previous configuration ABI 1 refused"); config.abi=NTW2_ABI;
+    config.abi=1u; Check(start(&config)==1,"previous configuration ABI 1 refused"); config.abi=KNTWR_ABI;
     config.size=72u; Check(start(&config)==1,"previous 72-byte configuration refused"); config.size=sizeof(config);
     config.workers=17; Check(start(&config)==1,"unsupported worker count refused"); config.workers=0;
-    config.profile_site=NTW2_TIMED_SITES+1; Check(start(&config)==1,"profile site beyond the timed sites refused"); config.profile_site=0;
+    config.profile_site=KNTWR_TIMED_SITES+1; Check(start(&config)==1,"profile site beyond the timed sites refused"); config.profile_site=0;
     config.enabled_mask=0; Check(start(&config)==1,"empty feature set refused");
     config.enabled_mask=0x10000u; Check(start(&config)==1,"undefined feature bit refused");
-    config.enabled_mask=NTW2_GRID_CENSUS; config.main_thread_id=GetCurrentThreadId();
+    config.enabled_mask=KNTWR_GRID_CENSUS; config.main_thread_id=GetCurrentThreadId();
     Check(start(&config)==1,"grid census without LOCO refused");
-    config.enabled_mask=NTW2_LOCO|NTW2_GRID_CENSUS; config.main_thread_id=0;
+    config.enabled_mask=KNTWR_LOCO|KNTWR_GRID_CENSUS; config.main_thread_id=0;
     Check(start(&config)==1,"grid census sampler without main thread refused");
-    config.enabled_mask=NTW2_COLLIDE_LOD|NTW2_COLLIDE; Check(start(&config)==1,"LOD and replacement solver cannot silently override each other");
-    config.enabled_mask=NTW2_COLLIDE_LOD|NTW2_FORMATION; Check(start(&config)==1,"LOD rejects the original-manager formation route");
-    config.enabled_mask=NTW2_COLLIDE_LOD; config.collide_lod_m=100001;
+    config.enabled_mask=KNTWR_COLLIDE_LOD|KNTWR_COLLIDE; Check(start(&config)==1,"LOD and replacement solver cannot silently override each other");
+    config.enabled_mask=KNTWR_COLLIDE_LOD|KNTWR_FORMATION; Check(start(&config)==1,"LOD rejects the original-manager formation route");
+    config.enabled_mask=KNTWR_COLLIDE_LOD; config.collide_lod_m=100001;
     Check(start(&config)==1,"invalid collision LOD distance refused"); config.collide_lod_m=0;
-    config.collide_lod_m=NTW2_COLLIDE_CENSUS;
+    config.collide_lod_m=KNTWR_COLLIDE_CENSUS;
     Check(start(&config)==1,"explicit collision census without PROFILE refused"); config.collide_lod_m=0;
-    config.enabled_mask=NTW2_BATCH64; config.collide_flags=NTW2_COLLIDE_CONTACT_SHADOW;
+    config.enabled_mask=KNTWR_BATCH64; config.collide_flags=KNTWR_COLLIDE_CONTACT_SHADOW;
     Check(start(&config)==1,"contact shadow requires the collision solver");
-    config.collide_flags=NTW2_COLLIDE_CONTACT_WORKERS;
+    config.collide_flags=KNTWR_COLLIDE_CONTACT_WORKERS;
     Check(start(&config)==1,"contact workers require the collision solver");
-    config.enabled_mask=NTW2_COLLIDE; config.workers=2;
-    config.collide_flags=NTW2_COLLIDE_CONTACT_SHADOW|NTW2_COLLIDE_CONTACT_WORKERS;
+    config.enabled_mask=KNTWR_COLLIDE; config.workers=2;
+    config.collide_flags=KNTWR_COLLIDE_CONTACT_SHADOW|KNTWR_COLLIDE_CONTACT_WORKERS;
     Check(start(&config)==1,"contact shadow and contact workers are exclusive");
     config.collide_flags=0x4u;
     Check(start(&config)==1,"unknown collide flags refused");
     config.collide_flags=0; config.workers=0;
-    config.enabled_mask=NTW2_ARMY_UNIT_SHADOW; Check(start(&config)==1,"army unit shadow alone refused (no routed tick reaches site 18)");
-    config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL|NTW2_ARMY_UNIT_SHADOW;
+    config.enabled_mask=KNTWR_ARMY_UNIT_SHADOW; Check(start(&config)==1,"army unit shadow alone refused (no routed tick reaches site 18)");
+    config.enabled_mask=KNTWR_BATCH64|KNTWR_VISUAL|KNTWR_ARMY_UNIT_SHADOW;
     Check(start(&config)==1,"army unit shadow refused without profile or a simulation feature");
     // Retired puppet probe: its mask bit and the config word at offset 48 are refused.
     config.enabled_mask=0x80000u; Check(start(&config)==1,"retired puppet mask bit refused");
-    config.enabled_mask=NTW2_BATCH64; config.va_watch_flags=0x4u; Check(start(&config)==1,"unknown va_watch_flags bit 2 refused");
-    config.va_watch_flags=NTW2_FORMATION_CENSUS; Check(start(&config)==1,"formation census refused without a routed tick");
-    config.va_watch_flags=NTW2_ENGAGE_CENSUS; Check(start(&config)==1,"engage census refused without a routed tick");
-    config.va_watch_flags=NTW2_VA_WATCH; Check(start(&config)==2,"--va-watch passes validation and refuses a foreign main image");
-    config.va_watch_flags=NTW2_VA_WATCH|NTW2_ARMY_STORM_CENSUS; Check(start(&config)==1,"census beside --va-watch still needs a routed tick");
+    config.enabled_mask=KNTWR_BATCH64; config.va_watch_flags=0x4u; Check(start(&config)==1,"unknown va_watch_flags bit 2 refused");
+    config.va_watch_flags=KNTWR_FORMATION_CENSUS; Check(start(&config)==1,"formation census refused without a routed tick");
+    config.va_watch_flags=KNTWR_ENGAGE_CENSUS; Check(start(&config)==1,"engage census refused without a routed tick");
+    config.va_watch_flags=KNTWR_VA_WATCH; Check(start(&config)==2,"--va-watch passes validation and refuses a foreign main image");
+    config.va_watch_flags=KNTWR_VA_WATCH|KNTWR_ARMY_STORM_CENSUS; Check(start(&config)==1,"census beside --va-watch still needs a routed tick");
     // --army-storm-census / --army-storm-sample-ms validation: routed tick + main thread, exclusive with the shadow, threshold needs
     // census + PROFILE + profile_site 19 (site 18), only the defined bits.
     config.main_thread_id=GetCurrentThreadId();
-    config.enabled_mask=NTW2_PATH; config.va_watch_flags=NTW2_ARMY_STORM_CENSUS;
+    config.enabled_mask=KNTWR_PATH; config.va_watch_flags=KNTWR_ARMY_STORM_CENSUS;
     Check(start(&config)==1,"storm census refused on a mask without the manager-routed tick (PATH only)");
-    config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.va_watch_flags=NTW2_ARMY_STORM_CENSUS;
+    config.enabled_mask=KNTWR_BATCH64|KNTWR_VISUAL; config.va_watch_flags=KNTWR_ARMY_STORM_CENSUS;
     Check(start(&config)==1,"storm census refused without a routed tick");
-    config.enabled_mask=NTW2_AI_ASYNC; config.main_thread_id=0;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.main_thread_id=0;
     Check(start(&config)==1,"storm census refused without a main thread id");
     config.main_thread_id=GetCurrentThreadId();
-    config.enabled_mask=NTW2_PROFILE|NTW2_ARMY_UNIT_SHADOW;
+    config.enabled_mask=KNTWR_PROFILE|KNTWR_ARMY_UNIT_SHADOW;
     Check(start(&config)==1,"storm census and the army unit shadow are exclusive");
-    config.enabled_mask=NTW2_PROFILE; Check(start(&config)==2,"storm census with PROFILE passes validation and refuses a foreign main image");
-    config.enabled_mask=NTW2_AI_ASYNC; Check(start(&config)==2,"storm census with a simulation feature passes validation");
-    config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|NTW2_FORMATION_CENSUS; config.enabled_mask=NTW2_PROFILE;
+    config.enabled_mask=KNTWR_PROFILE; Check(start(&config)==2,"storm census with PROFILE passes validation and refuses a foreign main image");
+    config.enabled_mask=KNTWR_AI_ASYNC; Check(start(&config)==2,"storm census with a simulation feature passes validation");
+    config.va_watch_flags=KNTWR_ARMY_STORM_CENSUS|KNTWR_FORMATION_CENSUS; config.enabled_mask=KNTWR_PROFILE;
     Check(start(&config)==2,"formation census beside the storm census passes validation and refuses a foreign main image");
-    config.va_watch_flags=5u<<NTW2_ARMY_STORM_SAMPLE_SHIFT; config.profile_site=19;
+    config.va_watch_flags=5u<<KNTWR_ARMY_STORM_SAMPLE_SHIFT; config.profile_site=19;
     Check(start(&config)==1,"storm sample threshold without the census refused");
-    config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|(5u<<NTW2_ARMY_STORM_SAMPLE_SHIFT); config.enabled_mask=NTW2_AI_ASYNC;
+    config.va_watch_flags=KNTWR_ARMY_STORM_CENSUS|(5u<<KNTWR_ARMY_STORM_SAMPLE_SHIFT); config.enabled_mask=KNTWR_AI_ASYNC;
     Check(start(&config)==1,"storm sample threshold without PROFILE refused");
-    config.enabled_mask=NTW2_PROFILE; config.profile_site=0;
+    config.enabled_mask=KNTWR_PROFILE; config.profile_site=0;
     Check(start(&config)==1,"storm sample threshold without a selected site refused");
     config.profile_site=18; Check(start(&config)==1,"storm sample threshold with the wrong profile site (index 17) refused");
     config.profile_site=20; Check(start(&config)==1,"storm sample threshold with the wrong profile site (index 19) refused");
     config.profile_site=19; Check(start(&config)==2,"storm sample threshold with census, PROFILE and site 18 passes validation");
-    config.va_watch_flags=NTW2_ARMY_STORM_CENSUS|NTW2_ARMY_STORM_SAMPLE_MASK; Check(start(&config)==2,"storm sample threshold 255 ms passes validation");
+    config.va_watch_flags=KNTWR_ARMY_STORM_CENSUS|KNTWR_ARMY_STORM_SAMPLE_MASK; Check(start(&config)==2,"storm sample threshold 255 ms passes validation");
     // --tick-pcore / --tick-core-ab validation: routed tick only, one placement mode at a time.
-    config.profile_site=0; config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.va_watch_flags=NTW2_TICK_PCORE;
+    config.profile_site=0; config.enabled_mask=KNTWR_BATCH64|KNTWR_VISUAL; config.va_watch_flags=KNTWR_TICK_PCORE;
     Check(start(&config)==1,"tick placement refused without a routed tick");
-    config.enabled_mask=NTW2_AI_ASYNC; Check(start(&config)==2,"tick placement with a simulation feature passes validation");
-    config.enabled_mask=NTW2_PROFILE; config.va_watch_flags=NTW2_TICK_CORE_AB;
+    config.enabled_mask=KNTWR_AI_ASYNC; Check(start(&config)==2,"tick placement with a simulation feature passes validation");
+    config.enabled_mask=KNTWR_PROFILE; config.va_watch_flags=KNTWR_TICK_CORE_AB;
     Check(start(&config)==2,"tick core A/B with PROFILE passes validation");
-    config.va_watch_flags=NTW2_TICK_PCORE|NTW2_TICK_CORE_AB; Check(start(&config)==1,"tick placement modes are exclusive");
+    config.va_watch_flags=KNTWR_TICK_PCORE|KNTWR_TICK_CORE_AB; Check(start(&config)==1,"tick placement modes are exclusive");
     // --army-solver-memo / --army-solver-shadow validation: manager-routed tick and main thread id, one mode at a time, compatible with the storm census.
-    config.main_thread_id=GetCurrentThreadId(); config.profile_site=0; config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO;
+    config.main_thread_id=GetCurrentThreadId(); config.profile_site=0; config.enabled_mask=KNTWR_BATCH64|KNTWR_VISUAL; config.va_watch_flags=KNTWR_ARMY_SOLVER_MEMO;
     Check(start(&config)==1,"solver memo refused without a routed tick");
-    config.enabled_mask=NTW2_PROFILE; Check(start(&config)==2,"solver memo with PROFILE passes validation and refuses a foreign main image");
-    config.va_watch_flags=NTW2_ARMY_SOLVER_SHADOW; Check(start(&config)==2,"solver shadow with PROFILE passes validation");
-    config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_SOLVER_SHADOW; Check(start(&config)==1,"solver memo and shadow are exclusive");
-    config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO|NTW2_ARMY_STORM_CENSUS; Check(start(&config)==2,"solver memo is compatible with the storm census");
-    config.va_watch_flags=NTW2_ARMY_SOLVER_SHADOW|NTW2_ARMY_STORM_CENSUS; Check(start(&config)==2,"solver shadow is compatible with the storm census");
-    config.enabled_mask=NTW2_AI_ASYNC; config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO; Check(start(&config)==2,"solver memo with a simulation feature passes validation");
+    config.enabled_mask=KNTWR_PROFILE; Check(start(&config)==2,"solver memo with PROFILE passes validation and refuses a foreign main image");
+    config.va_watch_flags=KNTWR_ARMY_SOLVER_SHADOW; Check(start(&config)==2,"solver shadow with PROFILE passes validation");
+    config.va_watch_flags=KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW; Check(start(&config)==1,"solver memo and shadow are exclusive");
+    config.va_watch_flags=KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_STORM_CENSUS; Check(start(&config)==2,"solver memo is compatible with the storm census");
+    config.va_watch_flags=KNTWR_ARMY_SOLVER_SHADOW|KNTWR_ARMY_STORM_CENSUS; Check(start(&config)==2,"solver shadow is compatible with the storm census");
+    config.enabled_mask=KNTWR_AI_ASYNC; config.va_watch_flags=KNTWR_ARMY_SOLVER_MEMO; Check(start(&config)==2,"solver memo with a simulation feature passes validation");
     config.main_thread_id=0; Check(start(&config)==1,"solver refused without a main thread id");
-    config.main_thread_id=GetCurrentThreadId(); config.va_watch_flags=NTW2_ARMY_SOLVER_MEMO|NTW2_FORMATION_CENSUS; Check(start(&config)==2,"formation census beside the solver passes validation");
-    config.enabled_mask=NTW2_BATCH64|NTW2_VISUAL; config.main_thread_id=0; config.va_watch_flags=NTW2_ALLOC_CENSUS|NTW2_ARENA_RELEASE|NTW2_HEAP_OPTIMIZE;
+    config.main_thread_id=GetCurrentThreadId(); config.va_watch_flags=KNTWR_ARMY_SOLVER_MEMO|KNTWR_FORMATION_CENSUS; Check(start(&config)==2,"formation census beside the solver passes validation");
+    config.enabled_mask=KNTWR_BATCH64|KNTWR_VISUAL; config.main_thread_id=0; config.va_watch_flags=KNTWR_ALLOC_CENSUS|KNTWR_ARENA_RELEASE|KNTWR_HEAP_OPTIMIZE;
     Check(start(&config)==2,"alloc census, arena release and heap optimize flags pass validation without a routed tick");
     config.va_watch_flags=0; config.profile_site=0; config.main_thread_id=0;
     // --ai-ctrl-* validation: routed tick, census shadow-only, verify needs a live feature, no ai_ctrl/ai_async2, known bits only.
-    config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=NTW2_AI_CTRL_HISTOGRAM;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.ai_ctrl_flags=KNTWR_AI_CTRL_HISTOGRAM;
     Check(start(&config)==2,"ai-ctrl histogram passes validation and refuses a foreign main image");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_HISTOGRAM|NTW2_AI_CTRL_GEOMETRY|NTW2_AI_CTRL_VERIFY;
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_HISTOGRAM|KNTWR_AI_CTRL_GEOMETRY|KNTWR_AI_CTRL_VERIFY;
     Check(start(&config)==2,"ai-ctrl histogram+geometry+verify passes validation");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_CENSUS; Check(start(&config)==2,"ai-ctrl census passes validation");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_CENSUS|NTW2_AI_CTRL_HISTOGRAM; Check(start(&config)==1,"ai-ctrl census is shadow-only");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_VERIFY; Check(start(&config)==1,"ai-ctrl verify alone refused");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_FLAGS_VALID+1; Check(start(&config)==1,"ai-ctrl unknown flag bit refused");
-    config.ai_ctrl_flags=NTW2_AI_CTRL_HISTOGRAM; config.enabled_mask=NTW2_BATCH64;
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_CENSUS; Check(start(&config)==2,"ai-ctrl census passes validation");
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_CENSUS|KNTWR_AI_CTRL_HISTOGRAM; Check(start(&config)==1,"ai-ctrl census is shadow-only");
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_VERIFY; Check(start(&config)==1,"ai-ctrl verify alone refused");
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_FLAGS_VALID+1; Check(start(&config)==1,"ai-ctrl unknown flag bit refused");
+    config.ai_ctrl_flags=KNTWR_AI_CTRL_HISTOGRAM; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"ai-ctrl without a routed tick refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-ctrl excludes ai_async2");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-ctrl excludes the controller offload");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai-ctrl excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CTRL; Check(start(&config)==1,"ai-ctrl excludes the controller offload");
     config.ai_ctrl_flags=0;
     // --ai-claim-once (ai_ctrl_flags bit 8): same routed-tick / exclusion rules as the --ai-ctrl modes, composes with them.
-    config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE;
     Check(start(&config)==2,"ai-claim-once passes validation and refuses a foreign main image");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"ai-claim-once combines with an --ai-ctrl mode");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_CTRL_VERIFY; Check(start(&config)==1,"ai-claim-once does not relax the --ai-ctrl-verify rule");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|0x10u; Check(start(&config)==1,"ai-claim-once beside an unknown ai_ctrl bit refused");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==2,"ai-claim-once-census passes validation");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==1,"ai-claim-once and its census are exclusive");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|KNTWR_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"ai-claim-once combines with an --ai-ctrl mode");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|KNTWR_AI_CTRL_VERIFY; Check(start(&config)==1,"ai-claim-once does not relax the --ai-ctrl-verify rule");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|0x10u; Check(start(&config)==1,"ai-claim-once beside an unknown ai_ctrl bit refused");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==2,"ai-claim-once-census passes validation");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|KNTWR_AI_CLAIM_ONCE_CENSUS; Check(start(&config)==1,"ai-claim-once and its census are exclusive");
     config.ai_ctrl_flags=0x20000u; Check(start(&config)==1,"bits 17..31 are reserved");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE; config.enabled_mask=NTW2_BATCH64;
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"ai-claim-once without a routed tick refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-claim-once excludes ai_async2");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"ai-claim-once excludes the controller offload");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai-claim-once excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CTRL; Check(start(&config)==1,"ai-claim-once excludes the controller offload");
     config.ai_ctrl_flags=0;
     // Retired AI group lever bits 13..17 (formup gate, stand-off, hold slots (+all), march slots) are no longer defined: every one is refused alone and beside a valid routed-tick brain-step setup.
-    config.enabled_mask=NTW2_AI_ASYNC;
+    config.enabled_mask=KNTWR_AI_ASYNC;
     for(unsigned bit=13;bit<=17;++bit){
         config.ai_ctrl_flags=1u<<bit; Check(start(&config)==1,"retired ai_ctrl bit 13..17 refused");
-        config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_TARGET_CULL|(1u<<bit); Check(start(&config)==1,"retired ai_ctrl bit 13..17 refused beside valid claim and brain-step bits");
+        config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|KNTWR_AI_TARGET_CULL|(1u<<bit); Check(start(&config)==1,"retired ai_ctrl bit 13..17 refused beside valid claim and brain-step bits");
     }
     config.ai_ctrl_flags=0x3E000u; Check(start(&config)==1,"all retired ai_ctrl bits refused together");
-    config.ai_ctrl_flags=NTW2_AI_CLAIM_ONCE|NTW2_AI_TARGET_CULL|NTW2_AI_RETARGET_JITTER; Check(start(&config)==2,"the valid claim and brain-step bits still pass validation");
+    config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE|KNTWR_AI_TARGET_CULL|KNTWR_AI_RETARGET_JITTER; Check(start(&config)==2,"the valid claim and brain-step bits still pass validation");
     config.ai_ctrl_flags=0;
     // --brain-target-cull-shadow / --brain-target-cull / --brain-retarget-jitter (bits 10..12): same routed-tick / exclusion rules, compose with the claim bits.
-    config.enabled_mask=NTW2_AI_ASYNC; config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER;
     Check(start(&config)==2,"brain-retarget-jitter passes validation and refuses a foreign main image");
-    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL; Check(start(&config)==2,"brain-target-cull passes validation");
-    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL_SHADOW; Check(start(&config)==2,"brain-target-cull-shadow passes validation");
-    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL|NTW2_AI_RETARGET_JITTER|NTW2_AI_CLAIM_ONCE; Check(start(&config)==2,"the brain-step levers compose with each other and the claim bit");
-    config.ai_ctrl_flags=NTW2_AI_TARGET_CULL|NTW2_AI_TARGET_CULL_SHADOW; Check(start(&config)==1,"brain-target-cull and its shadow are exclusive");
-    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER|NTW2_AI_CTRL_GEOMETRY; Check(start(&config)==1,"the brain-step levers exclude the geometry mode (shared status words 16..23)");
-    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER|NTW2_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"brain-retarget-jitter combines with the histogram mode");
-    config.ai_ctrl_flags=NTW2_AI_RETARGET_JITTER; config.enabled_mask=NTW2_BATCH64;
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL; Check(start(&config)==2,"brain-target-cull passes validation");
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL_SHADOW; Check(start(&config)==2,"brain-target-cull-shadow passes validation");
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL|KNTWR_AI_RETARGET_JITTER|KNTWR_AI_CLAIM_ONCE; Check(start(&config)==2,"the brain-step levers compose with each other and the claim bit");
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL|KNTWR_AI_TARGET_CULL_SHADOW; Check(start(&config)==1,"brain-target-cull and its shadow are exclusive");
+    config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER|KNTWR_AI_CTRL_GEOMETRY; Check(start(&config)==1,"the brain-step levers exclude the geometry mode (shared status words 16..23)");
+    config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER|KNTWR_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"brain-retarget-jitter combines with the histogram mode");
+    config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"brain-retarget-jitter without a routed tick refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"brain-retarget-jitter excludes ai_async2");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CTRL; Check(start(&config)==1,"brain-retarget-jitter excludes the controller offload");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"brain-retarget-jitter excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CTRL; Check(start(&config)==1,"brain-retarget-jitter excludes the controller offload");
     config.ai_ctrl_flags=0;
     // --ai-prepass-*: routed tick, no ai_async2, census combines only with presize, known bits only.
-    config.enabled_mask=NTW2_AI_ASYNC; config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS;
+    config.enabled_mask=KNTWR_AI_ASYNC; config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS;
     Check(start(&config)==2,"ai-prepass census passes validation and refuses a foreign main image");
-    config.ai_prepass_flags=NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-presize passes validation");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-prepass census+presize passes validation");
-    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW; Check(start(&config)==2,"ai-poly-shadow passes validation");
-    config.ai_prepass_flags=NTW2_AI_POLY; Check(start(&config)==2,"ai-poly passes validation");
-    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_PRESIZE; Check(start(&config)==2,"ai-poly combines with presize");
-    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW|NTW2_AI_POLY; Check(start(&config)==1,"ai-poly-shadow and ai-poly exclude each other");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY; Check(start(&config)==1,"ai-poly excludes the census");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY_SHADOW; Check(start(&config)==1,"ai-poly-shadow excludes the census");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_FLAGS_VALID+1; Check(start(&config)==1,"ai-prepass unknown flag bit refused");
+    config.ai_prepass_flags=KNTWR_AI_PRESIZE; Check(start(&config)==2,"ai-presize passes validation");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_PRESIZE; Check(start(&config)==2,"ai-prepass census+presize passes validation");
+    config.ai_prepass_flags=KNTWR_AI_POLY_SHADOW; Check(start(&config)==2,"ai-poly-shadow passes validation");
+    config.ai_prepass_flags=KNTWR_AI_POLY; Check(start(&config)==2,"ai-poly passes validation");
+    config.ai_prepass_flags=KNTWR_AI_POLY|KNTWR_AI_PRESIZE; Check(start(&config)==2,"ai-poly combines with presize");
+    config.ai_prepass_flags=KNTWR_AI_POLY_SHADOW|KNTWR_AI_POLY; Check(start(&config)==1,"ai-poly-shadow and ai-poly exclude each other");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_POLY; Check(start(&config)==1,"ai-poly excludes the census");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_POLY_SHADOW; Check(start(&config)==1,"ai-poly-shadow excludes the census");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_FLAGS_VALID+1; Check(start(&config)==1,"ai-prepass unknown flag bit refused");
     config.ai_prepass_flags=0x80; Check(start(&config)==1,"ai-prepass bit 0x80 refused");
-    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST; Check(start(&config)==2,"ai-record-test passes validation with ai-poly");
-    config.ai_prepass_flags=NTW2_AI_POLY_SHADOW|NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==2,"ai-record-test-shadow passes validation with ai-poly-shadow");
-    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST|NTW2_AI_PRESIZE|(200u<<NTW2_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-record-test combines with presize and the spiral cap");
-    config.ai_prepass_flags=NTW2_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test without a poly bit refused");
-    config.ai_prepass_flags=NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow without a poly bit refused");
-    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_RECORD_TEST|NTW2_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow and ai-record-test exclude each other");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_POLY|NTW2_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test excludes the census");
-    config.ai_prepass_flags=NTW2_AI_SPIRAL_CENSUS; Check(start(&config)==2,"ai-spiral-census passes validation");
-    config.ai_prepass_flags=200u<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 200 passes validation");
-    config.ai_prepass_flags=0xFFFFu<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 65535 passes validation");
-    config.ai_prepass_flags=NTW2_AI_SPIRAL_CAP_MIN_M<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 20 passes validation");
-    config.ai_prepass_flags=19u<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==1,"ai-spiral-cap-m below the first ring refused");
-    config.ai_prepass_flags=1u<<NTW2_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==1,"ai-spiral-cap-m 1 refused");
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS|NTW2_AI_SPIRAL_CENSUS|(200u<<NTW2_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-spiral combines with the prepass census");
-    config.ai_prepass_flags=NTW2_AI_POLY|NTW2_AI_PRESIZE|(200u<<NTW2_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-spiral combines with ai-poly and presize");
-    config.ai_prepass_flags=200u<<NTW2_AI_SPIRAL_CAP_SHIFT; config.enabled_mask=NTW2_BATCH64;
+    config.ai_prepass_flags=KNTWR_AI_POLY|KNTWR_AI_RECORD_TEST; Check(start(&config)==2,"ai-record-test passes validation with ai-poly");
+    config.ai_prepass_flags=KNTWR_AI_POLY_SHADOW|KNTWR_AI_RECORD_TEST_SHADOW; Check(start(&config)==2,"ai-record-test-shadow passes validation with ai-poly-shadow");
+    config.ai_prepass_flags=KNTWR_AI_POLY|KNTWR_AI_RECORD_TEST|KNTWR_AI_PRESIZE|(200u<<KNTWR_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-record-test combines with presize and the spiral cap");
+    config.ai_prepass_flags=KNTWR_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test without a poly bit refused");
+    config.ai_prepass_flags=KNTWR_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow without a poly bit refused");
+    config.ai_prepass_flags=KNTWR_AI_POLY|KNTWR_AI_RECORD_TEST|KNTWR_AI_RECORD_TEST_SHADOW; Check(start(&config)==1,"ai-record-test-shadow and ai-record-test exclude each other");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_POLY|KNTWR_AI_RECORD_TEST; Check(start(&config)==1,"ai-record-test excludes the census");
+    config.ai_prepass_flags=KNTWR_AI_SPIRAL_CENSUS; Check(start(&config)==2,"ai-spiral-census passes validation");
+    config.ai_prepass_flags=200u<<KNTWR_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 200 passes validation");
+    config.ai_prepass_flags=0xFFFFu<<KNTWR_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 65535 passes validation");
+    config.ai_prepass_flags=KNTWR_AI_SPIRAL_CAP_MIN_M<<KNTWR_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==2,"ai-spiral-cap-m 20 passes validation");
+    config.ai_prepass_flags=19u<<KNTWR_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==1,"ai-spiral-cap-m below the first ring refused");
+    config.ai_prepass_flags=1u<<KNTWR_AI_SPIRAL_CAP_SHIFT; Check(start(&config)==1,"ai-spiral-cap-m 1 refused");
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_SPIRAL_CENSUS|(200u<<KNTWR_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-spiral combines with the prepass census");
+    config.ai_prepass_flags=KNTWR_AI_POLY|KNTWR_AI_PRESIZE|(200u<<KNTWR_AI_SPIRAL_CAP_SHIFT); Check(start(&config)==2,"ai-spiral combines with ai-poly and presize");
+    config.ai_prepass_flags=200u<<KNTWR_AI_SPIRAL_CAP_SHIFT; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"ai-spiral without a routed tick refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-spiral excludes ai_async2");
-    config.enabled_mask=NTW2_AI_ASYNC;
-    config.ai_prepass_flags=NTW2_AI_PREPASS_CENSUS; config.enabled_mask=NTW2_BATCH64;
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai-spiral excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC;
+    config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"ai-prepass without a routed tick refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_ASYNC2; Check(start(&config)==1,"ai-prepass excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai-prepass excludes ai_async2");
     config.ai_prepass_flags=0;
-    config.enabled_mask=NTW2_BRAIN; config.main_thread_id=1; Check(start(&config)==1,"brain profiling without profile refused"); config.main_thread_id=0;
-    config.enabled_mask=NTW2_AI_CTRL; Check(start(&config)==1,"controller offload without ai refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_BUDGET_EMA; Check(start(&config)==1,"retired EMA budget refused with ai");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_SAFE_PARK; Check(start(&config)==1,"retired unsafe parking refused with ai");
-    config.enabled_mask=NTW2_BATCH64; config.brain_flags=NTW2_BRAIN_CENSUS;
+    config.enabled_mask=KNTWR_BRAIN; config.main_thread_id=1; Check(start(&config)==1,"brain profiling without profile refused"); config.main_thread_id=0;
+    config.enabled_mask=KNTWR_AI_CTRL; Check(start(&config)==1,"controller offload without ai refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_BUDGET_EMA; Check(start(&config)==1,"retired EMA budget refused with ai");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_SAFE_PARK; Check(start(&config)==1,"retired unsafe parking refused with ai");
+    config.enabled_mask=KNTWR_BATCH64; config.brain_flags=KNTWR_BRAIN_CENSUS;
     Check(start(&config)==1,"brain census requires brain2");
-    config.brain_flags=NTW2_BRAIN_TIMING;
+    config.brain_flags=KNTWR_BRAIN_TIMING;
     Check(start(&config)==1,"brain timing requires brain2");
-    config.brain_flags=NTW2_BRAIN_NODE_SHADOW;
+    config.brain_flags=KNTWR_BRAIN_NODE_SHADOW;
     Check(start(&config)==1,"node shadow requires brain2");
-    config.brain_flags=NTW2_BRAIN_FIRE_SHADOW;
+    config.brain_flags=KNTWR_BRAIN_FIRE_SHADOW;
     Check(start(&config)==1,"sequence shadow requires brain2");
-    config.enabled_mask=NTW2_BRAIN2; config.brain_flags=16u;
+    config.enabled_mask=KNTWR_BRAIN2; config.brain_flags=16u;
     Check(start(&config)==1,"brain parallel without census or quiet refused");
     config.brain_flags=0x100000u;
     Check(start(&config)==1,"unknown brain flags refused");
     {
         // Per-unit brain slices: every refusal is a pure validation result (no activation).
-        const U unit=NTW2_BRAIN_UNIT_FATIGUE;
-        const U bad[]={unit|NTW2_BRAIN_CENSUS,unit|NTW2_BRAIN_TIMING,unit|NTW2_BRAIN_NODE_SHADOW,unit|NTW2_BRAIN_FIRE_SHADOW,
-                       unit|NTW2_BRAIN_FINALIZER_SHADOW,unit|NTW2_BRAIN_UNIT_SHADOW,unit|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_CENSUS,
-                       unit|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET,NTW2_BRAIN_UNIT_FATIGUE_SHADOW,NTW2_BRAIN_UNIT_POSTURE_SHADOW,
-                       NTW2_BRAIN_UNIT_ENGAGE_SHADOW};
+        const U unit=KNTWR_BRAIN_UNIT_FATIGUE;
+        const U bad[]={unit|KNTWR_BRAIN_CENSUS,unit|KNTWR_BRAIN_TIMING,unit|KNTWR_BRAIN_NODE_SHADOW,unit|KNTWR_BRAIN_FIRE_SHADOW,
+                       unit|KNTWR_BRAIN_FINALIZER_SHADOW,unit|KNTWR_BRAIN_UNIT_SHADOW,unit|KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_CENSUS,
+                       unit|KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET,KNTWR_BRAIN_UNIT_FATIGUE_SHADOW,KNTWR_BRAIN_UNIT_POSTURE_SHADOW,
+                       KNTWR_BRAIN_UNIT_ENGAGE_SHADOW};
         config.workers=2;
         for (unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);++k) { config.brain_flags=bad[k]; Check(start(&config)==1,"unit brain flag combination refused"); }
         config.workers=0;
         const U saved=config.enabled_mask;
-        config.enabled_mask=NTW2_BATCH64; config.brain_flags=unit; Check(start(&config)==1,"unit brain flag requires brain2");
+        config.enabled_mask=KNTWR_BATCH64; config.brain_flags=unit; Check(start(&config)==1,"unit brain flag requires brain2");
         config.enabled_mask=saved;
     }
-    config.brain_flags=NTW2_BRAIN_UNIT_SHADOW|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_CENSUS; config.workers=2;
+    config.brain_flags=KNTWR_BRAIN_UNIT_SHADOW|KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_CENSUS; config.workers=2;
     Check(start(&config)==1,"unit shadow with brain parallel refused");
-    config.brain_flags=NTW2_BRAIN_UNIT_SHADOW|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET;
+    config.brain_flags=KNTWR_BRAIN_UNIT_SHADOW|KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET;
     Check(start(&config)==1,"unit shadow with brain quiet refused");
     {
-        const U others[]={NTW2_BRAIN_CENSUS,NTW2_BRAIN_TIMING,NTW2_BRAIN_NODE_SHADOW,NTW2_BRAIN_FIRE_SHADOW,
-                          NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET,NTW2_BRAIN_FINALIZER_SHADOW,NTW2_BRAIN_UNIT_SHADOW};
+        const U others[]={KNTWR_BRAIN_CENSUS,KNTWR_BRAIN_TIMING,KNTWR_BRAIN_NODE_SHADOW,KNTWR_BRAIN_FIRE_SHADOW,
+                          KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET,KNTWR_BRAIN_FINALIZER_SHADOW,KNTWR_BRAIN_UNIT_SHADOW};
         for (unsigned k=0;k<sizeof(others)/sizeof(others[0]);++k) {
-            config.brain_flags=NTW2_BRAIN_S0|others[k];
+            config.brain_flags=KNTWR_BRAIN_S0|others[k];
             Check(start(&config)==1,"brain S0 excludes every other brain flag");
         }
     }
-    config.enabled_mask=NTW2_BATCH64; config.brain_flags=NTW2_BRAIN_S0;
+    config.enabled_mask=KNTWR_BATCH64; config.brain_flags=KNTWR_BRAIN_S0;
     Check(start(&config)==1,"brain S0 requires brain2");
     {
         // --brain-locality owns the occurrence call and the S0 status row; its modifiers need the base bit and exclude each other.
-        const U L=NTW2_BRAIN_LOCALITY;
-        const U bad[]={L|NTW2_BRAIN_CENSUS,L|NTW2_BRAIN_TIMING,L|NTW2_BRAIN_NODE_SHADOW,L|NTW2_BRAIN_FIRE_SHADOW,
-                       L|NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET,L|NTW2_BRAIN_FINALIZER_SHADOW,L|NTW2_BRAIN_UNIT_SHADOW,L|NTW2_BRAIN_S0,
-                       L|NTW2_BRAIN_UNIT_FATIGUE,L|NTW2_BRAIN_UNIT_POSTURE,L|NTW2_BRAIN_UNIT_ENGAGE,
-                       NTW2_BRAIN_LOCALITY_WARM,NTW2_BRAIN_LOCALITY_PREFETCH,NTW2_BRAIN_LOCALITY_PREFETCH2,
-                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH,L|NTW2_BRAIN_LOCALITY_PREFETCH|NTW2_BRAIN_LOCALITY_PREFETCH2,
-                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH2,
-                       L|NTW2_BRAIN_LOCALITY_WARM|NTW2_BRAIN_LOCALITY_PREFETCH|NTW2_BRAIN_LOCALITY_PREFETCH2,0x100000u|L,
-                       NTW2_BRAIN_LOCALITY_MARK,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_WARM,
-                       L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_PREFETCH,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_LOCALITY_PREFETCH2,
-                       L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_S0,L|NTW2_BRAIN_LOCALITY_MARK|NTW2_BRAIN_CENSUS};
-        config.enabled_mask=NTW2_BRAIN2; config.workers=2;
+        const U L=KNTWR_BRAIN_LOCALITY;
+        const U bad[]={L|KNTWR_BRAIN_CENSUS,L|KNTWR_BRAIN_TIMING,L|KNTWR_BRAIN_NODE_SHADOW,L|KNTWR_BRAIN_FIRE_SHADOW,
+                       L|KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET,L|KNTWR_BRAIN_FINALIZER_SHADOW,L|KNTWR_BRAIN_UNIT_SHADOW,L|KNTWR_BRAIN_S0,
+                       L|KNTWR_BRAIN_UNIT_FATIGUE,L|KNTWR_BRAIN_UNIT_POSTURE,L|KNTWR_BRAIN_UNIT_ENGAGE,
+                       KNTWR_BRAIN_LOCALITY_WARM,KNTWR_BRAIN_LOCALITY_PREFETCH,KNTWR_BRAIN_LOCALITY_PREFETCH2,
+                       L|KNTWR_BRAIN_LOCALITY_WARM|KNTWR_BRAIN_LOCALITY_PREFETCH,L|KNTWR_BRAIN_LOCALITY_PREFETCH|KNTWR_BRAIN_LOCALITY_PREFETCH2,
+                       L|KNTWR_BRAIN_LOCALITY_WARM|KNTWR_BRAIN_LOCALITY_PREFETCH2,
+                       L|KNTWR_BRAIN_LOCALITY_WARM|KNTWR_BRAIN_LOCALITY_PREFETCH|KNTWR_BRAIN_LOCALITY_PREFETCH2,0x100000u|L,
+                       KNTWR_BRAIN_LOCALITY_MARK,L|KNTWR_BRAIN_LOCALITY_MARK|KNTWR_BRAIN_LOCALITY_WARM,
+                       L|KNTWR_BRAIN_LOCALITY_MARK|KNTWR_BRAIN_LOCALITY_PREFETCH,L|KNTWR_BRAIN_LOCALITY_MARK|KNTWR_BRAIN_LOCALITY_PREFETCH2,
+                       L|KNTWR_BRAIN_LOCALITY_MARK|KNTWR_BRAIN_S0,L|KNTWR_BRAIN_LOCALITY_MARK|KNTWR_BRAIN_CENSUS};
+        config.enabled_mask=KNTWR_BRAIN2; config.workers=2;
         for (unsigned k=0;k<sizeof(bad)/sizeof(bad[0]);++k) { config.brain_flags=bad[k]; Check(start(&config)==1,"locality flag combination refused"); }
         config.workers=0;
-        config.enabled_mask=NTW2_BATCH64; config.brain_flags=L; Check(start(&config)==1,"locality requires brain2");
-        config.brain_flags=L|NTW2_BRAIN_LOCALITY_WARM; Check(start(&config)==1,"locality warm requires brain2");
+        config.enabled_mask=KNTWR_BATCH64; config.brain_flags=L; Check(start(&config)==1,"locality requires brain2");
+        config.brain_flags=L|KNTWR_BRAIN_LOCALITY_WARM; Check(start(&config)==1,"locality warm requires brain2");
     }
-    config.enabled_mask=NTW2_BATCH64; config.brain_flags=NTW2_BRAIN_UNIT_SHADOW;
+    config.enabled_mask=KNTWR_BATCH64; config.brain_flags=KNTWR_BRAIN_UNIT_SHADOW;
     Check(start(&config)==1,"unit shadow requires brain2");
-    config.enabled_mask=NTW2_BRAIN2;
+    config.enabled_mask=KNTWR_BRAIN2;
     config.workers=2;
-    config.brain_flags=NTW2_BRAIN_QUIET;
+    config.brain_flags=KNTWR_BRAIN_QUIET;
     Check(start(&config)==1,"brain quiet without parallel refused");
-    config.brain_flags=NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET|NTW2_BRAIN_CENSUS;
+    config.brain_flags=KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET|KNTWR_BRAIN_CENSUS;
     Check(start(&config)==1,"brain quiet with census refused");
-    config.brain_flags=NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET|NTW2_BRAIN_TIMING;
+    config.brain_flags=KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET|KNTWR_BRAIN_TIMING;
     Check(start(&config)==1,"brain quiet with timing refused");
-    config.brain_flags=NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET|NTW2_BRAIN_FINALIZER_SHADOW;
+    config.brain_flags=KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET|KNTWR_BRAIN_FINALIZER_SHADOW;
     Check(start(&config)==1,"brain quiet with a shadow refused");
-    config.workers=0; config.brain_flags=NTW2_BRAIN_PARALLEL|NTW2_BRAIN_QUIET;
+    config.workers=0; config.brain_flags=KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET;
     Check(start(&config)==1,"brain quiet parallel without workers refused");
     config.brain_flags=0;
-    config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE; Check(start(&config)==1,"combined loco and collision require explicit owned grid and movement flags");
-    config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE_LOD; Check(start(&config)==1,"loco and collision LOD are refused");
-    config.enabled_mask=NTW2_LOCO|NTW2_PROFILE|NTW2_BRAIN; config.main_thread_id=1;
+    config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE; Check(start(&config)==1,"combined loco and collision require explicit owned grid and movement flags");
+    config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE_LOD; Check(start(&config)==1,"loco and collision LOD are refused");
+    config.enabled_mask=KNTWR_LOCO|KNTWR_PROFILE|KNTWR_BRAIN; config.main_thread_id=1;
     Check(start(&config)==1,"loco and brain profiling slots are refused"); config.main_thread_id=0;
-    config.enabled_mask=NTW2_BATCH64; config.loco_flags=NTW2_LOCO_CLONE; Check(start(&config)==1,"loco clone flag without the loco feature refused");
-    config.loco_flags=NTW2_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel flag without the loco feature refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel and clone flags without the loco feature refused");
-    config.loco_flags=NTW2_LOCO_GRID; Check(start(&config)==1,"loco grid without the loco feature refused");
-    config.loco_flags=NTW2_LOCO_GRID_VERIFY; Check(start(&config)==1,"grid verification without the loco feature refused");
-    config.enabled_mask=NTW2_LOCO; config.loco_flags=NTW2_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel without clone refused");
-    config.loco_flags=NTW2_LOCO_SHADOW; Check(start(&config)==1,"loco shadow without clone refused");
-    config.loco_flags=NTW2_LOCO_GRID|NTW2_LOCO_PARALLEL; Check(start(&config)==1,"grid does not relax parallel's clone dependency");
-    config.loco_flags=NTW2_LOCO_GRID|NTW2_LOCO_QUIET; Check(start(&config)==1,"grid does not relax quiet's owned-service dependency");
-    config.loco_flags=NTW2_LOCO_RELINK_SHADOW; Check(start(&config)==1,"relink shadow without owned services and grid refused");
-    config.loco_flags=NTW2_LOCO_GRID_INCREMENTAL; Check(start(&config)==1,"incremental grid without the grid refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID_INCREMENTAL; Check(start(&config)==1,"incremental grid with owned services but without the grid refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink workers without the grid refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_GRID|NTW2_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink workers without owned services refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID|NTW2_LOCO_RELINK_SHADOW|NTW2_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink shadow and workers are exclusive");
-    config.loco_flags=NTW2_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without clone and parallel refused");
-    config.loco_flags=NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet without clone, parallel and owned services refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet without owned services refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_SHADOW|NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet with shadow but without owned services refused");
-    config.loco_flags=NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet with owned services but without clone and parallel refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet with owned services and clone but without parallel refused");
-    config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without parallel refused");
-    config.loco_flags=NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services with parallel but without clone refused");
-    config.enabled_mask=NTW2_BATCH64; config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without the loco feature refused");
-    config.enabled_mask=NTW2_BATCH64; config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET; Check(start(&config)==1,"loco quiet without the loco feature refused");
-    config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE; config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL;
+    config.enabled_mask=KNTWR_BATCH64; config.loco_flags=KNTWR_LOCO_CLONE; Check(start(&config)==1,"loco clone flag without the loco feature refused");
+    config.loco_flags=KNTWR_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel flag without the loco feature refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel and clone flags without the loco feature refused");
+    config.loco_flags=KNTWR_LOCO_GRID; Check(start(&config)==1,"loco grid without the loco feature refused");
+    config.loco_flags=KNTWR_LOCO_GRID_VERIFY; Check(start(&config)==1,"grid verification without the loco feature refused");
+    config.enabled_mask=KNTWR_LOCO; config.loco_flags=KNTWR_LOCO_PARALLEL; Check(start(&config)==1,"loco parallel without clone refused");
+    config.loco_flags=KNTWR_LOCO_SHADOW; Check(start(&config)==1,"loco shadow without clone refused");
+    config.loco_flags=KNTWR_LOCO_GRID|KNTWR_LOCO_PARALLEL; Check(start(&config)==1,"grid does not relax parallel's clone dependency");
+    config.loco_flags=KNTWR_LOCO_GRID|KNTWR_LOCO_QUIET; Check(start(&config)==1,"grid does not relax quiet's owned-service dependency");
+    config.loco_flags=KNTWR_LOCO_RELINK_SHADOW; Check(start(&config)==1,"relink shadow without owned services and grid refused");
+    config.loco_flags=KNTWR_LOCO_GRID_INCREMENTAL; Check(start(&config)==1,"incremental grid without the grid refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID_INCREMENTAL; Check(start(&config)==1,"incremental grid with owned services but without the grid refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink workers without the grid refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_GRID|KNTWR_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink workers without owned services refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID|KNTWR_LOCO_RELINK_SHADOW|KNTWR_LOCO_RELINK_WORKERS; Check(start(&config)==1,"relink shadow and workers are exclusive");
+    config.loco_flags=KNTWR_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without clone and parallel refused");
+    config.loco_flags=KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet without clone, parallel and owned services refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet without owned services refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_SHADOW|KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet with shadow but without owned services refused");
+    config.loco_flags=KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet with owned services but without clone and parallel refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet with owned services and clone but without parallel refused");
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without parallel refused");
+    config.loco_flags=KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services with parallel but without clone refused");
+    config.enabled_mask=KNTWR_BATCH64; config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES; Check(start(&config)==1,"loco owned services without the loco feature refused");
+    config.enabled_mask=KNTWR_BATCH64; config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET; Check(start(&config)==1,"loco quiet without the loco feature refused");
+    config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE; config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL;
     Check(start(&config)==1,"combined loco and collision without owned services and grid refused");
-    const U combinedFlags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID;
-    const U requiredFlags[]={NTW2_LOCO_CLONE,NTW2_LOCO_PARALLEL,NTW2_LOCO_OWNED_SERVICES,NTW2_LOCO_GRID};
+    const U combinedFlags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID;
+    const U requiredFlags[]={KNTWR_LOCO_CLONE,KNTWR_LOCO_PARALLEL,KNTWR_LOCO_OWNED_SERVICES,KNTWR_LOCO_GRID};
     for(U missing:requiredFlags) {
         config.loco_flags=combinedFlags&~missing;
         Check(start(&config)==1,"combined mode rejects each missing requirement");
     }
-    config.loco_flags=combinedFlags|NTW2_LOCO_GRID_VERIFY;
-    config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE|NTW2_COLLIDE_LOD;
+    config.loco_flags=combinedFlags|KNTWR_LOCO_GRID_VERIFY;
+    config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE|KNTWR_COLLIDE_LOD;
     Check(start(&config)==1,"complete combined flags do not relax collision LOD exclusion");
-    config.enabled_mask=NTW2_LOCO; config.loco_flags=NTW2_LOCO_FLAGS_VALID<<1; Check(start(&config)==1,"undefined loco flag refused");
+    config.enabled_mask=KNTWR_LOCO; config.loco_flags=KNTWR_LOCO_FLAGS_VALID<<1; Check(start(&config)==1,"undefined loco flag refused");
     config.loco_flags=0;
-    config.enabled_mask=NTW2_AI_CENSUS; config.main_thread_id=GetCurrentThreadId(); Check(start(&config)==1,"ai census without ai refused");
-    config.enabled_mask=NTW2_AI_ASYNC|NTW2_AI_CENSUS; config.main_thread_id=0; Check(start(&config)==1,"ai census without a main thread id refused");
+    config.enabled_mask=KNTWR_AI_CENSUS; config.main_thread_id=GetCurrentThreadId(); Check(start(&config)==1,"ai census without ai refused");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CENSUS; config.main_thread_id=0; Check(start(&config)==1,"ai census without a main thread id refused");
     config.main_thread_id=0;
-    config.enabled_mask=NTW2_BATCH64;
-    ntw2_status snapshot={};
-    Check(ReadState(state,snapshot) && snapshot.phase==NTW2_IDLE && !snapshot.retained_bytes,"rejected starts publish no runtime resources");
+    config.enabled_mask=KNTWR_BATCH64;
+    kntwr_status snapshot={};
+    Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_IDLE && !snapshot.retained_bytes,"rejected starts publish no runtime resources");
     U* import=ModuleImport(dll,"GetModuleHandleW");
     if(!import) { fprintf(stderr,"main-module identity import not found\n"); return 2; }
     const U originalImport=*import;
@@ -2623,7 +2623,7 @@ int main(int argc,char** argv) {
         Check(*slot!=original && ReadOnly(slot),"published hook retains read-only protection");
         Check(start(&config)==1,"duplicate start refused");
         Check(stop(nullptr)==0,"stop joins the monitor");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask && !snapshot.root,"stopped snapshot published");
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask && !snapshot.root,"stopped snapshot published");
         Check(*slot==original && ReadOnly(slot),"original slot and protection restored");
         if(!i) retained=snapshot.retained_bytes;
         else Check(snapshot.retained_bytes==retained,"restart reuses the clone allocation");
@@ -2643,7 +2643,7 @@ int main(int argc,char** argv) {
         const ULONGLONG deadline=GetTickCount64()+3000;
         bool stopped=false;
         while(GetTickCount64()<deadline) {
-            if(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED) { stopped=true; break; }
+            if(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED) { stopped=true; break; }
             YieldProcessor();
         }
         Check(stopped,"monitor publishes stopped phase");
@@ -2652,34 +2652,34 @@ int main(int argc,char** argv) {
         Check(WaitForSingleObject(stopper,3000)==WAIT_OBJECT_0 && call.result==0,"first stop caller completed");
         CloseHandle(stopper);
         Check(stop(nullptr)==0,"stop the restarted generation");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && *slot==original,"no false completion from an old generation");
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && *slot==original,"no false completion from an old generation");
     }
     if(!failures) {
         U* walkSlot=At(0x133e2dc);
         const U walkOriginal=0x702bb0+delta;
         Check(*walkSlot==walkOriginal && ReadOnly(walkSlot),"pristine read-only planner state slot");
-        config.enabled_mask=NTW2_PROFILE; config.main_thread_id=GetCurrentThreadId();
-        Check(start(&config)==0 && WaitActive(state,NTW2_PROFILE),"profile publishes primary walk route");
+        config.enabled_mask=KNTWR_PROFILE; config.main_thread_id=GetCurrentThreadId();
+        Check(start(&config)==0 && WaitActive(state,KNTWR_PROFILE),"profile publishes primary walk route");
         Check(*walkSlot!=walkOriginal && ReadOnly(walkSlot),"planner gate retains read-only slot protection");
         Check(stop(nullptr)==0,"profile stop joins sampler and owner monitor");
         Check(*walkSlot==walkOriginal && ReadOnly(walkSlot),"planner slot and protection restored");
-        config.enabled_mask=NTW2_BATCH64; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_BATCH64; config.main_thread_id=0;
     }
     if(!failures) {
-        // NTW2_BRAIN: slot +0x0C of all 23 registry vtables is published (read-only protection retained) and restored with the
+        // KNTWR_BRAIN: slot +0x0C of all 23 registry vtables is published (read-only protection retained) and restored with the
         // runtime; without the feature none is touched; no counter moves without work (no tick runs in the owned image).
-        U* cells[NTW2_BRAIN_SLOTS];
+        U* cells[KNTWR_BRAIN_SLOTS];
         bool pristine=true;
-        for(unsigned i=0;i<NTW2_BRAIN_SLOTS;++i) { cells[i]=At(kBrain[i].table+0x0c); pristine=pristine && *cells[i]==kBrain[i].original+delta && ReadOnly(cells[i]); }
+        for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) { cells[i]=At(kBrain[i].table+0x0c); pristine=pristine && *cells[i]==kBrain[i].original+delta && ReadOnly(cells[i]); }
         Check(pristine,"all 23 registry vtable slots +0x0C pristine and read-only");
         config.main_thread_id=GetCurrentThreadId();
         for(unsigned cycle=0;cycle<12 && !failures;++cycle) {
             const bool brain=(cycle&1)==0;
-            config.enabled_mask=NTW2_PROFILE|(brain ? NTW2_BRAIN : 0u);
+            config.enabled_mask=KNTWR_PROFILE|(brain ? KNTWR_BRAIN : 0u);
             Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"brain profiling cycle became active");
             U entry[5]={};
             bool published=true, consistent=true;
-            for(unsigned i=0;i<NTW2_BRAIN_SLOTS;++i) {
+            for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) {
                 const U cur=*cells[i], orig=kBrain[i].original+delta;
                 published=published && ReadOnly(cells[i]);
                 if(!brain) { published=published && cur==orig; continue; }
@@ -2697,33 +2697,33 @@ int main(int argc,char** argv) {
             Check(AllCollisionWordsZero(snapshot),"no collision counter without routed tick work");
             Check(stop(nullptr)==0,"brain profiling stop joins the monitor");
             bool restored=true;
-            for(unsigned i=0;i<NTW2_BRAIN_SLOTS;++i) restored=restored && *cells[i]==kBrain[i].original+delta && ReadOnly(cells[i]);
+            for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) restored=restored && *cells[i]==kBrain[i].original+delta && ReadOnly(cells[i]);
             Check(restored,"stop restores all 23 brain slots and their protection");
-            Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask,"brain stop published");
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask,"brain stop published");
         }
-        config.enabled_mask=NTW2_BATCH64; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_BATCH64; config.main_thread_id=0;
     }
     if(!failures) Check(RunChild(argv[1],argv[2],"--install-conflict"),"foreign brain slot refusal scenario (child process) passed");
     if(!failures) {
-        // NTW2_AI_ASYNC: refusable (no asynchronous scheduler route) and startable (worker created/stopped per generation).
+        // KNTWR_AI_ASYNC: refusable (no asynchronous scheduler route) and startable (worker created/stopped per generation).
         // No think runs in these idle cycles: counters stay zero and the worker sleeps without OS suspension.
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta;
         const U aiMasks[]={
-            NTW2_AI_ASYNC|NTW2_BATCH64, NTW2_AI_ASYNC,
-            NTW2_AI_ASYNC|NTW2_AI_CTRL};
+            KNTWR_AI_ASYNC|KNTWR_BATCH64, KNTWR_AI_ASYNC,
+            KNTWR_AI_ASYNC|KNTWR_AI_CTRL};
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"pristine read-only tick task slot");
         config.enabled_mask=aiMasks[0];
         Put(model,0xB0,A(armyManager));
         root[0x2829c]=0;
         Check(start(&config)==0,"start with the ai feature");
         Sleep(80); // several 10 ms monitor polls
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && !snapshot.active_mask &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && *slot==original,"ai feature is refused without the asynchronous scheduler route");
         Put(model,0xB0,0);
         root[0x2829c]=1;
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && snapshot.probe==6 &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && snapshot.probe==6 &&
               !snapshot.active_mask,"AI without formation refuses a missing army manager instead of cancelling every job");
         Put(model,0xB0,A(armyManager));
         Check(WaitActive(state,aiMasks[0]),"AI without formation binds its manager and becomes active");
@@ -2741,33 +2741,33 @@ int main(int argc,char** argv) {
             for(unsigned w=0;w<6;++w) zero=zero && !snapshot.ai_slice_words[w];
             for(unsigned w=0;w<8;++w) zero=zero && !snapshot.ai_validation_words[w];
             for(unsigned w=0;w<2;++w) zero=zero && !snapshot.ai_slice_site_words[w];
-            for(unsigned w=0;w<NTW2_AI_SLICE_BUDGET_WORDS;++w) zero=zero && !snapshot.ai_slice_budget_words[w];
+            for(unsigned w=0;w<KNTWR_AI_SLICE_BUDGET_WORDS;++w) zero=zero && !snapshot.ai_slice_budget_words[w];
             for(unsigned w=0;w<16;++w) zero=zero && !snapshot.ai_ctrl_words[w];
             for(unsigned w=0;w<8;++w) zero=zero && !snapshot.ai_park_words[w];
-            for(unsigned w=0;w<NTW2_AI_COMPLETION_WORDS;++w) zero=zero && !snapshot.ai_completion_words[w];
+            for(unsigned w=0;w<KNTWR_AI_COMPLETION_WORDS;++w) zero=zero && !snapshot.ai_completion_words[w];
             Check(AiEventWorker(snapshot),"ai restart leaves the event worker unsuspended");
             Check(zero,"no think ran in the owned image and the crash capture stayed silent");
             Check(stop(nullptr)==0,"ai stop joins the monitor and the think worker");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"ai stop restores every slot");
         }
         root[0x2829c]=0;
-        config.enabled_mask=NTW2_BATCH64;
+        config.enabled_mask=KNTWR_BATCH64;
     }
     if(!failures) {
         // BRAIN2 v2 owns site 6 only while active. It needs no worker pool,
         // preserves the asynchronous-route lifecycle, and keeps profiling entry
         // slots original in both observation and serial-census modes.
-        auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(dll,"ntw2_site_callee"));
+        auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(dll,"kntwr_site_callee"));
         Check(siteCallee!=nullptr,"site callee diagnostic export present");
-        U* taskSlot=At(0x132e954); U* cells[NTW2_BRAIN_SLOTS];
+        U* taskSlot=At(0x132e954); U* cells[KNTWR_BRAIN_SLOTS];
         const U taskOriginal=0x5cc390+delta, loopOriginal=0x585d10+delta;
-        for(unsigned i=0;i<NTW2_BRAIN_SLOTS;++i) cells[i]=At(kBrain[i].table+0x0c);
+        for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) cells[i]=At(kBrain[i].table+0x0c);
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"pristine read-only tick task slot");
-        config.enabled_mask=NTW2_BRAIN2|NTW2_BATCH64; config.workers=2;
+        config.enabled_mask=KNTWR_BRAIN2|KNTWR_BATCH64; config.workers=2;
         root[0x2829c]=0;
         Check(start(&config)==0,"start with the brain2 feature");
         Sleep(80); // several 10 ms monitor polls
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && !snapshot.active_mask &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && *slot==original && AllBrain2WordsZero(snapshot),"brain2 feature is refused without the asynchronous scheduler route and counters stay zero");
         Check(siteCallee && siteCallee(6)==loopOriginal,"entity loop site stays the original until the feature is armed");
         root[0x2829c]=1;
@@ -2776,90 +2776,90 @@ int main(int argc,char** argv) {
         Check(ReadState(state,snapshot) && AllBrain2WordsZero(snapshot),"brain2 counters are zero without a dispatch");
         Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"entity loop site bound to the host dispatcher while brain2 is active");
         const U brain2Generation=snapshot.generation, brain2Task=*taskSlot;
-        U brain2Before[NTW2_BRAIN2_WORDS];
+        U brain2Before[KNTWR_BRAIN2_WORDS];
         memcpy(brain2Before,snapshot.brain2_words,sizeof(brain2Before));
         root[0x2829c]=0;
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_ACTIVE && snapshot.generation==brain2Generation &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==brain2Generation &&
               snapshot.active_mask==config.enabled_mask && snapshot.probe==0 && *taskSlot==brain2Task && ReadOnly(taskSlot),
               "same-world synchronous interval keeps brain2 hooks owned and generation active");
         Check(!memcmp(brain2Before,snapshot.brain2_words,sizeof(brain2Before)),"dormant brain2 interval retains counters");
         root[0x2829c]=1;
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_ACTIVE && snapshot.generation==brain2Generation &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==brain2Generation &&
               snapshot.probe==0x100 && *taskSlot==brain2Task,"asynchronous route resumes without reactivation");
         Check(stop(nullptr)==0,"brain2 stop joins the monitor and drains owner dispatch");
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"brain2 stop restores the task slot and protection");
         Check(ReadState(state,snapshot) && AllBrain2WordsZero(snapshot) && siteCallee && siteCallee(6)==loopOriginal,"brain2 stopped status retains zero counters and restores the original site6 callee");
         // Restart observe/census/timing modes, alone and alongside other pool features.
         struct Cycle { U mask; U workers; bool brain2; };
-        const Cycle cycles[]={{NTW2_BRAIN2|NTW2_BATCH64,2,true},{NTW2_BRAIN2,0,true},{NTW2_AI_ASYNC,0,false},{NTW2_BRAIN2|NTW2_AI_ASYNC|NTW2_AI_CTRL,3,true},
-                              {NTW2_BATCH64,0,false},{NTW2_BRAIN2|NTW2_PROFILE|NTW2_BRAIN,1,true},
-                              {NTW2_BRAIN2|NTW2_LOCO,0,true},{NTW2_AI_ASYNC|NTW2_AI_CTRL,4,false}};
+        const Cycle cycles[]={{KNTWR_BRAIN2|KNTWR_BATCH64,2,true},{KNTWR_BRAIN2,0,true},{KNTWR_AI_ASYNC,0,false},{KNTWR_BRAIN2|KNTWR_AI_ASYNC|KNTWR_AI_CTRL,3,true},
+                              {KNTWR_BATCH64,0,false},{KNTWR_BRAIN2|KNTWR_PROFILE|KNTWR_BRAIN,1,true},
+                              {KNTWR_BRAIN2|KNTWR_LOCO,0,true},{KNTWR_AI_ASYNC|KNTWR_AI_CTRL,4,false}};
         for(unsigned i=0;i<2*(sizeof(cycles)/sizeof(cycles[0])) && !failures;++i) {
             const Cycle& c=cycles[i%(sizeof(cycles)/sizeof(cycles[0]))];
             config.enabled_mask=c.mask; config.workers=c.workers;
             // The second pass adds the per-unit Stage A shadow (it needs no census and runs inline without workers).
-            config.brain_flags=c.brain2 ? (i&NTW2_BRAIN_FLAGS_VALID)|(i>=sizeof(cycles)/sizeof(cycles[0]) ? NTW2_BRAIN_UNIT_SHADOW : 0u) : 0u;
-            config.main_thread_id=(c.mask&NTW2_PROFILE) ? GetCurrentThreadId() : 0;
+            config.brain_flags=c.brain2 ? (i&KNTWR_BRAIN_FLAGS_VALID)|(i>=sizeof(cycles)/sizeof(cycles[0]) ? KNTWR_BRAIN_UNIT_SHADOW : 0u) : 0u;
+            config.main_thread_id=(c.mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
             Check(start(&config)==0 && WaitActive(state,c.mask),"brain2 cycle became active with the exact mask");
             Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==c.workers,"brain2 request and activation published");
             Check(siteCallee && ((siteCallee(6)==loopOriginal)==!c.brain2) && (!c.brain2 || InRuntime(siteCallee(6))),
                   c.brain2 ? "entity loop site bound to the host dispatcher" : "entity loop site stays the original without the feature");
-            Check(siteCallee && ((siteCallee(13)==0x531AF0+delta)==!(c.mask&NTW2_LOCO)),
+            Check(siteCallee && ((siteCallee(13)==0x531AF0+delta)==!(c.mask&KNTWR_LOCO)),
                   "brain and movement loop bindings coexist independently");
-            Check(siteCallee && ((siteCallee(33)==0x7C8BD0+delta)==!(c.mask&NTW2_AI_CTRL)) &&
-                  (!(c.mask&NTW2_AI_CTRL) || InRuntime(siteCallee(33))),
+            Check(siteCallee && ((siteCallee(33)==0x7C8BD0+delta)==!(c.mask&KNTWR_AI_CTRL)) &&
+                  (!(c.mask&KNTWR_AI_CTRL) || InRuntime(siteCallee(33))),
                   "controller site binds the host gate only with explicit ai_ctrl; ai alone stays original");
             Check(AllBrain2WordsZero(snapshot),"no brain2 counter without work");
             if (c.brain2) {
-                const U gated = (config.brain_flags & (NTW2_BRAIN_CENSUS | NTW2_BRAIN_NODE_SHADOW | NTW2_BRAIN_FIRE_SHADOW |
-                                                       NTW2_BRAIN_FINALIZER_SHADOW)) ? 1u : 0u;
+                const U gated = (config.brain_flags & (KNTWR_BRAIN_CENSUS | KNTWR_BRAIN_NODE_SHADOW | KNTWR_BRAIN_FIRE_SHADOW |
+                                                       KNTWR_BRAIN_FINALIZER_SHADOW)) ? 1u : 0u;
                 Check(snapshot.brain2_route_words[0]==1 && snapshot.brain2_route_words[1]==gated &&
                       snapshot.brain2_route_words[2]==0 && snapshot.brain2_route_words[3]==0,
                       "site6 selects BRAIN_W driver for shadow without census; LOCO does not change its variant");
             }
-            if(c.mask&NTW2_BRAIN) {
+            if(c.mask&KNTWR_BRAIN) {
                 bool untouched=true;
-                for(unsigned s=0;s<NTW2_BRAIN_SLOTS;++s) untouched=untouched && *cells[s]==kBrain[s].original+delta && ReadOnly(cells[s]);
+                for(unsigned s=0;s<KNTWR_BRAIN_SLOTS;++s) untouched=untouched && *cells[s]==kBrain[s].original+delta && ReadOnly(cells[s]);
                 Check(untouched,"brain profiling slots are not published while brain2 runs the clones");
             }
             bool zero=true;
             for(unsigned w=0;w<32;++w) zero=zero && !(w<16 && snapshot.ai_words[w]) && !snapshot.ai_extra_words[w] && !snapshot.crash_words[w];
             for(unsigned w=0;w<6;++w) zero=zero && !snapshot.ai_slice_words[w];
             for(unsigned w=0;w<2;++w) zero=zero && !snapshot.ai_slice_site_words[w];
-            for(unsigned w=0;w<NTW2_AI_SLICE_BUDGET_WORDS;++w) zero=zero && !snapshot.ai_slice_budget_words[w];
+            for(unsigned w=0;w<KNTWR_AI_SLICE_BUDGET_WORDS;++w) zero=zero && !snapshot.ai_slice_budget_words[w];
             for(unsigned w=0;w<16;++w) zero=zero && !snapshot.ai_ctrl_words[w];
             for(unsigned w=0;w<8;++w) zero=zero && !snapshot.ai_park_words[w];
             Check(zero,"no think ran and the crash capture stayed silent");
             Check(stop(nullptr)==0,"brain2 cycle stop drains the owner and any other feature workers");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"brain2 cycle stop restores every slot");
-            Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask && AllBrain2WordsZero(snapshot),"brain2 cycle stop published with zero counters");
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask && AllBrain2WordsZero(snapshot),"brain2 cycle stop published with zero counters");
             Check(siteCallee && siteCallee(6)==loopOriginal,"brain2 cycle stop unbinds the dispatcher");
             Check(siteCallee && siteCallee(33)==0x7C8BD0+delta,"stop restores the original controller site");
         }
         // --brain-s0: activation starts the timer (CPU check, BRAIN_S0 family routed, calibration) without any dispatch.
-        config.enabled_mask=NTW2_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=NTW2_BRAIN_S0;
-        Check(start(&config)==0 && WaitActive(state,NTW2_BRAIN2),"brain S0 generation became active");
+        config.enabled_mask=KNTWR_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=KNTWR_BRAIN_S0;
+        Check(start(&config)==0 && WaitActive(state,KNTWR_BRAIN2),"brain S0 generation became active");
         Check(ReadState(state,snapshot) && snapshot.brain_s0_words[0]==1 && snapshot.brain_s0_words[1]==1 &&
               snapshot.brain_s0_words[2]==1 && snapshot.brain_s0_words[3]==6 && snapshot.brain_s0_words[4]==0 &&
               snapshot.brain_s0_words[17]!=0 && snapshot.brain_s0_words[31]==2048,
               "brain S0 published version/configured/running, 1/64 sampling, calibration and no stage");
         Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"brain S0 binds the site-6 dispatcher");
         Check(stop(nullptr)==0,"brain S0 stop drains the owner");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.brain_s0_words[2]==1 &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && snapshot.brain_s0_words[2]==1 &&
               siteCallee(6)==loopOriginal,"brain S0 stop retains its row and restores site 6");
         // --brain-locality: activation starts the census (CPU check, storage, static line tables, bracket calibration) without any
         // dispatch; it reuses the S0 status row: version, configured bits (1 census, +2 warm, +4 prefetch, +8 prefetch2), running.
         {
-            const U locCycles[]={NTW2_BRAIN_LOCALITY,NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_WARM,
-                                 NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_PREFETCH,NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_PREFETCH2,
-                                 NTW2_BRAIN_LOCALITY|NTW2_BRAIN_LOCALITY_MARK};
+            const U locCycles[]={KNTWR_BRAIN_LOCALITY,KNTWR_BRAIN_LOCALITY|KNTWR_BRAIN_LOCALITY_WARM,
+                                 KNTWR_BRAIN_LOCALITY|KNTWR_BRAIN_LOCALITY_PREFETCH,KNTWR_BRAIN_LOCALITY|KNTWR_BRAIN_LOCALITY_PREFETCH2,
+                                 KNTWR_BRAIN_LOCALITY|KNTWR_BRAIN_LOCALITY_MARK};
             const U configured[]={1u,3u,5u,9u,17u};
             for (unsigned i=0;i<sizeof(locCycles)/sizeof(locCycles[0]) && !failures;++i) {
-                config.enabled_mask=NTW2_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=locCycles[i];
-                Check(start(&config)==0 && WaitActive(state,NTW2_BRAIN2),"brain locality generation became active");
-                const bool mark=(locCycles[i]&NTW2_BRAIN_LOCALITY_MARK)!=0;   // pass-through: no calibration, no storage
+                config.enabled_mask=KNTWR_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=locCycles[i];
+                Check(start(&config)==0 && WaitActive(state,KNTWR_BRAIN2),"brain locality generation became active");
+                const bool mark=(locCycles[i]&KNTWR_BRAIN_LOCALITY_MARK)!=0;   // pass-through: no calibration, no storage
                 Check(ReadState(state,snapshot) && snapshot.brain_s0_words[0]==1 && snapshot.brain_s0_words[1]==configured[i] &&
                       snapshot.brain_s0_words[2]==1 && snapshot.brain_s0_words[4]==0 && snapshot.brain_s0_words[30]==64 &&
                       (mark || (snapshot.brain_s0_words[3]==4 && snapshot.brain_s0_words[11]!=0 && snapshot.brain_s0_words[12]!=0 &&
@@ -2867,7 +2867,7 @@ int main(int argc,char** argv) {
                       "brain locality published version/configured/running, 1/16 sampling, calibration and no stage");
                 Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"brain locality binds the site-6 dispatcher");
                 Check(stop(nullptr)==0,"brain locality stop drains the owner");
-                Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && snapshot.brain_s0_words[2]==1 &&
+                Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && snapshot.brain_s0_words[2]==1 &&
                       siteCallee(6)==loopOriginal,"brain locality stop retains its row and restores site 6");
             }
         }
@@ -2875,146 +2875,146 @@ int main(int argc,char** argv) {
         // publishes the unit policy / fatigue rows (modes 1 = shadow, 2 = live; the posture/engage half stays zero); stop restores
         // site 6. A later activation without any unit flag leaves the whole unit row zero.
         {
-            const U unitCycles[]={NTW2_BRAIN_UNIT_FATIGUE|NTW2_BRAIN_UNIT_FATIGUE_SHADOW,NTW2_BRAIN_UNIT_FATIGUE,
-                                  NTW2_BRAIN_S0|NTW2_BRAIN_UNIT_FATIGUE,NTW2_BRAIN_UNIT_FATIGUE|NTW2_BRAIN_UNIT_FATIGUE_SHADOW};
+            const U unitCycles[]={KNTWR_BRAIN_UNIT_FATIGUE|KNTWR_BRAIN_UNIT_FATIGUE_SHADOW,KNTWR_BRAIN_UNIT_FATIGUE,
+                                  KNTWR_BRAIN_S0|KNTWR_BRAIN_UNIT_FATIGUE,KNTWR_BRAIN_UNIT_FATIGUE|KNTWR_BRAIN_UNIT_FATIGUE_SHADOW};
             for (unsigned i=0;i<sizeof(unitCycles)/sizeof(unitCycles[0]) && !failures;++i) {
-                config.enabled_mask=NTW2_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=unitCycles[i];
-                Check(start(&config)==0 && WaitActive(state,NTW2_BRAIN2),"unit fatigue generation became active");
-                const U mode=(unitCycles[i]&NTW2_BRAIN_UNIT_FATIGUE_SHADOW) ? 1u : 2u;
+                config.enabled_mask=KNTWR_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=unitCycles[i];
+                Check(start(&config)==0 && WaitActive(state,KNTWR_BRAIN2),"unit fatigue generation became active");
+                const U mode=(unitCycles[i]&KNTWR_BRAIN_UNIT_FATIGUE_SHADOW) ? 1u : 2u;
                 bool halfZero=true;
                 Check(ReadState(state,snapshot) && snapshot.brain_unit_policy_words[0]==1 && snapshot.brain_unit_policy_words[1]==mode &&
                       snapshot.brain_unit_policy_words[2]==0 && snapshot.brain_unit_policy_words[32]==1 &&
                       snapshot.brain_unit_policy_words[33]==mode,"unit fatigue row published version/mode and no stage at activation");
-                for (unsigned w=128;w<NTW2_BRAIN_UNIT_POLICY_WORDS;++w) halfZero=halfZero && !snapshot.brain_unit_policy_words[w];
+                for (unsigned w=128;w<KNTWR_BRAIN_UNIT_POLICY_WORDS;++w) halfZero=halfZero && !snapshot.brain_unit_policy_words[w];
                 Check(halfZero,"the posture/engage half of the unit policy row stays zero");
                 Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"unit fatigue binds the site-6 dispatcher");
                 Check(stop(nullptr)==0,"unit fatigue stop drains the owner");
-                Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && siteCallee(6)==loopOriginal,"unit fatigue stop restores site 6");
+                Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && siteCallee(6)==loopOriginal,"unit fatigue stop restores site 6");
             }
-            config.brain_flags=NTW2_BRAIN_S0;
-            Check(start(&config)==0 && WaitActive(state,NTW2_BRAIN2),"S0 only generation after unit cycles became active");
+            config.brain_flags=KNTWR_BRAIN_S0;
+            Check(start(&config)==0 && WaitActive(state,KNTWR_BRAIN2),"S0 only generation after unit cycles became active");
             bool zero=true;
             Check(ReadState(state,snapshot),"read state");
-            for (unsigned w=0;w<NTW2_BRAIN_UNIT_POLICY_WORDS;++w) zero=zero && !snapshot.brain_unit_policy_words[w];
+            for (unsigned w=0;w<KNTWR_BRAIN_UNIT_POLICY_WORDS;++w) zero=zero && !snapshot.brain_unit_policy_words[w];
             Check(zero,"a later activation without unit flags leaves every unit policy word zero");
             Check(stop(nullptr)==0,"S0-only stop after unit cycles");
         }
         root[0x2829c]=0;
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0;
         config.brain_flags=0;
     }
     if(!failures) {
         // COLLIDE shares the simulation epoch and persistent pool; no stage is invoked by this lifecycle fixture.
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta;
-        config.enabled_mask=NTW2_COLLIDE; config.workers=2; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_COLLIDE; config.workers=2; config.main_thread_id=0;
         root[0x2829c]=0;
         Check(start(&config)==0,"collide start accepted while scheduler is unarmed");
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && !snapshot.active_mask &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllCollideWordsZero(snapshot),
               "collide activation refused until asynchronous route is armed");
         Put(model,0xB0,0);
         root[0x2829c]=1;
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && snapshot.probe==6 &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && snapshot.probe==6 &&
               !snapshot.active_mask && *taskSlot==taskOriginal,
               "standalone collide waits for its own manager without requiring LOCO or AI");
         Put(model,0xB0,A(armyManager));
         const U boundariesBefore=activationBoundaries;
-        Check(WaitActive(state,NTW2_COLLIDE),"collide activates with exact requested mask");
+        Check(WaitActive(state,KNTWR_COLLIDE),"collide activates with exact requested mask");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"collide publishes the tick task hook");
         Check(ReadState(state,snapshot) && AllCollideWordsZero(snapshot),"collide counters remain zero without a stage");
         Check(activationBoundaries-boundariesBefore==1 &&
-              snapshot.memory_words[NTW2_MEM_PRIMARY_CAPACITY]==256 &&
-              snapshot.memory_words[NTW2_MEM_RECORD_CAPACITY]==256 &&
-              snapshot.memory_words[NTW2_MEM_COLLIDE_BYTES]>0 && snapshot.memory_words[NTW2_MEM_LOCO_BYTES]==0,
+              snapshot.memory_words[KNTWR_MEM_PRIMARY_CAPACITY]==256 &&
+              snapshot.memory_words[KNTWR_MEM_RECORD_CAPACITY]==256 &&
+              snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES]>0 && snapshot.memory_words[KNTWR_MEM_LOCO_BYTES]==0,
               "standalone collide captures an empty workload once and allocates only native-audit collision storage");
         Check(stop(nullptr)==0,"collide stop drains and joins the pool");
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"collide stop restores task slot and protection");
         struct CollideCycle { U mask; U workers; };
-        const CollideCycle cycles[]={{NTW2_COLLIDE,0},{NTW2_COLLIDE|NTW2_PROFILE,2},
-                                    {NTW2_BATCH64,0},{NTW2_COLLIDE|NTW2_BRAIN2,3},
-                                    {NTW2_COLLIDE|NTW2_BATCH64,1}};
+        const CollideCycle cycles[]={{KNTWR_COLLIDE,0},{KNTWR_COLLIDE|KNTWR_PROFILE,2},
+                                    {KNTWR_BATCH64,0},{KNTWR_COLLIDE|KNTWR_BRAIN2,3},
+                                    {KNTWR_COLLIDE|KNTWR_BATCH64,1}};
         for(unsigned i=0;i<10 && !failures;++i) {
             const CollideCycle& c=cycles[i%(sizeof(cycles)/sizeof(cycles[0]))];
             config.enabled_mask=c.mask; config.workers=c.workers;
-            config.main_thread_id=(c.mask&NTW2_PROFILE) ? GetCurrentThreadId() : 0;
+            config.main_thread_id=(c.mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
             Check(start(&config)==0 && WaitActive(state,c.mask),"collide restart activates exact feature mask");
             Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.workers==c.workers &&
                   AllCollideWordsZero(snapshot),"collide restart resets counters, including disabled generations");
             Check(stop(nullptr)==0,"collide restart stop joins monitor and pool");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"collide restart restores slots");
-            Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask &&
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask &&
                   AllCollideWordsZero(snapshot),"collide stopped status retains zero work counters");
         }
         root[0x2829c]=0;
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0;
     }
     if(!failures) {
-        auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(dll,"ntw2_site_callee"));
+        auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(dll,"kntwr_site_callee"));
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta, stageOriginal=0x57dc30+delta, queryOriginal=0x81a790+delta;
-        config.enabled_mask=NTW2_COLLIDE_LOD; config.workers=0; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_COLLIDE_LOD; config.workers=0; config.main_thread_id=0;
         root[0x2829c]=0;
         Check(start(&config)==0,"collision LOD start accepted while scheduler unarmed");
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && !snapshot.active_mask &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllCollideLodWordsZero(snapshot),
               "collision LOD activation refused until asynchronous route armed; counters zero");
         Check(siteCallee && siteCallee(5)==stageOriginal,"site 5 stays original until LOD activation");
         Check(siteCallee && siteCallee(106)==queryOriginal,"query site remains original while unarmed");
         root[0x2829c]=1;
-        Check(WaitActive(state,NTW2_COLLIDE_LOD),"collision LOD activates alone without PROFILE or workers");
+        Check(WaitActive(state,KNTWR_COLLIDE_LOD),"collision LOD activates alone without PROFILE or workers");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"collision LOD owns the tick task slot");
         Check(siteCallee && siteCallee(5)!=stageOriginal && InRuntime(siteCallee(5)),"site 5 binds the host stage gate while LOD active");
         Check(siteCallee && siteCallee(106)==queryOriginal,"LOD without census never binds the pair-timed query clone");
         Check(ReadState(state,snapshot) && AllCollideLodWordsZero(snapshot),"collision LOD remains zero before a stage");
         Check(stop(nullptr)==0 && siteCallee && siteCallee(5)==stageOriginal,"collision LOD stop unbinds site 5");
-        const U masks[]={NTW2_COLLIDE_LOD,NTW2_BATCH64,NTW2_COLLIDE_LOD|NTW2_PROFILE,
-                         NTW2_COLLIDE_LOD|NTW2_BATCH64,NTW2_AI_ASYNC|NTW2_COLLIDE_LOD,NTW2_PROFILE};
+        const U masks[]={KNTWR_COLLIDE_LOD,KNTWR_BATCH64,KNTWR_COLLIDE_LOD|KNTWR_PROFILE,
+                         KNTWR_COLLIDE_LOD|KNTWR_BATCH64,KNTWR_AI_ASYNC|KNTWR_COLLIDE_LOD,KNTWR_PROFILE};
         for(unsigned i=0;i<12 && !failures;++i) {
             const U mask=masks[i%(sizeof(masks)/sizeof(masks[0]))];
             config.enabled_mask=mask; config.workers=i%3;
-            config.main_thread_id=(mask&NTW2_PROFILE) ? GetCurrentThreadId() : 0;
+            config.main_thread_id=(mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
             config.collide_lod_m=i%2 ? 55 : 0; // explicit distance and default-zero contract
-            const bool census=(mask&NTW2_PROFILE) && i>=6;
-            if (census) config.collide_lod_m|=NTW2_COLLIDE_CENSUS;
+            const bool census=(mask&KNTWR_PROFILE) && i>=6;
+            if (census) config.collide_lod_m|=KNTWR_COLLIDE_CENSUS;
             Check(start(&config)==0 && WaitActive(state,mask),"collision LOD restart activates exact requested mask");
-            Check(siteCallee && ((siteCallee(5)!=stageOriginal)==((mask&(NTW2_COLLIDE_LOD|NTW2_PROFILE))!=0)),
+            Check(siteCallee && ((siteCallee(5)!=stageOriginal)==((mask&(KNTWR_COLLIDE_LOD|KNTWR_PROFILE))!=0)),
                   "site 5 inclusive timing remains bound in PROFILE generations without census");
             Check(siteCallee && ((siteCallee(106)!=queryOriginal)==census),
                   "PROFILE alone keeps original queries; explicit census alone admits the timed query clone");
-            Check(siteCallee && ((siteCallee(33)==0x7C8BD0+delta)==!(mask&NTW2_AI_CTRL)),
+            Check(siteCallee && ((siteCallee(33)==0x7C8BD0+delta)==!(mask&KNTWR_AI_CTRL)),
                   "planner ai, PROFILE and collision features alone do not bind the controller gate");
             Check(ReadState(state,snapshot) && AllCollideLodWordsZero(snapshot),"collision LOD restart and disabled generation reset every word");
             Check(stop(nullptr)==0 && siteCallee && siteCallee(5)==stageOriginal,"collision LOD restart stop restores site 5");
             Check(siteCallee && siteCallee(106)==queryOriginal,"stop restores the untimed original query after census generations");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"collision LOD restart restores all slots");
-            Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask &&
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask &&
                   AllCollideLodWordsZero(snapshot),"stopped collision LOD status retains zero counters without work");
         }
         root[0x2829c]=0;
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0; config.collide_lod_m=0;
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0; config.collide_lod_m=0;
     }
     if(!failures) {
-        // NTW2_LOCO Stages A/B/C: shares the simulation epoch; sites 13 and 5 bind independently in combined mode.
+        // KNTWR_LOCO Stages A/B/C: shares the simulation epoch; sites 13 and 5 bind independently in combined mode.
         // No battle tick runs in the owned image, so every work counter stays zero; metadata words are asserted separately.
-        auto siteCallee=reinterpret_cast<ntw2_site_callee_fn>(GetProcAddress(dll,"ntw2_site_callee"));
+        auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(dll,"kntwr_site_callee"));
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta, moveOriginal=0x531af0+delta, stageOriginal=0x57dc30+delta;
         Check(siteCallee!=nullptr,"site callee diagnostic export present for loco");
         BindLocoScene(true);
-        config.enabled_mask=NTW2_LOCO; config.workers=0; config.main_thread_id=0; config.loco_flags=0;
+        config.enabled_mask=KNTWR_LOCO; config.workers=0; config.main_thread_id=0; config.loco_flags=0;
         root[0x2829c]=0;
         Check(start(&config)==0,"loco start accepted while scheduler unarmed");
         Sleep(80);
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_WAITING_BATTLE && !snapshot.active_mask &&
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllLocoWordsZero(snapshot),
               "loco activation refused until the asynchronous route is armed");
         Check(siteCallee && siteCallee(13)==moveOriginal,"site 13 stays the original until loco activation");
         root[0x2829c]=1;
-        Check(WaitActive(state,NTW2_LOCO),"loco activates alone with the exact mask and an inline-capable shared pool");
+        Check(WaitActive(state,KNTWR_LOCO),"loco activates alone with the exact mask and an inline-capable shared pool");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"loco owns the tick task slot");
         Check(siteCallee && siteCallee(13)!=moveOriginal && InRuntime(siteCallee(13)),"site 13 binds the host movement gate while loco is active");
         Check(ReadState(state,snapshot) && AllLocoWorkWordsZero(snapshot) && snapshot.loco_words[44]==0 &&
@@ -3025,90 +3025,90 @@ int main(int argc,char** argv) {
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"loco stop restores the task slot and protection");
         // Stop while the handoff is still pending: no owner callback may retain
         // this generation's context or run after its arenas have been destroyed.
-        config.enabled_mask=NTW2_LOCO|NTW2_COLLIDE;
-        config.loco_flags=NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID_VERIFY;
+        config.enabled_mask=KNTWR_LOCO|KNTWR_COLLIDE;
+        config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID_VERIFY;
         config.workers=2; config.main_thread_id=0;
         Check(start(&config)==0,"pending combined activation starts");
         bool pending=false;
         for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
-            if(ReadState(state,snapshot) && snapshot.phase==NTW2_ACTIVATING && *taskSlot!=taskOriginal) {
+            if(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVATING && *taskSlot!=taskOriginal) {
                 pending=true; break;
             }
         Check(pending && !snapshot.active_mask && ReadOnly(taskSlot),"only the disabled task route is published before capture");
         Check(stop(nullptr)==0 && *taskSlot==taskOriginal && ReadOnly(taskSlot),"pending capture cancels and restores its task slot");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.error && !snapshot.active_mask,
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.error && !snapshot.active_mask,
               "explicit stop during capture wait is not an activation error");
         Check(activationBoundary(model)==0,"cancelled capture cannot run against freed arenas");
         struct LocoCycle { U mask; U flags; U workers; };
-        const LocoCycle cycles[]={{NTW2_LOCO,NTW2_LOCO_CLONE,0},{NTW2_LOCO|NTW2_BATCH64,0,2},{NTW2_BATCH64,0,0},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID,0}, {NTW2_LOCO,NTW2_LOCO_GRID,2},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID_VERIFY,0}, {NTW2_LOCO,NTW2_LOCO_GRID_VERIFY,2},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID|NTW2_LOCO_GRID_INCREMENTAL,0}, {NTW2_LOCO,NTW2_LOCO_GRID_VERIFY|NTW2_LOCO_GRID_INCREMENTAL,2},
-                                  {NTW2_LOCO|NTW2_COLLIDE|NTW2_BRAIN2,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID,0},
-                                  {NTW2_LOCO|NTW2_COLLIDE|NTW2_BRAIN2,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID_VERIFY,2},
-                                  {NTW2_LOCO|NTW2_COLLIDE|NTW2_PROFILE,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY|NTW2_LOCO_QUIET,2},
-                                  {NTW2_COLLIDE,0,2}, {NTW2_BATCH64,0,0},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID|NTW2_LOCO_CLONE,2},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID|NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL,2},
-                                  {NTW2_LOCO,NTW2_LOCO_GRID|NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET,2},
-                                  {NTW2_LOCO|NTW2_AI_ASYNC,NTW2_LOCO_CLONE,1},{NTW2_LOCO|NTW2_PROFILE,0,0},
-                                  {NTW2_LOCO|NTW2_PROFILE,NTW2_LOCO_CLONE,3},{NTW2_LOCO|NTW2_AI_ASYNC|NTW2_AI_CTRL,0,4},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL,0},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL,2},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_SHADOW,0},
-                                  {NTW2_LOCO|NTW2_PROFILE,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL,3},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES,0},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES,2},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_SHADOW|NTW2_LOCO_OWNED_SERVICES,2},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET,2},
-                                  {NTW2_LOCO,NTW2_LOCO_CLONE|NTW2_LOCO_PARALLEL|NTW2_LOCO_SHADOW|NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_QUIET,2}};
+        const LocoCycle cycles[]={{KNTWR_LOCO,KNTWR_LOCO_CLONE,0},{KNTWR_LOCO|KNTWR_BATCH64,0,2},{KNTWR_BATCH64,0,0},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID,0}, {KNTWR_LOCO,KNTWR_LOCO_GRID,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID_VERIFY,0}, {KNTWR_LOCO,KNTWR_LOCO_GRID_VERIFY,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_INCREMENTAL,0}, {KNTWR_LOCO,KNTWR_LOCO_GRID_VERIFY|KNTWR_LOCO_GRID_INCREMENTAL,2},
+                                  {KNTWR_LOCO|KNTWR_COLLIDE|KNTWR_BRAIN2,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID,0},
+                                  {KNTWR_LOCO|KNTWR_COLLIDE|KNTWR_BRAIN2,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID_VERIFY,2},
+                                  {KNTWR_LOCO|KNTWR_COLLIDE|KNTWR_PROFILE,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY|KNTWR_LOCO_QUIET,2},
+                                  {KNTWR_COLLIDE,0,2}, {KNTWR_BATCH64,0,0},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID|KNTWR_LOCO_CLONE,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID|KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_GRID|KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET,2},
+                                  {KNTWR_LOCO|KNTWR_AI_ASYNC,KNTWR_LOCO_CLONE,1},{KNTWR_LOCO|KNTWR_PROFILE,0,0},
+                                  {KNTWR_LOCO|KNTWR_PROFILE,KNTWR_LOCO_CLONE,3},{KNTWR_LOCO|KNTWR_AI_ASYNC|KNTWR_AI_CTRL,0,4},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL,0},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_SHADOW,0},
+                                  {KNTWR_LOCO|KNTWR_PROFILE,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL,3},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES,0},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_SHADOW|KNTWR_LOCO_OWNED_SERVICES,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET,2},
+                                  {KNTWR_LOCO,KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_SHADOW|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_QUIET,2}};
         for(unsigned i=0;i<2*(sizeof(cycles)/sizeof(cycles[0])) && !failures;++i) {
             const LocoCycle& c=cycles[i%(sizeof(cycles)/sizeof(cycles[0]))];
             config.enabled_mask=c.mask; config.loco_flags=c.flags; config.workers=c.workers;
-            config.brain_flags=(c.mask&NTW2_BRAIN2) ? NTW2_BRAIN_CENSUS : 0u;
-            config.main_thread_id=(c.mask&(NTW2_PROFILE|NTW2_GRID_CENSUS)) ? GetCurrentThreadId() : 0;
-            const bool loco=(c.mask&NTW2_LOCO)!=0;
+            config.brain_flags=(c.mask&KNTWR_BRAIN2) ? KNTWR_BRAIN_CENSUS : 0u;
+            config.main_thread_id=(c.mask&(KNTWR_PROFILE|KNTWR_GRID_CENSUS)) ? GetCurrentThreadId() : 0;
+            const bool loco=(c.mask&KNTWR_LOCO)!=0;
             const U boundariesBefore=activationBoundaries;
             Check(start(&config)==0 && WaitActive(state,c.mask),"loco cycle became active with the exact mask");
-            const U expectedBoundaries=((c.mask&NTW2_COLLIDE) ||
-                (c.flags&(NTW2_LOCO_OWNED_SERVICES|NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY)) ? 1u : 0u)+
-                ((c.flags&NTW2_LOCO_OWNED_SERVICES) ? 1u : 0u);
+            const U expectedBoundaries=((c.mask&KNTWR_COLLIDE) ||
+                (c.flags&(KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY)) ? 1u : 0u)+
+                ((c.flags&KNTWR_LOCO_OWNED_SERVICES) ? 1u : 0u);
             Check(activationBoundaries==boundariesBefore+expectedBoundaries,
                   "each generation captures workload once and owned scene once at quiescent boundaries");
             Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==c.workers,"loco request and activation published");
             Check(GridCensusWithoutCalls(snapshot,false),"ordinary LOCO starts keep census disabled");
             U storage=0;
-            for(U m=NTW2_MEM_LOCO_BYTES;m<=NTW2_MEM_OTHER_BYTES;++m) storage+=snapshot.memory_words[m];
-            Check(snapshot.memory_words[NTW2_MEM_VERSION]==4 && snapshot.memory_words[NTW2_MEM_TOTAL_BYTES]==storage &&
-                  snapshot.memory_words[NTW2_MEM_FLOOR_BYTES]==NTW2_MEMORY_MIN_AVAIL_VIRTUAL &&
-                  snapshot.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES]==NTW2_MEMORY_MIN_LARGEST_HOLE &&
-                  snapshot.memory_words[NTW2_MEM_MIN_LARGEST_HOLE]>=NTW2_MEMORY_MIN_LARGEST_HOLE &&
-                  !snapshot.memory_words[NTW2_MEM_LATCH_REASON] &&
-                  !snapshot.memory_words[NTW2_MEM_BUDGET_REFUSALS],"memory row accounts every module and preserves VA total and hole floors");
+            for(U m=KNTWR_MEM_LOCO_BYTES;m<=KNTWR_MEM_OTHER_BYTES;++m) storage+=snapshot.memory_words[m];
+            Check(snapshot.memory_words[KNTWR_MEM_VERSION]==4 && snapshot.memory_words[KNTWR_MEM_TOTAL_BYTES]==storage &&
+                  snapshot.memory_words[KNTWR_MEM_FLOOR_BYTES]==KNTWR_MEMORY_MIN_AVAIL_VIRTUAL &&
+                  snapshot.memory_words[KNTWR_MEM_HOLE_FLOOR_BYTES]==KNTWR_MEMORY_MIN_LARGEST_HOLE &&
+                  snapshot.memory_words[KNTWR_MEM_MIN_LARGEST_HOLE]>=KNTWR_MEMORY_MIN_LARGEST_HOLE &&
+                  !snapshot.memory_words[KNTWR_MEM_LATCH_REASON] &&
+                  !snapshot.memory_words[KNTWR_MEM_BUDGET_REFUSALS],"memory row accounts every module and preserves VA total and hole floors");
             Check(storage<96u*1024u*1024u,"small workloads never reserve worst-case Stage C arenas");
             Check(siteCallee && ((siteCallee(13)==moveOriginal)==!loco) && (!loco || InRuntime(siteCallee(13))),
                   loco ? "site 13 bound to the host movement gate" : "site 13 stays the original without the feature");
-            Check(siteCallee && ((siteCallee(5)!=stageOriginal)==((c.mask&(NTW2_COLLIDE|NTW2_PROFILE))!=0)) &&
-                  (!(c.mask&NTW2_COLLIDE) || InRuntime(siteCallee(5))), "collision site binds alongside movement in combined generations");
+            Check(siteCallee && ((siteCallee(5)!=stageOriginal)==((c.mask&(KNTWR_COLLIDE|KNTWR_PROFILE))!=0)) &&
+                  (!(c.mask&KNTWR_COLLIDE) || InRuntime(siteCallee(5))), "collision site binds alongside movement in combined generations");
             Check(AllCollideWordsZero(snapshot),"combined and standalone restarts reset collision work and source tails before any stage");
-            Check(siteCallee && ((siteCallee(6)==0x585D10+delta)==!(c.mask&NTW2_BRAIN2)) && AllBrain2WordsZero(snapshot),
+            Check(siteCallee && ((siteCallee(6)==0x585D10+delta)==!(c.mask&KNTWR_BRAIN2)) && AllBrain2WordsZero(snapshot),
                   "combined owned mover and brain census bind separately without executing work");
-            Check(AllLocoWorkWordsZero(snapshot) && LocoPortMetadata(snapshot,(c.flags&(NTW2_LOCO_SHADOW|NTW2_LOCO_OWNED_SERVICES))!=0) &&
-                  (loco ? snapshot.loco_words[44]==((c.flags&NTW2_LOCO_CLONE) ? 1u : 0u) &&
+            Check(AllLocoWorkWordsZero(snapshot) && LocoPortMetadata(snapshot,(c.flags&(KNTWR_LOCO_SHADOW|KNTWR_LOCO_OWNED_SERVICES))!=0) &&
+                  (loco ? snapshot.loco_words[44]==((c.flags&KNTWR_LOCO_CLONE) ? 1u : 0u) &&
                           snapshot.loco_gate_words[0]==1 && snapshot.loco_gate_words[4]==0x233 &&
-                          LocoServiceMetadata(snapshot,(c.flags&NTW2_LOCO_CLONE)!=0,(c.flags&NTW2_LOCO_QUIET)!=0) &&
-                          LocoGridV2Metadata(snapshot,(c.flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))!=0,(c.flags&NTW2_LOCO_GRID_VERIFY)!=0) &&
-                          LocoOwnedMetadata(snapshot,(c.flags&NTW2_LOCO_PARALLEL)!=0,(c.flags&NTW2_LOCO_OWNED_SERVICES)!=0,(c.flags&NTW2_LOCO_QUIET)!=0,(c.flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))!=0) : AllLocoWordsZero(snapshot)),
+                          LocoServiceMetadata(snapshot,(c.flags&KNTWR_LOCO_CLONE)!=0,(c.flags&KNTWR_LOCO_QUIET)!=0) &&
+                          LocoGridV2Metadata(snapshot,(c.flags&(KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY))!=0,(c.flags&KNTWR_LOCO_GRID_VERIFY)!=0) &&
+                          LocoOwnedMetadata(snapshot,(c.flags&KNTWR_LOCO_PARALLEL)!=0,(c.flags&KNTWR_LOCO_OWNED_SERVICES)!=0,(c.flags&KNTWR_LOCO_QUIET)!=0,(c.flags&(KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY))!=0) : AllLocoWordsZero(snapshot)),
                   "loco cycle has zero work and exact clone/gate/service/grid-v2/parallel/owned-phase metadata; all arrays zero when disabled");
             Check(start(&config)==1,"duplicate loco start refused");
             Check(stop(nullptr)==0,"loco cycle stop joins the monitor and the pool");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"loco cycle stop restores every slot");
-            Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask && AllLocoWorkWordsZero(snapshot) &&
-                  LocoPortMetadata(snapshot,(c.flags&(NTW2_LOCO_SHADOW|NTW2_LOCO_OWNED_SERVICES))!=0) &&
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask && AllLocoWorkWordsZero(snapshot) &&
+                  LocoPortMetadata(snapshot,(c.flags&(KNTWR_LOCO_SHADOW|KNTWR_LOCO_OWNED_SERVICES))!=0) &&
                   (loco ? snapshot.loco_gate_words[0]==1 && snapshot.loco_gate_words[4]==0x233 &&
-                          LocoServiceMetadata(snapshot,(c.flags&NTW2_LOCO_CLONE)!=0,(c.flags&NTW2_LOCO_QUIET)!=0) &&
-                          LocoGridV2Metadata(snapshot,(c.flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))!=0,(c.flags&NTW2_LOCO_GRID_VERIFY)!=0) &&
-                          LocoOwnedMetadata(snapshot,(c.flags&NTW2_LOCO_PARALLEL)!=0,(c.flags&NTW2_LOCO_OWNED_SERVICES)!=0,(c.flags&NTW2_LOCO_QUIET)!=0,(c.flags&(NTW2_LOCO_GRID|NTW2_LOCO_GRID_VERIFY))!=0) : AllLocoWordsZero(snapshot)),
+                          LocoServiceMetadata(snapshot,(c.flags&KNTWR_LOCO_CLONE)!=0,(c.flags&KNTWR_LOCO_QUIET)!=0) &&
+                          LocoGridV2Metadata(snapshot,(c.flags&(KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY))!=0,(c.flags&KNTWR_LOCO_GRID_VERIFY)!=0) &&
+                          LocoOwnedMetadata(snapshot,(c.flags&KNTWR_LOCO_PARALLEL)!=0,(c.flags&KNTWR_LOCO_OWNED_SERVICES)!=0,(c.flags&KNTWR_LOCO_QUIET)!=0,(c.flags&(KNTWR_LOCO_GRID|KNTWR_LOCO_GRID_VERIFY))!=0) : AllLocoWordsZero(snapshot)),
                   "loco stop retains grid-v2/parallel/owned-phase metadata and zero work; disabled arrays stay entirely zero");
             Check(GridCensusWithoutCalls(snapshot,false),"ordinary LOCO stops retain an all-zero census tail");
             Check(siteCallee && siteCallee(13)==moveOriginal,"loco cycle stop restores the original movement loop");
@@ -3116,10 +3116,10 @@ int main(int argc,char** argv) {
                   "combined stop restores collision site and retains zero source/work tails");
         }
         root[0x2829c]=0; BindLocoScene(false);
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0; config.loco_flags=0;
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0; config.loco_flags=0;
     }
     if(!failures) {
-        // NTW2_VISUAL: published into the single .rdata word holding the relocated original 0x779E60 (found by scanning the mapped
+        // KNTWR_VISUAL: published into the single .rdata word holding the relocated original 0x779E60 (found by scanning the mapped
         // real image), read-only throughout, restored on every stop. It is not a simulation feature: no tick epoch gates it, so it
         // is startable alone with no scheduler route. No work runs in the owned image: every work counter stays zero; word 13
         // (live slot VA) is slot metadata and is asserted separately.
@@ -3131,13 +3131,13 @@ int main(int argc,char** argv) {
             U* taskSlot=At(0x132e954); U* walkSlot=At(0x133e2dc);
             const U taskOriginal=0x5cc390+delta, walkOriginal=0x702bb0+delta;
             struct VisualCycle { U mask; bool async; };
-            const VisualCycle cycles[]={{NTW2_VISUAL,false},{NTW2_BATCH64|NTW2_AI_ASYNC|NTW2_VISUAL|NTW2_PROFILE,true},{NTW2_BATCH64|NTW2_VISUAL,false},{NTW2_VISUAL,true}};
+            const VisualCycle cycles[]={{KNTWR_VISUAL,false},{KNTWR_BATCH64|KNTWR_AI_ASYNC|KNTWR_VISUAL|KNTWR_PROFILE,true},{KNTWR_BATCH64|KNTWR_VISUAL,false},{KNTWR_VISUAL,true}};
             Put(model,0xB0,A(visualManager));
             for(unsigned i=0;i<16 && !failures;++i) {
                 const VisualCycle& c=cycles[i%(sizeof(cycles)/sizeof(cycles[0]))];
                 config.enabled_mask=c.mask; config.workers=i%3;
                 const LONG allocatedBefore=allocatorAllocations, freedBefore=allocatorFrees;
-                config.main_thread_id=(c.mask&NTW2_PROFILE) ? GetCurrentThreadId() : 0;
+                config.main_thread_id=(c.mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
                 root[0x2829c]=c.async ? 1 : 0;
                 Check(start(&config)==0 && WaitActive(state,c.mask),"visual cycle became active with the exact mask");
                 const U published=*vslot;
@@ -3145,23 +3145,23 @@ int main(int argc,char** argv) {
                 Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask,"visual request and activation published");
                 Check(snapshot.visual_words[13]==A(vslot),"visual words[13] reports the live slot VA");
                 Check(AllVisualWorkWordsZero(snapshot),"no visual work counter without work");
-                if(c.mask&NTW2_AI_ASYNC) Check(AiEventWorker(snapshot),"ai worker idles without suspension beside visual");
+                if(c.mask&KNTWR_AI_ASYNC) Check(AiEventWorker(snapshot),"ai worker idles without suspension beside visual");
                 bool admitted=true;
                 for(U worker=0;worker<config.workers;++worker)
-                    admitted=admitted && snapshot.allocator_words[worker*NTW2_ALLOCATOR_ROW_WORDS]==1;
-                if(c.mask&NTW2_AI_ASYNC)
-                    admitted=admitted && snapshot.allocator_words[(NTW2_ALLOCATOR_THREADS-1)*NTW2_ALLOCATOR_ROW_WORDS]==1;
-                const LONG probes=static_cast<LONG>(config.workers+((c.mask&NTW2_AI_ASYNC) ? 1 : 0));
+                    admitted=admitted && snapshot.allocator_words[worker*KNTWR_ALLOCATOR_ROW_WORDS]==1;
+                if(c.mask&KNTWR_AI_ASYNC)
+                    admitted=admitted && snapshot.allocator_words[(KNTWR_ALLOCATOR_THREADS-1)*KNTWR_ALLOCATOR_ROW_WORDS]==1;
+                const LONG probes=static_cast<LONG>(config.workers+((c.mask&KNTWR_AI_ASYNC) ? 1 : 0));
                 Check(admitted && allocatorAllocations-allocatedBefore==probes && allocatorFrees-freedBefore==probes,
                       "every pool and AI worker allocates and frees exactly once before activation");
                 Check(start(&config)==1,"duplicate visual start refused");
                 Check(stop(nullptr)==0,"visual stop joins the monitor");
                 Check(*vslot==vOriginal && ReadOnly(vslot),"visual stop restores the read-only original");
                 Check(*slot==original && ReadOnly(slot) && *taskSlot==taskOriginal && ReadOnly(taskSlot) && *walkSlot==walkOriginal && ReadOnly(walkSlot),"visual stop restores every companion slot");
-                Check(ReadState(state,snapshot) && snapshot.phase==NTW2_STOPPED && !snapshot.active_mask,"visual stop published");
+                Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask,"visual stop published");
                 Check(stop(nullptr)==0,"visual stop is idempotent");
             }
-            config.enabled_mask=NTW2_VISUAL; config.main_thread_id=0; root[0x2829c]=0;
+            config.enabled_mask=KNTWR_VISUAL; config.main_thread_id=0; root[0x2829c]=0;
             for(unsigned i=0;i<32 && !failures;++i) {
                 Check(start(&config)==0,"visual immediate restart accepted");
                 Check(stop(nullptr)==0,"visual immediate cancellation joins the monitor");
@@ -3169,7 +3169,7 @@ int main(int argc,char** argv) {
             }
         }
         root[0x2829c]=0;
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0;
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0;
     }
     if(!failures) {
         U* allocSlot=At(0x13ede3c);
@@ -3180,17 +3180,17 @@ int main(int argc,char** argv) {
         const U oldHeapAlloc=*At(0x13071a4), oldHeapFree=*At(0x13071a8);
         Check(Replace(At(0x13071a4),A(reinterpret_cast<void*>(&HeapAlloc))) &&
               Replace(At(0x13071a8),A(reinterpret_cast<void*>(&HeapFree))),"bind HeapAlloc/HeapFree IAT slots for alloc census test");
-        // 1) mode=2 (--alloc-fix via NTW2_ALLOC_FIX in va_watch_flags): zero VirtualAlloc storage, zero vtable slots swapped, ReclaimTick active.
-        config.enabled_mask=NTW2_BATCH64; config.workers=0; config.main_thread_id=0; config.va_watch_flags=NTW2_ALLOC_FIX;
-        state->alloc_census_words[NTW2_ALLOC_CENSUS_MODE]=0u;
-        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc-fix alone (NTW2_ALLOC_FIX, mode=2) activates");
+        // 1) mode=2 (--alloc-fix via KNTWR_ALLOC_FIX in va_watch_flags): zero VirtualAlloc storage, zero vtable slots swapped, ReclaimTick active.
+        config.enabled_mask=KNTWR_BATCH64; config.workers=0; config.main_thread_id=0; config.va_watch_flags=KNTWR_ALLOC_FIX;
+        state->alloc_census_words[KNTWR_ALLOC_CENSUS_MODE]=0u;
+        Check(start(&config)==0 && WaitActive(state,KNTWR_BATCH64),"alloc-fix alone (KNTWR_ALLOC_FIX, mode=2) activates");
         Check(ReadOnly(allocSlot) && *allocSlot==allocOriginal && ReadOnly(freeSlot) && *freeSlot==freeOriginal,
               "alloc-fix alone (mode=2) leaves provider vtable slots untouched");
         Check(ReadState(state,snapshot) && snapshot.alloc_census_words[0]==1u && snapshot.alloc_census_words[1]==1u &&
-              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==2u && snapshot.alloc_census_words[22]==0u &&
+              snapshot.alloc_census_words[KNTWR_ALLOC_CENSUS_MODE]==2u && snapshot.alloc_census_words[22]==0u &&
               snapshot.alloc_census_words[23]==0u,
               "alloc-fix alone (mode=2) reserves 0 bytes of census storage");
-        const U otherBytesMode2=snapshot.memory_words[NTW2_MEM_OTHER_BYTES];
+        const U otherBytesMode2=snapshot.memory_words[KNTWR_MEM_OTHER_BYTES];
         alignas(4) uint8_t fakePf[0x200]={};
         U sub1=0, sub2=0, oldFree=0x12345678u;
         sub1=A(&sub2); sub2=0;
@@ -3205,16 +3205,16 @@ int main(int argc,char** argv) {
               ReadState(state,snapshot) && snapshot.alloc_census_words[19]==2u && snapshot.alloc_census_words[20]==2u*0x70u &&
               snapshot.alloc_census_words[21]==1u,
               "alloc-fix alone (mode=2) splices orphaned pathfinder +0x17C subnodes onto +0x170 with 0 census storage");
-        // 2) mode=3 (NTW2_ALLOC_CENSUS | NTW2_ALLOC_FIX): swaps provider slots, tracks Provider[3] only, ignores Provider[0].
-        config.va_watch_flags=NTW2_ALLOC_CENSUS|NTW2_ALLOC_FIX;
-        Check(start(&config)==0 && WaitActive(state,NTW2_BATCH64),"alloc census+fix (mode=3) activates");
+        // 2) mode=3 (KNTWR_ALLOC_CENSUS | KNTWR_ALLOC_FIX): swaps provider slots, tracks Provider[3] only, ignores Provider[0].
+        config.va_watch_flags=KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX;
+        Check(start(&config)==0 && WaitActive(state,KNTWR_BATCH64),"alloc census+fix (mode=3) activates");
         Check(ReadOnly(allocSlot) && *allocSlot!=allocOriginal && InRuntime(*allocSlot) &&
               ReadOnly(freeSlot) && *freeSlot!=freeOriginal && InRuntime(*freeSlot),
               "alloc census+fix (mode=3) swaps both provider vtable slots to read-only runtime gates");
         Check(ReadState(state,snapshot) && snapshot.alloc_census_words[0]==1u && snapshot.alloc_census_words[1]==1u &&
-              snapshot.alloc_census_words[NTW2_ALLOC_CENSUS_MODE]==3u && snapshot.alloc_census_words[3]==(1u<<22) &&
+              snapshot.alloc_census_words[KNTWR_ALLOC_CENSUS_MODE]==3u && snapshot.alloc_census_words[3]==(1u<<22) &&
               snapshot.alloc_census_words[5]==8192u && snapshot.alloc_census_words[22]>0u && snapshot.alloc_census_words[23]==2u &&
-              snapshot.memory_words[NTW2_MEM_OTHER_BYTES]==otherBytesMode2+snapshot.alloc_census_words[22],
+              snapshot.memory_words[KNTWR_MEM_OTHER_BYTES]==otherBytesMode2+snapshot.alloc_census_words[22],
               "alloc census+fix (mode=3) publishes header metadata and storage at activation");
         struct FakeOut { U ptr, owner; } outs[2]={}, luaOut={};
         U fakeProvider3[3]={A(At(0x13ede38)),3u,A(GetProcessHeap())};
@@ -3267,7 +3267,7 @@ int main(int argc,char** argv) {
         Check(Replace(slot,foreign),"install owned-process competing hook");
         Check(stop(nullptr)!=0,"stop reports incomplete restoration");
         Check(*slot==foreign && ReadOnly(slot),"stop does not overwrite another hook");
-        Check(ReadState(state,snapshot) && snapshot.phase==NTW2_FAILED,"restoration failure is visible");
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED,"restoration failure is visible");
         Check(start(&config)!=0,"failed restoration prevents restart");
         Replace(slot,original);
     }

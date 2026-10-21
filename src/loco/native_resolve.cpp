@@ -8,7 +8,7 @@
 #include "native_resolve.h"
 #pragma fenv_access(on)
 
-namespace ntw2_resolve {
+namespace kntwr_resolve {
 namespace {
 static_assert(sizeof(void*) == 4, "native resolve is x86 only");
 using U = uint32_t;
@@ -370,7 +370,7 @@ template<class T> struct CycleBuilder {
         U node = first;
         do {
             if (!nodes.emplace(node, Location{cycle, range.count}).second)
-                RaiseException(ntw2_sweep::WorkerRefusal, 0, 0, nullptr);
+                RaiseException(kntwr_sweep::WorkerRefusal, 0, 0, nullptr);
             values.push_back(read(node));
             ++range.count;
             node = Load<U>(node, 8);
@@ -379,11 +379,11 @@ template<class T> struct CycleBuilder {
         return range;
     }
 };
-void VerifyGeometry(const ntw2_sweep::WorkerScene* scene, U address, size_t bytes) {
-    if (scene) ntw2_sweep::VerifyOnBuild(*scene, 3, address, bytes);
+void VerifyGeometry(const kntwr_sweep::WorkerScene* scene, U address, size_t bytes) {
+    if (scene) kntwr_sweep::VerifyOnBuild(*scene, 3, address, bytes);
 }
 void CaptureRing(U native, Ring& ring, CycleBuilder<Edge>& cycles,
-    const ntw2_sweep::WorkerScene* scene = nullptr) {
+    const kntwr_sweep::WorkerScene* scene = nullptr) {
     ring.native = native;
     VerifyGeometry(scene, native + 8, 4); VerifyGeometry(scene, native + 0x30, 16);
     std::memcpy(ring.plane, Pointer(native + 0x30), sizeof(ring.plane));
@@ -397,7 +397,7 @@ void CaptureRing(U native, Ring& ring, CycleBuilder<Edge>& cycles,
     });
 }
 void CaptureCapsule(U native, Capsule& v, CycleBuilder<PolygonPoint>& cycles,
-    const ntw2_sweep::WorkerScene* scene = nullptr) {
+    const kntwr_sweep::WorkerScene* scene = nullptr) {
     v.native = native; v.owner = Load<U>(native, 0x3C);
     v.eligible_target = Target(v.owner + 0xC, 0); v.secondary_target = Target(v.owner, 8);
     v.point = ReadPoint(native, 0xC); v.tangent = ReadPoint(native, 0x14);
@@ -455,7 +455,7 @@ struct WorkerDispatch {
         case 0x54E920: return Load<B>(receiver,4);
         case 0x462CB0: return 0;
         case 0x447880: return 1;
-        default: RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr); return 0;
+        default: RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr); return 0;
         }
     }
 };
@@ -531,10 +531,10 @@ template<class T> const T* Find(const std::vector<T>& v, U native) {
 bool Unique(std::vector<U>& v) {
     std::sort(v.begin(), v.end()); v.erase(std::unique(v.begin(), v.end()), v.end()); return true;
 }
-void PrepareCatalogImpl(WorkerCatalog& k, const ntw2_sweep::WorkerScene& s) {
+void PrepareCatalogImpl(WorkerCatalog& k, const kntwr_sweep::WorkerScene& s) {
     if (k.attempted && k.generation == s.generation) {
         if (!k.prepared || k.source != &s || k.build != s.build || k.image_delta != s.image_delta)
-            RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+            RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
         return;
     }
     k = WorkerCatalog{}; k.image_delta = s.image_delta;
@@ -566,11 +566,11 @@ void PrepareCatalogImpl(WorkerCatalog& k, const ntw2_sweep::WorkerScene& s) {
         CaptureWall(native, k.geometry.walls[i]);
     }
     k.geometry.edges.shrink_to_fit(); k.geometry.polygon_points.shrink_to_fit();
-    if (!ntw2_sweep::VerifyBuild(s,0,4)) RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+    if (!kntwr_sweep::VerifyBuild(s,0,4)) RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
     // The complete scene and catalog have now been checked, including every
     // original cell head/link before interning. No worker or tick uses the tape.
-    ntw2_sweep::ReleaseBuildVerification(s);
-    ntw2_sweep::CandidateCapacities(t,s.owners.size(),k.reserve);
+    kntwr_sweep::ReleaseBuildVerification(s);
+    kntwr_sweep::CandidateCapacities(t,s.owners.size(),k.reserve);
     k.prepared = true;
 }
 bool WorkerResolveImpl(WorkerContext& c, U p, U identity, U scratch, const Aabb& box) {
@@ -586,7 +586,7 @@ bool WorkerResolveImpl(WorkerContext& c, U p, U identity, U scratch, const Aabb&
     // Same two captured virtuals as the shadow path; any other class is refused.
     if (Target(p, 0x5C) != delta + 0x808570 || Target(p, 0x60) != delta + 0x7FFE30) return false;
     const U agentTarget = Target(p, 0x3C);
-    if (!ntw2_sweep::PureAgentTarget(p, agentTarget, delta)) return false;
+    if (!kntwr_sweep::PureAgentTarget(p, agentTarget, delta)) return false;
     a.agent_predicate = reinterpret_cast<B(__thiscall*)(void*)>(agentTarget)(Pointer(p));
     a.inout = 1; a.result = 0; a.candidate_index = ~0u; a.pass = 0;
     // No response means no transform/shape-table geometry work in the native
@@ -638,15 +638,15 @@ uint8_t Run(AgentView& a, const Candidates& c, const Aabb& box) {
     RequireOwner();
     return RunCore(a, OwnedSource{c}, box, OwnerDispatch{});
 }
-bool PrepareCatalog(WorkerCatalog& k, const ntw2_sweep::WorkerScene& s) {
+bool PrepareCatalog(WorkerCatalog& k, const kntwr_sweep::WorkerScene& s) {
     if (!s.built) { k.prepared = false; return false; }
     bool ok = false;
     __try { PrepareCatalogImpl(k, s); ok = true; }
-    __except (ntw2_sweep::RefusalFilter(GetExceptionCode())) { k.prepared = false; }
+    __except (kntwr_sweep::RefusalFilter(GetExceptionCode())) { k.prepared = false; }
     return ok;
 }
 bool PrepareWorker(WorkerContext& c, const WorkerCatalog& k) {
-    c.fp = ntw2_sweep::CaptureFp();
+    c.fp = kntwr_sweep::CaptureFp();
     if (!k.prepared || !k.source || !k.source->built || k.build!=k.source->build) return false;
     if (c.catalog==&k && c.build==k.build) return true;
     // Allocate/prefault the exact type-specific bounds, shedding old-build peaks.
@@ -675,13 +675,13 @@ size_t HeapBytes(const WorkerContext& c) {
     return (c.selected.rings.capacity()+c.selected.capsules.capacity()+c.selected.walls.capacity())*sizeof(void*);
 }
 bool WorkerResolve(WorkerContext& c, void* agent, uint32_t identity, void* scratch, const Aabb& box, uint8_t& result) {
-    ntw2_sweep::FpState saved{}; bool ok=false;
-    if (!c.fp_managed) { saved=ntw2_sweep::CaptureFp(); ntw2_sweep::ApplyFp(c.fp); }
+    kntwr_sweep::FpState saved{}; bool ok=false;
+    if (!c.fp_managed) { saved=kntwr_sweep::CaptureFp(); kntwr_sweep::ApplyFp(c.fp); }
     __try {
         __try { ok = WorkerResolveImpl(c, Address(agent), identity, Address(scratch), box); }
-        __finally { if (!c.fp_managed) ntw2_sweep::ApplyFp(saved); }
+        __finally { if (!c.fp_managed) kntwr_sweep::ApplyFp(saved); }
     }
-    __except (ntw2_sweep::RefusalFilter(GetExceptionCode())) { ok = false; }
+    __except (kntwr_sweep::RefusalFilter(GetExceptionCode())) { ok = false; }
     if (ok) {
         const AgentView& a = c.view; const U p = Address(agent);
         U bits[2] = {Bits(a.dx), Bits(a.dz)};
@@ -760,4 +760,4 @@ void ShadowAfter(B original_return) {
     // Release only after every frame-owned read/write, including timing.
     InterlockedExchange(&owner_thread, 0);
 }
-} // namespace ntw2_resolve
+} // namespace kntwr_resolve

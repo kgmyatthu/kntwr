@@ -1,4 +1,4 @@
-// Oracle for src/ai/ntw2_planner_prepass.{h,cpp}: the walk key, the gathered-list hash, the ordered query log, the D1 cross-child
+// Oracle for src/ai/kntwr_planner_prepass.{h,cpp}: the walk key, the gathered-list hash, the ordered query log, the D1 cross-child
 // snapshot, the census engine's counting, and the 0x559090 presize clone chain executed in a private relocated image against the
 // native routine. No running game or installed file is modified; only private loader/heap boundaries are supplied.
 #define _CRT_SECURE_NO_WARNINGS
@@ -15,14 +15,14 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_planner_prepass.h"
+#include "clones/kntwr_clones.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_planner_prepass.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;
 using B=unsigned char;
-namespace pp=ntw2_prepass;
+namespace pp=kntwr_prepass;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 static B* image;
 static U delta, checks;
@@ -50,7 +50,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     image=static_cast<B*>(VirtualAlloc(nullptr,nt->OptionalHeader.SizeOfImage,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));
@@ -338,13 +338,13 @@ static bool CloneCall(U clone,U offset,U& target) {
     target=clone+offset+5+static_cast<U>(rel); return p[0]==0xE8;
 }
 static void TestPresizeClones() {
-    ntw2_clone_set clones={}; U bindings[NTW2_BIND_COUNT];
+    kntwr_clone_set clones={}; U bindings[KNTWR_BIND_COUNT];
     for(U& b:bindings) b=A(At(0x6dca08));   // unreached bindings: valid image addresses, never executed here
-    bindings[NTW2_BIND_PP_CHILD_THINK]=pp::ChildThinkGateAddress();
-    bindings[NTW2_BIND_PP_RESERVE]=pp::PresizeReserveGateAddress();
-    bindings[NTW2_BIND_PP_EXIT]=pp::PresizeExitGateAddress();
-    U detail=0; Require(ntw2_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
-    const U c559=clones.entries[NTW2_CLONE_PRESIZE_559090], c551=clones.entries[NTW2_CLONE_PRESIZE_551FE0], c56a=clones.entries[NTW2_CLONE_PRESIZE_56A610];
+    bindings[KNTWR_BIND_PP_CHILD_THINK]=pp::ChildThinkGateAddress();
+    bindings[KNTWR_BIND_PP_RESERVE]=pp::PresizeReserveGateAddress();
+    bindings[KNTWR_BIND_PP_EXIT]=pp::PresizeExitGateAddress();
+    U detail=0; Require(kntwr_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
+    const U c559=clones.entries[KNTWR_CLONE_PRESIZE_559090], c551=clones.entries[KNTWR_CLONE_PRESIZE_551FE0], c56a=clones.entries[KNTWR_CLONE_PRESIZE_56A610];
     U target=0;
     Require(CloneCall(c56a,0x56A66D-0x56A610,target) && target==c551,"56A610 clone calls the 551FE0 clone at 56A66D");
     Require(CloneCall(c551,0x55208A-0x551FE0,target) && target==c559,"551FE0 clone calls the 559090 clone at 55208A");

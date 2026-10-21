@@ -6,9 +6,9 @@
 #include <intrin.h>
 #include <string.h>
 #include "native_unit_fatigue.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 
-namespace ntw2_unit_fatigue {
+namespace kntwr_unit_fatigue {
 // Byte table 0x6711D8 (A+1B8 0..0x4E -> switch class), verified against the mapped image at Start.
 const uint8_t kActivityClass[kActivityLimit + 1] = {
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 4, 4, 4, 4, 10, 10, 5, 5, 5, 1, 1, 6, 6, 7, 7, 8, 9, 9, 9, 9, 9, 0, 4, 3, 6,
@@ -88,9 +88,9 @@ bool ThresholdsOrdered(const Inputs& in) {
 
 namespace {
 static_assert(sizeof(void*) == 4, "the fatigue gate is a Win32 naked thunk");
-constexpr const char* kLabels[] = { NTW2_UNIT_FATIGUE_LABELS };
+constexpr const char* kLabels[] = { KNTWR_UNIT_FATIGUE_LABELS };
 static_assert(sizeof(kLabels) / sizeof(kLabels[0]) == kWords, "one label per fatigue status word");
-using ntw2_unit_policy::g_occ;
+using kntwr_unit_policy::g_occ;
 
 constexpr U kHistBuckets = 8, kLevelBuckets = 11, kClassRows = 12;
 struct UnitState { U valid, generation, ever; int32_t acc; U level; };
@@ -98,7 +98,7 @@ struct UnitState { U valid, generation, ever; int32_t acc; U level; };
 U g_delta;
 U g_mode;
 bool g_started;
-UnitState g_state[ntw2_unit_policy::kMaxUnits];
+UnitState g_state[kntwr_unit_policy::kMaxUnits];
 U g_words[kWords];
 U g_occPtr;                        // &g_occ for the naked gate
 U g_fatigueNative = 0x670F40;
@@ -238,7 +238,7 @@ void Roll(U stage) {
     g_acc = StageAcc{}; g_acc.stage = stage;
 }
 
-U Decide(U ui, const ntw2_unit_policy::UnitView& v, U* slot) {
+U Decide(U ui, const kntwr_unit_policy::UnitView& v, U* slot) {
     Roll(v.stage);
     const unsigned long long t0 = __rdtsc();
     UnitState& st = g_state[ui];
@@ -294,15 +294,15 @@ U Decide(U ui, const ntw2_unit_policy::UnitView& v, U* slot) {
 // Out-of-worklist publication (Live only): members of this admitted unit whose site-6 occurrence did not run this stage
 // (+30 != 1: not in the worklist) get the same pair, so the next native aggregation sees the unit value rather than a
 // mixture. Only when the unit's list is exactly the one imported at the seam (a member may have died during the stage).
-void End(U ui, const ntw2_unit_policy::UnitView& v, U* slot) {
-    if (!(v.admitted & ntw2_unit_policy::kMaskFatigue)) return;
+void End(U ui, const kntwr_unit_policy::UnitView& v, U* slot) {
+    if (!(v.admitted & kntwr_unit_policy::kMaskFatigue)) return;
     const unsigned long long t0 = __rdtsc();
-    if (g_mode == ntw2_unit_policy::Live) {
+    if (g_mode == kntwr_unit_policy::Live) {
         U pending = 0;
         for (U k = 0; k < v.memberCount; ++k) pending += v.ran[k] != v.stage;
         g_words[Applies] += v.memberCount - pending;
         if (pending) {
-            if (!ntw2_unit_policy::UnitListStable(ui)) ++g_words[PublishSkipped];
+            if (!kntwr_unit_policy::UnitListStable(ui)) ++g_words[PublishSkipped];
             else
                 for (U k = 0; k < v.memberCount; ++k)
                     if (v.ran[k] != v.stage) {
@@ -326,7 +326,7 @@ U Bucket(U delta) {
     return 7;
 }
 // Shadow: the occurrence ran native; compare the man's native result with the unit's pair.
-void Observe(U entity, const ntw2_unit_policy::UnitView&, U* slot) {
+void Observe(U entity, const kntwr_unit_policy::UnitView&, U* slot) {
     const int32_t nativeAcc = static_cast<int32_t>(D(entity + 0x370)), unitAcc = static_cast<int32_t>(slot[SlotAcc]);
     const U nativeLevel = D(entity + 0x374), unitLevel = slot[SlotLevel];
     ++g_words[ShadowMen];
@@ -345,17 +345,17 @@ void Observe(U entity, const ntw2_unit_policy::UnitView&, U* slot) {
     if (!accEqual || !levelEqual) ++g_words[ClassBase + 2 * cls + 1];
 }
 
-const ntw2_unit_policy::Provider kLive = {ntw2_unit_policy::Fatigue, ntw2_unit_policy::Live, &Decide, &End, &Retire, nullptr};
-const ntw2_unit_policy::Provider kShadow = {ntw2_unit_policy::Fatigue, ntw2_unit_policy::Shadow, &Decide, &End, &Retire, &Observe};
+const kntwr_unit_policy::Provider kLive = {kntwr_unit_policy::Fatigue, kntwr_unit_policy::Live, &Decide, &End, &Retire, nullptr};
+const kntwr_unit_policy::Provider kShadow = {kntwr_unit_policy::Fatigue, kntwr_unit_policy::Shadow, &Decide, &End, &Retire, &Observe};
 
 // A gate call for a man that is not the current occurrence while a live fatigue mask is open: contract fault.
 void __cdecl ContractMiss() {
     ++g_words[ContractMisses]; ++g_words[Drains];
-    ntw2_unit_policy::Drain(g_occ.unitIndex, ntw2_unit_policy::Fatigue, 1);
+    kntwr_unit_policy::Drain(g_occ.unitIndex, kntwr_unit_policy::Fatigue, 1);
 }
 } // namespace
 
-// NTW2_BIND_U_FATIGUE: replaces `call [eax+108]` at 66D43D (`mov ecx,edi` before it stays). ECX = A, no stack argument, plain
+// KNTWR_BIND_U_FATIGUE: replaces `call [eax+108]` at 66D43D (`mov ecx,edi` before it stays). ECX = A, no stack argument, plain
 // RET, EAX/ECX/EDX volatile (the native selector clobbers them), EBX/ESI/EDI/EBP/ESP preserved, x87 untouched, EFLAGS unused
 // by the caller. g_occ: entity @0, mask @8, slot[Fatigue] @16.
 __declspec(naked) static void FatigueGate() {
@@ -387,7 +387,7 @@ U GateAddress() { return static_cast<U>(reinterpret_cast<uintptr_t>(&FatigueGate
 bool Bind(U imageBase, U* bindings) {
     if (!imageBase || !bindings) return false;
     g_occPtr = static_cast<U>(reinterpret_cast<uintptr_t>(&g_occ));
-    bindings[NTW2_BIND_U_FATIGUE] = GateAddress();
+    bindings[KNTWR_BIND_U_FATIGUE] = GateAddress();
     return true;
 }
 static bool PinActivityModel() {
@@ -405,7 +405,7 @@ static bool PinActivityModel() {
 }
 bool Start(U imageBase, U mode) {
     Stop(); Reset();
-    if (!imageBase || (mode != ntw2_unit_policy::Shadow && mode != ntw2_unit_policy::Live)) return false;
+    if (!imageBase || (mode != kntwr_unit_policy::Shadow && mode != kntwr_unit_policy::Live)) return false;
     g_delta = imageBase - 0x400000;
     // Pin the image tables this port embeds: activity byte table, the 11-way and 6-way jump tables, the rebased constants.
     const U table = V(0x6711D8);
@@ -428,13 +428,13 @@ void Reset() {
     memset(g_state, 0, sizeof(g_state)); memset(g_words, 0, sizeof(g_words));
     g_acc = StageAcc{};
 }
-const ntw2_unit_policy::Provider* Provider() {
+const kntwr_unit_policy::Provider* Provider() {
     if (!g_started) return nullptr;
-    return g_mode == ntw2_unit_policy::Live ? &kLive : &kShadow;
+    return g_mode == kntwr_unit_policy::Live ? &kLive : &kShadow;
 }
 void Snapshot(U* words) {
     memcpy(words, g_words, sizeof(g_words));
     words[Version] = kVersion; words[Mode] = g_mode;
     words[DecideUsLast] = g_words[DecideUsLast];
 }
-} // namespace ntw2_unit_fatigue
+} // namespace kntwr_unit_fatigue

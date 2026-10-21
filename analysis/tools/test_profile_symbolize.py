@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline integration checks: real ABI-7 capture and synthetic ABI-8 + real PDB.
 
-Run under ntw2_run_limited.exe 512 8192 180 -- python this_file.py
+Run under kntwr_run_limited.exe 512 8192 180 -- python this_file.py
   --abi7 ../analysis/ntw2-live-receipt-cc-owned2.json.profile.bin
-  --dll build/native/bin/Release/ntw2_runtime.dll
+  --dll build/kntwr/bin/Release/kntwr_runtime.dll
 The synthetic file is written into a temporary directory and removed on exit.
 No runtime build or live game is required. No symbol mocks are used.
 """
@@ -65,7 +65,7 @@ class ProfileTests(unittest.TestCase):
         self.assertIn("Main-image main A1 stack chains", output.getvalue())
 
     def test_executable_prefix_geometry(self):
-        with tempfile.TemporaryDirectory(prefix="ntw2-profile-prefix-") as directory:
+        with tempfile.TemporaryDirectory(prefix="kntwr-profile-prefix-") as directory:
             path = Path(directory) / "prefix.profile.bin"
             data = fixture(0x10000, 0x80, 0x81, code_bytes=0x1000)
             path.write_bytes(data)
@@ -88,19 +88,19 @@ class ProfileTests(unittest.TestCase):
     def test_synthetic_abi8_real_pdb(self):
         symbols = ps.DbgHelp(ARGS.dll)
         try:
-            start, size = symbols.named_rva("ntw2_profile_start")
+            start, size = symbols.named_rva("kntwr_profile_start")
             bucket = (start + 63) // 64 * 64
             self.assertGreater(size, bucket - start + 1)
             symbol = symbols.resolve(bucket)
-            self.assertIn("ntw2_profile_start", symbol.name)
-            self.assertTrue(symbol.file.endswith("ntw2_profile.cpp"), symbol)
+            self.assertIn("kntwr_profile_start", symbol.name)
+            self.assertTrue(symbol.file.endswith("kntwr_profile.cpp"), symbol)
             self.assertGreater(symbol.line, 0)
             runtime_size = symbols.image_size
             expected_name = symbol.name
             pdb = symbols.pdb_path
         finally:
             symbols.close()
-        with tempfile.TemporaryDirectory(prefix="ntw2-profile-") as directory:
+        with tempfile.TemporaryDirectory(prefix="kntwr-profile-") as directory:
             path = Path(directory) / "synthetic.profile.bin"
             data = fixture(runtime_size, bucket, bucket + 1)
             path.write_bytes(data)
@@ -118,7 +118,7 @@ class ProfileTests(unittest.TestCase):
                              "Runtime workers (heuristic): 11", "Runtime tick thread inside site 13: 7",
                              "Tick wait-stub callers inside runtime: 5", "0x004000C0          12",
                              "frame RVA 0x00000040 (stack-scan hint, NOT proven site 13): 7",
-                             "direct=[ESP]:3 scanned=2", "ntw2_profile.cpp:"):
+                             "direct=[ESP]:3 scanned=2", "kntwr_profile.cpp:"):
                 self.assertIn(expected, text)
             # Parse structural failures rather than accepting a partial or wrong table.
             path.write_bytes(data[:-1])

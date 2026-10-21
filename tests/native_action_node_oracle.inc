@@ -3,8 +3,8 @@
 // are replaced, at their original direct-call seams, in this alternate bank.
 #include "native_action_node.h"
 namespace action_oracle {
-namespace action = ntw2_action_node;
-static ntw2_clone_set bank{};
+namespace action = kntwr_action_node;
+static kntwr_clone_set bank{};
 static U eventCount, orderCount, kinds[8], orders[8];
 static bool changeOrder, changeReset, changeMove, corrupt;
 static U currentNode;
@@ -117,9 +117,9 @@ static void Invoke(ActionFixture& f, U index, action::Operation op, U count, boo
     action::Reset(); action::Configure(true); eventCount = orderCount = 0; currentNode = f.NodeAddress(); ResetFp();
     U va = index == 0 ? (op == action::Begin ? 0x816080 : 0x818500) :
         index == 1 ? (op == action::Begin ? 0x444b60 : 0x818330) : (op == action::Begin ? 0x815ff0 : 0x444b60);
-    U clone = index == 0 ? (op == action::Begin ? NTW2_CLONE_BRAIN_ACTION_BEGIN : NTW2_CLONE_BRAIN_ACTION_STEP) :
-        index == 1 ? (op == action::Begin ? NTW2_CLONE_BRAIN_ACTION_EMPTY : NTW2_CLONE_BRAIN_ACTION_RELATED_STEP) :
-        (op == action::Begin ? NTW2_CLONE_BRAIN_ACTION_RELATED_BEGIN : NTW2_CLONE_BRAIN_ACTION_EMPTY);
+    U clone = index == 0 ? (op == action::Begin ? KNTWR_CLONE_BRAIN_ACTION_BEGIN : KNTWR_CLONE_BRAIN_ACTION_STEP) :
+        index == 1 ? (op == action::Begin ? KNTWR_CLONE_BRAIN_ACTION_EMPTY : KNTWR_CLONE_BRAIN_ACTION_RELATED_STEP) :
+        (op == action::Begin ? KNTWR_CLONE_BRAIN_ACTION_RELATED_BEGIN : KNTWR_CLONE_BRAIN_ACTION_EMPTY);
     U token = action::BeforeSite(va, op == action::Begin ? 0x66c17d : 0x66c18e, f.NodeAddress(), nullptr, bank.entries);
     Require(token != 0, "action concrete capture admitted");
     reinterpret_cast<void (__thiscall*)(U)>(original ? Addr(At(va)) : bank.entries[clone])(f.NodeAddress());
@@ -253,10 +253,10 @@ static void Routes() {
         label = "production action concrete virtual routing including shared empty slots"; ActionFixture f(index);
         Put(f.Node(), 0x10, B(started)); if (index == 1) Put(f.related.data(), 0x220, U(2));
         f.ownerVtable[0xc / 4] = Addr(At(0x66ce00));
-        std::array<U, NTW2_CLONE_COUNT> entries;
+        std::array<U, KNTWR_CLONE_COUNT> entries;
         std::copy(std::begin(production.entries), std::end(production.entries), entries.begin());
-        entries[NTW2_CLONE_BRAIN_W] = Fn(&HolderRoute);
-        entries[NTW2_CLONE_BRAIN_W_REQUEST] = Fn(&ProductionRequest);
+        entries[KNTWR_CLONE_BRAIN_W] = Fn(&HolderRoute);
+        entries[KNTWR_CLONE_BRAIN_W_REQUEST] = Fn(&ProductionRequest);
         eventCount = 0; brain::Reset(); brain::Configure(false, false, true, false);
         brain::RunOccurrence(Addr(f.owner.data()), entries.data());
         U w[action::kWords]; action::Snapshot(index, w);
@@ -272,10 +272,10 @@ static void Routes() {
 } // namespace action_oracle
 void RunActionNodeCases() {
     using namespace action_oracle;
-    action::Bind(Addr(image)); U saved = bindings[NTW2_BIND_B2_SERVICE_GATE], detail = 0;
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = Fn(&Gate);
-    Require(ntw2_build_clones(Addr(image), bindings, &bank, &detail) == 0, "build source-pinned action event-seam bank");
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = saved;
+    action::Bind(Addr(image)); U saved = bindings[KNTWR_BIND_B2_SERVICE_GATE], detail = 0;
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = Fn(&Gate);
+    Require(kntwr_build_clones(Addr(image), bindings, &bank, &detail) == 0, "build source-pinned action event-seam bank");
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = saved;
     Branches(); Begins(); Timers(); Routes();
     action::Release(); VirtualFree(bank.allocation, 0, MEM_RELEASE); bank = {};
 }

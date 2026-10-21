@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#define NTW2_NODE_WORD_LABELS \
+#define KNTWR_NODE_WORD_LABELS \
  "version", "enabled", "bound", "captures", "admitted", "refused", "constructors", "begins", \
  "steps", "destructors", "comparisons", "matches", "mismatches", "node_mismatches", \
  "owner_mismatches", "event_mismatches", "predicted_arrivals", "predicted_orders", \
@@ -8,7 +8,7 @@
  "projection_calls", "preparation_failures", "reentrant_refusals", "last_owner", \
  "last_operation", "last_mismatch_offset", "last_expected", "last_actual", \
  "workers_blocked", "fake_table_installed"
-#define NTW2_NODE_EVENT_WORD_LABELS \
+#define KNTWR_NODE_EVENT_WORD_LABELS \
  "arrival_predicted", "arrival_observed", "arrival_mismatch", \
  "order_predicted", "order_observed", "order_mismatch", \
  "request_predicted", "request_observed", "request_mismatch", \
@@ -19,7 +19,7 @@
 
 // Owner-only differential proof. No function installs the fake table, publishes
 // detached bytes, or runs an arrival/order/request transaction a second time.
-namespace ntw2_node {
+namespace kntwr_node {
 using U = uint32_t;
 using B = unsigned char;
 constexpr U kWords = 32, kEventWords = 16, kAgentBytes = 0x620;
@@ -109,5 +109,5 @@ void Observe(U originalVA, U receiver, const U* args);
 // entries operate on detached AgentView bytes using the currently bound services.
 // The returned table address is NEVER written into a live holder by this module.
 const U* FakeVtable();
-} // namespace ntw2_node
+} // namespace kntwr_node
 #endif

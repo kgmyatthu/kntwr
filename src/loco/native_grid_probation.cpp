@@ -3,9 +3,9 @@
 #include <windows.h>
 #include <string.h>
 #include <intrin.h>
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 
-namespace ntw2_grid_probation {
+namespace kntwr_grid_probation {
 namespace {
 
 Binding g_binding;
@@ -355,7 +355,7 @@ U Preferred(U address, U* clone) {
     *clone = UINT32_MAX;
     switch (AddressModule(address)) {
     case ModuleImage: return address - g_binding.image_base + 0x400000u;
-    case ModuleClone: return ntw2_clone_origin(g_binding.clones, address, clone);
+    case ModuleClone: return kntwr_clone_origin(g_binding.clones, address, clone);
     default: return address;
     }
 }
@@ -508,4 +508,4 @@ bool Probe(void* base, U bytes) {
     Bump(ProbeArms);
     return true;
 }
-} // namespace ntw2_grid_probation
+} // namespace kntwr_grid_probation

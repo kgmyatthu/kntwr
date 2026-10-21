@@ -1,5 +1,5 @@
 // Differential oracle + microbenchmark: the real 0x80DCF0 -> 0x10EC150 closure of a private relocated copy of the supported image
-// against ntw2_poly::Evaluate. Asserts byte-equal AL, x87 control/status/tag and MXCSR (control + sticky flags) on every call
+// against kntwr_poly::Evaluate. Asserts byte-equal AL, x87 control/status/tag and MXCSR (control + sticky flags) on every call
 // the replacement serves, and that every refusal reason fires on its fixture. `--bench` prints native vs replacement cost by
 // vertex class. No running game or installed file is touched.
 #define _CRT_SECURE_NO_WARNINGS
@@ -17,8 +17,8 @@
 #include <random>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_planner_search.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_planner_search.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;
@@ -41,7 +41,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     image=static_cast<B*>(VirtualAlloc(nullptr,nt->OptionalHeader.SizeOfImage,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));
@@ -81,14 +81,14 @@ static void SetPolygonBits(const std::vector<std::pair<U,U>>& pts) {
         verts[i].v[3]=pts[i].first; verts[i].v[4]=pts[i].second;
     }
 }
-static U counts[ntw2_poly::ReasonCount], hits, misses;
+static U counts[kntwr_poly::ReasonCount], hits, misses;
 // Runs native and replacement from the identical FP state; when the replacement serves, everything observable must be equal.
-static ntw2_poly::Reason Compare(U csr=kCsr,bool requireServed=false,const char* what="case") {
+static kntwr_poly::Reason Compare(U csr=kCsr,bool requireServed=false,const char* what="case") {
     Fx a,b; U vs=0; B result=0xcc;
     ResetFp(csr); const B n=native(shape,nullptr,verts.data()); _fxsave(a.bytes);
-    ResetFp(csr); const auto why=ntw2_poly::Evaluate(shape,verts.data(),&result,&vs); _fxsave(b.bytes);
+    ResetFp(csr); const auto why=kntwr_poly::Evaluate(shape,verts.data(),&result,&vs); _fxsave(b.bytes);
     ++counts[why];
-    if(why==ntw2_poly::Served) {
+    if(why==kntwr_poly::Served) {
         char msg[96]; std::snprintf(msg,sizeof(msg),"%s: AL native=%u fast=%u",what,n,result);
         Require(n==result,msg);
         std::snprintf(msg,sizeof(msg),"%s: x87 control/status/tag",what);
@@ -142,14 +142,14 @@ static void Bench() {
         for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) { const B x=native(shp[c].data(),nullptr,store[c].data()); sink+=x; if(!r) nativeHits+=x; }
         const double tn=(Now()-t0)/(double(reps)*cases);
         B res; ResetFp(); t0=Now();
-        for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) { if(ntw2_poly::Evaluate(shp[c].data(),store[c].data(),&res,nullptr)==ntw2_poly::Served) { sink+=res; if(!r) ++served; } }
+        for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) { if(kntwr_poly::Evaluate(shp[c].data(),store[c].data(),&res,nullptr)==kntwr_poly::Served) { sink+=res; if(!r) ++served; } }
         const double tf=(Now()-t0)/(double(reps)*cases);
-        ntw2_poly::Configure(native,ntw2_poly::ModeLive); ResetFp(); t0=Now();   // the clone-bound host gate: Evaluate + counters + refusal path
-        for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) sink+=ntw2_poly::Gate(shp[c].data(),nullptr,store[c].data());
+        kntwr_poly::Configure(native,kntwr_poly::ModeLive); ResetFp(); t0=Now();   // the clone-bound host gate: Evaluate + counters + refusal path
+        for(U r=0;r<reps;++r) for(U c=0;c<cases;++c) sink+=kntwr_poly::Gate(shp[c].data(),nullptr,store[c].data());
         const double tg=(Now()-t0)/(double(reps)*cases);
         // Cross-check the benchmark inputs themselves.
         for(U c=0;c<cases;++c) { ResetFp(); const B n=native(shp[c].data(),nullptr,store[c].data()); ResetFp();
-            if(ntw2_poly::Evaluate(shp[c].data(),store[c].data(),&res,nullptr)==ntw2_poly::Served) Require(res==n,"bench input equality"); }
+            if(kntwr_poly::Evaluate(shp[c].data(),store[c].data(),&res,nullptr)==kntwr_poly::Served) Require(res==n,"bench input equality"); }
         std::printf("V=%-5u hit=%3u%% native %10.1f ns   fast %9.1f ns   gate %9.1f ns   S(eval)=%.2f S(gate)=%.2f  served %u/%u (sink %u)\n",v,100*nativeHits/cases,tn,tf,tg,tn/tf,tn/tg,served,cases,sink);
     }
 }
@@ -157,7 +157,7 @@ int main(int argc,char** argv) {
     if(argc<2) { std::fprintf(stderr,"usage: native_planner_search_oracle Napoleon.exe [--bench]\n"); return 2; }
     Map(argv[1]); native=reinterpret_cast<Native>(At(0x80dcf0));
     Require(*reinterpret_cast<U*>(At(0x1318038))==Bits(0.5f) && *reinterpret_cast<U*>(At(0x1318048))==Bits(1.0f),"image constants 0.5/1.0");
-    ntw2_poly::Configure(native,ntw2_poly::ModeLive); // module-owned vertex buffer (the runtime allocates it at activation)
+    kntwr_poly::Configure(native,kntwr_poly::ModeLive); // module-owned vertex buffer (the runtime allocates it at activation)
     if(argc>2 && !std::strcmp(argv[2],"--bench")) { Bench(); return 0; }
     // Random finite polygons: V classes, orthonormal and arbitrary axes, float and integer coordinates, hit/miss mix.
     const U classes[]={1,2,3,4,5,7,8,17,64,65,256,1000,1024};
@@ -179,40 +179,40 @@ int main(int argc,char** argv) {
     { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{9,9}}); Compare(kCsr,false,"single vertex outside"); }
     { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{9,9},{9,9}}); Compare(kCsr,false,"two coincident vertices"); }
     // Polygon contains the OBB entirely (PIP path), OBB contains polygon (first-vertex path), edge crossing only (segment passes).
-    { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{-50,-50},{50,-50},{50,50},{-50,50}}); Require(Compare(kCsr,true,"polygon contains OBB")==ntw2_poly::Served,"served"); }
+    { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{-50,-50},{50,-50},{50,50},{-50,50}}); Require(Compare(kCsr,true,"polygon contains OBB")==kntwr_poly::Served,"served"); }
     { float s[9]={0,0,0,20,20,1,0,0,1}; SetShape(s); SetPolygon({{-1,-1},{1,-1},{1,1},{-1,1}}); Compare(kCsr,true,"OBB contains polygon"); }
     { float s[9]={0,0,0,20,2,1,0,0,1}; SetShape(s); SetPolygon({{-1,-5},{1,-5},{1,5},{-1,5}}); Compare(kCsr,true,"cross shape, no vertex inside"); }
     // Guard refusals, each on its own fixture (and the refused call must still be answered by native).
-    { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s,1); SetPolygon({{9,9},{10,9},{10,10}}); Require(Compare(kCsr,false,"kind 1")==ntw2_poly::FallKind,"kind refusal"); }
+    { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s,1); SetPolygon({{9,9},{10,9},{10,10}}); Require(Compare(kCsr,false,"kind 1")==kntwr_poly::FallKind,"kind refusal"); }
     { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{9,9},{10,9},{10,10}});
-      Require(Compare(0x1f80u,false,"PE not sticky")==ntw2_poly::FallFp,"inexact precondition");
-      Require(Compare(0x1f20u,false,"exception unmasked")==ntw2_poly::FallFp,"mask precondition");
+      Require(Compare(0x1f80u,false,"PE not sticky")==kntwr_poly::FallFp,"inexact precondition");
+      Require(Compare(0x1f20u,false,"exception unmasked")==kntwr_poly::FallFp,"mask precondition");
       Fx f; ResetFp(); __asm { fld1 }
-      B res; U vs; const auto why=ntw2_poly::Evaluate(shape,verts.data(),&res,&vs); __asm { fstp st(0) }
-      Require(why==ntw2_poly::FallFp,"x87 TOP precondition"); (void)f;
+      B res; U vs; const auto why=kntwr_poly::Evaluate(shape,verts.data(),&res,&vs); __asm { fstp st(0) }
+      Require(why==kntwr_poly::FallFp,"x87 TOP precondition"); (void)f;
       ResetFp(); unsigned short cw; __asm { fnstcw cw }
       cw&=~1u; __asm { fldcw cw }  // unmask invalid
-      Require(ntw2_poly::Evaluate(shape,verts.data(),&res,&vs)==ntw2_poly::FallFp,"x87 mask precondition"); ResetFp(); }
+      Require(kntwr_poly::Evaluate(shape,verts.data(),&res,&vs)==kntwr_poly::FallFp,"x87 mask precondition"); ResetFp(); }
     { // Too many vertices: refused (native would also be correct, just slow). A list that never returns to P must not hang us.
       Star(65537,0,0,10,20,false); float s[9]={100,100,0,2,2,1,0,0,1}; SetShape(s);
-      Require(Compare(kCsr,false,"V=65537")==ntw2_poly::FallWalkCap,"walk cap at 65537"); }
+      Require(Compare(kCsr,false,"V=65537")==kntwr_poly::FallWalkCap,"walk cap at 65537"); }
     // Large rings are served (module-owned buffer): byte-equal AL/x87/MXCSR on hits (early exit) and on full-traversal misses.
     for(U v:{1025u,2048u,4096u,20000u,65536u}) {
         Star(v,0,0,10,60,false); float miss[9]={200,200,0,2,2,1,0,0,1}, hit[9]={0,0,0,40,40,1,0,0,1}, crossing[9]={30,0,0,60,2,1,0,0,1};
-        SetShape(miss); Require(Compare(kCsr,true,"large ring miss")==ntw2_poly::Served,"large miss served");
-        SetShape(hit); Require(Compare(kCsr,true,"large ring hit")==ntw2_poly::Served,"large hit served");
-        SetShape(crossing); Require(Compare(kCsr,true,"large ring crossing")==ntw2_poly::Served,"large crossing served");
-        for(U k=0;k<8;++k) { RandomShape(R(-70,70),R(-70,70),k&1,false); Require(Compare(kCsr,true,"large ring random")==ntw2_poly::Served,"large random served"); }
+        SetShape(miss); Require(Compare(kCsr,true,"large ring miss")==kntwr_poly::Served,"large miss served");
+        SetShape(hit); Require(Compare(kCsr,true,"large ring hit")==kntwr_poly::Served,"large hit served");
+        SetShape(crossing); Require(Compare(kCsr,true,"large ring crossing")==kntwr_poly::Served,"large crossing served");
+        for(U k=0;k<8;++k) { RandomShape(R(-70,70),R(-70,70),k&1,false); Require(Compare(kCsr,true,"large ring random")==kntwr_poly::Served,"large random served"); }
     }
     { // The busy guard: an unconfigured/released module refuses every call to native, counted; Configure restores service.
-      ntw2_poly::Release(); float s[9]={200,200,0,2,2,1,0,0,1}; SetShape(s); Star(8,0,0,10,60,false);
-      Require(Compare(kCsr,false,"released")==ntw2_poly::FallBusy,"released module answers FallBusy");
-      ntw2_poly::Configure(native,ntw2_poly::ModeLive);
-      Require(Compare(kCsr,true,"reconfigured")==ntw2_poly::Served,"configure restores service"); }
+      kntwr_poly::Release(); float s[9]={200,200,0,2,2,1,0,0,1}; SetShape(s); Star(8,0,0,10,60,false);
+      Require(Compare(kCsr,false,"released")==kntwr_poly::FallBusy,"released module answers FallBusy");
+      kntwr_poly::Configure(native,kntwr_poly::ModeLive);
+      Require(Compare(kCsr,true,"reconfigured")==kntwr_poly::Served,"configure restores service"); }
     { std::vector<Vertex> cyc(3); for(U i=0;i<3;++i) { cyc[i].v[2]=static_cast<U>(reinterpret_cast<uintptr_t>(&cyc[(i+1)%3])); cyc[i].v[3]=Bits(9.0f); cyc[i].v[4]=Bits(float(9+i)); }
       Vertex head={}; head.v[2]=static_cast<U>(reinterpret_cast<uintptr_t>(&cyc[0])); head.v[3]=Bits(9.0f); head.v[4]=Bits(8.0f);
       float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); B res; ResetFp();
-      Require(ntw2_poly::Evaluate(shape,&head,&res,nullptr)==ntw2_poly::FallWalkCap,"list that never returns to P"); }
+      Require(kntwr_poly::Evaluate(shape,&head,&res,nullptr)==kntwr_poly::FallWalkCap,"list that never returns to P"); }
     // NaN / Inf / denormal / huge: the vector path must refuse; scalar stage identical to native whatever it raises.
     const U bad[]={0x7fc00000u,0x7f800001u,0xffc00000u,0x7f800000u,0xff800000u,0x00000001u,0x007fffffu,0x80000001u,0x00800000u,0x7f7fffffu,0x4b800000u,0x2f800000u,0x00ffffffu};
     for(U pattern:bad) {
@@ -221,7 +221,7 @@ int main(int argc,char** argv) {
             std::vector<std::pair<U,U>> p={{Bits(0),Bits(0)},{Bits(4),Bits(0)},{Bits(4),Bits(4)},{Bits(0),Bits(4)},{Bits(-3),Bits(2)}};
             (field?p[vtx].second:p[vtx].first)=pattern; SetPolygonBits(p);
             const auto why=Compare(kCsr,false,"bad polygon coordinate");
-            Require(why==ntw2_poly::FallDomain,"NaN/Inf/denormal/huge polygon coordinate refused to native");
+            Require(why==kntwr_poly::FallDomain,"NaN/Inf/denormal/huge polygon coordinate refused to native");
         }
         for(U field=0;field<9;++field) {
             float s2[9]={50,50,0,2,2,1,0,0,1}; U w[9]; for(U i=0;i<9;++i) w[i]=Bits(s2[i]); w[field]=pattern;
@@ -231,24 +231,24 @@ int main(int argc,char** argv) {
             if(field==2) continue; // OBB word +8 is not an input of the predicate: result must still be served and equal
             // NaN/Inf in any input field poisons the corners: refused to native. Denormal/huge patterns are either refused or
             // answered identically by the shared scalar stage (Compare asserts equality whenever the replacement serves).
-            if((pattern&0x7f800000u)==0x7f800000u) Require(why==ntw2_poly::FallDomain,"NaN/Inf OBB field refused to native");
+            if((pattern&0x7f800000u)==0x7f800000u) Require(why==kntwr_poly::FallDomain,"NaN/Inf OBB field refused to native");
         }
     }
     // Poisoned OBB field 2 is ignored by the kernel: still served, identical.
     { float s[9]={50,50,0,2,2,1,0,0,1}; SetShape(s); shape[3]=0x7fc00000u; SetPolygon({{0,0},{4,0},{4,4},{0,4}});
-      Require(Compare(kCsr,true,"OBB word +8 is not an input")==ntw2_poly::Served,"+8 ignored"); }
+      Require(Compare(kCsr,true,"OBB word +8 is not an input")==kntwr_poly::Served,"+8 ignored"); }
     // The clone-bound gate: shadow answers natively and must count zero mismatches (AL, x87 status, MXCSR); live answers like native.
-    for(U mode=ntw2_poly::ModeShadow;mode<=ntw2_poly::ModeLive;++mode) {
-        ntw2_poly::Configure(native,mode);
+    for(U mode=kntwr_poly::ModeShadow;mode<=kntwr_poly::ModeLive;++mode) {
+        kntwr_poly::Configure(native,mode);
         for(U round=0;round<60;++round) for(U v:classes) {
             Star(v,R(-20,20),R(-20,20),10,60,round&1); RandomShape(R(-70,70),R(-70,70),!(round&2),round&1);
-            ResetFp(); const B n=native(shape,nullptr,verts.data()); ResetFp(); const B g=ntw2_poly::Gate(shape,nullptr,verts.data());
+            ResetFp(); const B n=native(shape,nullptr,verts.data()); ResetFp(); const B g=kntwr_poly::Gate(shape,nullptr,verts.data());
             Require(n==g,"gate result equals native");
         }
-        const volatile U* w=ntw2_poly::words;
+        const volatile U* w=kntwr_poly::words;
         Require(w[0]==1 && w[1]==mode && w[2]==60*(sizeof(classes)/sizeof(classes[0])) && w[3]>500,"gate counters: version, mode, calls, served");
         Require(w[31]>=100 && w[31]<=20000,"tsc_per_us calibrated");
-        if(mode==ntw2_poly::ModeShadow) {
+        if(mode==kntwr_poly::ModeShadow) {
             Require(w[8]==w[3] && !w[9] && !w[10] && !w[11],"shadow compares every served call bit-identical");
             Require(w[29]==w[3] && w[26]==w[28] && w[27]>0 && w[28]>0,"shadow samples every served call: native and fast timed on the same calls");
         } else {
@@ -258,23 +258,23 @@ int main(int argc,char** argv) {
             Require(w[4]==0 && w[6]<=w[2]/50,"live: (almost) no kind/domain refusals on finite random input");
             // Refusals run native and are timed: a domain-refused polygon (1e9 coordinate) 300 times.
             const U f0=w[30]; std::vector<std::pair<float,float>> bigPoly={{1e9f,0},{2,2},{3,1}}; SetPolygon(bigPoly); float sh[9]={0,0,0,2,2,1,0,0,1}; SetShape(sh);
-            for(U k=0;k<300;++k) { ResetFp(); const B nn=native(shape,nullptr,verts.data()); ResetFp(); Require(nn==ntw2_poly::Gate(shape,nullptr,verts.data()),"fallback gate result equals native"); }
+            for(U k=0;k<300;++k) { ResetFp(); const B nn=native(shape,nullptr,verts.data()); ResetFp(); Require(nn==kntwr_poly::Gate(shape,nullptr,verts.data()),"fallback gate result equals native"); }
             Require(w[6]>=300 && w[30]>f0,"fallback native time accumulates");
         }
     }
     { // Large-ring classes through the gate (shadow): words 21..24 split the served V>256 calls, busy stays zero.
-      ntw2_poly::Configure(native,ntw2_poly::ModeShadow);
+      kntwr_poly::Configure(native,kntwr_poly::ModeShadow);
       const U big[]={300,1025,4096,5000,16385,40000,65536};
       for(U v:big) { Star(v,0,0,10,60,false); { float farS[9]={300,300,0,2,2,1,0,0,1}; SetShape(farS); } // full traversal: the ring is always walked
-                     ResetFp(); const B n=native(shape,nullptr,verts.data()); ResetFp(); Require(n==ntw2_poly::Gate(shape,nullptr,verts.data()),"large gate result equals native"); }
-      const volatile U* w=ntw2_poly::words;
+                     ResetFp(); const B n=native(shape,nullptr,verts.data()); ResetFp(); Require(n==kntwr_poly::Gate(shape,nullptr,verts.data()),"large gate result equals native"); }
+      const volatile U* w=kntwr_poly::words;
       Require(w[2]==7 && w[3]==7 && w[18]==7 && w[21]+w[22]+w[23]+w[24]==7 && w[21]==1 && w[22]==2 && w[23]==1 && w[24]==3 && !w[25] &&
               w[8]==7 && !w[9] && !w[10] && !w[11] && w[14]==65536,"gate V classes above 256 (<=1024,<=4096,<=16384,<=65536), no busy, shadow clean"); }
-    ntw2_poly::Configure(native,ntw2_poly::ModeOff);
-    { bool zero=true; for(U i=0;i<ntw2_poly::kWords;++i) zero=zero && !ntw2_poly::words[i]; Require(zero,"row all zero when off"); }
-    std::printf("coverage: served=%u hit=%u miss=%u kind=%u fp=%u domain=%u cap=%u busy=%u\n",counts[ntw2_poly::Served],hits,misses,counts[ntw2_poly::FallKind],counts[ntw2_poly::FallFp],counts[ntw2_poly::FallDomain],counts[ntw2_poly::FallWalkCap],counts[ntw2_poly::FallBusy]);
-    Require(counts[ntw2_poly::Served]>5000 && hits>100 && misses>100,"coverage of served hit/miss");
+    kntwr_poly::Configure(native,kntwr_poly::ModeOff);
+    { bool zero=true; for(U i=0;i<kntwr_poly::kWords;++i) zero=zero && !kntwr_poly::words[i]; Require(zero,"row all zero when off"); }
+    std::printf("coverage: served=%u hit=%u miss=%u kind=%u fp=%u domain=%u cap=%u busy=%u\n",counts[kntwr_poly::Served],hits,misses,counts[kntwr_poly::FallKind],counts[kntwr_poly::FallFp],counts[kntwr_poly::FallDomain],counts[kntwr_poly::FallWalkCap],counts[kntwr_poly::FallBusy]);
+    Require(counts[kntwr_poly::Served]>5000 && hits>100 && misses>100,"coverage of served hit/miss");
     std::printf("planner search oracle: %u checks; served=%u (hit %u, miss %u) kind=%u fp=%u domain=%u cap=%u\n",checks,
-        counts[ntw2_poly::Served],hits,misses,counts[ntw2_poly::FallKind],counts[ntw2_poly::FallFp],counts[ntw2_poly::FallDomain],counts[ntw2_poly::FallWalkCap]);
+        counts[kntwr_poly::Served],hits,misses,counts[kntwr_poly::FallKind],counts[kntwr_poly::FallFp],counts[kntwr_poly::FallDomain],counts[kntwr_poly::FallWalkCap]);
     return 0;
 }

@@ -1,5 +1,5 @@
-// --ai-ctrl-* oracle (src/ai/ntw2_ai_ctrl_batch.{h,cpp}) on the mapped approved image (no game process, no .text patch).
-//  1. The seven-counter leaf 0x749D90: the module's exact port (ntw2_ai_ctrl::Histogram) versus the ORIGINAL machine code, byte for
+// --ai-ctrl-* oracle (src/ai/kntwr_ai_ctrl_batch.{h,cpp}) on the mapped approved image (no game process, no .text patch).
+//  1. The seven-counter leaf 0x749D90: the module's exact port (kntwr_ai_ctrl::Histogram) versus the ORIGINAL machine code, byte for
 //     byte over the 28 output bytes: every class/subtype branch x B41/B44 combination x filter values (low byte decides), list
 //     multiplicity/duplicates, empty lists, filter 0 versus 1, deterministic random mixes.
 //  2. Batch ABI: begin/end/epoch parity, retire callbacks (begin epoch, once per end, deduplicated, cleared by Reset), a begin inside an
@@ -19,13 +19,13 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "clones/ntw2_clones.h"
-#include "ai/ntw2_ai_ctrl_batch.h"
+#include "kntwr_runtime.h"
+#include "clones/kntwr_clones.h"
+#include "ai/kntwr_ai_ctrl_batch.h"
 
 using U = uint32_t;
 using B = unsigned char;
-namespace ac = ntw2_ai_ctrl;
+namespace ac = kntwr_ai_ctrl;
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
 static B* image;
 static U delta, checks;
@@ -45,7 +45,7 @@ static void Map(const char* path) {
     Require(BCryptHash(algorithm, nullptr, 0, bytes.data(), static_cast<ULONG>(bytes.size()), hash, 32) == 0, "SHA image");
     BCryptCloseAlgorithmProvider(algorithm, 0);
     char hex[65]; for (U i = 0; i < 32; ++i) std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
-    Require(!std::strcmp(hex, NTW2_IMAGE_SHA256), "pinned Steam image");
+    Require(!std::strcmp(hex, KNTWR_IMAGE_SHA256), "pinned Steam image");
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data() + dos->e_lfanew);
     Require(nt->OptionalHeader.ImageBase == 0x400000, "preferred base");
@@ -161,22 +161,22 @@ static void BatchCases() {
     Require(Words(ac::WBatches) == 4 && Words(ac::WEndAssign) == 1 && Words(ac::WEndCallback) == 1 && Words(ac::WEndExit) == 1 &&
             b->epoch == 8 && retiredCount == 4, "batch and end-reason counters, one retire per end");
     ai_ctrl_batch_register_retire(&Retire2);
-    ac::Reset(NTW2_AI_CTRL_HISTOGRAM, delta, 0);
+    ac::Reset(KNTWR_AI_CTRL_HISTOGRAM, delta, 0);
     ai_ctrl_batch_begin(&p, &n, &c); ai_ctrl_batch_end(AI_CTRL_END_EXIT);
-    Require(retiredCount == 4 && b->epoch == 2 && ai_ctrl_batch_flags() == NTW2_AI_CTRL_HISTOGRAM, "Reset clears callbacks and epoch");
+    Require(retiredCount == 4 && b->epoch == 2 && ai_ctrl_batch_flags() == KNTWR_AI_CTRL_HISTOGRAM, "Reset clears callbacks and epoch");
     std::printf("batch ABI: epoch, retire, reason counters ok\n");
 }
 
 // ---- gates
-static U bindings[NTW2_BIND_COUNT];
+static U bindings[KNTWR_BIND_COUNT];
 static U Gate(U which) { return bindings[which]; }
 static U Hist(Ctx& c, U filter, U out[7]) {
-    reinterpret_cast<HistFn>(Gate(NTW2_BIND_AI_CTRL_HISTOGRAM))(out, 0x5555u, c.Addr(), filter); return 0;
+    reinterpret_cast<HistFn>(Gate(KNTWR_BIND_AI_CTRL_HISTOGRAM))(out, 0x5555u, c.Addr(), filter); return 0;
 }
 static bool Same(const U* a, const U* b) { return !memcmp(a, b, 7 * sizeof(U)); }
 
 static void HistogramGateCases() {
-    ac::Reset(NTW2_AI_CTRL_HISTOGRAM, delta, 0); ac::Bind(bindings);
+    ac::Reset(KNTWR_AI_CTRL_HISTOGRAM, delta, 0); ac::Bind(bindings);
     Ctx c; B* u[4];
     u[0] = NewUnit(2, 4, 1, 1); u[1] = NewUnit(2, 8, 1, 1); u[2] = NewUnit(0, 4, 1, 1); u[3] = NewUnit(0, 9, 1, 1);
     for (B* x : u) c.list.push_back(A(x));
@@ -202,7 +202,7 @@ static void HistogramGateCases() {
     ai_ctrl_batch_end(AI_CTRL_END_REFRESH);
 
     // verify: a mutation inside the batch is caught, the NATIVE value is returned and the feature latches off
-    ac::Reset(NTW2_AI_CTRL_HISTOGRAM | NTW2_AI_CTRL_VERIFY, delta, 0);
+    ac::Reset(KNTWR_AI_CTRL_HISTOGRAM | KNTWR_AI_CTRL_VERIFY, delta, 0);
     u[2][0xB44] = 1;
     ai_ctrl_batch_begin(&p, &n, reinterpret_cast<void*>(c.Addr()));
     Hist(c, 1, first); NativeHist(c.Addr(), 1, native);
@@ -211,14 +211,14 @@ static void HistogramGateCases() {
     u[0][0xB41] = 0;
     NativeHist(c.Addr(), 1, native);
     Hist(c, 1, out);
-    Require(Same(out, native) && !Same(out, first) && Words(ac::WHistMismatch) == 1 && (Words(ac::WFlags) >> 8) == NTW2_AI_CTRL_HISTOGRAM &&
-            ai_ctrl_batch_flags() == NTW2_AI_CTRL_VERIFY, "verify mismatch: native value returned, histogram latched off");
+    Require(Same(out, native) && !Same(out, first) && Words(ac::WHistMismatch) == 1 && (Words(ac::WFlags) >> 8) == KNTWR_AI_CTRL_HISTOGRAM &&
+            ai_ctrl_batch_flags() == KNTWR_AI_CTRL_VERIFY, "verify mismatch: native value returned, histogram latched off");
     u[0][0xB41] = 1; NativeHist(c.Addr(), 1, native);
     Hist(c, 1, out); Require(Same(out, native) && Words(ac::WHistServed) == 2, "latched: served counter stops, native answers");
     ai_ctrl_batch_end(AI_CTRL_END_EXIT);
 
     // census: native always executes; repeats and B41/B44 transitions are counted against the batch's first call
-    ac::Reset(NTW2_AI_CTRL_CENSUS, delta, 0);
+    ac::Reset(KNTWR_AI_CTRL_CENSUS, delta, 0);
     ai_ctrl_batch_begin(&p, &n, reinterpret_cast<void*>(c.Addr()));
     Hist(c, 1, out); NativeHist(c.Addr(), 1, native);
     Require(Same(out, native) && Words(ac::WEligible) == 4 && Words(ac::WHistFirst) == 1 && Words(ac::WHistMismatch) == 0, "census: first call");
@@ -271,7 +271,7 @@ static void CallPreserving(U gate) {
 }
 
 static void GateCases() {
-    ac::Reset(NTW2_AI_CTRL_HISTOGRAM, delta, A(reinterpret_cast<const void*>(&FakeCloneScore))); ac::Bind(bindings);
+    ac::Reset(KNTWR_AI_CTRL_HISTOGRAM, delta, A(reinterpret_cast<const void*>(&FakeCloneScore))); ac::Bind(bindings);
     U vtable[0x40]; memset(vtable, 0, sizeof(vtable));
     struct Node { U vt; } node = {A(vtable)};
     vtable[0x30 / 4] = A(reinterpret_cast<const void*>(&FakeRefresh));
@@ -279,28 +279,28 @@ static void GateCases() {
     // scorer: exact slot -> the clone (no batch change); a foreign slot ends the open batch and runs the native target
     vtable[0x18 / 4] = A(At(0x7B1270));
     ai_ctrl_batch_begin(&p, &n, &c);
-    const U r = reinterpret_cast<ScoreFn>(Gate(NTW2_BIND_AI_CTRL_SCORER))(&node, 0, 0x1234, 0x5678);
+    const U r = reinterpret_cast<ScoreFn>(Gate(KNTWR_BIND_AI_CTRL_SCORER))(&node, 0, 0x1234, 0x5678);
     Require(r == 0xC10E && scorerCloneCalls == 1 && lastScoreU == 0x1234 && lastScoreC == 0x5678 && Words(ac::WScorerCalls) == 1 &&
             ai_ctrl_batch_current()->open, "scorer gate: exact 0x7B1270 slot runs the clone with its stack arguments and keeps the batch");
-    reinterpret_cast<ScoreFn>(Gate(NTW2_BIND_AI_CTRL_SCORER))(&node, 0, 1, 2);
+    reinterpret_cast<ScoreFn>(Gate(KNTWR_BIND_AI_CTRL_SCORER))(&node, 0, 1, 2);
     vtable[0x18 / 4] = A(reinterpret_cast<const void*>(&FakeNativeScore));
-    const U r2 = reinterpret_cast<ScoreFn>(Gate(NTW2_BIND_AI_CTRL_SCORER))(&node, 0, 0x9, 0xA);
+    const U r2 = reinterpret_cast<ScoreFn>(Gate(KNTWR_BIND_AI_CTRL_SCORER))(&node, 0, 0x9, 0xA);
     Require(r2 == 0x7A71 && scorerNativeCalls == 1 && scorerCloneCalls == 2 && lastScoreU == 9 && lastScoreC == 0xA &&
             !ai_ctrl_batch_current()->open && Words(ac::WEndCallback) == 1 && Words(ac::WScorerCalls) == 2 && Words(ac::WMaxScorerBatch) == 2,
             "scorer gate: a foreign slot ends the batch (CALLBACK) and runs the native target");
     // refresh: ends an open batch before the native refresh, then begins with P = EBX and C = P + 0x68
     ai_ctrl_batch_begin(&p, &n, &c);
     B planner[0x100] = {};
-    CallRefresh(Gate(NTW2_BIND_AI_CTRL_REFRESH), &node, planner);
+    CallRefresh(Gate(KNTWR_BIND_AI_CTRL_REFRESH), &node, planner);
     const AiCtrlBatch* b = ai_ctrl_batch_current();
     Require(refreshCalls == 1 && refreshSawOpen == 0 && b->open && b->P == planner && b->N == &node && b->C == planner + 0x68 &&
             Words(ac::WEndRefresh) == 1, "refresh gate: previous batch ended, native refresh ran outside any batch, next batch begun");
     // assign: EAX/ECX/EDX/EFLAGS preserved, batch ended with ASSIGN
-    CallPreserving(Gate(NTW2_BIND_AI_CTRL_BATCH_ASSIGN));
+    CallPreserving(Gate(KNTWR_BIND_AI_CTRL_BATCH_ASSIGN));
     Require(savedEax == 0x11111111 && savedEcx == 0x22222222 && savedEdx == 0x33333333 && (savedFlags & 1) && (savedFlags & 0x80) &&
             !b->open && Words(ac::WEndAssign) == 1, "assign gate: registers and flags preserved, batch ended (ASSIGN)");
     ai_ctrl_batch_begin(&p, &n, &c);
-    reinterpret_cast<void (*)()>(Gate(NTW2_BIND_AI_CTRL_BATCH_EXIT))();
+    reinterpret_cast<void (*)()>(Gate(KNTWR_BIND_AI_CTRL_BATCH_EXIT))();
     Require(!b->open && Words(ac::WEndExit) == 1, "exit gate ends the batch (EXIT)");
     std::printf("gates: scorer, refresh, assign, exit ok\n");
 }

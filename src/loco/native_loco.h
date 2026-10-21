@@ -2,8 +2,8 @@
 #include <stdint.h>
 #include "core/native_workload.h"
 
-// Keep this order identical to ntw2_loco::Word and the append-only public status.
-#define NTW2_LOCO_WORD_LABELS \
+// Keep this order identical to kntwr_loco::Word and the append-only public status.
+#define KNTWR_LOCO_WORD_LABELS \
     "version", "calls", "entities", "admitted", "rejected", \
     "reject_class", "reject_lifetime", "reject_activity", "reject_target", "reject_parked", \
     "reject_pending", "reject_charge_fire", "reject_posture_order", "reject_node", "reject_environment", \
@@ -16,7 +16,7 @@
 
 // Independent diagnostics at site 13; these buckets overlap and are not a
 // partition. Only reasons selected by enforced_mask refuse serial MOVE.
-#define NTW2_LOCO_GATE_LABELS \
+#define KNTWR_LOCO_GATE_LABELS \
     "version", "entities", "candidates", "admitted", "enforced_mask", \
     "class", "lifetime", "activity", "target", "parked", "pending", \
     "charge_fire", "posture_order", "node", "environment", \
@@ -28,7 +28,7 @@
     "reserved_40", "reserved_41", "reserved_42", "reserved_43", \
     "reserved_44", "reserved_45", "reserved_46", "reserved_47"
 
-#define NTW2_LOCO_SERVICE_LABELS \
+#define KNTWR_LOCO_SERVICE_LABELS \
     "version", "enabled", "timed_calls", "stack_overflows", "abandoned_frames", \
     "clone_wall_us", "services_union_us", "outside_services_us", "max_depth", "qpc_failures", \
     "reserved_10", "reserved_11", \
@@ -40,12 +40,12 @@
     "sweep_calls", "resolve_calls", "height_owner_calls", "wrapper_query_calls", \
     "reserved_36", "reserved_37", "reserved_38", "reserved_39"
 
-#define NTW2_LOCO_GRID_LABELS \
+#define KNTWR_LOCO_GRID_LABELS \
     "version", "captures", "records", "primary", "secondary", "memberships", "cells", "mismatches", \
     "sampled_records", "births", "removals", "reused_addresses", "capture_us", "csr_us", "faults", "refusals", \
     "generation", "epoch", "bytes", "max_records", "max_memberships", "native_order_cells", "unsupported_nodes", \
     "deactivations", "membership_removals", "reserved_25", "reserved_26", "reserved_27", "reserved_28", "reserved_29", "reserved_30", "reserved_31"
-#define NTW2_LOCO_PARALLEL_LABELS \
+#define KNTWR_LOCO_PARALLEL_LABELS \
     "version", "enabled", "chunks", "worker_entities", "owner_entities", "needs_env", "needs_sweep", "needs_resolve", \
     "needs_class_wrapper", "needs_relationship", "needs_staging", "needs_duplicate", "replayed_services", \
     "capture_us", "csr_us", "kernel_us", "replay_us", "staging_us", "faults", "sticky", "inline_chunks", \
@@ -53,7 +53,7 @@
     "last_entity", "last_ordinal", "last_eip", "last_access", "last_serial"
 
 // B2 diagnostics are a new status tail; never resize the original parallel block.
-#define NTW2_LOCO_OWNED_LABELS \
+#define KNTWR_LOCO_OWNED_LABELS \
     "version", "enabled", "worker_active_direct", "worker_active_battle", "worker_inactive", \
     "needs_class_wrapper", "needs_alternate_wrapper", "needs_pending", "needs_foreign_transform", \
     "needs_staging_oob", "needs_unit_dependency", "needs_sweep", "needs_resolve", "env_untested", \
@@ -62,7 +62,7 @@
     "capture_us", "kernel_us", "replay_us", "worker_time_us", "max_chunk_us", "chunks", \
     "duplicate_refusals", "faults", "fallback_entities", "active_entities"
 
-#define NTW2_LOCO_OWNED_DETAIL_LABELS \
+#define KNTWR_LOCO_OWNED_DETAIL_LABELS \
     "version", "quiet_enabled", "staging_initial_a3_zero", "staging_result_a3_zero", \
     "staging_clamp_callback", "actual_class_wrapper", "other_class", "actual_alternate_wrapper", \
     "unit_blocked_class", "unit_blocked_staging", "unit_blocked_other", \
@@ -71,7 +71,7 @@
 // Per-stage B2 phase breakdown. `dispatches / loco_words.calls` must stay 1.0 per active stage.
 // chunk_us histogram buckets are <=16, <=32, <=64, <=128, <=256, <=512, <=1024, >1024 microseconds.
 // replay_commit_us/replay_fallback_us are x16 estimates from every 16th replayed/fallback occurrence.
-#define NTW2_LOCO_OWNED_PHASE_LABELS \
+#define KNTWR_LOCO_OWNED_PHASE_LABELS \
     "version", "dispatches", "chunks", "list_entities", "max_chunk_entities", \
     "chunk_le16us", "chunk_le32us", "chunk_le64us", "chunk_le128us", "chunk_le256us", "chunk_le512us", "chunk_le1024us", "chunk_gt1024us", \
     "index_us", "scene_prepare_us", "catalog_prepare_us", "worker_prepare_us", "dispatch_wall_us", \
@@ -80,7 +80,7 @@
     "participants_used", "chunk_size_last", "participant_overflow", "reserved_30", "reserved_31"
 
 // One-time activation work and paired chunk wall/CPU evidence; appended status block.
-#define NTW2_LOCO_OWNED_LOAD_LABELS \
+#define KNTWR_LOCO_OWNED_LOAD_LABELS \
     "version", "activation_calls", "activation_us", "scene_us", "catalog_us", "participants_us", "arena_us", \
     "model_changes", "capacity_refusals", "chunk_cpu_us", "chunk_wall_max_us", "chunk_cpu_at_wall_max_us", \
     "activation_failure_reason", "activation_exception", "activation_detail", "activation_actual"
@@ -91,7 +91,7 @@
 // the optional native-chain verifier as its own final dispatch. Refusals before the first dispatch count none.
 // `build_us` is the owner's whole entry-to-publication time (serial registry/identity construction and the owner
 // plan between the dispatches included) and never includes verify_us.
-#define NTW2_LOCO_GRID_V2_LABELS \
+#define KNTWR_LOCO_GRID_V2_LABELS \
     "version", "enabled", "verify_enabled", "builds", "build_us", "max_build_us", "records", "memberships", \
     "verify_mismatches", "verify_us", "dispatches", "committed_records", "record_reads", \
     "refusals", "faults", "epoch"
@@ -101,7 +101,7 @@
 // `capture_wall_us`/`build_wall_us` bracket dispatches 1 and 2; `plan_us` is everything the owner does between them.
 // `registry_reuses` (word 15) counts builds whose registry arrays were byte-identical to the previous build, so the
 // record/hash tables were reused instead of rebuilt.
-#define NTW2_LOCO_GRID_BUILD_LABELS \
+#define KNTWR_LOCO_GRID_BUILD_LABELS \
     "version", "mode", "full_builds", "incremental_builds", "changed_records", \
     "delta_hint_records", "registry_us", "capture_wall_us", "plan_us", "build_wall_us", \
     "full_fallbacks", "last_fallback_reason", "shadow_compares", "shadow_mismatches", "dispatches", "registry_reuses"
@@ -114,7 +114,7 @@
 // apply_cpu_us the summed pool task time; shadow_us the owner time of the mirror apply + compare. `refusals` counts
 // batches/ops that could not be verified or whose kernels saw a broken chain invariant; `untapped_writers` counts
 // grid mismatches shadow mode attributes to writers outside the log. Words 28-31 histogram the applied batch sizes.
-#define NTW2_LOCO_RELINK_LABELS \
+#define KNTWR_LOCO_RELINK_LABELS \
     "version", "mode", "stages", "ops_unlink", "ops_insert", \
     "collapsed", "batches", "flush_fallback", "flush_class_wrapper", "flush_end", \
     "flush_other", "max_batch_ops", "log_us", "apply_wall_us", "apply_cpu_us", \
@@ -135,7 +135,7 @@
 // refused only because a child vtable is not the World agent table 0x1333714; cw_refused_gate = other phase-2 gate refusals
 // (pre-step, state 9, >8 children, null/self child, unproven child slots); cw_recheck_fallbacks = computed wrappers whose
 // child list/vtables/state/0x14A51A0 word changed before commit (run natively); cw_shadow_compares/mismatches.
-#define NTW2_LOCO_CW_LABELS \
+#define KNTWR_LOCO_CW_LABELS \
     "version", "occurrences", "pre_step_nonzero", "children_0", "children_1", "children_2plus", \
     "children_max", "state_9", "state_8", "state_other", "empty_closure", "with_children_no_pre_step", \
     "children_total", "null_children", "vtable_overflow", "unreadable", \
@@ -145,7 +145,7 @@
 
 #ifdef __cplusplus
 #include "native_owned_grid.h"
-namespace ntw2_loco {
+namespace kntwr_loco {
 enum Word : uint32_t {
     Version, Calls, Entities, Admitted, Rejected,
     RejectClass, RejectLifetime, RejectActivity, RejectTarget, RejectParked,
@@ -306,7 +306,7 @@ struct Binding {
     // Synchronous owner-boundary handoff for live scene capture only. Null means
     // the caller already owns a quiescent model (standalone mapped-image oracles).
     bool (*capture_at_tick)(void (*capture)(void*), void* context);
-    // Optional grid-probation relink window (ntw2_grid_probation::Window): the runtime opens the owner's native
+    // Optional grid-probation relink window (kntwr_grid_probation::Window): the runtime opens the owner's native
     // relink window after PrepareOwned and closes it in Stage's finally (after grid publication). Null = disabled.
     void (__cdecl *grid_window)(void* manager, uint32_t open);
     // Cell-partitioned relink apply (requires use_owned_services and use_grid; exclusive with each other). Shadow: the native serial
@@ -343,7 +343,7 @@ void SampleOwnedLoad(uint32_t words[OwnedLoadWordCount]);
 // Allocation breakdown refreshed at Start/ActivateOwned/Stop only; O(1) copy, all zero when stopped.
 void SampleStorage(uint32_t words[StorageWordCount]);
 // Cached catalog geometry accounting (same refresh points and O(1) copy, all zero when stopped), in
-// ntw2_resolve::SampleCatalogStorage order: capacity bytes of rings, capsules, walls, edges, polygon points (these five
+// kntwr_resolve::SampleCatalogStorage order: capacity bytes of rings, capsules, walls, edges, polygon points (these five
 // sum to the catalog bytes in StorageCatalog), then the five unique logical counts in the same order.
 enum : uint32_t { CatalogStorageWordCount = 10 };
 void SampleCatalogStorage(uint32_t words[CatalogStorageWordCount]);
@@ -353,7 +353,7 @@ void SampleCatalogStorage(uint32_t words[CatalogStorageWordCount]);
 // the owned grid uses records/cells/memberships. Nothing grows afterwards: a Stage whose worklist or a grid
 // capture whose registries/cells/memberships exceed the capacity refuses before any publication or game write.
 // A failed or mismatched activation leaves owned execution unavailable, never partially published.
-bool ActivateOwned(void* model, const ntw2_workload::Capacity& capacity);
+bool ActivateOwned(void* model, const kntwr_workload::Capacity& capacity);
 // Bytes owned by this module: movement slots/states/worklist, participant structs+clones+contexts,
 // scene/catalog, owned grid block, legacy worker arena. Cached; O(1); zero when stopped.
 uint32_t StorageBytes();
@@ -361,7 +361,7 @@ uint32_t StorageBytes();
 // layout arithmetic as ActivateOwned): page-rounded grid block + slots/states/worklist + one context struct per
 // participant that has none yet. Scene/catalog/vector capacities (known only after capture) are NOT included;
 // they are visible in StorageBytes() afterwards. UINT32_MAX = not started, incoherent capacity, or overflow.
-uint32_t EstimateActivationBytes(const ntw2_workload::Capacity& capacity);
+uint32_t EstimateActivationBytes(const kntwr_workload::Capacity& capacity);
 // Movement slot size (all primary-capacity slots are this wide): 448 bytes + 1 state byte + 4 worklist bytes.
 // The slot stores only the proven live-in guard footprint and the proven write footprint of the mover closure.
 constexpr uint32_t kOwnedSlotBytes = 448;
@@ -379,7 +379,7 @@ struct ServiceRecord { uint32_t service; uint32_t receiver; };
 // Records are copied by the caller before the next execution. No callback changes FP state.
 const ServiceRecord* ServiceTrace(uint32_t* count);
 void ResetServiceTrace();
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
 // Isolated ABI preservation probes only; absent from the runtime build.
 uint32_t SetServiceTargetForTest(Service service, uint32_t address);
 // Compact movement-slot footprint inspection (offsets are native receiver offsets, spans sorted/disjoint/dword aligned).
@@ -412,5 +412,5 @@ static_assert(StorageWordCount == 11, "storage breakdown is the published memory
 static_assert(GridV2WordCount == 16, "Stage C diagnostics are a separate append-only tail");
 static_assert(RelinkWordCount == 32, "relink diagnostics are a separate append-only tail");
 static_assert(CwWordCount == 32, "class-wrapper census is a separate append-only tail");
-} // namespace ntw2_loco
+} // namespace kntwr_loco
 #endif

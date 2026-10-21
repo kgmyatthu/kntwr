@@ -17,7 +17,7 @@
 // Replay() applies them on the owner in contact order; Shadow() runs the original callback
 // instead and compares every predicted effect bit-for-bit (the avoidance effect through the
 // manager queue). Neither installs anything: no vtable, slot or vptr is changed.
-#define NTW2_COLLIDE_CONTACT_WORD_LABELS \
+#define KNTWR_COLLIDE_CONTACT_WORD_LABELS \
  "version", "mode", "stages", "contacts", "port_contacts", "owner_diff_team", "owner_foreign_class", \
  "owner_unsupported", "owner_faults", "predicted_write_r", "predicted_write_s", "predicted_avoid", \
  "predicted_tracker_appends", "compared", "mismatches", "mismatch_write_r", "mismatch_write_s", \
@@ -29,7 +29,7 @@
  "first_mismatch_s", "identity_refusals", "max_contacts", "callback_faults", "tracker_replays", \
  "port_callbacks", "owner_kind_callbacks"
 #ifdef __cplusplus
-namespace ntw2_contact {
+namespace kntwr_contact {
 using U = uint32_t;
 enum Mode : U { ModeOff = 0, ModeShadow = 1, ModeWorkers = 2 };
 enum Word : U {

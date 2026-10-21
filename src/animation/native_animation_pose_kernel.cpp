@@ -1,4 +1,4 @@
-// See native_animation_pose_kernel.h.  Build: CMake target ntw2_animation_pose (x86, /O2 /fp:precise /arch:SSE2).
+// See native_animation_pose_kernel.h.  Build: CMake target kntwr_animation_pose (x86, /O2 /fp:precise /arch:SSE2).
 // Every expression below keeps the original instruction order (no reassociation, no FMA): the original is
 // scalar SSE `mulss/addss/subss` plus x87 `fsin` stored through a float.
 #include "native_animation_pose_kernel.h"

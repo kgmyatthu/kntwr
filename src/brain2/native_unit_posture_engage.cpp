@@ -6,17 +6,17 @@
 #include <windows.h>
 #include <string.h>
 #include "native_unit_posture_engage.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 static_assert(sizeof(void*) == 4, "the gates are Win32 x86 naked thunks");
-constexpr const char* kLabels[] = {NTW2_UNIT_POSTURE_ENGAGE_LABELS};
+constexpr const char* kLabels[] = {KNTWR_UNIT_POSTURE_ENGAGE_LABELS};
 static_assert(sizeof(kLabels) / sizeof(kLabels[0]) == 128, "status label count");
 
-namespace ntw2_unit_posture_engage {
+namespace kntwr_unit_posture_engage {
 namespace {
-using ntw2_unit_policy::g_occ;
-using ntw2_unit_policy::Provider;
-using ntw2_unit_policy::UnitView;
-using ntw2_unit_policy::Drain;
+using kntwr_unit_policy::g_occ;
+using kntwr_unit_policy::Provider;
+using kntwr_unit_policy::UnitView;
+using kntwr_unit_policy::Drain;
 
 constexpr U kStates = 13, kStateFirst = 0x1454168, kRestState = 0x1454198, kStateTables = 0x1346994;
 constexpr U kFsmVtable = 0x1320F28, kUnitStateFirst = 0x1450908;
@@ -114,8 +114,8 @@ U StateIndex(U state) {
     return off <= 0x30 && !(off & 3) ? off / 4 : 14;
 }
 
-void __fastcall PostureFallback(U code, U counter) { ++g_cnt[counter]; Drain(g_occ.unitIndex, ntw2_unit_policy::Posture, code); }
-void __cdecl AltReached() { ++g_cnt[CAlt]; Drain(g_occ.unitIndex, ntw2_unit_policy::Engage, DrainAlt); }
+void __fastcall PostureFallback(U code, U counter) { ++g_cnt[counter]; Drain(g_occ.unitIndex, kntwr_unit_policy::Posture, code); }
+void __cdecl AltReached() { ++g_cnt[CAlt]; Drain(g_occ.unitIndex, kntwr_unit_policy::Engage, DrainAlt); }
 
 #define C(k) (4 * (k))
 // ---- U_POSTURE: replaces `call 10FC370` at 819A01 (ECX = fsm = A+F4, plain ret, AL result; EAX/ECX/EDX and flags are
@@ -422,15 +422,15 @@ U DecidePosture(U, const UnitView& unit, U* slot) {
         if (cause & 4) ++g_words[WMoving + 4];
         return PrMoving;
     }
-    slot[PsTarget] = g_postureMode == ntw2_unit_policy::Live ? g_rest : 0;
+    slot[PsTarget] = g_postureMode == kntwr_unit_policy::Live ? g_rest : 0;
     ++g_words[WPDecide + 1]; ++g_words[WPDecide + 2];
     return 0;
 }
 // Shadow only: the native members' end-of-stage posture state against the unit decision, and the unit-activity x speed x
 // state histogram of every selected unit (also refused ones: the evidence for a B..E mapping).
 void EndPosture(U, const UnitView& unit, U* slot) {
-    if (g_postureMode != ntw2_unit_policy::Shadow || !unit.ran || !unit.members) return;
-    const bool admitted = (unit.admitted & ntw2_unit_policy::kMaskPosture) != 0;
+    if (g_postureMode != kntwr_unit_policy::Shadow || !unit.ran || !unit.members) return;
+    const bool admitted = (unit.admitted & kntwr_unit_policy::kMaskPosture) != 0;
     const U act = slot[PsActivity] > 5 ? 5 : slot[PsActivity], speed = slot[PsSpeedClass] & 3, target = slot[PsShadowTarget];
     for (U k = 0; k < unit.memberCount; ++k) {
         if (unit.ran[k] != unit.stage) { if (admitted) ++g_words[WPCompare + 3]; continue; }
@@ -451,7 +451,7 @@ void EndPosture(U, const UnitView& unit, U* slot) {
 U DecideEngage(U, const UnitView& unit, U* slot) {
     if (g_lastStageEngage != unit.stage) {
         g_lastStageEngage = unit.stage; g_words[WEDecide + 1] = 0;
-        if (g_postureMode == ntw2_unit_policy::Off) ++g_words[WStages];
+        if (g_postureMode == kntwr_unit_policy::Off) ++g_words[WStages];
     }
     ++g_words[WEDecide];
     memcpy(slot, g_native, 9 * sizeof(U));
@@ -459,7 +459,7 @@ U DecideEngage(U, const UnitView& unit, U* slot) {
     if (!unit.handle) { ++g_words[WEDecide + 4]; ++g_words[WEDecide + 3]; return ErNoUnit; }
     U d9d;
     if (!Rb(unit.handle + 0xD9D, d9d)) { ++g_words[WEDecide + 5]; ++g_words[WEDecide + 3]; return ErRead; }
-    const bool live = g_engageMode == ntw2_unit_policy::Live;
+    const bool live = g_engageMode == kntwr_unit_policy::Live;
     ++g_words[WEDecide + (d9d ? 6 : 7)];
     slot[EvD9dValue] = d9d != 0;
     slot[EvD9dMode] = live ? 1 : 0;
@@ -479,8 +479,8 @@ U DecideEngage(U, const UnitView& unit, U* slot) {
 // Shadow only: native end-of-stage engage phase / latch bytes / order / stance of the stepped members against the unit
 // values; the order and stance of one unit are compared with each other (uniformity = the evidence for a unit order).
 void EndEngage(U, const UnitView& unit, U* slot) {
-    if (g_engageMode != ntw2_unit_policy::Shadow || !unit.ran || !unit.members) return;
-    const bool admitted = (unit.admitted & ntw2_unit_policy::kMaskEngage) != 0;
+    if (g_engageMode != kntwr_unit_policy::Shadow || !unit.ran || !unit.members) return;
+    const bool admitted = (unit.admitted & kntwr_unit_policy::kMaskEngage) != 0;
     if (admitted) {   // freeze validation: re-evaluate what live freezes at the seam
         Lookups now;
         EvalLookups(unit.handle, now);
@@ -525,17 +525,17 @@ bool Bind(U imageBase, U* bindings) {
     g_native10FC370 = V(0x10FC370); g_native649520 = V(0x649520); g_native64F8F0 = V(0x64F8F0);
     g_native64DE80 = V(0x64DE80); g_native57E1F0 = V(0x57E1F0);
     g_evp = Fn(g_native); g_cnt[15] = Fn(g_native); // the entry gate's native-block pointer cell (U_ENGAGE_CNT + 60)
-    bindings[NTW2_BIND_U_POSTURE] = Fn(&PostureGate);
-    bindings[NTW2_BIND_U_EVP] = Fn(&g_evp);
-    bindings[NTW2_BIND_U_ENGAGE_CNT] = Fn(g_cnt);
-    bindings[NTW2_BIND_U_DRIVER_ALT] = Fn(&DriverAltGate);
-    bindings[NTW2_BIND_U_UNIT_MODIFIER] = Fn(&ModifierGate);
-    bindings[NTW2_BIND_U_ORDER_PREDICATE] = Fn(&OrderPredicateGate);
-    bindings[NTW2_BIND_U_UNIT_ARRIVAL] = Fn(&UnitArrivalGate);
-    bindings[NTW2_BIND_U_NODE_BEGIN] = Fn(&NodeBeginGate);
-    bindings[NTW2_BIND_U_NODE_STEP] = Fn(&NodeStepGate);
-    bindings[NTW2_BIND_U_PHASE6] = Fn(&Phase6Gate);
-    bindings[NTW2_BIND_U_PHASE7] = Fn(&Phase7Gate);
+    bindings[KNTWR_BIND_U_POSTURE] = Fn(&PostureGate);
+    bindings[KNTWR_BIND_U_EVP] = Fn(&g_evp);
+    bindings[KNTWR_BIND_U_ENGAGE_CNT] = Fn(g_cnt);
+    bindings[KNTWR_BIND_U_DRIVER_ALT] = Fn(&DriverAltGate);
+    bindings[KNTWR_BIND_U_UNIT_MODIFIER] = Fn(&ModifierGate);
+    bindings[KNTWR_BIND_U_ORDER_PREDICATE] = Fn(&OrderPredicateGate);
+    bindings[KNTWR_BIND_U_UNIT_ARRIVAL] = Fn(&UnitArrivalGate);
+    bindings[KNTWR_BIND_U_NODE_BEGIN] = Fn(&NodeBeginGate);
+    bindings[KNTWR_BIND_U_NODE_STEP] = Fn(&NodeStepGate);
+    bindings[KNTWR_BIND_U_PHASE6] = Fn(&Phase6Gate);
+    bindings[KNTWR_BIND_U_PHASE7] = Fn(&Phase7Gate);
     static const U kBegin[3] = {0x816900, 0x816080, 0x815FF0}, kStep[4] = {0x819310, 0x66DD10, 0x818500, 0x818330};
     for (U i = 0; i < 3; ++i) g_beginTarget[i] = g_beginEntry[i] = V(kBegin[i]);
     for (U i = 0; i < 4; ++i) g_stepTarget[i] = g_stepEntry[i] = V(kStep[i]);    return g_bound;
@@ -543,23 +543,23 @@ bool Bind(U imageBase, U* bindings) {
 
 bool Start(U imageBase, U postureMode, U engageMode, const U* cloneEntries) {
     g_started = false;
-    g_postureMode = ntw2_unit_policy::Off; g_engageMode = ntw2_unit_policy::Off;
+    g_postureMode = kntwr_unit_policy::Off; g_engageMode = kntwr_unit_policy::Off;
     if (!g_bound || imageBase - 0x400000 != g_delta) return false;
     if ((postureMode || engageMode) && !StatesPinned()) return false;
     if ((postureMode || engageMode) && !UnitFsmPinned()) return false;
     if ((postureMode || engageMode) && !cloneEntries) return false;
     g_postureMode = postureMode; g_engageMode = engageMode;
     if (postureMode || engageMode) {
-        const U begin[3] = {NTW2_CLONE_BRAIN_U_HOT_BEGIN, NTW2_CLONE_BRAIN_U_ACTION_BEGIN, NTW2_CLONE_BRAIN_U_RELATED_BEGIN};
-        const U step[4] = {NTW2_CLONE_BRAIN_U_HOT_STEP, NTW2_CLONE_BRAIN_U_IDLE_STEP, NTW2_CLONE_BRAIN_U_ACTION_STEP,
-                           NTW2_CLONE_BRAIN_U_RELATED_STEP};
+        const U begin[3] = {KNTWR_CLONE_BRAIN_U_HOT_BEGIN, KNTWR_CLONE_BRAIN_U_ACTION_BEGIN, KNTWR_CLONE_BRAIN_U_RELATED_BEGIN};
+        const U step[4] = {KNTWR_CLONE_BRAIN_U_HOT_STEP, KNTWR_CLONE_BRAIN_U_IDLE_STEP, KNTWR_CLONE_BRAIN_U_ACTION_STEP,
+                           KNTWR_CLONE_BRAIN_U_RELATED_STEP};
         for (U i = 0; i < 3; ++i) if (cloneEntries[begin[i]]) g_beginEntry[i] = cloneEntries[begin[i]];
         for (U i = 0; i < 4; ++i) if (cloneEntries[step[i]]) g_stepEntry[i] = cloneEntries[step[i]];
     }
     g_tableOk[0] = g_tableOk[1] = 0; g_tableNext = 0;
     g_evp = Fn(g_native);
-    g_posture = Provider{ntw2_unit_policy::Posture, postureMode, &DecidePosture, &EndPosture, &Retire, nullptr};
-    g_engage = Provider{ntw2_unit_policy::Engage, engageMode, &DecideEngage, &EndEngage, &Retire, nullptr};
+    g_posture = Provider{kntwr_unit_policy::Posture, postureMode, &DecidePosture, &EndPosture, &Retire, nullptr};
+    g_engage = Provider{kntwr_unit_policy::Engage, engageMode, &DecideEngage, &EndEngage, &Retire, nullptr};
     g_started = true;
     g_words[WVersion] = kVersion; g_words[WPostureMode] = postureMode; g_words[WEngageMode] = engageMode;
     return true;
@@ -602,4 +602,4 @@ void Snapshot(U* words) {
     for (U a = 1; a < 5; ++a) for (U s = 1; s <= 2; ++s)
         modal(a, s, s, words[WPHist + 15 + 4 * (a - 1) + 2 * (s - 1)], words[WPHist + 16 + 4 * (a - 1) + 2 * (s - 1)]);
 }
-} // namespace ntw2_unit_posture_engage
+} // namespace kntwr_unit_posture_engage

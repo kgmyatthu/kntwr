@@ -7,9 +7,9 @@
 #include <cstring>
 #include "native_brain_s0.h"
 #include "native_unit_policy.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 static_assert(sizeof(void*) == 4, "the S0 gates are Win32 x86 naked forwarding thunks");
-namespace ntw2_brain_s0 {
+namespace kntwr_brain_s0 {
 namespace {
 using U64 = unsigned long long;
 // ---- gate data (referenced by the naked gates; layouts are part of the asm contract) -------------------------------
@@ -267,7 +267,7 @@ S0_STATIC_GATE(GatePostureNext, S0R_POSTURE_NEXT, 0, S0_PRE_NEXT, S0_LOAD_NEXT, 
 S0_STATIC_GATE(GateProvider0, S0R_TIMER_PROVIDER, 0, S0_PRE_PROVIDER0, S0_LOAD_EAX, S0_JMP_EAX)
 S0_STATIC_GATE(GateProvider1, S0R_TIMER_PROVIDER, 0, S0_PRE_PROVIDER1, S0_LOAD_EAX, S0_JMP_EAX)
 // Destination of the selector dispatch for the native fatigue target 670F40 when units are on: the admitted occurrence enters
-// the unit gate (NTW2_BIND_U_FATIGUE, ECX = A) so the S0 fatigue row times the unit apply in place of the native body; every
+// the unit gate (KNTWR_BIND_U_FATIGUE, ECX = A) so the S0 fatigue row times the unit apply in place of the native body; every
 // other occurrence runs the native 670F40. Reached through S0Sampled/the pass path with the original registers (ECX = A).
 __declspec(naked) void S0FatigueRoute() {
     __asm test dword ptr [g_umask], 1
@@ -330,7 +330,7 @@ S0_DISPATCH_GATE(GateCalibDispatch, 4, S0_NONE, __asm push dword ptr [g_static +
 struct Totals { U64 calls, sampled, hits, children, desc, incl; long long excl; double sqIncl, sqExcl; U maxStage; };
 Totals g_rows[kSlots];
 U g_delta, g_bound, g_started, g_configured, g_state, g_shift = kDefaultShift;
-U g_entries[NTW2_CLONE_COUNT];
+U g_entries[KNTWR_CLONE_COUNT];
 U g_stage, g_stages, g_sampledOccurrences, g_unitOverflow, g_nestedRoot, g_abandoned, g_calSamples;
 U64 g_occurrences, g_site6, g_stageStart, g_tscFirst, g_tscLast;
 LONGLONG g_qpcFirst, g_qpcLast, g_qpcFreq;
@@ -350,11 +350,11 @@ inline U64 Join(U lo, U hi) { return (static_cast<U64>(hi) << 32) | lo; }
 
 struct StaticSpec { U binding, va; };
 const StaticSpec kStaticGates[StaticGateCount] = {
-    {NTW2_BIND_S0_TARGET, 0x6718F0}, {NTW2_BIND_S0_DRIVER, 0x658C50}, {NTW2_BIND_S0_DRIVER_ALT, 0x64DE80},
-    {NTW2_BIND_S0_TIMER, 0x602E00}, {NTW2_BIND_S0_ORDER_FINAL, 0x6631A0}, {NTW2_BIND_S0_ORDER_NODE, 0x662E70},
-    {NTW2_BIND_S0_ORDER_ADJUST, 0x66AE10}, {NTW2_BIND_S0_ORDER_PREDICATE, 0x64F8F0},
-    {NTW2_BIND_S0_UNIT_ARRIVAL, 0x57E1F0}, {NTW2_BIND_S0_UNIT_MODIFIER, 0x649520}, {NTW2_BIND_S0_STANCE, 0x662E50},
-    {NTW2_BIND_S0_PATH, 0x819770}, {NTW2_BIND_S0_POSTURE, 0x10FC370}, {NTW2_BIND_COUNT, 0}, {NTW2_BIND_COUNT, 0}};
+    {KNTWR_BIND_S0_TARGET, 0x6718F0}, {KNTWR_BIND_S0_DRIVER, 0x658C50}, {KNTWR_BIND_S0_DRIVER_ALT, 0x64DE80},
+    {KNTWR_BIND_S0_TIMER, 0x602E00}, {KNTWR_BIND_S0_ORDER_FINAL, 0x6631A0}, {KNTWR_BIND_S0_ORDER_NODE, 0x662E70},
+    {KNTWR_BIND_S0_ORDER_ADJUST, 0x66AE10}, {KNTWR_BIND_S0_ORDER_PREDICATE, 0x64F8F0},
+    {KNTWR_BIND_S0_UNIT_ARRIVAL, 0x57E1F0}, {KNTWR_BIND_S0_UNIT_MODIFIER, 0x649520}, {KNTWR_BIND_S0_STANCE, 0x662E50},
+    {KNTWR_BIND_S0_PATH, 0x819770}, {KNTWR_BIND_S0_POSTURE, 0x10FC370}, {KNTWR_BIND_COUNT, 0}, {KNTWR_BIND_COUNT, 0}};
 using Gate = void (*)();
 const Gate kStaticFns[StaticGateCount] = {
     GateTarget, GateDriver, GateDriverAlt, GateTimer, GateOrderFinal, GateOrderNode, GateOrderAdjust,
@@ -363,19 +363,19 @@ const Gate kStaticFns[StaticGateCount] = {
 // Known dispatch targets: (gate, preferred VA, row, clone or ~0 for the original).
 struct DispatchSpec { U gate, va, row, clone; };
 const DispatchSpec kDispatch[] = {
-    {DNodeBegin, 0x816900, NodeBeginHot, NTW2_CLONE_BRAIN_S0_HOT_BEGIN},
-    {DNodeBegin, 0x816080, NodeBeginMove, NTW2_CLONE_BRAIN_S0_ACTION_BEGIN},
-    {DNodeBegin, 0x815FF0, NodeBeginRelated, NTW2_CLONE_BRAIN_S0_RELATED_BEGIN},
-    {DNodeStep, 0x819310, NodeStepHot, NTW2_CLONE_BRAIN_S0_HOT_STEP},
-    {DNodeStep, 0x66DD10, NodeStepIdle, NTW2_CLONE_BRAIN_S0_IDLE_STEP},
-    {DNodeStep, 0x818500, NodeStepMove, NTW2_CLONE_BRAIN_S0_ACTION_STEP},
-    {DNodeStep, 0x818330, NodeStepRelated, NTW2_CLONE_BRAIN_S0_RELATED_STEP},
-    {DFinalize, 0x6543D0, Finalize, NTW2_CLONE_BRAIN_S0_FINALIZE},
+    {DNodeBegin, 0x816900, NodeBeginHot, KNTWR_CLONE_BRAIN_S0_HOT_BEGIN},
+    {DNodeBegin, 0x816080, NodeBeginMove, KNTWR_CLONE_BRAIN_S0_ACTION_BEGIN},
+    {DNodeBegin, 0x815FF0, NodeBeginRelated, KNTWR_CLONE_BRAIN_S0_RELATED_BEGIN},
+    {DNodeStep, 0x819310, NodeStepHot, KNTWR_CLONE_BRAIN_S0_HOT_STEP},
+    {DNodeStep, 0x66DD10, NodeStepIdle, KNTWR_CLONE_BRAIN_S0_IDLE_STEP},
+    {DNodeStep, 0x818500, NodeStepMove, KNTWR_CLONE_BRAIN_S0_ACTION_STEP},
+    {DNodeStep, 0x818330, NodeStepRelated, KNTWR_CLONE_BRAIN_S0_RELATED_STEP},
+    {DFinalize, 0x6543D0, Finalize, KNTWR_CLONE_BRAIN_S0_FINALIZE},
     {DSelector, 0x670F40, Fatigue, ~0u}};
 const U kMissRow[DispatchGateCount] = {NodeBeginOther, NodeStepOther, FinalizeOther, SelectorOther, kCalibInner};
 const U kRoutedClone[StaticGateCount] = {
-    ~0u, NTW2_CLONE_BRAIN_S0_MOVEORDER, ~0u, NTW2_CLONE_BRAIN_S0_TIMER, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u,
-    NTW2_CLONE_BRAIN_S0_PATH, NTW2_CLONE_BRAIN_S0_POSTURE, ~0u, ~0u};
+    ~0u, KNTWR_CLONE_BRAIN_S0_MOVEORDER, ~0u, KNTWR_CLONE_BRAIN_S0_TIMER, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u,
+    KNTWR_CLONE_BRAIN_S0_PATH, KNTWR_CLONE_BRAIN_S0_POSTURE, ~0u, ~0u};
 
 void __cdecl EmptyStub() {}
 void __fastcall EmptyThiscall(void*, void*) {}
@@ -568,14 +568,14 @@ bool Bind(U imageBase, U* bindings) {
     g_delta = imageBase - 0x400000; g_bound = imageBase != 0;
     g_exit = Fn(&S0Exit);
     for (U k = 0; k < StaticGateCount; ++k)
-        if (kStaticGates[k].binding != NTW2_BIND_COUNT) bindings[kStaticGates[k].binding] = Fn(kStaticFns[k]);
-    bindings[NTW2_BIND_S0_SELECTOR] = Fn(&GateSelector);
-    bindings[NTW2_BIND_S0_NODE_BEGIN] = Fn(&GateNodeBegin);
-    bindings[NTW2_BIND_S0_NODE_STEP] = Fn(&GateNodeStep);
-    bindings[NTW2_BIND_S0_FINALIZE] = Fn(&GateFinalize);
-    bindings[NTW2_BIND_S0_POSTURE_NEXT] = Fn(&GatePostureNext);
-    bindings[NTW2_BIND_S0_TIMER_PROVIDER0] = Fn(&GateProvider0);
-    bindings[NTW2_BIND_S0_TIMER_PROVIDER1] = Fn(&GateProvider1);
+        if (kStaticGates[k].binding != KNTWR_BIND_COUNT) bindings[kStaticGates[k].binding] = Fn(kStaticFns[k]);
+    bindings[KNTWR_BIND_S0_SELECTOR] = Fn(&GateSelector);
+    bindings[KNTWR_BIND_S0_NODE_BEGIN] = Fn(&GateNodeBegin);
+    bindings[KNTWR_BIND_S0_NODE_STEP] = Fn(&GateNodeStep);
+    bindings[KNTWR_BIND_S0_FINALIZE] = Fn(&GateFinalize);
+    bindings[KNTWR_BIND_S0_POSTURE_NEXT] = Fn(&GatePostureNext);
+    bindings[KNTWR_BIND_S0_TIMER_PROVIDER0] = Fn(&GateProvider0);
+    bindings[KNTWR_BIND_S0_TIMER_PROVIDER1] = Fn(&GateProvider1);
     return g_bound && Route(nullptr);
 }
 bool Start(const U* cloneEntries, U sampleShift, const U* bindings, bool units) {
@@ -583,14 +583,14 @@ bool Start(const U* cloneEntries, U sampleShift, const U* bindings, bool units) 
     g_unitMode = false; g_umask = 0; g_usDriver = g_uPosture = g_unitFatigue = 0; g_nativeFatigue = V(0x670F40);
     if (!CpuSupported()) { g_state = 2; return false; }
     if (!g_bound || !cloneEntries) { g_state = 3; return false; }
-    for (U id = NTW2_CLONE_BRAIN_S0; id <= NTW2_CLONE_BRAIN_S0_RELATED_STEP; ++id)
+    for (U id = KNTWR_CLONE_BRAIN_S0; id <= KNTWR_CLONE_BRAIN_S0_RELATED_STEP; ++id)
         if (!cloneEntries[id]) { g_state = 3; return false; }
     std::memcpy(g_entries, cloneEntries, sizeof(g_entries));
     if (units) {  // routes to the unit applies; an absent target keeps its route native
         g_unitMode = true;
-        g_unitFatigue = bindings && bindings[NTW2_BIND_U_FATIGUE] ? bindings[NTW2_BIND_U_FATIGUE] : g_nativeFatigue;
-        g_uPosture = bindings ? bindings[NTW2_BIND_U_POSTURE] : 0;
-        g_usDriver = cloneEntries[NTW2_CLONE_BRAIN_US_DRIVER];
+        g_unitFatigue = bindings && bindings[KNTWR_BIND_U_FATIGUE] ? bindings[KNTWR_BIND_U_FATIGUE] : g_nativeFatigue;
+        g_uPosture = bindings ? bindings[KNTWR_BIND_U_POSTURE] : 0;
+        g_usDriver = cloneEntries[KNTWR_CLONE_BRAIN_US_DRIVER];
     }
     if (!Route(g_entries)) { g_state = 3; return false; }
     Calibrate();
@@ -619,10 +619,10 @@ void BeginStage(U manager) {
         LARGE_INTEGER q; QueryPerformanceCounter(&q);
         g_tscFirst = g_stageStart; g_qpcFirst = q.QuadPart;
     }
-    if (g_unitMode) ntw2_unit_policy::BeginStage(manager); // the unit seam is site-6 time
+    if (g_unitMode) kntwr_unit_policy::BeginStage(manager); // the unit seam is site-6 time
 }
 void EndStage() {
-    if (g_unitMode) ntw2_unit_policy::EndStage();
+    if (g_unitMode) kntwr_unit_policy::EndStage();
     const U64 end = Tsc();
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     g_site6 += end - g_stageStart; g_tscLast = end; g_qpcLast = q.QuadPart; ++g_stages;
@@ -639,9 +639,9 @@ void RunStep(U entity, U brainClass, U original) {
     const U row = core ? StepCore : wrapper ? StepWrapper : StepOther;
     U entry = original;
     if (g_started) {
-        if (core) entry = g_entries[NTW2_CLONE_BRAIN_S0];
-        else if (brainClass == 2) entry = g_entries[NTW2_CLONE_BRAIN_S0_602EB0];
-        else if (brainClass == 3) entry = g_entries[NTW2_CLONE_BRAIN_S0_5FCEB0];
+        if (core) entry = g_entries[KNTWR_CLONE_BRAIN_S0];
+        else if (brainClass == 2) entry = g_entries[KNTWR_CLONE_BRAIN_S0_602EB0];
+        else if (brainClass == 3) entry = g_entries[KNTWR_CLONE_BRAIN_S0_5FCEB0];
     }
     ++g_calls[row];
     if (!g_started || !Decide(entity, brainClass) || g_depth) {
@@ -656,18 +656,18 @@ void RunOccurrence(U entity, U brainClass, U original, const U* cloneEntries) {
     (void)cloneEntries; // the family was captured (and verified complete) at Start
     if (!g_unitMode) { RunStep(entity, brainClass, original); return; }
     // Unit policy: the occurrence's live mask routes the selector/driver/posture gates of the S0 clone (g_umask); the
-    // observe hooks of the providers run after the step. No SEH frame here (ntw2_brain2::RunOccurrence holds the
+    // observe hooks of the providers run after the step. No SEH frame here (kntwr_brain2::RunOccurrence holds the
     // occurrence's): after an exception g_umask/g_occ stay stale, but g_umask is rewritten before every RunStep (the only
     // reader) and EndOccurrence runs only when g_occ belongs to this occurrence's entity.
     const bool member = brainClass == 0 && original == V(0x66CE00);
-    g_umask = member ? ntw2_unit_policy::BeginOccurrence(entity) & 7 : 0;
+    g_umask = member ? kntwr_unit_policy::BeginOccurrence(entity) & 7 : 0;
     RunStep(entity, brainClass, original);
     g_umask = 0;
-    if (member && ntw2_unit_policy::g_occ.entity == entity) ntw2_unit_policy::EndOccurrence();
+    if (member && kntwr_unit_policy::g_occ.entity == entity) kntwr_unit_policy::EndOccurrence();
 }
 bool OverrideGateTarget(U binding, U target) {
     for (U k = 0; k < StaticGateCount; ++k)
-        if (kStaticGates[k].binding == binding && binding != NTW2_BIND_COUNT) { g_static[k] = target; RefreshRoutes(); return true; }
+        if (kStaticGates[k].binding == binding && binding != KNTWR_BIND_COUNT) { g_static[k] = target; RefreshRoutes(); return true; }
     return false;
 }
 uint64_t RunTimedRoot(U row, U entry, U receiver) {
@@ -711,4 +711,4 @@ void Snapshot(U* w) {
         row[MaxStageCalls] = t.maxStage > g_calls[r] ? t.maxStage : g_calls[r];
     }
 }
-} // namespace ntw2_brain_s0
+} // namespace kntwr_brain_s0

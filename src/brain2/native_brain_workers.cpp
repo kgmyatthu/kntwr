@@ -8,14 +8,14 @@
 #include <malloc.h>
 #include <setjmp.h>
 #include <new>
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_brain_workers.h"
 #include "native_region_table.h"
 #pragma fenv_access(on)
 
 static_assert(sizeof(void*) == 4, "BRAIN_W is the pinned Win32 x86 native closure");
-namespace ntw2_brain_workers {
+namespace kntwr_brain_workers {
 namespace {
 using B = uint8_t;
 constexpr DWORD kRefuse = 0xE042B301u;
@@ -63,11 +63,11 @@ struct Counters {
 // Readable ranges are proven per stage (native_region_table.h) before any footprint byte is touched, so no access
 // violation (and no crash-recorder entry) is raised by a speculative read; SEH remains the backstop for a region
 // freed concurrently.
-using RegionTable = ntw2_region::Table;
+using RegionTable = kntwr_region::Table;
 
 struct Arena;
 struct Participant;
-// Per-participant cache of the static gate verdicts (ntw2_brain2::WorkerStaticVerdict plus this module's forced/hard/
+// Per-participant cache of the static gate verdicts (kntwr_brain2::WorkerStaticVerdict plus this module's forced/hard/
 // deferred-event exclusions): `replacement` is the callee the gate continues to (the target itself when forwarded,
 // the worker clone entry when cloned), 0 when the gate must classify per call. WorkerServiceGate's fast path reads it
 // in assembly: index ((site ^ target) * 0x9E3779B1) >> 23, 16-byte entries, so kGateSlots is fixed at 512.
@@ -83,7 +83,7 @@ struct Current {
     U entity, work, timer, timerWork;
     U reason, service, pendingTarget, pendingKind;
     U eventBase, eventCount, stageBytes, stageSpans, ordinal;
-    ntw2_brain2::WitnessDeps* deps; // this ordinal's witness dependencies (arena-owned, read by the owner at commit)
+    kntwr_brain2::WitnessDeps* deps; // this ordinal's witness dependencies (arena-owned, read by the owner at commit)
     U stream, draws; // private model-LCG word served to 5FC070 on the bound receiver, and its draw count
     bool hasTimer, jumpArmed; // jumpArmed: refuseJump is live (RunCloneGuarded's frame is on the stack)
     ULONGLONG captured, cloned; // RDTSC at clone start / clone return (0: not reached)
@@ -101,7 +101,7 @@ struct alignas(64) Participant {
     U rebased[kReceiverBytes / 4 / 32], rebasedTimer;
     Counters counters;
     RegionTable regions;
-    ntw2_brain2::WitnessMemo memo; // bound around this participant's chunks; new epoch per dispatch
+    kntwr_brain2::WitnessMemo memo; // bound around this participant's chunks; new epoch per dispatch
     GateEntry gateCache[kGateSlots];
     Current current;
 };
@@ -110,7 +110,7 @@ struct Arena {
     U* list = nullptr;
     B* diff = nullptr;
     Event* events = nullptr;
-    ntw2_brain2::WitnessDeps* deps = nullptr; // one record per ordinal
+    kntwr_brain2::WitnessDeps* deps = nullptr; // one record per ordinal
     B* blocks = nullptr; // kGuardBlocks capture checksums per ordinal (guard-miss attribution only)
     U capacity = 0, diffCapacity = 0, count = 0, chunkSize = 0, chunks = 0, mxcsr = 0;
     // Stage RNG binding: the model LCG word (0: unbound), its value at stage start, the stage generation.
@@ -124,7 +124,7 @@ struct Arena {
 struct Config {
     bool started = false, quiet = false;
     U delta = 0, workers = 0, participants = 0, minEntities = 64, deferMask = 0;
-    ntw2_clone_set family{};
+    kntwr_clone_set family{};
     U stubs[kEventKinds] = {};
     Participant* participant[kMaxParticipants] = {};
     Arena arena;
@@ -144,10 +144,10 @@ __declspec(thread) Current* t_current;
 // + 4 * index, the layout TlsGetValue reads for index < 64); 0 disables the fast path (cache still used in C++).
 U g_gateTls, g_gateTlsIndex = TLS_OUT_OF_INDEXES;
 // Owner-walk witness memo for WitnessDepsHold (world read sets only; new epoch after every native write but commits).
-ntw2_brain2::WitnessMemo g_ownerMemo;
+kntwr_brain2::WitnessMemo g_ownerMemo;
 __declspec(thread) Participant* t_participant;
 __declspec(thread) LONG t_epoch;
-#ifdef NTW2_BRAIN_WORKERS_ORACLE
+#ifdef KNTWR_BRAIN_WORKERS_ORACLE
 FaultInjector g_injector;
 bool g_computeOnly;
 #endif
@@ -424,9 +424,9 @@ U StaticReplacement(U site, U target) {
         const U kind = EventKindOf(original, site);
         if (kind != kNone && (g.deferMask >> kind & 1)) return 0;
     }
-    switch (ntw2_brain2::WorkerStaticVerdict(target, site)) {
-    case ntw2_brain2::StaticForward: return target;
-    case ntw2_brain2::StaticClone: return g.family.entries[ntw2_brain2::CloneIdFor(original)];
+    switch (kntwr_brain2::WorkerStaticVerdict(target, site)) {
+    case kntwr_brain2::StaticForward: return target;
+    case kntwr_brain2::StaticClone: return g.family.entries[kntwr_brain2::CloneIdFor(original)];
     default: return 0;
     }
 }
@@ -441,8 +441,8 @@ void __stdcall WorkerEnter(U* stack, U* registers) {
     GateEntry& cached = c->gateCache[GateIndex(site, target)];
     if (cached.site != site || cached.target != target) cached = GateEntry{site, target, StaticReplacement(site, target), 0};
     if (cached.replacement) { stack[1] = cached.replacement; return; }
-    if (LocalForcedSite(site) || ntw2_brain2::WorkerSiteForced(site)) Refuse(c, ReasonSiteForced, ntw2_brain2::Unknown);
-    if (HardRefused(original)) Refuse(c, ReasonHardList, ntw2_brain2::Unknown);
+    if (LocalForcedSite(site) || kntwr_brain2::WorkerSiteForced(site)) Refuse(c, ReasonSiteForced, kntwr_brain2::Unknown);
+    if (HardRefused(original)) Refuse(c, ReasonHardList, kntwr_brain2::Unknown);
     if (g.deferMask) {
         const U kind = EventKindOf(original, site);
         if (kind != kNone && (g.deferMask >> kind & 1)) {
@@ -451,24 +451,24 @@ void __stdcall WorkerEnter(U* stack, U* registers) {
             return;
         }
     }
-    const U id = ntw2_brain2::CloneIdFor(original);
-    U service = ntw2_brain2::Unknown;
-    const ntw2_brain2::Classification cls =
-        ntw2_brain2::WorkerClassify(target, site, receiver, stack + 3, c->work, &service, c->deps);
+    const U id = kntwr_brain2::CloneIdFor(original);
+    U service = kntwr_brain2::Unknown;
+    const kntwr_brain2::Classification cls =
+        kntwr_brain2::WorkerClassify(target, site, receiver, stack + 3, c->work, &service, c->deps);
     if (id != kNone) {
         // A cloned container is Inactive at entry unless its site is forced or its entry predicate (WrapperService)
         // is unresolved; its descendants are classified at their own gates.
-        if (cls != ntw2_brain2::Inactive)
-            Refuse(c, cls == ntw2_brain2::Active ? ReasonServiceActive : ReasonServiceUnresolved, service);
+        if (cls != kntwr_brain2::Inactive)
+            Refuse(c, cls == kntwr_brain2::Active ? ReasonServiceActive : ReasonServiceUnresolved, service);
         stack[1] = g.family.entries[id];
         return;
     }
-    if (cls == ntw2_brain2::Inactive) {
+    if (cls == kntwr_brain2::Inactive) {
         // 5FC070 on the bound model LCG: run the ORIGINAL 5FC070 against this occurrence's private stream word.
         // ECX is dead after the call at all six cloned sites (5B7C9F/5B7CEE/5B7E49, 66DE62/66DF04/66E002 each
         // reload or overwrite it first), so redirecting it is invisible; the output format is native by construction
         // and the shared word is never read or written here.
-        if (ntw2_brain2::WorkerRandomStream(target, receiver)) {
+        if (kntwr_brain2::WorkerRandomStream(target, receiver)) {
             registers[6] = Address(&c->stream);
             ++c->draws;
             return;
@@ -478,15 +478,15 @@ void __stdcall WorkerEnter(U* stack, U* registers) {
         if (original != 0x5FC070) return;
         Refuse(c, ReasonServiceReceiver, service);
     }
-    Refuse(c, cls == ntw2_brain2::Active ? ReasonServiceActive : ReasonServiceUnresolved, service);
+    Refuse(c, cls == kntwr_brain2::Active ? ReasonServiceActive : ReasonServiceUnresolved, service);
 }
 void __stdcall WorkerObserve(U site, const U* registers) {
     Current* c = t_current;
     if (!c) return;
     ++c->participant->counters.gates;
-    const ntw2_brain2::Classification cls = ntw2_brain2::WorkerObserveClassify(site, registers, c->work, c->deps);
-    if (cls == ntw2_brain2::Inactive) return;
-    Refuse(c, cls == ntw2_brain2::Active ? ReasonObserveActive : ReasonObserveUnresolved, ntw2_brain2::MutableRead);
+    const kntwr_brain2::Classification cls = kntwr_brain2::WorkerObserveClassify(site, registers, c->work, c->deps);
+    if (cls == kntwr_brain2::Inactive) return;
+    Refuse(c, cls == kntwr_brain2::Active ? ReasonObserveActive : ReasonObserveUnresolved, kntwr_brain2::MutableRead);
 }
 // Transparent forwarding gates. Only the volatile XMM registers are saved around the C++ decision, which uses
 // no x87 and never changes MXCSR or the x87 control word.
@@ -640,13 +640,13 @@ __declspec(noinline) bool RunCloneGuarded(Arena& a, Current& c, U entry) {
 #pragma warning(suppress : 4611) // no C++ object with a destructor lives in this frame
     if (setjmp(c.refuseJump)) return false;
     c.jumpArmed = true;
-#ifdef NTW2_BRAIN_WORKERS_ORACLE
+#ifdef KNTWR_BRAIN_WORKERS_ORACLE
     if (g_injector && g_injector(c.entity, c.ordinal) == 1) *reinterpret_cast<volatile U*>(0x10) = 1;
 #endif
     RunClone(entry, c.work);
     c.cloned = Tsc();
     CloseSegment(c, true);
-#ifdef NTW2_BRAIN_WORKERS_ORACLE
+#ifdef KNTWR_BRAIN_WORKERS_ORACLE
     // Stands in for the timing-dependent refusals (capacity, participant overflow) after a full worker run.
     if (g_injector && g_injector(c.entity, c.ordinal) == 2) Refuse(&c, ReasonInjected, kServiceRows - 1);
     // Stands in for a forwarded original that advanced the shared model LCG word from this thread.
@@ -693,9 +693,9 @@ bool RunSlotBody(Arena& a, Participant& p, U ordinal) {
     if (!p.regions.Readable(vtable + 0xC, 4, p.counters.regionQueries)) { Record(p, slot, ReasonClass, kServiceRows - 1); return true; }
     __try { entry = D(vtable + 0xC); } __except (EXCEPTION_EXECUTE_HANDLER) { Record(p, slot, ReasonLifetime, kServiceRows - 1); return true; }
     U id;
-    if (entry == V(0x66CE00) || entry == V(0x6F50F0)) id = NTW2_CLONE_BRAIN_W;
-    else if (entry == V(0x602EB0)) id = NTW2_CLONE_BRAIN_W_602EB0;
-    else if (entry == V(0x5FCEB0)) id = NTW2_CLONE_BRAIN_W_5FCEB0;
+    if (entry == V(0x66CE00) || entry == V(0x6F50F0)) id = KNTWR_CLONE_BRAIN_W;
+    else if (entry == V(0x602EB0)) id = KNTWR_CLONE_BRAIN_W_602EB0;
+    else if (entry == V(0x5FCEB0)) id = KNTWR_CLONE_BRAIN_W_5FCEB0;
     else { Record(p, slot, ReasonClass, kServiceRows - 1); return true; }
     c.hasTimer = c.timer != 0;
     B* const timerBase = p.timerBase + (c.timer & 15);
@@ -791,7 +791,7 @@ void __fastcall Chunk(void* context, U chunk) {
             q->regions.Clear();
             // Native memory is frozen during the dispatch (workers write only private copies), so memoized read sets
             // and static gate verdicts stay valid for exactly this dispatch.
-            ntw2_brain2::BumpWitnessMemo(q->memo);
+            kntwr_brain2::BumpWitnessMemo(q->memo);
             memset(q->gateCache, 0, sizeof(q->gateCache));
             t_participant = q;
         }
@@ -803,7 +803,7 @@ void __fastcall Chunk(void* context, U chunk) {
     unsigned short savedCw;
     __asm fnstcw savedCw
     const ULONGLONG start = Tsc();
-    ntw2_brain2::BindWitnessMemo(&p->memo);
+    kntwr_brain2::BindWitnessMemo(&p->memo);
     __try {
         // Full controls, not just rounding: FTZ, DAZ and x87 precision all participate in the native arithmetic.
         InstallFp(a);
@@ -821,7 +821,7 @@ void __fastcall Chunk(void* context, U chunk) {
             }
         }
     } __finally {
-        ntw2_brain2::BindWitnessMemo(nullptr);
+        kntwr_brain2::BindWitnessMemo(nullptr);
         __asm fnclex
         __asm fldcw savedCw
         _mm_setcsr(savedCsr);
@@ -883,12 +883,12 @@ void AttributeSoldierMiss(const Arena& a, U ordinal, U entity) {
     for (U k = 0; k < ordinal; ++k) if (a.list[k] == entity) { ++g_words[GuardMissDuplicate]; break; }
 }
 // The owner walk binds its world-only memo (BumpWitnessMemo after every native write but commits' footprint spans).
-bool DepsHold(const ntw2_brain2::WitnessDeps& deps) {
-    ntw2_brain2::BindWitnessMemo(&g_ownerMemo);
+bool DepsHold(const kntwr_brain2::WitnessDeps& deps) {
+    kntwr_brain2::BindWitnessMemo(&g_ownerMemo);
     bool held;
-    __try { held = ntw2_brain2::WitnessDepsHold(deps); }
+    __try { held = kntwr_brain2::WitnessDepsHold(deps); }
     __except (EXCEPTION_EXECUTE_HANDLER) { held = false; }
-    ntw2_brain2::BindWitnessMemo(nullptr);
+    kntwr_brain2::BindWitnessMemo(nullptr);
     return held;
 }
 // Crew dependency (header, phase row): soldiers a crew-node step of an owner-run soldier wrote this stage. Owner only;
@@ -956,7 +956,7 @@ bool Commit(Arena& a, U ordinal, U entity) {
     // Witness proofs this soldier consumed must still hold NOW, at its ordinal: an earlier owner-run soldier may
     // have changed a unit/slot/battle value after the stage snapshot. A miss is a stale result, not a broken proof.
     // The foreign read-set hashes re-read heap objects; a fault there is a miss, never a published result.
-    const ntw2_brain2::WitnessDeps& deps = a.deps[ordinal];
+    const kntwr_brain2::WitnessDeps& deps = a.deps[ordinal];
     if (deps.count && !DepsHold(deps)) { ++g_words[WitnessDepMisses]; return false; }
     const B* s = a.diff + slot.spanOffset;
     const B* const end = s + slot.spanBytes;
@@ -965,7 +965,7 @@ bool Commit(Arena& a, U ordinal, U entity) {
         if (h.target == kBoundary) {
             const Event& e = a.events[slot.eventFirst + h.offset];
             ReplayEvent(e);
-            ntw2_brain2::BumpWitnessMemo(g_ownerMemo);
+            kntwr_brain2::BumpWitnessMemo(g_ownerMemo);
             ++g_words[EventsReplayed + e.kind];
             continue;
         }
@@ -1021,7 +1021,7 @@ bool EnsureArena(U count) {
     const ULONGLONG slots = static_cast<ULONGLONG>(capacity) * sizeof(Slot), list = static_cast<ULONGLONG>(capacity) * 4;
     const U diff = capacity * kDiffBytesPerEntity > kMinDiffPool ? capacity * kDiffBytesPerEntity : kMinDiffPool;
     const ULONGLONG events = static_cast<ULONGLONG>(kMaxEvents) * sizeof(Event);
-    const ULONGLONG deps = static_cast<ULONGLONG>(capacity) * sizeof(ntw2_brain2::WitnessDeps);
+    const ULONGLONG deps = static_cast<ULONGLONG>(capacity) * sizeof(kntwr_brain2::WitnessDeps);
     // Guard-miss block checksums exist only outside quiet mode.
     const ULONGLONG blocks = g.quiet ? 0 : static_cast<ULONGLONG>(capacity) * kGuardBlocks;
     const ULONGLONG total = slots + list + diff + events + deps + blocks;
@@ -1032,7 +1032,7 @@ bool EnsureArena(U count) {
     a.list = reinterpret_cast<U*>(block + slots);
     a.diff = block + slots + list;
     a.events = reinterpret_cast<Event*>(block + slots + list + diff);
-    a.deps = reinterpret_cast<ntw2_brain2::WitnessDeps*>(block + slots + list + diff + events);
+    a.deps = reinterpret_cast<kntwr_brain2::WitnessDeps*>(block + slots + list + diff + events);
     a.blocks = g.quiet ? nullptr : block + slots + list + diff + events + deps;
     a.stamp = 0; // fresh (zeroed) slots: the next stage starts the stamp cycle again
     a.capacity = capacity; a.diffCapacity = diff; a.bytes = total;
@@ -1053,14 +1053,14 @@ bool HasAes() {
 bool Start(const Binding& b) {
     Stop();
     if (!b.image_base || !b.clones || !b.bindings || !HasAes()) return false;
-    for (U id = NTW2_CLONE_BRAIN_W; id <= NTW2_CLONE_BRAIN_W_UNLINK; ++id) if (!b.clones->entries[id]) return false;
-    U bindings[NTW2_BIND_COUNT];
+    for (U id = KNTWR_CLONE_BRAIN_W; id <= KNTWR_CLONE_BRAIN_W_UNLINK; ++id) if (!b.clones->entries[id]) return false;
+    U bindings[KNTWR_BIND_COUNT];
     memcpy(bindings, b.bindings, sizeof(bindings));
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = Address(reinterpret_cast<const void*>(&WorkerServiceGate));
-    bindings[NTW2_BIND_B2_OBSERVE] = Address(reinterpret_cast<const void*>(&WorkerObserveGate));
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = Address(reinterpret_cast<const void*>(&WorkerServiceGate));
+    bindings[KNTWR_BIND_B2_OBSERVE] = Address(reinterpret_cast<const void*>(&WorkerObserveGate));
     g = Config{};
     g.delta = b.image_base - 0x400000;
-    if (ntw2_build_brain_worker_family(b.clones, b.image_base, bindings, &g.family)) { g = Config{}; return false; }
+    if (kntwr_build_brain_worker_family(b.clones, b.image_base, bindings, &g.family)) { g = Config{}; return false; }
     g.stubs[EventOrder] = Address(reinterpret_cast<const void*>(&OrderStub));
     g.stubs[EventArrival] = Address(reinterpret_cast<const void*>(&ArrivalStub));
     g.stubs[EventRequest] = Address(reinterpret_cast<const void*>(&RequestStub));
@@ -1074,7 +1074,7 @@ bool Start(const Binding& b) {
         if (!memory) { Stop(); return false; }
         g.participant[i] = new (memory) Participant;
         memset(g.participant[i], 0, sizeof(Participant));
-        ntw2_brain2::WitnessMemo& memo = g.participant[i]->memo;
+        kntwr_brain2::WitnessMemo& memo = g.participant[i]->memo;
         memo.privateLo = Address(g.participant[i]); memo.privateHi = memo.privateLo + sizeof(Participant);
     }
     memset(&g_ownerMemo, 0, sizeof(g_ownerMemo));
@@ -1092,7 +1092,7 @@ bool Start(const Binding& b) {
 }
 
 void Stop() {
-    ntw2_brain2::SetWorkerRandomStream(0);
+    kntwr_brain2::SetWorkerRandomStream(0);
     g_gateTls = 0;
     if (g_gateTlsIndex != TLS_OUT_OF_INDEXES) { TlsFree(g_gateTlsIndex); g_gateTlsIndex = TLS_OUT_OF_INDEXES; }
     for (Participant*& p : g.participant) {
@@ -1128,10 +1128,10 @@ U LcgAdvance(U state, U steps) {
 }
 bool Started() { return g.started; }
 const char* ReasonName(U reason) {
-    static const char* const names[kReasonCount] = { NTW2_BRAIN_WORKER_REASON_LABELS };
+    static const char* const names[kReasonCount] = { KNTWR_BRAIN_WORKER_REASON_LABELS };
     return reason < kReasonCount ? names[reason] : "invalid";
 }
-#ifdef NTW2_BRAIN_WORKERS_ORACLE
+#ifdef KNTWR_BRAIN_WORKERS_ORACLE
 void SetFaultInjector(FaultInjector injector) { g_injector = injector; }
 void SetComputeOnly(bool value) { g_computeOnly = value; }
 #endif
@@ -1144,12 +1144,12 @@ bool RunWorklist(U manager, const U* cloneEntries) {
     const U first = D(manager + 0x264);
     const LONGLONG captureStart = Now();
     const ULONGLONG tscStart = Tsc();
-    const U probeQueries0 = ntw2_brain2::WitnessProbeQueries(), regionQueries0 = g_words[RegionQueries];
+    const U probeQueries0 = kntwr_brain2::WitnessProbeQueries(), regionQueries0 = g_words[RegionQueries];
     if (!CopyLive(a.list, first, count * 4)) { ++g_words[Handoffs]; return false; }
     // From here this function owns the whole loop, including the Stage-1 bookkeeping RunWorklist would do.
-    ntw2_brain2::WitnessBegin(manager);
+    kntwr_brain2::WitnessBegin(manager);
     const LONGLONG witnessBegun = Now();
-    ntw2_brain2::BeginDispatch();
+    kntwr_brain2::BeginDispatch();
     // Slots are stamped instead of cleared (Slot); the array is zeroed only when the stamp cycle wraps.
     a.stamp = static_cast<B>(a.stamp % 255 + 1);
     if (a.stamp == 1) memset(a.slots, 0, static_cast<size_t>(a.capacity) * sizeof(Slot));
@@ -1167,13 +1167,13 @@ bool RunWorklist(U manager, const U* cloneEntries) {
     if (!a.epoch) a.epoch = _InterlockedIncrement(&g_epochCounter);
     for (U i = 0; i < g.participants; ++i) { memset(&g.participant[i]->counters, 0, sizeof(Counters)); }
     g_ownerRegions.Clear();
-    ntw2_brain2::BumpWitnessMemo(g_ownerMemo);
+    kntwr_brain2::BumpWitnessMemo(g_ownerMemo);
     // RNG stream binding (header "RNG streams"). Event deferral replays services at checkpoints the worker
     // stream does not model, so a deferring configuration keeps 5FC070 refused.
     a.rngLcg = g.deferMask ? 0 : StreamWord(a);
     a.rngState = a.rngLcg ? D(a.rngLcg) : 0;
     a.rngGeneration = a.rngLcg ? ++g_rngGeneration : 0;
-    ntw2_brain2::SetWorkerRandomStream(a.rngLcg);
+    kntwr_brain2::SetWorkerRandomStream(a.rngLcg);
     const LONGLONG dispatchStart = Now();
     if (g_dispatch) g_dispatch(g_pool, Address(reinterpret_cast<const void*>(&Chunk)), a.chunks, &a);
     else for (U i = 0; i < a.chunks; ++i) Chunk(&a, i);
@@ -1208,11 +1208,11 @@ bool RunWorklist(U manager, const U* cloneEntries) {
         _InterlockedExchange(&g_sticky, 1);
         g_words[LastFaultCode] = kLcgRaced; g_words[LastFaultAddress] = a.rngLcg;
     }
-#ifdef NTW2_BRAIN_WORKERS_ORACLE
+#ifdef KNTWR_BRAIN_WORKERS_ORACLE
     // Proof hook: stop after the worker phase so a test can show no native byte changed before the owner commits.
-    if (g_computeOnly) { ntw2_brain2::SetWorkerRandomStream(0); ntw2_brain2::WitnessAbort(); return true; }
+    if (g_computeOnly) { kntwr_brain2::SetWorkerRandomStream(0); kntwr_brain2::WitnessAbort(); return true; }
 #endif
-    ntw2_brain2::SetWorkerRandomStream(0);
+    kntwr_brain2::SetWorkerRandomStream(0);
     const LONGLONG replayStart = Now();
     volatile U* const lcg = reinterpret_cast<volatile U*>(static_cast<uintptr_t>(a.rngLcg));
     U walked = 0, walkedSpeculated = 0;
@@ -1256,8 +1256,8 @@ bool RunWorklist(U manager, const U* cloneEntries) {
                 const U seed = lcg ? StreamSeed(a.rngState, a.rngGeneration, k) : 0;
                 if (lcg) *lcg = seed;
                 NoteCrewWriter(entity);
-                ntw2_brain2::RunOccurrence(entity, cloneEntries);
-                ntw2_brain2::BumpWitnessMemo(g_ownerMemo);
+                kntwr_brain2::RunOccurrence(entity, cloneEntries);
+                kntwr_brain2::BumpWitnessMemo(g_ownerMemo);
                 if (lcg) CountOwnerDraws(seed, *lcg);
                 g_prevOwner = entity;
                 g_prevOwnerService = state == SlotRefused ? a.slots[k].service + 1u : 0u;
@@ -1276,7 +1276,7 @@ bool RunWorklist(U manager, const U* cloneEntries) {
     const LONGLONG walkEnd = Now();
     // Every commit validated its own witness dependencies at its ordinal, so a changed value here never means a
     // published stale result; it is telemetry for the static-during-site-6 claims, not a reason to disable.
-    g_words[WitnessViolations] += ntw2_brain2::WitnessEnd();
+    g_words[WitnessViolations] += kntwr_brain2::WitnessEnd();
     const LONGLONG replayEnd = Now();
     const ULONGLONG tscEnd = Tsc();
     const U captureUs = Microseconds(dispatchStart - captureStart), dispatchUs = Microseconds(dispatchEnd - dispatchStart);
@@ -1303,7 +1303,7 @@ bool RunWorklist(U manager, const U* cloneEntries) {
     g_phase[PhaseWorkerPublishUs] += us(publishTicks);
     g_phase[PhaseWorkerBusyUs] += us(busyTicks);
     g_phase[PhaseWorkerCriticalUs] += us(criticalTicks);
-    g_phase[PhaseWitnessRegionQueries] += ntw2_brain2::WitnessProbeQueries() - probeQueries0;
+    g_phase[PhaseWitnessRegionQueries] += kntwr_brain2::WitnessProbeQueries() - probeQueries0;
     g_phase[PhaseWorkerRegionQueries] += workerQueries;
     g_phase[PhaseOwnerRegionQueries] += g_words[RegionQueries] - regionQueries0 - workerQueries;
     g_phase[PhaseLastCaptureUs] = captureUs; g_phase[PhaseLastDispatchUs] = dispatchUs;
@@ -1342,4 +1342,4 @@ void PhaseSnapshot(U* words) {
     words[PhaseMissPrevServiceTop] = g_missService[best] ? best : 0;
     words[PhaseMissPrevServiceCount] = g_missService[best];
 }
-} // namespace ntw2_brain_workers
+} // namespace kntwr_brain_workers

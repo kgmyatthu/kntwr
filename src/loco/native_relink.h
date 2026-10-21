@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include "native_move_delta.h"
 
-namespace ntw2_loco {
+namespace kntwr_loco {
 
 constexpr uint32_t kRelinkMaxTasks = 32;
 
@@ -136,4 +136,4 @@ void RelinkMirrorTouch(RelinkMirror& mirror, const MoveLog& log, uint32_t index)
 bool RelinkMirrorApply(RelinkMirror& mirror, const MoveLog& log, const RelinkDispatcher* dispatcher, uint32_t minCells,
                        RelinkApplyStats& stats, RelinkShadowResult& result);
 
-} // namespace ntw2_loco
+} // namespace kntwr_loco

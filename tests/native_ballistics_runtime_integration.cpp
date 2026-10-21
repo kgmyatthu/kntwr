@@ -1,8 +1,8 @@
 // Owned-image differential oracle for the PRODUCT-generated ballistic clones, not the analysis clone blob.
 // Usage: native_ballistics_runtime_integration.exe <Napoleon.exe> [worlds=N] [workers=N] [seed=N]
 // No external DLL/kit is needed: the production nqc/nbc/pool/helper objects are linked directly. The six
-// worker entries are exactly StartModules' image leaves + NTW2_CLONE_UNIT_HIT. All clones come from
-// ntw2_build_clones; no generated code or native collision instruction is replaced with a mock.
+// worker entries are exactly StartModules' image leaves + KNTWR_CLONE_UNIT_HIT. All clones come from
+// kntwr_build_clones; no generated code or native collision instruction is replaced with a mock.
 //
 // Queries compare native return, all defined result bytes, fixture writes, callback order/visited state,
 // FP controls and static cleanup. Coverage includes cached positive/negative results, unsupported getters,
@@ -16,13 +16,13 @@
 // needs a relocatable battle capture containing model+0x94 effect owner/vtables, +0x98 hit resolver,
 // +0x9C terrain/heightfield, +0xA0 material grid, +0xB0 collision holder, +0xBC/+0xC0 scene managers,
 // projectile definitions/owners and the reachable unit/effect/RNG state. No fake terrain/effects are used.
-// Host TickGate/BallisticGate epoch and slot publication belong to ntw2_runtime.cpp and are not linked
+// Host TickGate/BallisticGate epoch and slot publication belong to kntwr_runtime.cpp and are not linked
 // into this oracle. We verify the manager-to-query clone seams, not a live battle tick or its host gates.
 //
 // CMake (tests/CMakeLists.txt):
-// ntw2_harness(native_ballistics_runtime_integration STD 20 FP strict
-//   SOURCES native_ballistics_runtime_integration.cpp ../src/clones/ntw2_clones.cpp
-//   OBJECTS ntw2_ballistics_query_cache ntw2_ballistics_collision ntw2_worker_dispatch ntw2_ballistics_helpers
+// kntwr_harness(native_ballistics_runtime_integration STD 20 FP strict
+//   SOURCES native_ballistics_runtime_integration.cpp ../src/clones/kntwr_clones.cpp
+//   OBJECTS kntwr_ballistics_query_cache kntwr_ballistics_collision kntwr_worker_dispatch kntwr_ballistics_helpers
 //   INCLUDES ../src LIBS bcrypt)
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
@@ -43,7 +43,7 @@
 #include "native_ballistics_query_cache.h"
 #include "native_ballistics_abi.h"
 #include "native_worker_dispatch.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #pragma comment(lib, "bcrypt.lib")
 #pragma fenv_access(on)
 static_assert(sizeof(void*) == 4, "native x86 only");
@@ -181,7 +181,7 @@ struct Segment { U type; float p[6]; };
 struct Entry { U kind; uint16_t id,pad; U aux,object,pad2,next; };
 static_assert(sizeof(Entry)==0x18 && sizeof(Segment)==28,"native fixture layouts");
 struct Output { U unused,capacity,count,data; };
-static ntw2_clone_set clones{};
+static kntwr_clone_set clones{};
 alignas(64) static ntw_pool pool{};
 static bal_job job{};
 static bal_record records[2048];
@@ -189,37 +189,37 @@ static U boundRoot,boundModel;
 static U pureTable[16],opaqueTable[16];
 static void __declspec(naked) UnexpectedBinding() { __asm { int 3 } }
 static void BuildClones() {
-    U bindings[NTW2_BIND_COUNT];
+    U bindings[KNTWR_BIND_COUNT];
     for (U& b:bindings) b=Fn(&UnexpectedBinding); // unrelated emitted clones must never be invoked
-    bindings[NTW2_BIND_BAL_STAGE]=Fn(&bal_stage);
-    bindings[NTW2_BIND_BAL_STEP]=Fn(&bal_step);
-    bindings[NTW2_BIND_BAL_JOB]=Addr(&job);
-    bindings[NTW2_BIND_QUERY_GATHER]=Fn(&nqc_gather_hook);
-    bindings[NTW2_BIND_QUERY_UNIT]=Fn(&nqc_unit_hook);
-    bindings[NTW2_BIND_QUERY]=Fn(&nqc_query_hook);
-    U detail=0; U e=ntw2_build_clones(Addr(image),bindings,&clones,&detail);
-    REQUIRE(e==0,"ntw2_build_clones error %u detail %08X",e,detail);
+    bindings[KNTWR_BIND_BAL_STAGE]=Fn(&bal_stage);
+    bindings[KNTWR_BIND_BAL_STEP]=Fn(&bal_step);
+    bindings[KNTWR_BIND_BAL_JOB]=Addr(&job);
+    bindings[KNTWR_BIND_QUERY_GATHER]=Fn(&nqc_gather_hook);
+    bindings[KNTWR_BIND_QUERY_UNIT]=Fn(&nqc_unit_hook);
+    bindings[KNTWR_BIND_QUERY]=Fn(&nqc_query_hook);
+    U detail=0; U e=kntwr_build_clones(Addr(image),bindings,&clones,&detail);
+    REQUIRE(e==0,"kntwr_build_clones error %u detail %08X",e,detail);
     const auto call=[](U field,U target) {
         REQUIRE(Get<B>(Ptr(field-1),0)==0xe8 && field+4+Get<U>(Ptr(field),0)==target,"generated call seam %08X -> %08X",field,target);
     };
-    call(clones.entries[NTW2_CLONE_QUERY]+0x639581-0x6392c0+1,Fn(&nqc_gather_hook));
-    call(clones.entries[NTW2_CLONE_QUERY]+0x639699-0x6392c0+1,Fn(&nqc_unit_hook));
-    call(clones.entries[NTW2_CLONE_QUERY_WRAPPER]+0x84,Fn(&nqc_query_hook));
-    call(clones.entries[NTW2_CLONE_BAL_MANAGER]+0x48,Fn(&bal_stage));
-    call(clones.entries[NTW2_CLONE_BAL_MANAGER]+0x61,clones.entries[NTW2_CLONE_BAL_STEP]);
+    call(clones.entries[KNTWR_CLONE_QUERY]+0x639581-0x6392c0+1,Fn(&nqc_gather_hook));
+    call(clones.entries[KNTWR_CLONE_QUERY]+0x639699-0x6392c0+1,Fn(&nqc_unit_hook));
+    call(clones.entries[KNTWR_CLONE_QUERY_WRAPPER]+0x84,Fn(&nqc_query_hook));
+    call(clones.entries[KNTWR_CLONE_BAL_MANAGER]+0x48,Fn(&bal_stage));
+    call(clones.entries[KNTWR_CLONE_BAL_MANAGER]+0x61,clones.entries[KNTWR_CLONE_BAL_STEP]);
     // BAL_STEP is a tail jmp, not a call.
-    const U step=clones.entries[NTW2_CLONE_BAL_STEP];
+    const U step=clones.entries[KNTWR_CLONE_BAL_STEP];
     REQUIRE(Get<B>(Ptr(step),5)==0xe9 && step+10+Get<U>(Ptr(step),6)==Fn(&bal_step),"generated manager step tail seam");
     REQUIRE(Get<U>(Ptr(step),1)==Addr(&job),"generated manager job binding");
-    call(clones.entries[NTW2_CLONE_BAL_ITEM]+0x659,clones.entries[NTW2_CLONE_QUERY_WRAPPER]);
-    const U table=clones.entries[NTW2_CLONE_QUERY_TABLE];
-    REQUIRE(Get<U>(Ptr(clones.entries[NTW2_CLONE_QUERY]),0x639661-0x6392c0+3)==table,"private query jump table reference");
+    call(clones.entries[KNTWR_CLONE_BAL_ITEM]+0x659,clones.entries[KNTWR_CLONE_QUERY_WRAPPER]);
+    const U table=clones.entries[KNTWR_CLONE_QUERY_TABLE];
+    REQUIRE(Get<U>(Ptr(clones.entries[KNTWR_CLONE_QUERY]),0x639661-0x6392c0+3)==table,"private query jump table reference");
     const U targets[]={0x639668,0x639670,0x639670,0x639668};
-    for (U i=0;i<4;++i) REQUIRE(Get<U>(Ptr(table),i*4)==clones.entries[NTW2_CLONE_QUERY]+targets[i]-0x6392c0,"private query table target");
+    for (U i=0;i<4;++i) REQUIRE(Get<U>(Ptr(table),i*4)==clones.entries[KNTWR_CLONE_QUERY]+targets[i]-0x6392c0,"private query table target");
     job.abi=BAL_ABI_VERSION; job.capacity=2048; job.records=records;
-    job.prefix_entry=clones.entries[NTW2_CLONE_BAL_PREFIX];
-    job.orig_item=clones.entries[NTW2_CLONE_BAL_ITEM];
-    job.tail_va=job.orig_item+NTW2_BAL_ITEM_TAIL_OFFSET; job.one_ptr=Native(0x1318048);
+    job.prefix_entry=clones.entries[KNTWR_CLONE_BAL_PREFIX];
+    job.orig_item=clones.entries[KNTWR_CLONE_BAL_ITEM];
+    job.tail_va=job.orig_item+KNTWR_BAL_ITEM_TAIL_OFFSET; job.one_ptr=Native(0x1318048);
     job.dispatch=Fn(&ntw_pool_dispatch); job.dispatch_user=Addr(&pool);
     job.min_parallel=64; job.chunk_items=32; job.worker_entry=Fn(&bal_worker);
 }
@@ -232,8 +232,8 @@ static void StartPool(U workers) {
 }
 static void StartCache(U root,U model,U capacity=8192) {
     nqc_config c={NQC_ABI,sizeof(c),delta,root,model,capacity,32,Fn(&ntw_pool_dispatch),Addr(&pool),
-        clones.entries[NTW2_CLONE_QUERY],Native(0x10e8500),Native(0x10e7030),Native(0x10e83e0),Native(0x5db450),
-        clones.entries[NTW2_CLONE_UNIT_HIT],Native(0x809c00)};
+        clones.entries[KNTWR_CLONE_QUERY],Native(0x10e8500),Native(0x10e7030),Native(0x10e83e0),Native(0x5db450),
+        clones.entries[KNTWR_CLONE_UNIT_HIT],Native(0x809c00)};
     U e=nqc_initialize(&c); REQUIRE(e==0,"cache start class=%u detail=%X",NQC_ERR_CLASS(e),NQC_ERR_DETAIL(e));
     REQUIRE(nqc_state[NQC_S_ENABLED] && !nqc_state[NQC_S_BUSY] && !nqc_state[NQC_S_OWNER_THREAD],"cache start state");
     boundRoot=root; boundModel=model;
@@ -331,7 +331,7 @@ static Result RunQuery(World& w,Route route,uint16_t cw=0x27f,U csr=0x1f80) {
     Result r; SetFp(cw,csr);
     if (route==WrapperOriginal || route==WrapperClone) {
         using Wrap=void(__thiscall*)(void*,void*,const Segment*,U,U,U,U);
-        const U fn=route==WrapperOriginal ? Native(0x53c060) : clones.entries[NTW2_CLONE_QUERY_WRAPPER];
+        const U fn=route==WrapperOriginal ? Native(0x53c060) : clones.entries[KNTWR_CLONE_QUERY_WRAPPER];
         reinterpret_cast<Wrap>(Ptr(fn))(w.holder,&out,w.segment,w.mode,w.stop,w.mask,0);
     } else if (route==Original) {
         using Query=B(__thiscall*)(void*,void*,const Segment*,U,U,const Segment*,U,void*,U,float);
@@ -413,7 +413,7 @@ static void CompareManager(ManagerWorld& w,const char* label,uint16_t cw=0x27f,U
     }
     w.a.Restore(); const U committed=job.st_committed;
     for (U tick=0;tick<3;++tick) {
-        SetFp(cw,csr); reinterpret_cast<Manager>(Ptr(clones.entries[NTW2_CLONE_BAL_MANAGER]))(w.manager);
+        SetFp(cw,csr); reinterpret_cast<Manager>(Ptr(clones.entries[KNTWR_CLONE_BAL_MANAGER]))(w.manager);
         const uint16_t gotCw=Cw(),gotSw=Sw(); const U gotCsr=_mm_getcsr(); SetFp();
         REQUIRE(std::memcmp(reference.data()+tick*w.a.used,w.a.mem,w.a.used)==0,"%s manager fixture differs at tick %u",label,tick);
         REQUIRE(cws[tick]==gotCw && ((csrs[tick]^gotCsr)&0xffc0u)==0,"%s manager FP control mismatch",label);

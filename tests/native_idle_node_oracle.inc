@@ -2,8 +2,8 @@
 // Included before RunOracle. Native node arithmetic and RNG helpers execute in
 // source-pinned bodies; only world transactions are explicit event boundaries.
 namespace idle_oracle {
-namespace idle = ntw2_idle_node;
-static ntw2_clone_set bank{};
+namespace idle = kntwr_idle_node;
+static kntwr_clone_set bank{};
 struct Seen { U va, receiver, args[4]; };
 static Seen seen[4];
 static U seenCount;
@@ -117,7 +117,7 @@ static void Invoke(IdleFixture& f, U va, U clone, U events, bool original = fals
 }
 static void Step(IdleFixture& f, U events, bool original = false) {
     Invoke(f, f.cls ? 0x66dcf0 : 0x66dd10,
-        f.cls ? NTW2_CLONE_BRAIN_W_WAIT_STEP : NTW2_CLONE_BRAIN_W_IDLE_STEP, events, original);
+        f.cls ? KNTWR_CLONE_BRAIN_W_WAIT_STEP : KNTWR_CLONE_BRAIN_W_IDLE_STEP, events, original);
 }
 static void RequireOrder(U index, U order, U mode = 0) {
     Require(seen[index].va == 0x662e70 && seen[index].args[0] == order && seen[index].args[1] == mode
@@ -127,10 +127,10 @@ static void Lifecycle() {
     for (U cls : {0u, 1u}) {
         label = "idle mapped original constructor preserves padding"; IdleFixture f(cls);
         memset(f.Node(), 0x6d, 0x28);
-        Invoke(f, cls ? 0x61d8f0 : 0x61d910, cls ? NTW2_CLONE_BRAIN_W_WAIT_CTOR : NTW2_CLONE_BRAIN_W_IDLE_CTOR, 0, true);
+        Invoke(f, cls ? 0x61d8f0 : 0x61d910, cls ? KNTWR_CLONE_BRAIN_W_WAIT_CTOR : KNTWR_CLONE_BRAIN_W_IDLE_CTOR, 0, true);
         Require(Get<B>(f.Node(), 9) == 0x6d && Get<B>(f.Node(), 0x11) == 0x6d, "idle constructor padding retained");
         label = "idle mapped original destructor empty delete arm";
-        Invoke(f, cls ? 0x5ac9d0 : 0x624ef0, cls ? NTW2_CLONE_BRAIN_W_WAIT_DTOR : NTW2_CLONE_BRAIN_W_IDLE_DTOR, 0, true);
+        Invoke(f, cls ? 0x5ac9d0 : 0x624ef0, cls ? KNTWR_CLONE_BRAIN_W_WAIT_DTOR : KNTWR_CLONE_BRAIN_W_IDLE_DTOR, 0, true);
     }
 }
 static void WaitCases() {
@@ -142,11 +142,11 @@ static void WaitCases() {
         bool done = flag == 1 && (bits & 0x7fffffffu) < 0x3c23d70a;
         Require(Get<B>(f.Node(), 8) == B(done), "wait expected completion branch");
         Put(f.Node(), 8, B(0));
-        Invoke(f, 0x665e30, NTW2_CLONE_BRAIN_W_WAIT_BEGIN, done ? 0 : 1, done);
+        Invoke(f, 0x665e30, KNTWR_CLONE_BRAIN_W_WAIT_BEGIN, done ? 0 : 1, done);
         Require(Get<B>(f.Node(), 8) == B(done), "wait begin matches predicate");
     }
     label = "idle begin stop transaction once"; IdleFixture f;
-    Invoke(f, 0x665e60, NTW2_CLONE_BRAIN_W_IDLE_BEGIN, 1);
+    Invoke(f, 0x665e60, KNTWR_CLONE_BRAIN_W_IDLE_BEGIN, 1);
     Require(seen[0].va == 0x6669b0 && !seen[0].args[0], "idle begin zero stop argument");
 }
 static void EntryBranches() {
@@ -257,16 +257,16 @@ static void Refusals() {
 // Observe/Before/After are retained. Only outer occurrence and stop are sinks.
 static void __fastcall ProductionStop(U owner, U, U flag) { RecordEffect(0x6669b0, owner, &flag, 1); }
 static void __fastcall HolderRoute(U owner, U) {
-    reinterpret_cast<void (__thiscall*)(U)>(production.entries[NTW2_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
+    reinterpret_cast<void (__thiscall*)(U)>(production.entries[KNTWR_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
 }
 static void ProductionRoutes() {
     for (U cls : {0u, 1u}) for (bool started : {false, true}) {
         label = "production holder routes concrete idle/wait virtuals"; IdleFixture f(cls);
         Put(f.Node(), 0x10, B(started)); f.ownerVtable[0xc / 4] = Addr(At(0x66ce00));
-        std::array<U, NTW2_CLONE_COUNT> entries;
+        std::array<U, KNTWR_CLONE_COUNT> entries;
         std::copy(std::begin(production.entries), std::end(production.entries), entries.begin());
-        entries[NTW2_CLONE_BRAIN_W] = Fn(&HolderRoute);
-        entries[NTW2_CLONE_BRAIN_W_STOP] = Fn(&ProductionStop);
+        entries[KNTWR_CLONE_BRAIN_W] = Fn(&HolderRoute);
+        entries[KNTWR_CLONE_BRAIN_W_STOP] = Fn(&ProductionStop);
         seenCount = 0; brain::Reset(); brain::Configure(false, false, true, false);
         brain::RunOccurrence(Addr(f.owner.data()), entries.data());
         Status(cls, started ? 1 : 2, started ? 0 : 1);
@@ -280,11 +280,11 @@ static void ProductionRoutes() {
 static void RunIdleNodeCases() {
     using namespace idle_oracle;
     idle::Bind(Addr(image));
-    std::array<U, NTW2_BIND_COUNT> localBindings;
+    std::array<U, KNTWR_BIND_COUNT> localBindings;
     std::copy(std::begin(bindings), std::end(bindings), localBindings.begin());
-    localBindings[NTW2_BIND_B2_SERVICE_GATE] = Fn(&Gate);
+    localBindings[KNTWR_BIND_B2_SERVICE_GATE] = Fn(&Gate);
     U detail = 0;
-    Require(ntw2_build_clones(Addr(image), localBindings.data(), &bank, &detail) == 0, "build idle source-pinned event bank");
+    Require(kntwr_build_clones(Addr(image), localBindings.data(), &bank, &detail) == 0, "build idle source-pinned event bank");
     idle_oracle::Lifecycle(); idle_oracle::WaitCases(); idle_oracle::EntryBranches();
     idle_oracle::TailBranches(); idle_oracle::Refusals(); idle_oracle::ProductionRoutes();
     idle::Release(); VirtualFree(bank.allocation, 0, MEM_RELEASE); bank = {};

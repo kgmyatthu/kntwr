@@ -1,11 +1,11 @@
-// Byte-identity oracle for the in-memory gameplay patch (src/core/ntw2_gameplay_patch.c).
+// Byte-identity oracle for the in-memory gameplay patch (src/core/kntwr_gameplay_patch.c).
 //
 // The game files on disk are stock; the launcher turns the loader-mapped stock image into the patched image in memory. The
 // proof obligation is that the live image is exactly what the Windows loader would have produced from the PATCHED file
 // at the same base. This test builds that loader-equivalent image independently of the applier (sections mapped by raw/virtual
 // size, base relocations of the patched file applied) and compares it, byte for byte over the whole image above the PE
 // header, against:
-//   1. private x86 mappings of the STOCK file at several bases (delta 0 and non-zero) after ntw2_gp_apply;
+//   1. private x86 mappings of the STOCK file at several bases (delta 0 and non-zero) after kntwr_gp_apply;
 //   2. (optional) the same for mss32.dll;
 //   3. (optional) a REAL game process: CreateProcess(CREATE_SUSPENDED) of the stock Napoleon.exe, the same applier through
 //      the process backend before the process executes a single instruction, then a full read of the live image.
@@ -24,8 +24,8 @@
 #include <string>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "core/ntw2_gameplay_patch.h"
+#include "kntwr_runtime.h"
+#include "core/kntwr_gameplay_patch.h"
 #pragma comment(lib, "bcrypt.lib")
 
 using Bytes = std::vector<uint8_t>;
@@ -209,7 +209,7 @@ static Case MakeCase(const char* name, const uint8_t* blob, uint32_t blobSize, c
     return c;
 }
 
-static void ReportLine(const char* what, const ntw2_gp_report& r) {
+static void ReportLine(const char* what, const kntwr_gp_report& r) {
     std::printf("  %-26s runs %u (header %u, applied %u, %u B in windows)  fixups in windows: stock %u un-relocated, patched %u re-relocated  "
                 "tables: stock %u patched %u  sections %u (%#x B, %u fixups)\n",
                 what, r.runs_total, r.runs_header, r.runs_applied, r.bytes_applied, r.fixups_stock_unrelocated, r.fixups_patched_relocated,
@@ -219,16 +219,16 @@ static void ReportLine(const char* what, const ntw2_gp_report& r) {
 static void RunPrivate(const Case& c, uint32_t base, bool* unrelocatedWindowSeen) {
     Mapping m;
     Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image");
-    ntw2_gp_report rep;
-    ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-    int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+    kntwr_gp_report rep;
+    kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+    int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
     if (rc != 0) std::fprintf(stderr, "  apply failed: status %u phase %u: %s (run %u va %#x)\n", rep.status, rep.phase, rep.error, rep.fail_run, rep.fail_va);
-    Require(rc == 0, "ntw2_gp_apply on a private stock mapping");
+    Require(rc == 0, "kntwr_gp_apply on a private stock mapping");
     char label[64];
     std::snprintf(label, sizeof label, "%s @ %#010x (delta %+d)", c.name, base, static_cast<int>(base - c.sp.base));
     ReportLine(label, rep);
     Require(rep.runs_applied + rep.runs_header == rep.runs_total, "every run is applied or header-verified");
-    Require(rep.status == NTW2_GP_OK && rep.phase == 1, "report status");
+    Require(rep.status == KNTWR_GP_OK && rep.phase == 1, "report status");
     Bytes patchedImage = LoaderImage(c.patched, base, "patched");
     Bytes stockImage = LoaderImage(c.stock, base, "stock");
     const uint64_t bad = CompareImage(label, m.base, patchedImage, stockImage, c.pp, c.sp, false);
@@ -259,10 +259,10 @@ static void RunNegatives(const Case& c, uint32_t base) {
         void* blocker = VirtualAlloc(m.base + AlignUp(c.sp.soi, 0x10000), 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
         Require(blocker != nullptr, "place blocker page inside the appended range");
         Bytes before(m.base, m.base + c.sp.soi);
-        ntw2_gp_report rep;
-        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-        int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
-        Require(rc == NTW2_GP_E_ALLOC && rep.phase == 0, "occupied appended range is refused with E_ALLOC before writing");
+        kntwr_gp_report rep;
+        kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+        int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        Require(rc == KNTWR_GP_E_ALLOC && rep.phase == 0, "occupied appended range is refused with E_ALLOC before writing");
         Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "occupied range: stock image untouched");
         std::printf("  negative: occupied range -> %s\n", rep.error);
         VirtualFree(blocker, 0, MEM_RELEASE);
@@ -272,7 +272,7 @@ static void RunNegatives(const Case& c, uint32_t base) {
     {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (tamper)");
-        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
+        kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
         // Tamper with the first stock byte the patch changes above the header (found by diffing the two files).
         uint32_t firstCode = 0;
         const uint32_t common = static_cast<uint32_t>(std::min(c.stock.size(), c.patched.size()));
@@ -288,9 +288,9 @@ static void RunNegatives(const Case& c, uint32_t base) {
         VirtualProtect(m.base + rva, 1, PAGE_EXECUTE_READWRITE, &old);
         m.base[rva] ^= 0x5A;
         Bytes before(m.base, m.base + c.sp.soi);
-        ntw2_gp_report rep;
-        int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
-        Require(rc == NTW2_GP_E_STOCK && rep.phase == 0, "tampered stock byte is refused with E_STOCK before writing");
+        kntwr_gp_report rep;
+        int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        Require(rc == KNTWR_GP_E_STOCK && rep.phase == 0, "tampered stock byte is refused with E_STOCK before writing");
         Require(rep.fail_va == base + rva, "failure names the tampered address");
         Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "tamper: image untouched");
         std::printf("  negative: tampered byte -> %s\n", rep.error);
@@ -301,11 +301,11 @@ static void RunNegatives(const Case& c, uint32_t base) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (wrong delta)");
         Bytes before(m.base, m.base + c.sp.soi);
-        ntw2_gp_report rep;
-        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-        int rc = ntw2_gp_apply(&mem, base, c.sp.base + 0x10000, c.blob, c.blobSize, &rep);
+        kntwr_gp_report rep;
+        kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+        int rc = kntwr_gp_apply(&mem, base, c.sp.base + 0x10000, c.blob, c.blobSize, &rep);
         if (rep.fixups_stock_unrelocated + rep.fixups_patched_relocated != 0 || rc != 0) {
-            Require(rc == NTW2_GP_E_STOCK && rep.phase == 0, "a wrong relocation delta is refused with E_STOCK before writing");
+            Require(rc == KNTWR_GP_E_STOCK && rep.phase == 0, "a wrong relocation delta is refused with E_STOCK before writing");
             Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "wrong delta: image untouched");
             std::printf("  negative: wrong delta -> %s\n", rep.error);
         } else {
@@ -320,9 +320,9 @@ static void RunNegatives(const Case& c, uint32_t base) {
         DWORD old;
         VirtualProtect(m.base, 0x1000, PAGE_READWRITE, &old);
         m.base[0] = 'X';
-        ntw2_gp_report rep;
-        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-        Require(ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == NTW2_GP_E_HEADER, "a non-PE target is refused with E_HEADER");
+        kntwr_gp_report rep;
+        kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+        Require(kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == KNTWR_GP_E_HEADER, "a non-PE target is refused with E_HEADER");
         Unmap(&m);
     }
 }
@@ -331,12 +331,12 @@ static void RunNegatives(const Case& c, uint32_t base) {
 static void RunDoubleApply(const Case& c, uint32_t base) {
     Mapping m;
     Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (double apply)");
-    ntw2_gp_report rep;
-    ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-    Require(ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == 0, "first apply");
+    kntwr_gp_report rep;
+    kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+    Require(kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == 0, "first apply");
     Bytes after(m.base, m.base + c.pp.soi);
-    ntw2_gp_report again;
-    int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &again);
+    kntwr_gp_report again;
+    int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &again);
     Require(rc != 0, "second apply on the patched image must refuse");
     // The refusal happens in verification (header/run mismatch) or on the now-occupied appended range; never after a write.
     Require(again.runs_applied == 0, "second apply wrote nothing");
@@ -376,7 +376,7 @@ static void RunProcess(const Case& c, const char* exePath) {
     STARTUPINFOA si = {};
     si.cb = sizeof si;
     PROCESS_INFORMATION pi = {};
-    ntw2_gp_report rep;
+    kntwr_gp_report rep;
     uint32_t base = 0;
     int rc = -1;
     // About a quarter of fresh processes have an early private allocation inside the 40 KiB range above the image (observed
@@ -387,9 +387,9 @@ static void RunProcess(const Case& c, const char* exePath) {
         pi = {};
         Require(CreateProcessA(exePath, cmd, nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, dir, &si, &pi) != 0, "CreateProcess(CREATE_SUSPENDED) of the stock game");
         base = Peb32ImageBase(pi.hProcess);
-        ntw2_gp_memory mem = ntw2_gp_process_memory(pi.hProcess);
-        rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
-        if (rc == NTW2_GP_E_ALLOC && rep.phase == 0) {
+        kntwr_gp_memory mem = kntwr_gp_process_memory(pi.hProcess);
+        rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        if (rc == KNTWR_GP_E_ALLOC && rep.phase == 0) {
             std::printf("  attempt %d: range above the image is busy in this process (%s); new process\n", attempts + 1, rep.error);
             TerminateProcess(pi.hProcess, 1);
             WaitForSingleObject(pi.hProcess, 5000);
@@ -403,7 +403,7 @@ static void RunProcess(const Case& c, const char* exePath) {
                 static_cast<int>(base - c.sp.base), attempts + 1);
     if (rc != 0) std::fprintf(stderr, "  process apply failed: status %u phase %u: %s (run %u va %#x)\n", rep.status, rep.phase, rep.error, rep.fail_run, rep.fail_va);
     if (rc != 0) TerminateProcess(pi.hProcess, 1);
-    Require(rc == 0, "ntw2_gp_apply on the suspended real process");
+    Require(rc == 0, "kntwr_gp_apply on the suspended real process");
     ReportLine("suspended game process", rep);
     Bytes live(c.pp.soi);
     uint32_t done = 0;
@@ -433,7 +433,7 @@ static void RunProcess(const Case& c, const char* exePath) {
 // ---------------------------------------------------------------------------------------------------- rollback of a live module
 // Fault-injecting memory backend over the current process: fails or silently corrupts the Nth write.
 struct FaultMem {
-    ntw2_gp_memory inner;
+    kntwr_gp_memory inner;
     int mode;      // 0 pass, 1 fail only write N, 2 fail every write from N on, 3 corrupt write N (reports success)
     uint32_t n;
     uint32_t writes;
@@ -461,24 +461,24 @@ static void RunRollback(const Case& c, uint32_t base) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (rollback)");
         Bytes before(m.base, m.base + c.sp.soi);
-        FaultMem fm = {ntw2_gp_process_memory(GetCurrentProcess()), inj.mode, inj.n, 0};
-        ntw2_gp_memory mem = {&fm, FmRead, FmWrite, FmRemalloc, FmProtect};
-        ntw2_gp_report rep;
-        int rc = ntw2_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+        FaultMem fm = {kntwr_gp_process_memory(GetCurrentProcess()), inj.mode, inj.n, 0};
+        kntwr_gp_memory mem = {&fm, FmRead, FmWrite, FmRemalloc, FmProtect};
+        kntwr_gp_report rep;
+        int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
         RequireF(rc != 0, "%s: apply must fail", inj.name);
         std::printf("  rollback: %s -> status %u, rollback %u: %s\n", inj.name, rep.status, rep.rollback, rep.error);
         if (inj.expectRestored) {
-            Require(rep.rollback == NTW2_GP_ROLLBACK_RESTORED, "failed write/verify of a live module is rolled back");
+            Require(rep.rollback == KNTWR_GP_ROLLBACK_RESTORED, "failed write/verify of a live module is rolled back");
             Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "rollback left the stock image byte-identical");
             // The restored module can be patched again, and then equals the loader image of the patched file.
-            ntw2_gp_report again;
-            ntw2_gp_memory real = ntw2_gp_process_memory(GetCurrentProcess());
-            Require(ntw2_gp_apply(&real, base, c.sp.base, c.blob, c.blobSize, &again) == 0, "re-apply after rollback");
+            kntwr_gp_report again;
+            kntwr_gp_memory real = kntwr_gp_process_memory(GetCurrentProcess());
+            Require(kntwr_gp_apply(&real, base, c.sp.base, c.blob, c.blobSize, &again) == 0, "re-apply after rollback");
             Bytes want = LoaderImage(c.patched, base, "patched");
             Bytes stockImage = LoaderImage(c.stock, base, "stock");
             Require(CompareImage("after rollback", m.base, want, stockImage, c.pp, c.sp, false) == 0, "re-applied image equals the patched loader image");
         } else {
-            Require(rep.rollback == NTW2_GP_ROLLBACK_FAILED, "a failed restore is reported as ROLLBACK_FAILED");
+            Require(rep.rollback == KNTWR_GP_ROLLBACK_FAILED, "a failed restore is reported as ROLLBACK_FAILED");
         }
         Unmap(&m);
     }
@@ -491,8 +491,8 @@ static const char* Arg(int argc, char** argv, const char* key) {
 }
 
 static void CheckBlob(const char* name, const uint8_t* blob, uint32_t size, const Bytes& stock, const Bytes& patched) {
-    ntw2_gp_blob_info info;
-    Require(ntw2_gp_blob_describe(blob, size, &info) == 0, "embedded blob parses");
+    kntwr_gp_blob_info info;
+    Require(kntwr_gp_blob_describe(blob, size, &info) == 0, "embedded blob parses");
     RequireF(Sha256Hex(stock) == info.stock_sha256, "%s: stock file is not the blob's stock image", name);
     RequireF(Sha256Hex(patched) == info.patched_sha256, "%s: patched file is not the blob's patched image", name);
     RequireF(info.stock_len == stock.size() && info.patched_len == patched.size(), "%s: blob lengths match the files", name);
@@ -503,26 +503,26 @@ static void CheckBlob(const char* name, const uint8_t* blob, uint32_t size, cons
 // Diagnostic bisection (--gameplay-patch-only-runs / --gameplay-patch-skip-runs): the filter only decides which non-header runs reach the live image.
 //   ONLY={}  : no code run is written: the image is the stock loader image with the patched header and the appended sections;
 //   SKIP={44,48}: the two relocated-operand runs (RVA 0x43C70C / 0x43F2F1) stay stock, every other byte is the loader-equivalent patched image;
-//   --no-d3d9-swap (ntw2_gp_filter_exclude_d3d9_swap on ALL): exactly the rel32 fields of the two Direct3DCreate9 calls (RVA 0xCA6203 / 0xDFD3FF,
+//   --no-d3d9-swap (kntwr_gp_filter_exclude_d3d9_swap on ALL): exactly the rel32 fields of the two Direct3DCreate9 calls (RVA 0xCA6203 / 0xDFD3FF,
 //   4 bytes after the E8 opcode) stay stock, every other byte is the loader-equivalent patched image.
 static void RunFilter(const Case& c, uint32_t base) {
-    ntw2_gp_filter parsed;
+    kntwr_gp_filter parsed;
     std::memset(&parsed, 0, sizeof parsed);
-    Require(ntw2_gp_filter_parse("14-16,36,44", &parsed) == 0, "filter list parses");
+    Require(kntwr_gp_filter_parse("14-16,36,44", &parsed) == 0, "filter list parses");
     Require((parsed.runs[0] & (7u << 14)) == (7u << 14) && (parsed.runs[1] & (1u << 4)) && (parsed.runs[1] & (1u << 12)) && !(parsed.runs[0] & (1u << 17)) && !(parsed.runs[0] & (1u << 13)),
             "filter bits: 14-16, 36, 44");
     const char* bad[] = {"", "x", "1-", "-3", "5-2", "3,,4", "3,", "128", "1 2"};
-    for (const char* s : bad) { ntw2_gp_filter f; std::memset(&f, 0, sizeof f); RequireF(ntw2_gp_filter_parse(s, &f) != 0, "malformed run list \"%s\" refused", s); }
+    for (const char* s : bad) { kntwr_gp_filter f; std::memset(&f, 0, sizeof f); RequireF(kntwr_gp_filter_parse(s, &f) != 0, "malformed run list \"%s\" refused", s); }
     {
-        const uint32_t d3dA = 1u << (NTW2_GP_RUN_D3D9_FACTORY_A & 31u), d3dB = 1u << (NTW2_GP_RUN_D3D9_FACTORY_B & 31u);
-        ntw2_gp_filter skip, only;
+        const uint32_t d3dA = 1u << (KNTWR_GP_RUN_D3D9_FACTORY_A & 31u), d3dB = 1u << (KNTWR_GP_RUN_D3D9_FACTORY_B & 31u);
+        kntwr_gp_filter skip, only;
         std::memset(&skip, 0, sizeof skip); std::memset(&only, 0, sizeof only);
-        skip.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44", &skip) == 0, "skip list parses");
-        only.mode = NTW2_GP_ONLY; Require(ntw2_gp_filter_parse("14,65,92", &only) == 0, "only list parses");
-        ntw2_gp_filter_exclude_d3d9_swap(&skip);
-        ntw2_gp_filter_exclude_d3d9_swap(&only);
-        Require(skip.mode == NTW2_GP_SKIP && (skip.runs[1] & (1u << 12)) && (skip.runs[2] & d3dA) && (skip.runs[2] & d3dB), "exclude keeps a SKIP list and adds 65, 92");
-        Require(only.mode == NTW2_GP_ONLY && (only.runs[0] & (1u << 14)) && !(only.runs[2] & d3dA) && !(only.runs[2] & d3dB), "exclude keeps an ONLY list without 65, 92");
+        skip.mode = KNTWR_GP_SKIP; Require(kntwr_gp_filter_parse("44", &skip) == 0, "skip list parses");
+        only.mode = KNTWR_GP_ONLY; Require(kntwr_gp_filter_parse("14,65,92", &only) == 0, "only list parses");
+        kntwr_gp_filter_exclude_d3d9_swap(&skip);
+        kntwr_gp_filter_exclude_d3d9_swap(&only);
+        Require(skip.mode == KNTWR_GP_SKIP && (skip.runs[1] & (1u << 12)) && (skip.runs[2] & d3dA) && (skip.runs[2] & d3dB), "exclude keeps a SKIP list and adds 65, 92");
+        Require(only.mode == KNTWR_GP_ONLY && (only.runs[0] & (1u << 14)) && !(only.runs[2] & d3dA) && !(only.runs[2] & d3dB), "exclude keeps an ONLY list without 65, 92");
     }
 
     Bytes patchedImage = LoaderImage(c.patched, base, "patched");
@@ -533,19 +533,19 @@ static void RunFilter(const Case& c, uint32_t base) {
     for (int variant = 0; variant < 3; ++variant) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image (filter)");
-        ntw2_gp_filter f;
+        kntwr_gp_filter f;
         std::memset(&f, 0, sizeof f);
-        if (variant == 0) f.mode = NTW2_GP_ONLY;
-        else if (variant == 1) { f.mode = NTW2_GP_SKIP; Require(ntw2_gp_filter_parse("44,48", &f) == 0, "skip list parses"); }
-        else ntw2_gp_filter_exclude_d3d9_swap(&f);
+        if (variant == 0) f.mode = KNTWR_GP_ONLY;
+        else if (variant == 1) { f.mode = KNTWR_GP_SKIP; Require(kntwr_gp_filter_parse("44,48", &f) == 0, "skip list parses"); }
+        else kntwr_gp_filter_exclude_d3d9_swap(&f);
         if (variant == 2)
             for (uint32_t s : d3dSites)
                 RequireF(std::memcmp(&stockImage[s], &patchedImage[s], 4) != 0 && patchedImage[s - 1] == 0xE8u && stockImage[s - 1] == 0xE8u,
                          "D3D9 swap site %#x is the rel32 of a patched call", s);
-        ntw2_gp_report rep;
-        ntw2_gp_memory mem = ntw2_gp_process_memory(GetCurrentProcess());
-        Require(ntw2_gp_apply_filtered(&mem, base, c.sp.base, c.blob, c.blobSize, &f, &rep) == 0, "filtered apply");
-        Require(rep.status == NTW2_GP_OK && rep.phase == 1, "filtered report status");
+        kntwr_gp_report rep;
+        kntwr_gp_memory mem = kntwr_gp_process_memory(GetCurrentProcess());
+        Require(kntwr_gp_apply_filtered(&mem, base, c.sp.base, c.blob, c.blobSize, &f, &rep) == 0, "filtered apply");
+        Require(rep.status == KNTWR_GP_OK && rep.phase == 1, "filtered report status");
         const uint32_t soh = c.pp.soh;
         uint64_t bad = 0, stockWindowBytes = 0;
         for (uint32_t i = 0; i < c.pp.soi; ++i) {
@@ -589,10 +589,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     uint32_t blobSize = 0;
-    const uint8_t* blob = ntw2_gp_napoleon_blob(&blobSize);
+    const uint8_t* blob = kntwr_gp_napoleon_blob(&blobSize);
     Bytes stock = ReadAll(stockPath), patched = ReadAll(patchedPath);
     CheckBlob("napoleon", blob, blobSize, stock, patched);
-    RequireF(Sha256Hex(patched) == NTW2_IMAGE_SHA256, "%s: the patched image is not NTW2_IMAGE_SHA256", "napoleon");
+    RequireF(Sha256Hex(patched) == KNTWR_IMAGE_SHA256, "%s: the patched image is not KNTWR_IMAGE_SHA256", "napoleon");
     Case nap = MakeCase("napoleon", blob, blobSize, stock, patched);
 
     // Bases: the preferred base (delta 0) when free, plus relocated bases with distinct deltas.
@@ -618,7 +618,7 @@ int main(int argc, char** argv) {
     const char* ms = Arg(argc, argv, "--mss32-stock");
     if (mp && ms) {
         uint32_t msize = 0;
-        const uint8_t* mblob = ntw2_gp_mss32_blob(&msize);
+        const uint8_t* mblob = kntwr_gp_mss32_blob(&msize);
         Bytes mstock = ReadAll(ms), mpatched = ReadAll(mp);
         CheckBlob("mss32", mblob, msize, mstock, mpatched);
         Case mss = MakeCase("mss32", mblob, msize, mstock, mpatched);

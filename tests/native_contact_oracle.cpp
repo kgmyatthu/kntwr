@@ -35,10 +35,10 @@
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace C = ntw2_contact;
+namespace C = kntwr_contact;
 static_assert(sizeof(void*) == 4, "owned x86 oracle");
 static_assert(C::WordCount == 48 && C::OwnerKindCallbacks == 47 && C::IdentityRefusals == 42 &&
-    C::AvoidVtable == 34 && C::CombatVtable == 36, "status words follow NTW2_COLLIDE_CONTACT_WORD_LABELS");
+    C::AvoidVtable == 34 && C::CombatVtable == 36, "status words follow KNTWR_COLLIDE_CONTACT_WORD_LABELS");
 
 static B* image;
 static U delta, checks;

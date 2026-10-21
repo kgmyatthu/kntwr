@@ -1,8 +1,8 @@
 // Chain oracle for the --army-solver-memo / --army-solver-shadow SOLVER_* clone family (src/army/native_army_solver.{h,cpp}).
 //
-// Inside a private relocated copy of the pinned Napoleon.exe it builds the REAL production clone set (ntw2_build_clones, same specs, same
-// source-hash pins), binds NTW2_BIND_SOLVER_ASSIGN/_SOLVE/_SHIM to the REAL host code (AssignGate / SolveGate / SolveShim, bound through
-// ntw2_army_solver::Bind and activated through ntw2_army_solver::Start with the private image's delta), and runs twin fixtures:
+// Inside a private relocated copy of the pinned Napoleon.exe it builds the REAL production clone set (kntwr_build_clones, same specs, same
+// source-hash pins), binds KNTWR_BIND_SOLVER_ASSIGN/_SOLVE/_SHIM to the REAL host code (AssignGate / SolveGate / SolveShim, bound through
+// kntwr_army_solver::Bind and activated through kntwr_army_solver::Start with the private image's delta), and runs twin fixtures:
 //   twin A: the ORIGINAL 0x18F0A00 (+ 0x18F0200 / 0x5373F0 / 0x18F0D00 trampoline / 0x502770 / 0x18F1200) of the same image;
 //   twin B: AssignGate -> CLONE_SOLVER_18F0A00 -> {CLONE_SOLVER_5373F0 -> SolveShim, CLONE_SOLVER_18F1200 -> SolveGate} in the module modes
 //           forward (every solve native; oracle-only mode), memo (kernel replaces the solver) and shadow (native authoritative, kernel compared).
@@ -39,7 +39,7 @@
 #include <vector>
 #include "army/native_army_solver.h"
 #include "formation/native_formation_solver.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_image_relocation.h"
 
 #pragma comment(lib, "bcrypt.lib")
@@ -48,7 +48,7 @@ extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile int g_tlsPad[32];
 
 namespace {
-namespace as = ntw2_army_solver;
+namespace as = kntwr_army_solver;
 using U = uint32_t;
 
 constexpr U kImageBase = 0x400000;
@@ -109,8 +109,8 @@ void PatchJump(U va, const void* target) {
 }
 
 // ---- mapped image + production clones
-U g_bindings[NTW2_BIND_COUNT];
-ntw2_clone_set g_clones;
+U g_bindings[KNTWR_BIND_COUNT];
+kntwr_clone_set g_clones;
 
 bool MapImage(const std::vector<uint8_t>& file, const std::vector<uint8_t>& table) {
     auto* dos = (const IMAGE_DOS_HEADER*)file.data();
@@ -132,8 +132,8 @@ bool MapImage(const std::vector<uint8_t>& file, const std::vector<uint8_t>& tabl
     for (U& b : g_bindings) b = NativeAddress(0x6dca08); // unreached bindings: valid image addresses, never executed here
     as::Bind(static_cast<U>(g_delta), g_bindings);
     U detail = 0;
-    const U rc = ntw2_build_clones(Addr(g_base), g_bindings, &g_clones, &detail);
-    if (rc != 0) { std::fprintf(stderr, "ntw2_build_clones failed: error %u detail %#x\n", rc, detail); return false; }
+    const U rc = kntwr_build_clones(Addr(g_base), g_bindings, &g_clones, &detail);
+    if (rc != 0) { std::fprintf(stderr, "kntwr_build_clones failed: error %u detail %#x\n", rc, detail); return false; }
     PatchJump(0x00FF7F20, (const void*)&HostAlloc);
     PatchJump(0x00FF7EF0, (const void*)&HostFree);
     *(int32_t*)(uintptr_t)NativeAddress(0x14A40B0) = (int32_t)0x80000000;
@@ -179,7 +179,7 @@ __declspec(naked) void NativeSolverEntryStub() {          // 0x502770: count the
         jmp dword ptr [g_native502776]
     }
 }
-// Hooks are applied only around the native twin runs and removed again before any chain mode (ntw2_army_solver::Start verifies the pristine
+// Hooks are applied only around the native twin runs and removed again before any chain mode (kntwr_army_solver::Start verifies the pristine
 // 0x502770 prologue, and the chain must run against the unhooked image).
 struct HookSite { U va; size_t len; uint8_t original[8]; };
 HookSite g_hookSites[3] = {{0x18F0D1D, 5, {}}, {0x18F0D22, 7, {}}, {0x502770, 6, {}}};
@@ -683,8 +683,8 @@ int main(int argc, char** argv) {
     }
 
     for (as::Mode mode : {as::ModeForward, as::ModeMemo, as::ModeShadow}) {
-        as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[NTW2_CLONE_SOLVER_18F0A00]};
-        if (!as::Start(b)) { std::fprintf(stderr, "ntw2_army_solver::Start refused (%s)\n", ModeName(mode)); return 2; }
+        as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00]};
+        if (!as::Start(b)) { std::fprintf(stderr, "kntwr_army_solver::Start refused (%s)\n", ModeName(mode)); return 2; }
         Stats st;
         for (size_t i = 0; i < all.size(); ++i) {
             const Case& c = all[i];
@@ -696,7 +696,7 @@ int main(int argc, char** argv) {
             as::Reset();
             DumpResult r;
             ++st.runs;
-            if (!RunStub(g_bindings[NTW2_BIND_SOLVER_ASSIGN], k, c, r)) { ++st.failures; std::fprintf(stderr, "FAIL [%s] chain faulted: %s\n", ModeName(mode), c.label.c_str()); continue; }
+            if (!RunStub(g_bindings[KNTWR_BIND_SOLVER_ASSIGN], k, c, r)) { ++st.failures; std::fprintf(stderr, "FAIL [%s] chain faulted: %s\n", ModeName(mode), c.label.c_str()); continue; }
             std::string why = Diff(nat[i].r, r);
             U w[as::kWords];
             as::Snapshot(w);

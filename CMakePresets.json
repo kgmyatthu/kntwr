@@ -12,8 +12,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl",
-        "NTW2_BUILD_RUNTIME": "ON",
-        "NTW2_BUILD_TESTS": "OFF"
+        "KNTWR_BUILD_RUNTIME": "ON",
+        "KNTWR_BUILD_TESTS": "OFF"
       },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
@@ -22,7 +22,7 @@
       "displayName": "MSVC x86 / Ninja, product + native oracles/harnesses/audits",
       "inherits": "x86-ninja",
       "binaryDir": "${sourceDir}/build/x86-ninja-tests",
-      "cacheVariables": { "NTW2_BUILD_TESTS": "ON" }
+      "cacheVariables": { "KNTWR_BUILD_TESTS": "ON" }
     },
     {
       "name": "vs2026-x86",
@@ -31,8 +31,8 @@
       "binaryDir": "${sourceDir}/build/vs2026-x86",
       "architecture": { "value": "Win32", "strategy": "set" },
       "cacheVariables": {
-        "NTW2_BUILD_RUNTIME": "ON",
-        "NTW2_BUILD_TESTS": "OFF"
+        "KNTWR_BUILD_RUNTIME": "ON",
+        "KNTWR_BUILD_TESTS": "OFF"
       },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
@@ -41,7 +41,7 @@
       "displayName": "Visual Studio 2026 / Win32, product + native oracles/harnesses/audits",
       "inherits": "vs2026-x86",
       "binaryDir": "${sourceDir}/build/vs2026-x86-tests",
-      "cacheVariables": { "NTW2_BUILD_TESTS": "ON" }
+      "cacheVariables": { "KNTWR_BUILD_TESTS": "ON" }
     }
   ],
   "buildPresets": [

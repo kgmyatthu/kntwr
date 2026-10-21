@@ -15,23 +15,23 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_node.h"
 #include "native_node_projection.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace node = ntw2_node;
-namespace brain = ntw2_brain2;
+namespace node = kntwr_node;
+namespace brain = kntwr_brain2;
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
 static B* image;
 static U delta, checks, cases;
 static const char* label = "map";
-static ntw2_clone_set production{}, boundary{};
-static U bindings[NTW2_BIND_COUNT];
+static kntwr_clone_set production{}, boundary{};
+static U bindings[KNTWR_BIND_COUNT];
 static U productionServiceGate, commonTarget;
 static U ringBacking[10][64], lookupBacking[10][64];
 static uint16_t idBacking[10][64];
@@ -106,8 +106,8 @@ __declspec(naked) static void BoundaryGate() {
 }
 static void SeedBanks() {
     for (U p = 0; p < 10; ++p) {
-        B* visit = p == 9 ? At(0x15adb74) : reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]);
-        B* lookup = p == 9 ? At(0x14d0a6c) : reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p]);
+        B* visit = p == 9 ? At(0x15adb74) : reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p]);
+        B* lookup = p == 9 ? At(0x14d0a6c) : reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p]);
         memset(visit, 0, 0x2030); memset(lookup, 0, 20);
         Put(visit, 0, U(64)); Put(visit, 4, Addr(ringBacking[p]));
         Put(visit, 0x2020, U(64)); Put(visit, 0x2028, Addr(idBacking[p]));
@@ -118,8 +118,8 @@ static void SeedBanks() {
 }
 static void UnseedBanks() {
     for (U p = 0; p < node::projection::kParticipants; ++p) {
-        B* visit = reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]);
-        B* lookup = reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p]);
+        B* visit = reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p]);
+        B* lookup = reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p]);
         Put(visit, 4, U(0)); Put(visit, 0x2028, U(0)); Put(lookup, 0xc, U(0));
     }
 }
@@ -157,15 +157,15 @@ static void Map(const char* path) {
     Put(At(0x14d05b0), 0, uint16_t(0x4321));
     std::fill(std::begin(bindings), std::end(bindings), Fn(&Unexpected));
     Require(brain::Bind(Addr(image), bindings), "bind production gates and private projection");
-    productionServiceGate = bindings[NTW2_BIND_B2_SERVICE_GATE];
+    productionServiceGate = bindings[KNTWR_BIND_B2_SERVICE_GATE];
     commonTarget = Addr(At(0x670eb0));
     Require(node::projection::Initialize(Addr(image), bindings), "initialize private projection");
     node::Bind(Addr(image));
     SeedBanks();
     U detail = 0;
-    Require(ntw2_build_clones(Addr(image), bindings, &production, &detail) == 0, "build production clones");
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = Fn(&BoundaryGate);
-    Require(ntw2_build_clones(Addr(image), bindings, &boundary, &detail) == 0, "build event-boundary clones");
+    Require(kntwr_build_clones(Addr(image), bindings, &production, &detail) == 0, "build production clones");
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = Fn(&BoundaryGate);
+    Require(kntwr_build_clones(Addr(image), bindings, &boundary, &detail) == 0, "build event-boundary clones");
 }
 static void __fastcall Attach(U reference, U, U owner) {
     ++attachedCalls;
@@ -308,7 +308,7 @@ static void StepCase(Fixture& f, B begin, U expectedEvents, bool fullArrival = f
     Require(token != 0, "native preparation admits fixture");
     observedCount = 0; executeArrival = fullArrival; attachedCalls = 0;
     ResetFp(control);
-    reinterpret_cast<void (__thiscall*)(U, U)>(boundary.entries[NTW2_CLONE_BRAIN_W_REFERENCE])(
+    reinterpret_cast<void (__thiscall*)(U, U)>(boundary.entries[KNTWR_CLONE_BRAIN_W_REFERENCE])(
         Addr(f.owner.data()) + node::kNodeOffset, begin);
     const auto originalAfter = f.owner;
     const FpState nativeFp = CaptureFp();
@@ -397,7 +397,7 @@ static void ProjectionCases() {
             Equal(originalVisit.data(), At(0x15adb74), originalVisit.size(), "private ring/bitset/id bank never writes original");
             Equal(originalLookup.data(), At(0x14d0a6c), originalLookup.size(), "private lookup never writes original");
             Require(node::projection::Ready(p), "private ring/id list drained for reuse");
-            Require(Get<U>(reinterpret_cast<void*>(bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p]), 8) == 0,
+            Require(Get<U>(reinterpret_cast<void*>(bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p]), 8) == 0,
                 "private candidate list drained for reuse");
             ++cases;
         }
@@ -425,7 +425,7 @@ static void __fastcall MoveRoute(U owner, U) {
     reinterpret_cast<void (__thiscall*)(U, U)>(brain::GateAddress(brain::MoveDriver))(owner, 1);
 }
 static void __fastcall HolderRoute(U owner, U) {
-    reinterpret_cast<void (__thiscall*)(U)>(production.entries[NTW2_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
+    reinterpret_cast<void (__thiscall*)(U)>(production.entries[KNTWR_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
 }
 static void __fastcall HolderGateRoute(U owner, U) {
     reinterpret_cast<void (__thiscall*)(U)>(brain::GateAddress(brain::PreBattle))(owner + 0x228);
@@ -451,9 +451,9 @@ static int ReportException(EXCEPTION_POINTERS* fault) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 static void ScopedRoute(Fixture& f, U outer) {
-    static std::array<U, NTW2_CLONE_COUNT> entries;
+    static std::array<U, KNTWR_CLONE_COUNT> entries;
     std::copy(std::begin(production.entries), std::end(production.entries), entries.begin());
-    entries[NTW2_CLONE_BRAIN_W] = outer;
+    entries[KNTWR_CLONE_BRAIN_W] = outer;
     f.ownerVtable[0xc / 4] = Addr(At(0x66ce00));
     brain::RunOccurrence(Addr(f.owner.data()), entries.data());
 }
@@ -507,7 +507,7 @@ static void RouteCases() {
                 Addr(At(referenceClass ? 0x1334180 : 0x1321188)), "native dynamic node identity retained");
             Require(route[6] == 0, "retained-node fixture does not construct a reference");
             if (outer == Fn(&MoveRoute))
-                Require(route[2] == NTW2_CLONE_BRAIN_W_MOVEORDER + 1 && route[3] == 1,
+                Require(route[2] == KNTWR_CLONE_BRAIN_W_MOVEORDER + 1 && route[3] == 1,
                     "actual move driver is production clone, not original fallback");
             if (outer == Fn(&CommonRoute))
                 Require(Get<float>(f.owner.data(), 0x54) == 6.0f && Get<U>(f.owner.data(), 0x19c) == 0x15,
@@ -526,7 +526,7 @@ static void RouteCases() {
     ScopedRoute(f, Fn(&MoveRoute));
     U status[node::kWords], route[8];
     node::Snapshot(status); brain::RouteSnapshot(route);
-    Require(route[2] == NTW2_CLONE_BRAIN_W_MOVEORDER + 1 && route[3] == 1
+    Require(route[2] == KNTWR_CLONE_BRAIN_W_MOVEORDER + 1 && route[3] == 1
         && !route[4] && !route[5] && route[6] == 1, "driver ctor tail route counts");
     Require(status[node::Captures] == 1 && status[node::Comparisons] == 1
         && status[node::Matches] == 1 && !status[node::Refused] && !status[node::Mismatches],

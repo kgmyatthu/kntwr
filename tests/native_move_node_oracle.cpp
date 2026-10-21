@@ -16,7 +16,7 @@
 #include <new>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_move_node.h"
 #include "native_brain_s0.h"
@@ -24,15 +24,15 @@
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace hot = ntw2_move_node;
-namespace brain = ntw2_brain2;
-namespace projection = ntw2_node::projection;
+namespace hot = kntwr_move_node;
+namespace brain = kntwr_brain2;
+namespace projection = kntwr_node::projection;
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
 static B* image;
-static U delta, cases, checks, bindings[NTW2_BIND_COUNT];
-static ntw2_clone_set production{}, boundary{};
+static U delta, cases, checks, bindings[KNTWR_BIND_COUNT];
+static kntwr_clone_set production{}, boundary{};
 static const char* label = "map";
 static hot::Event observed[3];
 static U observedCount;
@@ -114,8 +114,8 @@ __declspec(naked) static void BoundaryGate() {
 }
 static void SeedBanks() {
     for (U p = 0; p < 10; ++p) {
-        B* visit = p == 9 ? At(0x15adb74) : reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]);
-        B* lookup = p == 9 ? At(0x14d0a6c) : reinterpret_cast<B*>(bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p]);
+        B* visit = p == 9 ? At(0x15adb74) : reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p]);
+        B* lookup = p == 9 ? At(0x14d0a6c) : reinterpret_cast<B*>(bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p]);
         memset(visit, 0, 0x2030); memset(lookup, 0, 20);
         Put(visit, 0, U(64)); Put(visit, 4, Addr(ringBacking[p]));
         Put(visit, 0x2020, U(64)); Put(visit, 0x2028, Addr(idBacking[p]));
@@ -152,13 +152,13 @@ static void Map(const char* path) {
     Put(At(0x131a7b8), 0, 1.25f);
     std::fill(std::begin(bindings), std::end(bindings), Fn(&Unexpected));
     Require(brain::Bind(Addr(image), bindings), "bind production generic gates");
-    Require(ntw2_brain_s0::Bind(Addr(image), bindings), "bind S0 timing gates");
+    Require(kntwr_brain_s0::Bind(Addr(image), bindings), "bind S0 timing gates");
     Require(projection::Initialize(Addr(image), bindings), "initialize private projection banks");
     hot::Bind(Addr(image)); SeedBanks();
     U detail = 0;
-    Require(ntw2_build_clones(Addr(image), bindings, &production, &detail) == 0, "build production source-pinned clones");
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = Fn(&BoundaryGate);
-    Require(ntw2_build_clones(Addr(image), bindings, &boundary, &detail) == 0, "build source-pinned event-seam clones");
+    Require(kntwr_build_clones(Addr(image), bindings, &production, &detail) == 0, "build production source-pinned clones");
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = Fn(&BoundaryGate);
+    Require(kntwr_build_clones(Addr(image), bindings, &boundary, &detail) == 0, "build source-pinned event-seam clones");
     // 0x1325d24 (lead threshold, stock 5.0f) is a generator data pin since PIN_CONTACT_LEAD; the fixture keeps the
     // stock value and drives the threshold cases through group+0xda8 instead.
 }
@@ -257,8 +257,8 @@ static void Invoke(Fixture& f, hot::Operation op, U events, bool useOriginal = f
     if (op == hot::Destroy) args[0] = 5;
     U token = hot::Before(va, f.NodeAddress(), args, boundary.entries);
     Require(token != 0, "capture admitted");
-    U clone = op == hot::Begin ? NTW2_CLONE_BRAIN_W_HOT_BEGIN : op == hot::Step ? NTW2_CLONE_BRAIN_W_HOT_STEP
-        : op == hot::Construct ? NTW2_CLONE_BRAIN_W_HOT_CTOR : NTW2_CLONE_BRAIN_W_HOT_DTOR;
+    U clone = op == hot::Begin ? KNTWR_CLONE_BRAIN_W_HOT_BEGIN : op == hot::Step ? KNTWR_CLONE_BRAIN_W_HOT_STEP
+        : op == hot::Construct ? KNTWR_CLONE_BRAIN_W_HOT_CTOR : KNTWR_CLONE_BRAIN_W_HOT_DTOR;
     U entry = useOriginal ? Addr(At(va)) : boundary.entries[clone];
     if (op == hot::Construct) reinterpret_cast<U (__thiscall*)(U, U, U)>(entry)(f.NodeAddress(), args[0], args[1]);
     else if (op == hot::Destroy) reinterpret_cast<U (__thiscall*)(U, U)>(entry)(f.NodeAddress(), args[0]);
@@ -404,10 +404,10 @@ static void __fastcall ProductionRequest(U owner, U, const U* descriptor, const 
     memcpy(event.descriptor, descriptor, 20); memcpy(event.options, options, 0x1c);
 }
 static void __fastcall HolderRoute(U owner, U) {
-    reinterpret_cast<void (__thiscall*)(U)>(production.entries[NTW2_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
+    reinterpret_cast<void (__thiscall*)(U)>(production.entries[KNTWR_CLONE_BRAIN_W_HOLDER_STEP])(owner + 0x228);
 }
 static void __fastcall InstallRoute(U owner, U) {
-    reinterpret_cast<void (__thiscall*)(U, const B*)>(production.entries[NTW2_CLONE_BRAIN_W_HOT_INSTALL])(
+    reinterpret_cast<void (__thiscall*)(U, const B*)>(production.entries[KNTWR_CLONE_BRAIN_W_HOT_INSTALL])(
         owner, reinterpret_cast<const B*>(Get<U>(reinterpret_cast<void*>(owner), 0x5b8)));
 }
 static void ProductionRoutes() {
@@ -415,10 +415,10 @@ static void ProductionRoutes() {
         label = "production holder virtual routes to hot class"; Fixture f;
         Put(f.Node(), 0x10, B(started)); Put(f.Node(), 0x44, B(1)); Put(f.owner.data(), 0x390, U(6));
         f.ownerVtable[0xc / 4] = Addr(At(0x66ce00));
-        std::array<U, NTW2_CLONE_COUNT> entries;
+        std::array<U, KNTWR_CLONE_COUNT> entries;
         std::copy(std::begin(production.entries), std::end(production.entries), entries.begin());
-        entries[NTW2_CLONE_BRAIN_W] = Fn(&HolderRoute);
-        entries[NTW2_CLONE_BRAIN_W_REQUEST] = Fn(&ProductionRequest);
+        entries[KNTWR_CLONE_BRAIN_W] = Fn(&HolderRoute);
+        entries[KNTWR_CLONE_BRAIN_W_REQUEST] = Fn(&ProductionRequest);
         observedCount = 0; brain::Reset(); brain::Configure(false, false, true, false);
         brain::RunOccurrence(Addr(f.owner.data()), entries.data());
         Status(started ? 1 : 2, started ? 0 : 3);
@@ -436,9 +436,9 @@ static void ProductionRoutes() {
         label = "production replacement wrapper reaches hot lifecycle"; Fixture f;
         Put(f.owner.data(), 0x2c4, B(installed)); Put(f.owner.data(), 0x5b8, Addr(f.descriptor.data()));
         f.ownerVtable[0xc / 4] = Addr(At(0x66ce00));
-        std::array<U, NTW2_CLONE_COUNT> entries;
+        std::array<U, KNTWR_CLONE_COUNT> entries;
         std::copy(std::begin(production.entries), std::end(production.entries), entries.begin());
-        entries[NTW2_CLONE_BRAIN_W] = Fn(&InstallRoute);
+        entries[KNTWR_CLONE_BRAIN_W] = Fn(&InstallRoute);
         brain::Reset(); brain::Configure(false, false, true, false);
         brain::RunOccurrence(Addr(f.owner.data()), entries.data());
         Status(installed ? 2 : 1, 0);
@@ -488,10 +488,10 @@ static FixturePtr ZeroedFixture(const Fixture* from = nullptr) {
     return FixturePtr(from ? new (p) Fixture(*from) : new (p) Fixture());
 }
 static void S0HotStepCases() {
-    namespace s0 = ntw2_brain_s0;
+    namespace s0 = kntwr_brain_s0;
     s0::Reset();
     Require(s0::Start(production.entries, 0), "S0 starts on the production family");
-    const U clone = production.entries[NTW2_CLONE_BRAIN_S0_HOT_STEP];
+    const U clone = production.entries[KNTWR_CLONE_BRAIN_S0_HOT_STEP];
     U steps = 0;
     for (bool timed : {false, true}) for (U state : {0u, 6u, 7u}) for (B flag : {B(0), B(1), B(2), B(255)}) {
         label = "S0 hot-step clone vs mapped original (no-order states)";
@@ -524,9 +524,9 @@ static int RunOracle(int argc, char** argv) {
     CertifiedProjectionCases(); RunIdleNodeCases(); RunActionNodeCases(); S0HotStepCases();
     hot::Release();
     for (U p = 0; p < projection::kParticipants; ++p) {
-        Put(reinterpret_cast<void*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]), 4, U(0));
-        Put(reinterpret_cast<void*>(bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p]), 0x2028, U(0));
-        Put(reinterpret_cast<void*>(bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p]), 0xc, U(0));
+        Put(reinterpret_cast<void*>(bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p]), 4, U(0));
+        Put(reinterpret_cast<void*>(bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p]), 0x2028, U(0));
+        Put(reinterpret_cast<void*>(bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p]), 0xc, U(0));
     }
     projection::Release();
     VirtualFree(boundary.allocation, 0, MEM_RELEASE); VirtualFree(production.allocation, 0, MEM_RELEASE);

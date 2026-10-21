@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#define NTW2_ENV_WORD_LABELS \
+#define KNTWR_ENV_WORD_LABELS \
  "version", "enabled", "calls", "compared", "mismatches", "faults", "reentry", "shadow_us", \
  "owner", "flag_b4", "flag_b5", "event_inferred_mismatch", "callback_implied", "notification_unobserved", "events_predicted", "events_inferred", \
  "first_entity", "first_call", "first_field", "first_expected", "first_actual", "first_owner", "first_flags", "first_candidate", \
@@ -9,7 +9,7 @@
 #ifdef __cplusplus
 #include <vector>
 #include "native_sweep.h"
-namespace ntw2_env {
+namespace kntwr_env {
 struct Agent; struct Scratch;
 struct Binding { uint32_t image_delta, generation; bool enabled, shadow; };
 enum Word : uint32_t { Version, Enabled, Calls, Compared, Mismatches, Faults, Reentry, ShadowUs,
@@ -44,12 +44,12 @@ void Capture(Agent*, Scratch*, AgentView&, Scene&);
 // Worker context: private scratch only; no scene tape, histogram or diagnostics.
 struct WorkerContext {
  uint32_t image_delta = 0, build = 0;
- const ntw2_sweep::WorkerScene* scene = nullptr;
+ const kntwr_sweep::WorkerScene* scene = nullptr;
  bool fp_managed = false;
- ntw2_sweep::FpState fp; WorkerScratch scratch; AgentView view{};
+ kntwr_sweep::FpState fp; WorkerScratch scratch; AgentView view{};
 };
 // Activation only: initializes/prefaults the complete owner-domain traversal scratch.
-bool PrepareWorker(WorkerContext&, const ntw2_sweep::WorkerScene&);
+bool PrepareWorker(WorkerContext&, const kntwr_sweep::WorkerScene&);
 size_t HeapBytes(const WorkerContext&);
 // agent is the >=0x680-byte participant copy; nativeScratch is three pointers to
 // cloned headers, only R0 (count@+12,data@+16) is read. Writes copy +10,+B4,+B5

@@ -14,13 +14,13 @@
 #include "native_region_table.h"
 static_assert(sizeof(void*) == 4, "the locality census reads the 32-bit Win32 x86 game");
 #pragma comment(lib, "advapi32.lib")   // EventRegister / EventWrite (mark mode)
-namespace ntw2_brain_locality {
+namespace kntwr_brain_locality {
 namespace {
 using U64 = unsigned long long;
 constexpr U kTypeCount = 16, kEntityBytes = 0x680, kDeepCap = 65536, kMinPtr = 0x10000;
 constexpr U kLineBitWords = (1u << 26) / 32, kPageBitWords = (1u << 20) / 32;
 constexpr U kRepMax = 32, kCal = 2048, kAll = kTypeCount;
-static_assert(kTypeCount == kTypes && kTypeCount + 1 == NTW2_BRAIN_LOC_TYPES, "type rows");
+static_assert(kTypeCount == kTypes && kTypeCount + 1 == KNTWR_BRAIN_LOC_TYPES, "type rows");
 struct TypeSpec { const char* name; U field, count; const uint16_t* offsets; };
 #include "native_brain_locality_sets.inc"
 struct Storage {
@@ -30,12 +30,12 @@ struct Storage {
     U sortA[kDeepCap], sortB[kDeepCap];
     U tuple[kDeepCap][kTypeCount - 1]; // deep stage: object pointers of types 1..15 (post-step loads)
 };
-struct Arm { U64 n, sum, touchSum; double sq, touchSq; U hist[NTW2_BRAIN_LOC_HIST_BINS]; };
+struct Arm { U64 n, sum, touchSum; double sq, touchSq; U hist[KNTWR_BRAIN_LOC_HIST_BINS]; };
 struct Bucket { U64 n, sum; double sq; };
 struct Slot { U line, epoch, flags; };
 
 Storage* g_store;
-ntw2_region::Table g_probe;
+kntwr_region::Table g_probe;
 U g_probeQueries;
 U g_delta, g_member, g_mode, g_shift = kDefaultShift, g_deepShift = kDefaultDeepShift, g_state, g_started, g_configured;
 // Static line tables: per type and object alignment (address & 63) the first hot offset of every distinct line.
@@ -55,10 +55,10 @@ U g_blocksA, g_blocksB;
 U64 g_prefetchIssued;
 U64 g_pairs, g_samePage, g_sameLine, g_sameUnit, g_ascending, g_descending, g_equal, g_unitRuns, g_inversions, g_inversionPairs;
 U64 g_spanSum, g_spanMax, g_entityPagesSum, g_entityPagesMax;
-U g_deltaHist[NTW2_BRAIN_LOC_DELTA_BINS], g_runHist[NTW2_BRAIN_LOC_RUN_BINS];
-U g_rows[kTypeCount + 1][NTW2_BRAIN_LOC_TYPE_WORDS];
-Bucket g_buckets[NTW2_BRAIN_LOC_BUCKETS];
-Arm g_arms[NTW2_BRAIN_LOC_ARMS];
+U g_deltaHist[KNTWR_BRAIN_LOC_DELTA_BINS], g_runHist[KNTWR_BRAIN_LOC_RUN_BINS];
+U g_rows[kTypeCount + 1][KNTWR_BRAIN_LOC_TYPE_WORDS];
+Bucket g_buckets[KNTWR_BRAIN_LOC_BUCKETS];
+Arm g_arms[KNTWR_BRAIN_LOC_ARMS];
 // Calibration and scratch.
 U g_calTscKhz, g_floorX16, g_floorSpreadX16, g_floor, g_calSamples;
 U g_samples[kCal];
@@ -228,7 +228,7 @@ void PrefetchChain(U e) {
 }
 void IssuePrefetch() {
     U cursor, end;
-    if (!ntw2_brain2::WorklistWindow(&cursor, &end)) return;
+    if (!kntwr_brain2::WorklistWindow(&cursor, &end)) return;
     if (g_mode == ModePrefetch1) {
         if (cursor + 4 >= end) return;
         const U next = D(cursor + 4);
@@ -261,7 +261,7 @@ void Account(const U* cur, bool prevValid, bool armA, U64 stepCycles, U64 touchC
         arm.touchSum += t; arm.touchSq += static_cast<double>(t) * static_cast<double>(t);
     }
     if (prevValid && !(split && armA)) {
-        Bucket& b = g_buckets[std::min<U>(c.newer / 4, NTW2_BRAIN_LOC_BUCKETS - 1)];
+        Bucket& b = g_buckets[std::min<U>(c.newer / 4, KNTWR_BRAIN_LOC_BUCKETS - 1)];
         ++b.n; b.sum += v; b.sq += static_cast<double>(v) * static_cast<double>(v);
     }
     ++g_timed;
@@ -357,7 +357,7 @@ void Post(U e, bool timed, bool nextTimed, bool armA, U64 stepCycles, U64 touchC
         g_samePage += ((e ^ g_prevE) >> 12) == 0; g_sameLine += ((e ^ g_prevE) >> 6) == 0;
         g_ascending += e > g_prevE; g_descending += e < g_prevE; g_equal += e == g_prevE;
         if (unit == g_prevUnit) { ++g_sameUnit; ++g_run; }
-        else { if (g_run) { ++g_runHist[std::min<U>(Log2Floor(g_run), NTW2_BRAIN_LOC_RUN_BINS - 1)]; } ++g_unitRuns; g_run = 1; }
+        else { if (g_run) { ++g_runHist[std::min<U>(Log2Floor(g_run), KNTWR_BRAIN_LOC_RUN_BINS - 1)]; } ++g_unitRuns; g_run = 1; }
     } else { g_run = 1; ++g_unitRuns; }
     g_prevE = e; g_prevUnit = unit; g_havePrev = true;
     if (!(timed || nextTimed || g_deep)) { g_prevValid = false; return; }
@@ -394,7 +394,7 @@ __declspec(noinline) bool PostGuarded(U e, bool timed, bool nextTimed, bool armA
         return false;
     }
 }
-// --brain-locality-mark: manifest-free ETW provider (GUID NTW2_BRAIN_LOC_MARK_GUID_TEXT); event Id 1 = stage begin, Id 2 = stage end,
+// --brain-locality-mark: manifest-free ETW provider (GUID KNTWR_BRAIN_LOC_MARK_GUID_TEXT); event Id 1 = stage begin, Id 2 = stage end,
 // payload one U32 stage ordinal (1-based, counted per Start). EventWrite is a no-op without an enabled session.
 const GUID kMarkProvider = {0x6e1c4a2b, 0x5d3f, 0x4a7e, {0x9b, 0x21, 0xc8, 0xf0, 0xa3, 0xd7, 0xe5, 0x14}};
 REGHANDLE g_etw;
@@ -462,7 +462,7 @@ void EndStage() {
     if (g_mode == ModeMark) { if (g_started) { MarkEvent(2, g_stage); ++g_stages; } return; }
     const U64 end = Tsc();
     g_loopCycles += end - g_stageStart; ++g_stages;
-    if (g_run) { ++g_runHist[std::min<U>(Log2Floor(g_run), NTW2_BRAIN_LOC_RUN_BINS - 1)]; g_run = 0; }
+    if (g_run) { ++g_runHist[std::min<U>(Log2Floor(g_run), KNTWR_BRAIN_LOC_RUN_BINS - 1)]; g_run = 0; }
     g_lastStage = g_k; if (g_k > g_maxStage) g_maxStage = g_k;
     if (g_deep && g_store) { DeepAnalyze(); g_deepCycles += Tsc() - end; }
     g_deep = 0;
@@ -521,8 +521,8 @@ void Snapshot(U* w) {
     w[PrefetchIssued] = static_cast<U>(g_prefetchIssued); w[ProbeQueries] = g_probeQueries; w[Faults] = g_faults;
     w[MaxStageMembers] = g_maxStage; w[LastStageMembers] = g_lastStage; w[BlocksA] = g_blocksA; w[BlocksB] = g_blocksB;
     w[BlockSize] = kBlock; w[CalibrationSamples] = g_calSamples;
-    std::memcpy(w + NTW2_BRAIN_LOC_DELTA_BASE, g_deltaHist, sizeof(g_deltaHist));
-    U* sc = w + NTW2_BRAIN_LOC_SCALAR_BASE;
+    std::memcpy(w + KNTWR_BRAIN_LOC_DELTA_BASE, g_deltaHist, sizeof(g_deltaHist));
+    U* sc = w + KNTWR_BRAIN_LOC_SCALAR_BASE;
     Put64(sc + PairsLo, g_pairs); sc[SamePage] = static_cast<U>(g_samePage); sc[SameLine] = static_cast<U>(g_sameLine);
     sc[SameUnit] = static_cast<U>(g_sameUnit); sc[Ascending] = static_cast<U>(g_ascending);
     sc[Descending] = static_cast<U>(g_descending); sc[Equal] = static_cast<U>(g_equal); sc[UnitRuns] = static_cast<U>(g_unitRuns);
@@ -531,17 +531,17 @@ void Snapshot(U* w) {
     sc[SpanKbSum] = static_cast<U>(g_spanSum); sc[SpanKbMax] = static_cast<U>(g_spanMax);
     sc[DeepMembersLo] = static_cast<U>(g_deepMembers);
     sc[EntityPagesSum] = static_cast<U>(g_entityPagesSum); sc[EntityPagesMax] = static_cast<U>(g_entityPagesMax);
-    std::memcpy(w + NTW2_BRAIN_LOC_RUN_BASE, g_runHist, sizeof(g_runHist));
-    std::memcpy(w + NTW2_BRAIN_LOC_TYPE_BASE, g_rows, sizeof(g_rows));
-    for (U b = 0; b < NTW2_BRAIN_LOC_BUCKETS; ++b) {
-        U* q = w + NTW2_BRAIN_LOC_BUCKET_BASE + b * NTW2_BRAIN_LOC_BUCKET_WORDS;
+    std::memcpy(w + KNTWR_BRAIN_LOC_RUN_BASE, g_runHist, sizeof(g_runHist));
+    std::memcpy(w + KNTWR_BRAIN_LOC_TYPE_BASE, g_rows, sizeof(g_rows));
+    for (U b = 0; b < KNTWR_BRAIN_LOC_BUCKETS; ++b) {
+        U* q = w + KNTWR_BRAIN_LOC_BUCKET_BASE + b * KNTWR_BRAIN_LOC_BUCKET_WORDS;
         q[0] = static_cast<U>(g_buckets[b].n); Put64(q + 1, g_buckets[b].sum); PutDouble(q + 3, g_buckets[b].sq);
     }
-    for (U a = 0; a < NTW2_BRAIN_LOC_ARMS; ++a) {
-        U* q = w + NTW2_BRAIN_LOC_ARM_BASE + a * NTW2_BRAIN_LOC_ARM_WORDS;
+    for (U a = 0; a < KNTWR_BRAIN_LOC_ARMS; ++a) {
+        U* q = w + KNTWR_BRAIN_LOC_ARM_BASE + a * KNTWR_BRAIN_LOC_ARM_WORDS;
         q[0] = static_cast<U>(g_arms[a].n); Put64(q + 1, g_arms[a].sum); PutDouble(q + 3, g_arms[a].sq);
         Put64(q + 5, g_arms[a].touchSum); PutDouble(q + 7, g_arms[a].touchSq);
-        std::memcpy(w + NTW2_BRAIN_LOC_HIST_BASE + a * NTW2_BRAIN_LOC_HIST_BINS, g_arms[a].hist, sizeof(g_arms[a].hist));
+        std::memcpy(w + KNTWR_BRAIN_LOC_HIST_BASE + a * KNTWR_BRAIN_LOC_HIST_BINS, g_arms[a].hist, sizeof(g_arms[a].hist));
     }
 }
-} // namespace ntw2_brain_locality
+} // namespace kntwr_brain_locality

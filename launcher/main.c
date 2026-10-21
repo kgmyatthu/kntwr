@@ -1,19 +1,19 @@
 /*
- * ntw2.exe - native launcher for the Napoleon Total War x86 multithreading runtime.
+ * kntwr.exe - native launcher for KNTWR, Kaung's Napoleon Total War Runtime (x86 multithreading runtime for Napoleon Total War).
  *
  * Flow: locate game directory (argument or prompt) -> validate Napoleon.exe (PE32/i386 + SHA-256 pin, streamed, no heap
  * copy) -> validate the adjacent runtime DLL (PE32/i386 DLL, start/stop/state/profile/trace exports, file-mapped, no
  * heap copy) -> refuse if any Napoleon.exe is already running -> CreateProcessW the game -> wait for loader stability ->
  * verify the remote lifetime (image file identity, main module base) -> remote LoadLibraryW of the runtime DLL ->
- * verify the remote module against the local file -> remote ntw2_start(config) -> monitor ntw2_state until game exit,
+ * verify the remote module against the local file -> remote kntwr_start(config) -> monitor kntwr_state until game exit,
  * Ctrl+C or --observe-seconds.  Activation is only reported when the in-process status says ACTIVE with every requested
  * feature bit set. Game files are read-only; outputs are --receipt and its .profile.bin / .ticks.bin companions.
  *
- * Contract with ntw2_runtime.dll (include/ntw2_runtime.h):
- *   ntw2_start  (_ntw2_start@4)  WINAPI thread entry, param = pointer to ntw2_config in the game; returns 0 on success.
- *   ntw2_stop   (_ntw2_stop@4)   WINAPI thread entry; returns 0 on success.
- *   ntw2_state  (DATA export)    an ntw2_status object (128 bytes, sequence-locked); read with ReadProcessMemory.
- *   ntw2_trace  (DATA export)    966688-byte little-endian tick ring (ABI 8, 112 sites + raw gate QPC); live snapshots are observational.
+ * Contract with kntwr_runtime.dll (include/kntwr_runtime.h):
+ *   kntwr_start  (_kntwr_start@4)  WINAPI thread entry, param = pointer to kntwr_config in the game; returns 0 on success.
+ *   kntwr_stop   (_kntwr_stop@4)   WINAPI thread entry; returns 0 on success.
+ *   kntwr_state  (DATA export)    a kntwr_status object (128 bytes, sequence-locked); read with ReadProcessMemory.
+ *   kntwr_trace  (DATA export)    966688-byte little-endian tick ring (ABI 8, 112 sites + raw gate QPC); live snapshots are observational.
  */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -51,29 +51,29 @@
 #include "army/native_army_storm.h"
 #include "collision/native_contact.h"
 
-#include "ntw2_runtime.h"
-#include "profile/ntw2_profile.h"
-#include "core/ntw2_gameplay_patch.h"
+#include "kntwr_runtime.h"
+#include "profile/kntwr_profile.h"
+#include "core/kntwr_gameplay_patch.h"
 #include "census.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
-#error "ntw2.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
+#error "kntwr.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
 #endif
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
 
-#ifndef NTW2_RUNTIME_DLL_NAME
-#define NTW2_RUNTIME_DLL_NAME "ntw2_runtime.dll"
+#ifndef KNTWR_RUNTIME_DLL_NAME
+#define KNTWR_RUNTIME_DLL_NAME "kntwr_runtime.dll"
 #endif
-#define NTW2_WIDEN2(x) L##x
-#define NTW2_WIDEN(x) NTW2_WIDEN2(x)
-#define RUNTIME_DLL_NAME NTW2_WIDEN(NTW2_RUNTIME_DLL_NAME)
+#define KNTWR_WIDEN2(x) L##x
+#define KNTWR_WIDEN(x) KNTWR_WIDEN2(x)
+#define RUNTIME_DLL_NAME KNTWR_WIDEN(KNTWR_RUNTIME_DLL_NAME)
 
 static const wchar_t *g_game_exe = L"Napoleon.exe";   /* --game-exe NAME (diagnostic): the exe file name inside the game folder */
 #define GAME_EXE_NAME (g_game_exe)
-#define NTW2_STEAM_APP_ID L"34030"   /* Total War: NAPOLEON - Definitive Edition (steamapps/appmanifest_34030.acf) */
+#define KNTWR_STEAM_APP_ID L"34030"   /* Total War: NAPOLEON - Definitive Edition (steamapps/appmanifest_34030.acf) */
 #define MAXP 4096u
 
 enum {
@@ -82,7 +82,7 @@ enum {
     EXIT_VALIDATE = 2,     /* game or runtime DLL missing / unsupported */
     EXIT_CONFLICT = 3,     /* a Napoleon.exe is already running */
     EXIT_LAUNCH = 4,       /* CreateProcessW failed or the game died before install */
-    EXIT_INSTALL = 5,      /* remote load / verification / ntw2_start failed */
+    EXIT_INSTALL = 5,      /* remote load / verification / kntwr_start failed */
     EXIT_RUNTIME_FAILED = 6,   /* runtime reported FAILED (or stopped unexpectedly) */
     EXIT_NOT_ACTIVE = 7,   /* armed, but all requested features never became ACTIVE */
     EXIT_INTERRUPTED = 8,  /* Ctrl+C: runtime stop requested and completed */
@@ -134,7 +134,7 @@ static void errsay(const wchar_t *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    vsay(g_herr, g_err_con, L"ntw2: error: ", fmt, ap);
+    vsay(g_herr, g_err_con, L"kntwr: error: ", fmt, ap);
     va_end(ap);
 }
 
@@ -195,12 +195,12 @@ typedef struct Options {
     BOOL brain_quiet;        /* --brain-quiet: performance mode of --brain-parallel; owner runs the original step, no census/QPC bookkeeping. */
     BOOL brain_unit_shadow;  /* --brain-unit-shadow: per-unit brain Stage A; UnitDecision vs each soldier's native step, shadow only. */
     BOOL brain_s0;           /* --brain-s0: S0 attribution timer (BRAIN_S0 clone family, 1/64 RDTSCP strata); diagnostics only. */
-    BOOL brain_locality;     /* --brain-locality: site-6 locality census (NTW2_BRAIN_LOCALITY); original step unchanged, diagnostics only. */
+    BOOL brain_locality;     /* --brain-locality: site-6 locality census (KNTWR_BRAIN_LOCALITY); original step unchanged, diagnostics only. */
     BOOL brain_locality_warm;      /* --brain-locality-warm: cold-vs-warm read-touch A/B (sets --brain-locality). */
     BOOL brain_locality_prefetch;  /* --brain-locality-prefetch: PREFETCHT0 distance-1 A/B blocks (sets --brain-locality). */
     BOOL brain_locality_prefetch2; /* --brain-locality-prefetch2: entity lines two ahead, chain lines one ahead (sets --brain-locality). */
     BOOL brain_locality_mark;      /* --brain-locality-mark: pass-through runner emitting one ETW event per site-6 stage begin/end (sets --brain-locality). */
-    BOOL brain_unit_fatigue;        /* --brain-unit-fatigue: S4 per-unit fatigue pair, live (NTW2_BRAIN_UNIT_FATIGUE). */
+    BOOL brain_unit_fatigue;        /* --brain-unit-fatigue: S4 per-unit fatigue pair, live (KNTWR_BRAIN_UNIT_FATIGUE). */
     BOOL brain_unit_fatigue_shadow; /* --brain-unit-fatigue-shadow: same decision, native results stay, divergence tables (sets both bits). */
     BOOL brain_unit_posture;        /* --brain-unit-posture: S2b per-unit posture, live. */
     BOOL brain_unit_posture_shadow; /* --brain-unit-posture-shadow. */
@@ -208,36 +208,36 @@ typedef struct Options {
     BOOL brain_unit_engage_shadow;  /* --brain-unit-engage-shadow. */
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
-    BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (ntw2_config::va_watch_flags); load-crash forensics only. */
-    BOOL army_storm_census;  /* --army-storm-census: opt-in site-18 storm census (ntw2_config::va_watch_flags NTW2_ARMY_STORM_CENSUS) */
+    BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (kntwr_config::va_watch_flags); load-crash forensics only. */
+    BOOL army_storm_census;  /* --army-storm-census: opt-in site-18 storm census (kntwr_config::va_watch_flags KNTWR_ARMY_STORM_CENSUS) */
     uint32_t army_storm_sample_ms; /* --army-storm-sample-ms N, 1..255 (0 = off): storm-gated sampler threshold, bits 8..15 of va_watch_flags */
-    BOOL tick_pcore;         /* --tick-pcore: pin the routed tick body to P cores on a hybrid CPU (va_watch_flags NTW2_TICK_PCORE) */
-    BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags NTW2_TICK_CORE_AB) */
-    BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (ntw2_config::va_watch_flags NTW2_ARMY_SOLVER_MEMO) */
-    BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (NTW2_ARMY_SOLVER_SHADOW); exclusive with memo */
-    BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (va_watch_flags NTW2_ALLOC_CENSUS) */
-    BOOL alloc_fix;          /* --alloc-fix: live pathfinder subnode reclamation (va_watch_flags NTW2_ALLOC_FIX; mode=2 alone, mode=3 with --alloc-census) */
+    BOOL tick_pcore;         /* --tick-pcore: pin the routed tick body to P cores on a hybrid CPU (va_watch_flags KNTWR_TICK_PCORE) */
+    BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags KNTWR_TICK_CORE_AB) */
+    BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (kntwr_config::va_watch_flags KNTWR_ARMY_SOLVER_MEMO) */
+    BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (KNTWR_ARMY_SOLVER_SHADOW); exclusive with memo */
+    BOOL alloc_census;       /* --alloc-census: process-heap allocation callsite census (va_watch_flags KNTWR_ALLOC_CENSUS) */
+    BOOL alloc_fix;          /* --alloc-fix: live pathfinder subnode reclamation (va_watch_flags KNTWR_ALLOC_FIX; mode=2 alone, mode=3 with --alloc-census) */
     BOOL no_alloc_fix;       /* --no-alloc-fix: opt out of --alloc-fix under --features all */
-    BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (NTW2_ARENA_RELEASE) */
+    BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (KNTWR_ARENA_RELEASE) */
     BOOL no_arena_release;   /* --no-arena-release: opt out of --arena-release under --features all */
-    BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
-    BOOL mounted_officer;    /* --mounted-officer: gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); implied by --features all unless --no-mounted-officer */
+    BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (KNTWR_HEAP_OPTIMIZE) */
+    BOOL mounted_officer;    /* --mounted-officer: gameplay feature, one mount for the officer of units with resolved mount columns (KNTWR_MOUNTED_OFFICER); implied by --features all unless --no-mounted-officer */
     BOOL no_mounted_officer; /* --no-mounted-officer: opt out of --mounted-officer under --features all */
-    BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (NTW2_MOUNTED_OFFICER_WIDEN) */
-    BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (NTW2_ENGAGE_CENSUS); never implied by --features all */
-    BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (NTW2_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
+    BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
+    BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
+    BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
     wchar_t formation_census_csv[MAXP]; /* --formation-census-csv FILE */
-    BOOL formation_census_men; /* --formation-census-men: also write FILE.men.csv (per-man steering detail of a few tracked units; NTW2_FORMATION_CENSUS_MEN) */
+    BOOL formation_census_men; /* --formation-census-men: also write FILE.men.csv (per-man steering detail of a few tracked units; KNTWR_FORMATION_CENSUS_MEN) */
     BOOL no_gameplay_patch;  /* --no-gameplay-patch: stock bytes in memory (diagnostic bisection; the runtime refuses a stock image, so it needs --no-activate) */
-    ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes (the D3D9 swap runs are removed with --no-d3d9-swap) */
+    kntwr_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes (the D3D9 swap runs are removed with --no-d3d9-swap) */
     BOOL gp_filter_listed;   /* an explicit --gameplay-patch-*-runs list was given */
     BOOL no_d3d9_swap;       /* --no-d3d9-swap: leave the patch's Direct3DCreate9 swap (runs 65, 92) stock; default writes the whole patch */
     BOOL steam;              /* --steam: give the game SteamAppId/SteamGameId=34030 (multiplayer, lobbies, overlay); opt-in while the Steam-attached startup crash is open */
     wchar_t game_exe[MAXP];  /* --game-exe NAME */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
-    BOOL loco_clone;         /* --loco-clone: NTW2_LOCO executes admitted movement through the private clone family (ntw2_config::loco_flags) */
+    BOOL loco_clone;         /* --loco-clone: KNTWR_LOCO executes admitted movement through the private clone family (kntwr_config::loco_flags) */
     BOOL loco_parallel;      /* --loco-parallel: closed movement workers; requires loco and --loco-clone */
     BOOL loco_shadow;        /* Owner-thread validation; never selects port results. */
     BOOL loco_owned;         /* --loco-owned-services: opt-in supported active mover path; requires loco, --loco-clone and --loco-parallel */
@@ -250,16 +250,16 @@ typedef struct Options {
     BOOL loco_relink_workers;/* --loco-relink-workers: live cell-partitioned relink apply on the pool; exclusive with shadow */
     BOOL loco_cw_shadow;     /* --loco-cw-shadow: class-wrapper phase 2 computed on workers, native wrapper still runs and is compared; requires --loco-owned-services */
     BOOL loco_cw_workers;    /* --loco-cw-workers: class-wrapper phase 2 live (owner replays child relocations natively); exclusive with shadow */
-    BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (ntw2_config::ai_deferred) */
-    uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..NTW2_AI_DEFERRED_MAX_K (default NTW2_AI_DEFERRED_DEFAULT_K) */
-    uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default NTW2_AI_DEFERRED_DEFAULT_BUDGET) */
-    uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: NTW2_AI_CTRL_* (ntw2_config::ai_ctrl_flags bits 0..3) */
-    BOOL ai_claim_once;      /* --ai-claim-once: ntw2_config::ai_ctrl_flags bit 8 (NTW2_AI_CLAIM_ONCE) */
-    BOOL ai_claim_once_census; /* --ai-claim-once-census: bit 9 (NTW2_AI_CLAIM_ONCE_CENSUS) */
-    BOOL brain_target_cull_shadow; /* --brain-target-cull-shadow: bit 10 (NTW2_AI_TARGET_CULL_SHADOW) */
-    BOOL brain_target_cull;  /* --brain-target-cull: bit 11 (NTW2_AI_TARGET_CULL) */
-    BOOL brain_retarget_jitter; /* --brain-retarget-jitter: bit 12 (NTW2_AI_RETARGET_JITTER); opt-in only, never implied by --features all */
-    uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (ntw2_config::ai_prepass_flags) */
+    BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (kntwr_config::ai_deferred) */
+    uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..KNTWR_AI_DEFERRED_MAX_K (default KNTWR_AI_DEFERRED_DEFAULT_K) */
+    uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default KNTWR_AI_DEFERRED_DEFAULT_BUDGET) */
+    uint32_t ai_ctrl_flags;  /* --ai-ctrl-census/-histogram/-geometry/-verify: KNTWR_AI_CTRL_* (kntwr_config::ai_ctrl_flags bits 0..3) */
+    BOOL ai_claim_once;      /* --ai-claim-once: kntwr_config::ai_ctrl_flags bit 8 (KNTWR_AI_CLAIM_ONCE) */
+    BOOL ai_claim_once_census; /* --ai-claim-once-census: bit 9 (KNTWR_AI_CLAIM_ONCE_CENSUS) */
+    BOOL brain_target_cull_shadow; /* --brain-target-cull-shadow: bit 10 (KNTWR_AI_TARGET_CULL_SHADOW) */
+    BOOL brain_target_cull;  /* --brain-target-cull: bit 11 (KNTWR_AI_TARGET_CULL) */
+    BOOL brain_retarget_jitter; /* --brain-retarget-jitter: bit 12 (KNTWR_AI_RETARGET_JITTER); opt-in only, never implied by --features all */
+    uint32_t ai_prepass_flags; /* --ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-census, cap metres in bits 16..31 (--ai-spiral-cap-m) (kntwr_config::ai_prepass_flags) */
     uint32_t observe_s;       /* 0 = until the game exits */
     uint32_t inject_timeout_s;
     BOOL activate;
@@ -271,12 +271,12 @@ typedef struct Options {
 
 static uint32_t loco_flags_from(const Options *o)
 {
-    return (o->loco_clone ? NTW2_LOCO_CLONE : 0u) | (o->loco_parallel ? NTW2_LOCO_PARALLEL : 0u) | (o->loco_shadow ? NTW2_LOCO_SHADOW : 0u) |
-           (o->loco_owned ? NTW2_LOCO_OWNED_SERVICES : 0u) | (o->loco_quiet ? NTW2_LOCO_QUIET : 0u) |
-           ((o->loco_grid || o->loco_grid_verify) ? NTW2_LOCO_GRID : 0u) | (o->loco_grid_verify ? NTW2_LOCO_GRID_VERIFY : 0u) |
-           (o->grid_probation ? NTW2_LOCO_GRID_PROBATION : 0u) | (o->loco_grid_incremental ? NTW2_LOCO_GRID_INCREMENTAL : 0u) |
-           (o->loco_relink_shadow ? NTW2_LOCO_RELINK_SHADOW : 0u) | (o->loco_relink_workers ? NTW2_LOCO_RELINK_WORKERS : 0u) |
-           (o->loco_cw_shadow ? NTW2_LOCO_CW_SHADOW : 0u) | (o->loco_cw_workers ? NTW2_LOCO_CW_WORKERS : 0u);
+    return (o->loco_clone ? KNTWR_LOCO_CLONE : 0u) | (o->loco_parallel ? KNTWR_LOCO_PARALLEL : 0u) | (o->loco_shadow ? KNTWR_LOCO_SHADOW : 0u) |
+           (o->loco_owned ? KNTWR_LOCO_OWNED_SERVICES : 0u) | (o->loco_quiet ? KNTWR_LOCO_QUIET : 0u) |
+           ((o->loco_grid || o->loco_grid_verify) ? KNTWR_LOCO_GRID : 0u) | (o->loco_grid_verify ? KNTWR_LOCO_GRID_VERIFY : 0u) |
+           (o->grid_probation ? KNTWR_LOCO_GRID_PROBATION : 0u) | (o->loco_grid_incremental ? KNTWR_LOCO_GRID_INCREMENTAL : 0u) |
+           (o->loco_relink_shadow ? KNTWR_LOCO_RELINK_SHADOW : 0u) | (o->loco_relink_workers ? KNTWR_LOCO_RELINK_WORKERS : 0u) |
+           (o->loco_cw_shadow ? KNTWR_LOCO_CW_SHADOW : 0u) | (o->loco_cw_workers ? KNTWR_LOCO_CW_WORKERS : 0u);
 }
 
 /* Quiet overrides owner shadow comparisons even when --loco-shadow is also supplied. */
@@ -293,21 +293,21 @@ typedef struct DllInfo {
 
 typedef struct TickTrace {
     /* Two slots in one allocation: a partial remote read must not destroy the last complete copy. */
-    ntw2_trace_ring copies[2];
+    kntwr_trace_ring copies[2];
     uint32_t current;
     BOOL have, finalized, analyzed;
     uint32_t count, first_tick, last_tick, duration[4], interval[4], over100, over150;
     uint32_t mod100[10], mod10[10], top[16], top_count;
     uint64_t duration_sum, manager_sum, ballistics_sum, path_sum;
-    uint64_t site_sum[NTW2_TIMED_SITES], site_calls[NTW2_TIMED_SITES];
+    uint64_t site_sum[KNTWR_TIMED_SITES], site_calls[KNTWR_TIMED_SITES];
     uint32_t timed_ticks;
     int64_t remainder_sum;
-    uint32_t scratch[NTW2_TRACE_ENTRIES];
+    uint32_t scratch[KNTWR_TRACE_ENTRIES];
 } TickTrace;
 
 #define TICK_LOG_MAX_ENTRIES 200000u
 typedef struct TickLog {
-    ntw2_trace_entry *entries;
+    kntwr_trace_entry *entries;
     uint32_t count, capacity, written;
     uint64_t lost;
     BOOL failed;
@@ -329,7 +329,7 @@ typedef struct Run {
     char mss32_sha[65];
     uint64_t mss32_size;
     uint32_t mss32_base;
-    ntw2_gp_report gp_rep, mss32_rep;
+    kntwr_gp_report gp_rep, mss32_rep;
     HANDLE exe_file;   /* held share-read-only from validation until the game is set up: no swap/modify window */
     HANDLE dll_file;
     DllInfo dll;
@@ -337,9 +337,9 @@ typedef struct Run {
     DWORD pid;
     FILETIME created;
     uint32_t exe_base, dll_base, state_addr;
-    ntw2_config cfg;
-    ntw2_status last;
-    uint32_t crash_tag;   /* acknowledgement tag of the last crash_words state printed (see ntw2_runtime.h crash_words[31]) */
+    kntwr_config cfg;
+    kntwr_status last;
+    uint32_t crash_tag;   /* acknowledgement tag of the last crash_words state printed (see kntwr_runtime.h crash_words[31]) */
     BOOL have_status, ever_armed, ever_full, stop_requested, stop_confirmed;
     BOOL game_exited;
     DWORD game_exit;
@@ -352,12 +352,12 @@ typedef struct Run {
     BOOL remote_leaked;   /* a remote thread timed out; its memory is intentionally never freed */
     const wchar_t *outcome;
     FILETIME t_start;
-    ntw2_profile_status profile;
+    kntwr_profile_status profile;
     uint32_t *profile_arrays;
     BOOL have_profile;
     TickTrace *trace;
     TickLog tick_log;
-    uint32_t overlay_words[NTW2_OVERLAY_WORDS];
+    uint32_t overlay_words[KNTWR_OVERLAY_WORDS];
     struct OverlayMod {
         wchar_t name[64];
         uint32_t base, size;
@@ -399,36 +399,36 @@ static void hex(const uint8_t *b, size_t n, char *out)
 static const wchar_t *phase_name(uint32_t p)
 {
     switch (p) {
-    case NTW2_IDLE: return L"IDLE";
-    case NTW2_VERIFYING: return L"VERIFYING";
-    case NTW2_WAITING_BATTLE: return L"WAITING_BATTLE";
-    case NTW2_ACTIVATING: return L"ACTIVATING";
-    case NTW2_ACTIVE: return L"ACTIVE";
-    case NTW2_RESTORING: return L"RESTORING";
-    case NTW2_FAILED: return L"FAILED";
-    case NTW2_STOPPED: return L"STOPPED";
+    case KNTWR_IDLE: return L"IDLE";
+    case KNTWR_VERIFYING: return L"VERIFYING";
+    case KNTWR_WAITING_BATTLE: return L"WAITING_BATTLE";
+    case KNTWR_ACTIVATING: return L"ACTIVATING";
+    case KNTWR_ACTIVE: return L"ACTIVE";
+    case KNTWR_RESTORING: return L"RESTORING";
+    case KNTWR_FAILED: return L"FAILED";
+    case KNTWR_STOPPED: return L"STOPPED";
     default: return L"UNKNOWN";
     }
 }
 
 static const struct { uint32_t bit; const wchar_t *name; const char *jname; } k_features[] = {
-    { NTW2_PATH, L"path", "path" },
-    { NTW2_FORMATION, L"formation", "formation" },
-    { NTW2_BALLISTICS, L"ballistics", "ballistics" },
-    { NTW2_AI_ASYNC, L"ai", "ai" },
-    { NTW2_AI_CTRL, L"ai_ctrl", "ai_ctrl" },
-    { NTW2_BATCH64, L"batch64", "batch64" },
-    { NTW2_BRAIN2, L"brain2", "brain2" },
-    { NTW2_VISUAL, L"visual", "visual" },
-    { NTW2_COLLIDE, L"collide", "collide" },
-    { NTW2_COLLIDE_LOD, L"collide_lod", "collide_lod" },
-    { NTW2_PROFILE, L"profile", "profile" },
-    { NTW2_BRAIN, L"brain", "brain" },
-    { NTW2_LOCO, L"loco", "loco" },
-    { NTW2_GRID_CENSUS, L"grid_census", "grid_census" },
-    { NTW2_AI_CENSUS, L"ai_census", "ai_census" },
-    { NTW2_AI_ASYNC2, L"ai_async2", "ai_async2" },
-    { NTW2_ARMY_UNIT_SHADOW, L"army_unit_shadow", "army_unit_shadow" },
+    { KNTWR_PATH, L"path", "path" },
+    { KNTWR_FORMATION, L"formation", "formation" },
+    { KNTWR_BALLISTICS, L"ballistics", "ballistics" },
+    { KNTWR_AI_ASYNC, L"ai", "ai" },
+    { KNTWR_AI_CTRL, L"ai_ctrl", "ai_ctrl" },
+    { KNTWR_BATCH64, L"batch64", "batch64" },
+    { KNTWR_BRAIN2, L"brain2", "brain2" },
+    { KNTWR_VISUAL, L"visual", "visual" },
+    { KNTWR_COLLIDE, L"collide", "collide" },
+    { KNTWR_COLLIDE_LOD, L"collide_lod", "collide_lod" },
+    { KNTWR_PROFILE, L"profile", "profile" },
+    { KNTWR_BRAIN, L"brain", "brain" },
+    { KNTWR_LOCO, L"loco", "loco" },
+    { KNTWR_GRID_CENSUS, L"grid_census", "grid_census" },
+    { KNTWR_AI_CENSUS, L"ai_census", "ai_census" },
+    { KNTWR_AI_ASYNC2, L"ai_async2", "ai_async2" },
+    { KNTWR_ARMY_UNIT_SHADOW, L"army_unit_shadow", "army_unit_shadow" },
 };
 #define NFEATURES (sizeof k_features / sizeof k_features[0])
 
@@ -594,7 +594,7 @@ static const wchar_t *find_exports(rva_fn f, void *ctx, uint32_t dir_rva, uint32
     return found == n ? NULL : L"a required export is missing";
 }
 
-static const char *const k_export_names[5] = { "ntw2_start", "ntw2_stop", "ntw2_state", "ntw2_profile", "ntw2_trace" };
+static const char *const k_export_names[5] = { "kntwr_start", "kntwr_stop", "kntwr_state", "kntwr_profile", "kntwr_trace" };
 
 typedef struct LocalCtx {
     const uint8_t *v;
@@ -656,33 +656,33 @@ static const wchar_t *parse_dll_view(const uint8_t *v, size_t n, DllInfo *out)
     why = find_exports(local_rva, &x, ed->VirtualAddress, ed->Size, k_export_names, 5, rvas);
     if (why) return why;
     s = section_of(&x, rvas[0]);
-    if (!s || !(s->Characteristics & IMAGE_SCN_MEM_EXECUTE)) return L"ntw2_start is not in an executable section";
+    if (!s || !(s->Characteristics & IMAGE_SCN_MEM_EXECUTE)) return L"kntwr_start is not in an executable section";
     s = section_of(&x, rvas[1]);
-    if (!s || !(s->Characteristics & IMAGE_SCN_MEM_EXECUTE)) return L"ntw2_stop is not in an executable section";
+    if (!s || !(s->Characteristics & IMAGE_SCN_MEM_EXECUTE)) return L"kntwr_stop is not in an executable section";
     s = section_of(&x, rvas[2]);
     if (!s || (s->Characteristics & IMAGE_SCN_MEM_EXECUTE) || !(s->Characteristics & IMAGE_SCN_MEM_READ))
-        return L"ntw2_state is not in a readable data section";
+        return L"kntwr_state is not in a readable data section";
     {
         uint32_t ext = s->Misc.VirtualSize > s->SizeOfRawData ? s->Misc.VirtualSize : s->SizeOfRawData;
-        if ((uint64_t)rvas[2] + sizeof(ntw2_status) > (uint64_t)s->VirtualAddress + ext)
-            return L"ntw2_state is smaller than the ntw2_status ABI";
+        if ((uint64_t)rvas[2] + sizeof(kntwr_status) > (uint64_t)s->VirtualAddress + ext)
+            return L"kntwr_state is smaller than the kntwr_status ABI";
     }
     s = section_of(&x, rvas[3]);
     if (!s || (s->Characteristics & IMAGE_SCN_MEM_EXECUTE) || !(s->Characteristics & IMAGE_SCN_MEM_READ))
-        return L"ntw2_profile is not in a readable data section";
+        return L"kntwr_profile is not in a readable data section";
     {
         uint32_t ext = s->Misc.VirtualSize > s->SizeOfRawData ? s->Misc.VirtualSize : s->SizeOfRawData;
-        if ((uint64_t)rvas[3] + sizeof(ntw2_profile_status) > (uint64_t)s->VirtualAddress + ext)
-            return L"ntw2_profile is smaller than the profile ABI";
+        if ((uint64_t)rvas[3] + sizeof(kntwr_profile_status) > (uint64_t)s->VirtualAddress + ext)
+            return L"kntwr_profile is smaller than the profile ABI";
     }
     s = section_of(&x, rvas[4]);
     if (!s || (s->Characteristics & IMAGE_SCN_MEM_EXECUTE) || !(s->Characteristics & IMAGE_SCN_MEM_READ))
-        return L"ntw2_trace is not in a readable data section";
+        return L"kntwr_trace is not in a readable data section";
     {
         uint32_t ext = s->Misc.VirtualSize > s->SizeOfRawData ? s->Misc.VirtualSize : s->SizeOfRawData;
-        if ((uint64_t)rvas[4] + sizeof(ntw2_trace_ring) > (uint64_t)s->VirtualAddress + ext ||
-            (uint64_t)rvas[4] + sizeof(ntw2_trace_ring) > nt->OptionalHeader.SizeOfImage)
-            return L"ntw2_trace is smaller than the trace ABI";
+        if ((uint64_t)rvas[4] + sizeof(kntwr_trace_ring) > (uint64_t)s->VirtualAddress + ext ||
+            (uint64_t)rvas[4] + sizeof(kntwr_trace_ring) > nt->OptionalHeader.SizeOfImage)
+            return L"kntwr_trace is smaller than the trace ABI";
     }
     out->ts = nt->FileHeader.TimeDateStamp;
     out->size_of_image = nt->OptionalHeader.SizeOfImage;
@@ -860,19 +860,19 @@ static BOOL validate_game(Run *r)
         report_hash_failure(L"Napoleon.exe", we, ne);
         return FALSE;
     }
-    if (_stricmp(r->exe_sha, NTW2_STOCK_IMAGE_SHA256) == 0) {
+    if (_stricmp(r->exe_sha, KNTWR_STOCK_IMAGE_SHA256) == 0) {
         r->exe_is_stock = TRUE;
         say(L"Napoleon.exe: stock (gameplay patch applied in memory; x86 PE32, %I64u bytes, SHA-256 match).\n",
             (unsigned long long)r->exe_size);
-    } else if (_stricmp(r->exe_sha, NTW2_IMAGE_SHA256) == 0) {
+    } else if (_stricmp(r->exe_sha, KNTWR_IMAGE_SHA256) == 0) {
         r->exe_is_stock = FALSE;
         say(L"Napoleon.exe: already patched on disk (in-memory gameplay patch skipped; x86 PE32, %I64u bytes, SHA-256 match).\n",
             (unsigned long long)r->exe_size);
     } else {
         wchar_t got[65], want_s[65], want_p[65];
         MultiByteToWideChar(CP_ACP, 0, r->exe_sha, -1, got, 65);
-        MultiByteToWideChar(CP_ACP, 0, NTW2_STOCK_IMAGE_SHA256, -1, want_s, 65);
-        MultiByteToWideChar(CP_ACP, 0, NTW2_IMAGE_SHA256, -1, want_p, 65);
+        MultiByteToWideChar(CP_ACP, 0, KNTWR_STOCK_IMAGE_SHA256, -1, want_s, 65);
+        MultiByteToWideChar(CP_ACP, 0, KNTWR_IMAGE_SHA256, -1, want_p, 65);
         errsay(L"\"%ls\" is not a supported Napoleon.exe.\n  size   : %I64u bytes\n  sha256 : %ls\n  stock  : %ls\n  patched: %ls\n"
                L"Only the stock Steam image or the pinned patched image is supported; the game files were not modified.\n",
                r->exe_path, (unsigned long long)r->exe_size, got, want_s, want_p);
@@ -891,10 +891,10 @@ static BOOL validate_game(Run *r)
             if (!sha256_handle(mf, r->mss32_sha, &r->mss32_size, &we, &ne)) {
                 r->mss32_sha[0] = 0;
                 say(L"mss32.dll: hashing failed; treated as unknown, the in-memory audio patch will be skipped.\n");
-            } else if (_stricmp(r->mss32_sha, NTW2_STOCK_MSS32_SHA256) == 0) {
+            } else if (_stricmp(r->mss32_sha, KNTWR_STOCK_MSS32_SHA256) == 0) {
                 r->mss32_state = MSS_STOCK;
                 say(L"mss32.dll: stock (audio DSP patch applied in memory; %I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
-            } else if (_stricmp(r->mss32_sha, NTW2_MSS32_SHA256) == 0) {
+            } else if (_stricmp(r->mss32_sha, KNTWR_MSS32_SHA256) == 0) {
                 r->mss32_state = MSS_PATCHED;
                 say(L"mss32.dll: already patched on disk (%I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
             } else {
@@ -922,7 +922,7 @@ static BOOL validate_runtime(Run *r)
     BOOL ok = FALSE;
 
     if (GetModuleFileNameW(NULL, self, MAXP) == 0 || GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-        win_fail(L"locating ntw2.exe", GetLastError());
+        win_fail(L"locating kntwr.exe", GetLastError());
         return FALSE;
     }
     slash = wcsrchr(self, L'\\');
@@ -934,7 +934,7 @@ static BOOL validate_runtime(Run *r)
         DWORD e = GetLastError();
         r->dll_file = NULL;
         if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)
-            errsay(L"runtime DLL \"%ls\" was not found next to ntw2.exe.\n", r->dll_path);
+            errsay(L"runtime DLL \"%ls\" was not found next to kntwr.exe.\n", r->dll_path);
         else win_fail(L"opening the runtime DLL", e);
         return FALSE;
     }
@@ -957,7 +957,7 @@ static BOOL validate_runtime(Run *r)
         report_hash_failure(L"the runtime DLL", we, ne);
         return FALSE;
     }
-    say(L"Runtime DLL verified: %ls (x86 DLL; ntw2_start/ntw2_stop/ntw2_state exported; %I64u bytes).\n", r->dll_path,
+    say(L"Runtime DLL verified: %ls (x86 DLL; kntwr_start/kntwr_stop/kntwr_state exported; %I64u bytes).\n", r->dll_path,
         (unsigned long long)r->dll_size);
     ok = TRUE;
     return ok;
@@ -1084,28 +1084,28 @@ static BOOL overlay_mod_cb(const MODULEENTRY32W *me, void *c)
     uint32_t size = me->modBaseSize;
     BOOL nv_umd = is_nv_umd_module(me->szModule, me->szExePath);
     BOOL foreign_hook = !nv_umd && is_foreign_hook_module(r, me->szModule, me->szExePath);
-    ++r->overlay_words[NTW2_OVL_TOTAL_MODULES];
+    ++r->overlay_words[KNTWR_OVL_TOTAL_MODULES];
     if (!nv_umd && !foreign_hook) return FALSE;
     /* A foreign or non-ASLR hook DLL mapped below tbb.dll (0x10000000) splits the lower-256 MiB hole between Napoleon.exe/tbbmalloc.dll and tbb.dll. */
     {
         BOOL splits_low = (base >= 0x01580000u && base < 0x10000000u);
-        if (splits_low) ++r->overlay_words[NTW2_OVL_SPLITS_LOW_HOLE_COUNT];
+        if (splits_low) ++r->overlay_words[KNTWR_OVL_SPLITS_LOW_HOLE_COUNT];
         if (nv_umd) {
-            ++r->overlay_words[NTW2_OVL_NV_UMD_MODULES];
-            r->overlay_words[NTW2_OVL_NV_UMD_IMAGE_BYTES] += size;
+            ++r->overlay_words[KNTWR_OVL_NV_UMD_MODULES];
+            r->overlay_words[KNTWR_OVL_NV_UMD_IMAGE_BYTES] += size;
         } else {
-            ++r->overlay_words[NTW2_OVL_FOREIGN_HOOK_MODULES];
-            r->overlay_words[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] += size;
+            ++r->overlay_words[KNTWR_OVL_FOREIGN_HOOK_MODULES];
+            r->overlay_words[KNTWR_OVL_FOREIGN_HOOK_IMAGE_BYTES] += size;
         }
         if (_wcsicmp(me->szModule, L"RTSSHooks.dll") == 0) {
-            r->overlay_words[NTW2_OVL_RTSS_BASE] = base;
-            r->overlay_words[NTW2_OVL_RTSS_SIZE] = size;
+            r->overlay_words[KNTWR_OVL_RTSS_BASE] = base;
+            r->overlay_words[KNTWR_OVL_RTSS_SIZE] = size;
         } else if (_wcsicmp(me->szModule, L"nvspcap.dll") == 0) {
-            r->overlay_words[NTW2_OVL_NVSPCAP_BASE] = base;
-            r->overlay_words[NTW2_OVL_NVSPCAP_SIZE] = size;
+            r->overlay_words[KNTWR_OVL_NVSPCAP_BASE] = base;
+            r->overlay_words[KNTWR_OVL_NVSPCAP_SIZE] = size;
         } else if (_wcsicmp(me->szModule, L"gameoverlayrenderer.dll") == 0) {
-            r->overlay_words[NTW2_OVL_STEAM_OVERLAY_BASE] = base;
-            r->overlay_words[NTW2_OVL_STEAM_OVERLAY_SIZE] = size;
+            r->overlay_words[KNTWR_OVL_STEAM_OVERLAY_BASE] = base;
+            r->overlay_words[KNTWR_OVL_STEAM_OVERLAY_SIZE] = size;
         }
         if (r->overlay_mod_count < 32u) {
             struct OverlayMod *m = &r->overlay_mods[r->overlay_mod_count++];
@@ -1170,8 +1170,8 @@ static void scan_overlay_threads(Run *r)
         } while (Thread32Next(snap, &te));
     }
     CloseHandle(snap);
-    r->overlay_words[NTW2_OVL_NV_DRIVER_THREADS] = nv_threads;
-    r->overlay_words[NTW2_OVL_NV_DRIVER_STACK_BYTES] = nv_stack_bytes;
+    r->overlay_words[KNTWR_OVL_NV_DRIVER_THREADS] = nv_threads;
+    r->overlay_words[KNTWR_OVL_NV_DRIVER_STACK_BYTES] = nv_stack_bytes;
 }
 
 static void print_overlay_report(const Run *r);
@@ -1180,13 +1180,13 @@ static void capture_overlay_report(Run *r, BOOL print)
     DWORD err = 0;
     memset(r->overlay_words, 0, sizeof r->overlay_words);
     r->overlay_mod_count = 0;
-    r->overlay_words[NTW2_OVL_VERSION] = 1u;
+    r->overlay_words[KNTWR_OVL_VERSION] = 1u;
     module_walk(r->pid, overlay_mod_cb, r, &err);
     scan_overlay_threads(r);
-    r->overlay_words[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] =
-        r->overlay_words[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] +
-        r->overlay_words[NTW2_OVL_NV_UMD_IMAGE_BYTES] +
-        r->overlay_words[NTW2_OVL_NV_DRIVER_STACK_BYTES];
+    r->overlay_words[KNTWR_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] =
+        r->overlay_words[KNTWR_OVL_FOREIGN_HOOK_IMAGE_BYTES] +
+        r->overlay_words[KNTWR_OVL_NV_UMD_IMAGE_BYTES] +
+        r->overlay_words[KNTWR_OVL_NV_DRIVER_STACK_BYTES];
     r->have_overlay = TRUE;
     memcpy(r->last.overlay_words, r->overlay_words, sizeof r->overlay_words);
     if (print) print_overlay_report(r);
@@ -1325,27 +1325,27 @@ static int remote_call(Run *r, uint32_t fn, uint32_t arg, DWORD timeout_ms, DWOR
 }
 
 /* ------------------------------------------------------------------------------------------------ status */
-static BOOL read_status(Run *r, ntw2_status *out, const wchar_t **why)
+static BOOL read_status(Run *r, kntwr_status *out, const wchar_t **why)
 {
     int i;
     for (i = 0; i < 16; ++i) {
         uint32_t s1, s2;
-        if (!remote_read(r->proc, r->state_addr, &s1, 4)) { *why = L"ReadProcessMemory on ntw2_state failed"; return FALSE; }
+        if (!remote_read(r->proc, r->state_addr, &s1, 4)) { *why = L"ReadProcessMemory on kntwr_state failed"; return FALSE; }
         if (s1 & 1) { Sleep(0); continue; }
-        if (!remote_read(r->proc, r->state_addr, out, sizeof *out)) { *why = L"ReadProcessMemory on ntw2_state failed"; return FALSE; }
-        if (!remote_read(r->proc, r->state_addr, &s2, 4)) { *why = L"ReadProcessMemory on ntw2_state failed"; return FALSE; }
+        if (!remote_read(r->proc, r->state_addr, out, sizeof *out)) { *why = L"ReadProcessMemory on kntwr_state failed"; return FALSE; }
+        if (!remote_read(r->proc, r->state_addr, &s2, 4)) { *why = L"ReadProcessMemory on kntwr_state failed"; return FALSE; }
         if (s1 != s2 || out->sequence != s1) continue;
-        if (out->abi != NTW2_ABI || out->size != sizeof *out) {
-            *why = L"ntw2_state ABI/size does not match this launcher";
+        if (out->abi != KNTWR_ABI || out->size != sizeof *out) {
+            *why = L"kntwr_state ABI/size does not match this launcher";
             return FALSE;
         }
         return TRUE;
     }
-    *why = L"no coherent ntw2_state snapshot (sequence kept changing)";
+    *why = L"no coherent kntwr_state snapshot (sequence kept changing)";
     return FALSE;
 }
 
-static void print_status(const ntw2_status *s, uint32_t req)
+static void print_status(const kntwr_status *s, uint32_t req)
 {
     wchar_t a[192], m[192];
     mask_str(s->active_mask, a, 192);
@@ -1355,7 +1355,7 @@ static void print_status(const ntw2_status *s, uint32_t req)
         (unsigned long)s->error, (unsigned long)s->error_detail, (unsigned long)s->probe);
 }
 
-static void print_counters(const ntw2_status *s)
+static void print_counters(const kntwr_status *s)
 {
     say(L"  counters: path=%lu formation=%lu ballistic=%lu collision_cache_hits=%lu worker_chunks=%lu "
         L"storage=%lu retained=%lu bytes\n"
@@ -1366,8 +1366,8 @@ static void print_counters(const ntw2_status *s)
         (unsigned long)s->path_fallbacks, (unsigned long)s->path_refused, (unsigned long)s->formation_epochs,
         (unsigned long)s->formation_refused, (unsigned long)s->ballistic_stages);
 }
-/* In-process crash capture (ntw2_status::crash_words, layout in ntw2_runtime.h). Prints nothing when no exception was recorded. */
-static void print_crash(const ntw2_status *s)
+/* In-process crash capture (kntwr_status::crash_words, layout in kntwr_runtime.h). Prints nothing when no exception was recorded. */
+static void print_crash(const kntwr_status *s)
 {
     static const wchar_t *const modules[4] = {L"main image", L"runtime dll", L"private clone", L"other"};
     static const wchar_t *const accesses[4] = {L"read", L"write", L"execute", L"n/a"};
@@ -1385,7 +1385,7 @@ static void print_crash(const ntw2_status *s)
         (unsigned long)c[6], (st >> 4) & 1u, (st >> 5) & 1u, (st >> 6) & 1u, (st >> 7) & 1u, (st >> 8) & 1u,
         (st >> 11) & 1u, dump_states[dump_state], dumps, (unsigned long)(st >> 16));
     if (dump_state == 2u && dumps)
-        say(L" file=F:\\NTW2\\translated_code\\analysis\\crashdumps\\ntw2-%lu-%u.dmp", (unsigned long)s->pid, dumps - 1u);
+        say(L" file=F:\\NTW2\\translated_code\\analysis\\crashdumps\\kntwr-%lu-%u.dmp", (unsigned long)s->pid, dumps - 1u);
     say(L" stack=[");
     for (i = 8; i < 24 && c[i]; ++i) say(L"%ls%08lX", i > 8 ? L" " : L"", (unsigned long)c[i]);
     say(L"]\n");
@@ -1394,35 +1394,35 @@ static void print_crash(const ntw2_status *s)
         (unsigned long)c[29], (unsigned long)c[30]);
 }
 
-/* --va-watch (ntw2_status::va_watch_words, layout enum ntw2_va_word). One line of the current sample; `ring` adds the last
-   NTW2_VA_RING_ENTRIES seconds oldest-first (the curve before a crash). Prints nothing when the sampler never ran. */
-static void print_va_watch(const ntw2_status *s, BOOL ring)
+/* --va-watch (kntwr_status::va_watch_words, layout enum kntwr_va_word). One line of the current sample; `ring` adds the last
+   KNTWR_VA_RING_ENTRIES seconds oldest-first (the curve before a crash). Prints nothing when the sampler never ran. */
+static void print_va_watch(const kntwr_status *s, BOOL ring)
 {
     static const wchar_t *const phases[9] = {L"idle", L"verifying", L"waiting", L"activating", L"active", L"restoring", L"failed", L"stopped", L"?"};
     const uint32_t *v = s->va_watch_words;
     unsigned i;
-    if (!v[NTW2_VA_SAMPLES]) return;
+    if (!v[KNTWR_VA_SAMPLES]) return;
     say(L"va: avail=%lu MiB (min %lu MiB at %lu s, %ls) largest_free=%lu MiB (min %lu) free_regions=%lu reserved=%lu MiB "
         L"committed=%lu MiB image=%lu MiB mapped=%lu MiB samples=%lu\n",
-        (unsigned long)(((uint64_t)v[NTW2_VA_AVAIL_HI] << 32 | v[NTW2_VA_AVAIL_LO]) >> 20),
-        (unsigned long)(((uint64_t)v[NTW2_VA_MIN_AVAIL_HI] << 32 | v[NTW2_VA_MIN_AVAIL_LO]) >> 20),
-        (unsigned long)v[NTW2_VA_MIN_UPTIME_S], phases[v[NTW2_VA_MIN_PHASE] < 8u ? v[NTW2_VA_MIN_PHASE] : 8u],
-        (unsigned long)v[NTW2_VA_LARGEST_FREE], (unsigned long)v[NTW2_VA_MIN_LARGEST_FREE], (unsigned long)v[NTW2_VA_FREE_REGIONS],
-        (unsigned long)v[NTW2_VA_RESERVED_MIB], (unsigned long)v[NTW2_VA_COMMITTED_MIB], (unsigned long)v[NTW2_VA_IMAGE_MIB],
-        (unsigned long)v[NTW2_VA_MAPPED_MIB], (unsigned long)v[NTW2_VA_SAMPLES]);
+        (unsigned long)(((uint64_t)v[KNTWR_VA_AVAIL_HI] << 32 | v[KNTWR_VA_AVAIL_LO]) >> 20),
+        (unsigned long)(((uint64_t)v[KNTWR_VA_MIN_AVAIL_HI] << 32 | v[KNTWR_VA_MIN_AVAIL_LO]) >> 20),
+        (unsigned long)v[KNTWR_VA_MIN_UPTIME_S], phases[v[KNTWR_VA_MIN_PHASE] < 8u ? v[KNTWR_VA_MIN_PHASE] : 8u],
+        (unsigned long)v[KNTWR_VA_LARGEST_FREE], (unsigned long)v[KNTWR_VA_MIN_LARGEST_FREE], (unsigned long)v[KNTWR_VA_FREE_REGIONS],
+        (unsigned long)v[KNTWR_VA_RESERVED_MIB], (unsigned long)v[KNTWR_VA_COMMITTED_MIB], (unsigned long)v[KNTWR_VA_IMAGE_MIB],
+        (unsigned long)v[KNTWR_VA_MAPPED_MIB], (unsigned long)v[KNTWR_VA_SAMPLES]);
     if (!ring) return;
     say(L"  va ring (uptime s: avail MiB / largest free MiB / phase), oldest first:");
-    for (i = 0; i < NTW2_VA_RING_ENTRIES; ++i) {
-        const unsigned slot = (v[NTW2_VA_RING_NEXT] + i) % NTW2_VA_RING_ENTRIES;
-        const uint32_t *e = v + NTW2_VA_RING_BASE + slot * NTW2_VA_RING_WORDS;
-        if (i < NTW2_VA_RING_ENTRIES - (v[NTW2_VA_RING_NEXT] < NTW2_VA_RING_ENTRIES ? v[NTW2_VA_RING_NEXT] : NTW2_VA_RING_ENTRIES)) continue;
+    for (i = 0; i < KNTWR_VA_RING_ENTRIES; ++i) {
+        const unsigned slot = (v[KNTWR_VA_RING_NEXT] + i) % KNTWR_VA_RING_ENTRIES;
+        const uint32_t *e = v + KNTWR_VA_RING_BASE + slot * KNTWR_VA_RING_WORDS;
+        if (i < KNTWR_VA_RING_ENTRIES - (v[KNTWR_VA_RING_NEXT] < KNTWR_VA_RING_ENTRIES ? v[KNTWR_VA_RING_NEXT] : KNTWR_VA_RING_ENTRIES)) continue;
         say(L" %lu:%lu/%lu/%ls", (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], phases[e[3] < 8u ? e[3] : 8u]);
     }
     say(L"\n");
 }
 /* Live crash hand-off: the faulting thread publishes the record and waits (bounded) for this acknowledgement before it lets the
    game's own handler terminate the process; the 200 ms status poll is the only chance to see the record in a dying process. */
-static void observe_crash(Run *r, const ntw2_status *s)
+static void observe_crash(Run *r, const kntwr_status *s)
 {
     uint32_t tag, ack;
     SIZE_T wrote = 0;
@@ -1432,11 +1432,11 @@ static void observe_crash(Run *r, const ntw2_status *s)
     r->crash_tag = tag;
     if (!(s->crash_words[7] & 0x800u)) print_crash(s);   /* a repeat of an earlier signature is not printed until the final recap */
     ack = tag;
-    WriteProcessMemory(r->proc, (LPVOID)(uintptr_t)(r->state_addr + (uint32_t)offsetof(ntw2_status, crash_words) + 31u * 4u),
+    WriteProcessMemory(r->proc, (LPVOID)(uintptr_t)(r->state_addr + (uint32_t)offsetof(kntwr_status, crash_words) + 31u * 4u),
                        &ack, sizeof ack, &wrote);
 }
 /* BRAIN2 v2 service IDs match native_brain2.h; no legacy replay-event labels. */
-static const char *const k_brain2_services[NTW2_BRAIN2_CENSUS_WORDS / 8u] = {
+static const char *const k_brain2_services[KNTWR_BRAIN2_CENSUS_WORDS / 8u] = {
     "effects", "slot_acquire", "target_acquire", "charge_callback", "move_driver", "fire_driver",
     "finalize", "fire_sequence", "path_request", "request_build", "request_commit", "order",
     "node_finish", "node_begin", "node_step", "node_destroy", "animation", "parked",
@@ -1447,22 +1447,22 @@ static const char *const k_brain2_services[NTW2_BRAIN2_CENSUS_WORDS / 8u] = {
     "wrapper_607540", "wrapper_5b9720", "virtual_order", "virtual_query", "unknown",
     "fire_candidates_62e910", "fire_submit_8021e0", "fire_gather_80bf70", "melee_label_14d060c", "mutable_read"
 };
-static const char *const k_ai_completion_metrics[NTW2_AI_COMPLETION_WORDS] = { NTW2_AI_COMPLETION_LABELS };
-static const char *const k_ai_async2_metrics[NTW2_AI_ASYNC2_WORDS] = { NTW2_AI_ASYNC2_LABELS };
-static const char *const k_ai_async2_route_metrics[NTW2_AI_ASYNC2_ROUTE_WORDS] = { NTW2_AI_ASYNC2_ROUTE_LABELS };
-static const char *const k_ai_deferred_metrics[NTW2_AI_DEFERRED_WORDS] = { NTW2_AI_DEFERRED_LABELS };
-static const char *const k_ai_ctrl_reuse_metrics[NTW2_AI_CTRL_REUSE_WORDS] = { NTW2_AI_CTRL_REUSE_LABELS };
-static const char *const k_brain_retarget_jitter_metrics[4] = { NTW2_AI_RETARGET_JITTER_LABELS };
-static const char *const k_brain_target_cull_metrics[4] = { NTW2_AI_TARGET_CULL_LABELS };
-static const char *const k_ai_prepass_census_metrics[NTW2_AI_PREPASS_CENSUS_WORDS] = { NTW2_AI_PREPASS_CENSUS_LABELS };
-static const char *const k_ai_poly_metrics[NTW2_AI_POLY_WORDS] = { NTW2_AI_POLY_LABELS };
-static const char *const k_ai_record_test_metrics[NTW2_AI_RECORD_TEST_WORDS] = { NTW2_AI_RECORD_TEST_LABELS };
-static const char *const k_ai_spiral_metrics[NTW2_AI_SPIRAL_WORDS] = { NTW2_AI_SPIRAL_LABELS };
-static const char *const k_alloc_census_metrics[32] = { NTW2_ALLOC_CENSUS_LABELS };
-static const char *const k_arena_metrics[NTW2_ARENA_WORDS] = { NTW2_ARENA_LABELS };
-static const char *const k_overlay_metrics[NTW2_OVERLAY_WORDS] = { NTW2_OVERLAY_LABELS };
-static const char *const k_mounted_officer_metrics[NTW2_MOUNTED_OFFICER_WORDS] = { NTW2_MOUNTED_OFFICER_LABELS };
-/* --engage-census (src/ai/ntw2_engage_census.h): header words 0..30, histograms 32..247, 20-word rows from 256. */
+static const char *const k_ai_completion_metrics[KNTWR_AI_COMPLETION_WORDS] = { KNTWR_AI_COMPLETION_LABELS };
+static const char *const k_ai_async2_metrics[KNTWR_AI_ASYNC2_WORDS] = { KNTWR_AI_ASYNC2_LABELS };
+static const char *const k_ai_async2_route_metrics[KNTWR_AI_ASYNC2_ROUTE_WORDS] = { KNTWR_AI_ASYNC2_ROUTE_LABELS };
+static const char *const k_ai_deferred_metrics[KNTWR_AI_DEFERRED_WORDS] = { KNTWR_AI_DEFERRED_LABELS };
+static const char *const k_ai_ctrl_reuse_metrics[KNTWR_AI_CTRL_REUSE_WORDS] = { KNTWR_AI_CTRL_REUSE_LABELS };
+static const char *const k_brain_retarget_jitter_metrics[4] = { KNTWR_AI_RETARGET_JITTER_LABELS };
+static const char *const k_brain_target_cull_metrics[4] = { KNTWR_AI_TARGET_CULL_LABELS };
+static const char *const k_ai_prepass_census_metrics[KNTWR_AI_PREPASS_CENSUS_WORDS] = { KNTWR_AI_PREPASS_CENSUS_LABELS };
+static const char *const k_ai_poly_metrics[KNTWR_AI_POLY_WORDS] = { KNTWR_AI_POLY_LABELS };
+static const char *const k_ai_record_test_metrics[KNTWR_AI_RECORD_TEST_WORDS] = { KNTWR_AI_RECORD_TEST_LABELS };
+static const char *const k_ai_spiral_metrics[KNTWR_AI_SPIRAL_WORDS] = { KNTWR_AI_SPIRAL_LABELS };
+static const char *const k_alloc_census_metrics[32] = { KNTWR_ALLOC_CENSUS_LABELS };
+static const char *const k_arena_metrics[KNTWR_ARENA_WORDS] = { KNTWR_ARENA_LABELS };
+static const char *const k_overlay_metrics[KNTWR_OVERLAY_WORDS] = { KNTWR_OVERLAY_LABELS };
+static const char *const k_mounted_officer_metrics[KNTWR_MOUNTED_OFFICER_WORDS] = { KNTWR_MOUNTED_OFFICER_LABELS };
+/* --engage-census (src/ai/kntwr_engage_census.h): header words 0..30, histograms 32..247, 20-word rows from 256. */
 #define EC_HDR 31u
 #define EC_HALT_RATIO 32u
 #define EC_HALT_METRES 54u
@@ -1543,27 +1543,27 @@ static void print_engage_census_line(const uint32_t *w)
             (unsigned long)w[6448], (unsigned long)w[6449], (unsigned long)w[EC_DIAG_UNITS]);
     }
 }
-/* --ai-ctrl-* (src/ai/ntw2_ai_ctrl_batch.h, src/ai/ntw2_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
+/* --ai-ctrl-* (src/ai/kntwr_ai_ctrl_batch.h, src/ai/kntwr_ai_ctrl_geometry.h): one line, labelled words 0..23 (A: batch/histogram, B: geometry).
    Words 16..23 are the geometry half only when no brain lever repurposes them (--brain-target-cull[-shadow] words 16..19,
    --brain-retarget-jitter 20..23 have their own print lines and receipt objects). */
 static void print_ai_ctrl(const uint32_t *w, uint32_t ai_ctrl_flags)
 {
-    const unsigned count = (ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) ? 16u : 24u;
+    const unsigned count = (ai_ctrl_flags & KNTWR_AI_BRAIN_STEP_BITS) ? 16u : 24u;
     unsigned i;
-    if (!(w[15] & NTW2_AI_CTRL_MODE_MASK)) return;
+    if (!(w[15] & KNTWR_AI_CTRL_MODE_MASK)) return;
     say(L"  ai_ctrl: flags=0x%lX latched=0x%lX", (unsigned long)(w[15] & 0xFFu), (unsigned long)(w[15] >> 8));
     for (i = 0; i < count; ++i)
         if (i != 15) say(L" %hs=%lu", k_ai_ctrl_reuse_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
 static double pct(uint32_t part, uint32_t whole) { return whole ? 100.0 * (double)part / (double)whole : 0.0; }
-/* --ai-prepass-census / --ai-presize (src/ai/ntw2_planner_prepass.h): per-think verdict lines, then every nonzero labelled word. */
+/* --ai-prepass-census / --ai-presize (src/ai/kntwr_planner_prepass.h): per-think verdict lines, then every nonzero labelled word. */
 static void print_ai_prepass(const uint32_t *w)
 {
     unsigned i;
     uint32_t scopes = w[1], walks = w[4], classified = w[6] + w[7];
     if (!w[0]) return;
-    if (w[63] & NTW2_AI_PREPASS_CENSUS) {
+    if (w[63] & KNTWR_AI_PREPASS_CENSUS) {
         static const char *const cls[5] = { "<=8ms", "<=32ms", "<=128ms", "<=512ms", ">512ms" };
         say(L"  ai_prepass census: think_scopes=%lu node_thinks=%lu child_thinks=%lu walks=%lu queries/think=%.1f distinct/think=%.1f "
             L"duplicate%%=%.1f unsupported=%lu overflow=%lu max_walks/think=%lu max_distinct/think=%lu\n",
@@ -1586,11 +1586,11 @@ static void print_ai_prepass(const uint32_t *w)
             (unsigned long)w[36], w[35] ? "WORLD_CHANGES_BETWEEN_IDENTICAL_QUERIES" : "stable");
     }
     say(L"  ai_prepass: flags=0x%lX", (unsigned long)w[63]);
-    for (i = 0; i < NTW2_AI_PREPASS_CENSUS_WORDS; ++i)
+    for (i = 0; i < KNTWR_AI_PREPASS_CENSUS_WORDS; ++i)
         if (i != 63 && w[i]) say(L" %hs=%lu", k_ai_prepass_census_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-poly-shadow / --ai-poly (src/ai/ntw2_planner_search.h): one verdict line, then every nonzero labelled word. */
+/* --ai-poly-shadow / --ai-poly (src/ai/kntwr_planner_search.h): one verdict line, then every nonzero labelled word. */
 static void print_ai_poly(const uint32_t *w, uint32_t thinks)
 {
     unsigned i;
@@ -1612,11 +1612,11 @@ static void print_ai_poly(const uint32_t *w, uint32_t thinks)
         if (thinks) say(L" per_think=%.2f ms (thinks=%lu)", saved_ms / (double)thinks, (unsigned long)thinks);
     }
     say(L"\n  ai_poly words:");
-    for (i = 0; i < NTW2_AI_POLY_WORDS; ++i)
+    for (i = 0; i < KNTWR_AI_POLY_WORDS; ++i)
         if (w[i]) say(L" %hs=%lu", k_ai_poly_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-record-test-shadow / --ai-record-test (src/ai/ntw2_record_test.h): ai_prepass_words[32..59]; one verdict line, the gain line, every nonzero word. */
+/* --ai-record-test-shadow / --ai-record-test (src/ai/kntwr_record_test.h): ai_prepass_words[32..59]; one verdict line, the gain line, every nonzero word. */
 static void print_ai_record_test(const uint32_t *w)
 {
     unsigned i;
@@ -1639,11 +1639,11 @@ static void print_ai_record_test(const uint32_t *w)
             (double)w[18] * ms_per_kc * 1000.0);
     }
     say(L"\n  ai_record_test words:");
-    for (i = 0; i < NTW2_AI_RECORD_TEST_WORDS; ++i)
+    for (i = 0; i < KNTWR_AI_RECORD_TEST_WORDS; ++i)
         if (w[i]) say(L" %hs=%lu", k_ai_record_test_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --ai-claim-once[-census] (src/ai/ntw2_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
+/* --ai-claim-once[-census] (src/ai/kntwr_claim_once.h): ai_ctrl_reuse_words[24..31] (calls, entries, masked, calls_masked, refused_state, refused_other, packed, hash). */
 static void print_ai_claim_once(const uint32_t *w)
 {
     if (!w[24]) return;
@@ -1652,14 +1652,14 @@ static void print_ai_claim_once(const uint32_t *w)
         (unsigned long)w[24], (unsigned long)w[25], (double)w[25] / w[24], (unsigned long)(w[30] & 0xFFu), (unsigned long)w[26], (unsigned long)w[27],
         (unsigned long)w[28], (unsigned long)w[29], (unsigned long)((w[30] >> 8) & 0xFFu), (unsigned long)(w[30] >> 16), (unsigned long)w[31]);
 }
-/* --brain-retarget-jitter (src/brain/ntw2_retarget_jitter.h): ai_ctrl_reuse_words[20..23] (tracker_calls, losses, jittered, delay_sum). */
+/* --brain-retarget-jitter (src/brain/kntwr_retarget_jitter.h): ai_ctrl_reuse_words[20..23] (tracker_calls, losses, jittered, delay_sum). */
 static void print_brain_retarget_jitter(const uint32_t *w)
 {
     if (!w[20]) return;
     say(L"  brain_retarget_jitter: tracker_calls=%lu losses=%lu (%.3f%% of calls) jittered=%lu (%.1f%% of losses) delay_sum=%lu mean_delay=%.2f ticks (of the jittered)\n",
         (unsigned long)w[20], (unsigned long)w[21], pct(w[21], w[20]), (unsigned long)w[22], pct(w[22], w[21]), (unsigned long)w[23], w[22] ? (double)w[23] / w[22] : 0.0);
 }
-/* --brain-target-cull[-shadow] (src/brain/ntw2_target_cull.h): ai_ctrl_reuse_words[16..19] (calls, candidates, predicates, packed mismatch/flag bytes). */
+/* --brain-target-cull[-shadow] (src/brain/kntwr_target_cull.h): ai_ctrl_reuse_words[16..19] (calls, candidates, predicates, packed mismatch/flag bytes). */
 static void print_brain_target_cull(const uint32_t *w)
 {
     if (!w[16]) return;
@@ -1668,7 +1668,7 @@ static void print_brain_target_cull(const uint32_t *w)
         (unsigned long)(w[17] > w[18] ? w[17] - w[18] : 0u), pct(w[17] > w[18] ? w[17] - w[18] : 0u, w[17]), (unsigned long)(w[19] >> 24),
         (unsigned long)(w[19] & 0xFFu), (unsigned long)((w[19] >> 8) & 0xFFu), (unsigned long)((w[19] >> 16) & 0xFFu));
 }
-/* --ai-spiral-census / --ai-spiral-cap-m (src/ai/ntw2_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
+/* --ai-spiral-census / --ai-spiral-cap-m (src/ai/kntwr_spiral.h): ladder stages, spiral exits, fallback entries-per-call, then every nonzero word. */
 static void print_ai_spiral(const uint32_t *w)
 {
     unsigned i;
@@ -1684,7 +1684,7 @@ static void print_ai_spiral(const uint32_t *w)
         (unsigned long)w[22], (unsigned long)w[23], (unsigned long)w[25], (unsigned long)w[26], (unsigned long)w[27], (unsigned long)w[28],
         (unsigned long)w[29], (unsigned long)w[30]);
     say(L"\n  ai_spiral words:");
-    for (i = 0; i < NTW2_AI_SPIRAL_WORDS; ++i)
+    for (i = 0; i < KNTWR_AI_SPIRAL_WORDS; ++i)
         if (w[i]) say(L" %hs=%lu", k_ai_spiral_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
@@ -1696,12 +1696,12 @@ static void print_ai_spiral(const uint32_t *w)
    unresolved-role soldiers (Stage B would run those natively). */
 static void print_unit_brain(const uint32_t *u)
 {
-    static const char *const header[] = { NTW2_BRAIN_UNIT_HEADER_LABELS };
-    static const char *const fields[] = { NTW2_BRAIN_UNIT_FIELD_LABELS };
-    static const char *const exceptions[] = { NTW2_BRAIN_UNIT_EXCEPTION_LABELS };
-    static const char *const census[] = { NTW2_BRAIN_UNIT_CENSUS_LABELS };
-    static const char *const roles[] = { NTW2_BRAIN_UNIT_ROLE_LABELS };
-    static const char *const tail[] = { NTW2_BRAIN_UNIT_TAIL_LABELS };
+    static const char *const header[] = { KNTWR_BRAIN_UNIT_HEADER_LABELS };
+    static const char *const fields[] = { KNTWR_BRAIN_UNIT_FIELD_LABELS };
+    static const char *const exceptions[] = { KNTWR_BRAIN_UNIT_EXCEPTION_LABELS };
+    static const char *const census[] = { KNTWR_BRAIN_UNIT_CENSUS_LABELS };
+    static const char *const roles[] = { KNTWR_BRAIN_UNIT_ROLE_LABELS };
+    static const char *const tail[] = { KNTWR_BRAIN_UNIT_TAIL_LABELS };
     const double stages = u[2] ? (double)u[2] : 1.0;
     /* observed minus observed exceptions (other_class is not observed) minus unresolved roles */
     const uint32_t compared = u[4] - (u[100] - u[99]) - u[169];
@@ -1750,8 +1750,8 @@ static void print_unit_brain(const uint32_t *u)
    + eligible unit cost / W + measured frozen-copy cost, per tick (dispatch/join overhead not included). */
 static void print_army_unit(const uint32_t *u)
 {
-    static const char *const reasons[] = { NTW2_ARMY_UNIT_REASON_LABELS };
-    static const char *const details[] = { NTW2_ARMY_UNIT_DETAIL_LABELS };
+    static const char *const reasons[] = { KNTWR_ARMY_UNIT_REASON_LABELS };
+    static const char *const details[] = { KNTWR_ARMY_UNIT_DETAIL_LABELS };
     const double occ = u[3] ? (double)u[3] : 1.0, ticks = u[6] ? (double)u[6] : 1.0, q = u[23] ? (double)u[23] : 1.0;
     const double unit_ms = u[16] / ticks / 1000.0, snap_ms = u[21] / ticks / 1000.0;
     const double native_ms = ((double)u[19] - u[20] - u[21]) / ticks / 1000.0, other_ms = native_ms - unit_ms;
@@ -1822,7 +1822,7 @@ typedef struct {
 typedef struct {
     double stages, occurrences, timed, cycles_per_ms, o, so, c, sc, r, sr;
     double step_ms, site6_ms, overhead_ms;
-    BrainS0Row rows[NTW2_BRAIN_S0_ROWS];
+    BrainS0Row rows[KNTWR_BRAIN_S0_ROWS];
 } BrainS0Table;
 static uint64_t s0_u64(const uint32_t *p) { return ((uint64_t)p[1] << 32) | p[0]; }
 static double s0_f64(const uint32_t *p) { double d; uint64_t v = s0_u64(p); memcpy(&d, &v, sizeof d); return d; }
@@ -1840,8 +1840,8 @@ static int brain_s0_table(const uint32_t *w, BrainS0Table *t)
     t->r = w[21] / 16.0; t->sr = w[22] / 16.0;
     if (!w[4] || !w[7] || t->cycles_per_ms <= 0.0) return 0;
     scale = t->occurrences / t->timed;
-    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) {
-        const uint32_t *q = w + NTW2_BRAIN_S0_HEADER_WORDS + r * NTW2_BRAIN_S0_ROW_WORDS;
+    for (r = 0; r < KNTWR_BRAIN_S0_ROWS; ++r) {
+        const uint32_t *q = w + KNTWR_BRAIN_S0_HEADER_WORDS + r * KNTWR_BRAIN_S0_ROW_WORDS;
         const double s = q[2], ch = q[4], de = q[5], incl = (double)s0_u64(q + 6);
         const double excl = (double)(int64_t)s0_u64(q + 8), sq_incl = s0_f64(q + 10), sq_excl = s0_f64(q + 12);
         const int step = r <= 2;
@@ -1865,7 +1865,7 @@ static int brain_s0_table(const uint32_t *w, BrainS0Table *t)
             timed_frames += s;
         } else timed_frames += s;
     }
-    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) t->rows[r].share = step_incl > 0.0 ? t->rows[r].excl_ms / step_incl : 0.0;
+    for (r = 0; r < KNTWR_BRAIN_S0_ROWS; ++r) t->rows[r].share = step_incl > 0.0 ? t->rows[r].excl_ms / step_incl : 0.0;
     t->step_ms = step_incl;
     t->site6_ms = (double)s0_u64(w + 8) / t->cycles_per_ms / t->stages;
     t->overhead_ms = (static_calls * pass + dispatch_calls * dispatch + t->occurrences * decide +
@@ -1874,8 +1874,8 @@ static int brain_s0_table(const uint32_t *w, BrainS0Table *t)
 }
 static void print_brain_s0(const uint32_t *w)
 {
-    static const char *const rows[] = { NTW2_BRAIN_S0_ROW_LABELS };
-    static const unsigned depth[] = { NTW2_BRAIN_S0_ROW_DEPTHS };
+    static const char *const rows[] = { KNTWR_BRAIN_S0_ROW_LABELS };
+    static const unsigned depth[] = { KNTWR_BRAIN_S0_ROW_DEPTHS };
     static const char *const states[] = { "not started", "running", "refused: no RDTSCP/invariant TSC", "refused: BRAIN_S0 clones missing" };
     BrainS0Table t;
     unsigned r;
@@ -1894,7 +1894,7 @@ static void print_brain_s0(const uint32_t *w)
         t.overhead_ms);
     say(L"    %-34hs %11hs %8hs %9hs %8hs %8hs %9hs %8hs %7hs\n", "mechanic (exclusive = minus timed children)", "calls/stage",
         "timed", "excl ms", "+-stat", "+-cal", "incl ms", "+-stat", "share");
-    for (r = 0; r < NTW2_BRAIN_S0_ROWS; ++r) {
+    for (r = 0; r < KNTWR_BRAIN_S0_ROWS; ++r) {
         const BrainS0Row *x = &t.rows[r];
         char name[48];
         if (!x->calls && !x->sampled) continue;
@@ -1922,14 +1922,14 @@ static double loc_median(const uint32_t *h, double n)
     double cum = 0.0;
     unsigned b;
     if (n <= 0.0) return 0.0;
-    for (b = 0; b < NTW2_BRAIN_LOC_HIST_BINS; ++b) {
+    for (b = 0; b < KNTWR_BRAIN_LOC_HIST_BINS; ++b) {
         if (h[b] && cum + h[b] >= n / 2.0) {
-            const double lo = loc_bin_lo(b), hi = b + 1u < NTW2_BRAIN_LOC_HIST_BINS ? loc_bin_lo(b + 1u) : lo * 2.0;
+            const double lo = loc_bin_lo(b), hi = b + 1u < KNTWR_BRAIN_LOC_HIST_BINS ? loc_bin_lo(b + 1u) : lo * 2.0;
             return lo + (hi - lo) * (n / 2.0 - cum) / h[b];
         }
         cum += h[b];
     }
-    return loc_bin_lo(NTW2_BRAIN_LOC_HIST_BINS - 1u);
+    return loc_bin_lo(KNTWR_BRAIN_LOC_HIST_BINS - 1u);
 }
 static int brain_loc_stats(const uint32_t *w, BrainLocStats *t)
 {
@@ -1942,8 +1942,8 @@ static int brain_loc_stats(const uint32_t *w, BrainLocStats *t)
     t->per_stage = t->members / t->stages;
     t->loop_ms = (double)s0_u64(w + 14) / t->cpm / t->stages;
     t->deep_ms = t->deep > 0.0 ? (double)s0_u64(w + 16) / t->cpm / t->deep : 0.0;
-    for (a = 0; a < NTW2_BRAIN_LOC_ARMS; ++a) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_ARM_BASE + a * NTW2_BRAIN_LOC_ARM_WORDS;
+    for (a = 0; a < KNTWR_BRAIN_LOC_ARMS; ++a) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_ARM_BASE + a * KNTWR_BRAIN_LOC_ARM_WORDS;
         const double n = q[0], sum = (double)s0_u64(q + 1), sq = s0_f64(q + 3);
         double var;
         t->n[a] = n;
@@ -1951,7 +1951,7 @@ static int brain_loc_stats(const uint32_t *w, BrainLocStats *t)
         t->mean[a] = sum / n;
         var = n > 1.0 ? (sq - sum * sum / n) / (n - 1.0) : 0.0;
         t->se[a] = sqrt(var > 0.0 ? var / n : 0.0);
-        t->median[a] = loc_median(w + NTW2_BRAIN_LOC_HIST_BASE + a * NTW2_BRAIN_LOC_HIST_BINS, n);
+        t->median[a] = loc_median(w + KNTWR_BRAIN_LOC_HIST_BASE + a * KNTWR_BRAIN_LOC_HIST_BINS, n);
         if (a == 1) {
             const double ts = (double)s0_u64(q + 5), tq = s0_f64(q + 7);
             t->touch_mean = ts / n;
@@ -1969,8 +1969,8 @@ static int brain_loc_stats(const uint32_t *w, BrainLocStats *t)
         t->net_ms = t->net * t->per_stage / t->cpm;
         t->touch_ms = t->touch_mean * t->per_stage / t->cpm;
     }
-    for (b = 0; b < NTW2_BRAIN_LOC_BUCKETS; ++b) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + b * NTW2_BRAIN_LOC_BUCKET_WORDS;
+    for (b = 0; b < KNTWR_BRAIN_LOC_BUCKETS; ++b) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_BUCKET_BASE + b * KNTWR_BRAIN_LOC_BUCKET_WORDS;
         const double n = q[0], x = 4.0 * b + 2.0, y = n > 0.0 ? (double)s0_u64(q + 1) / n : 0.0;
         if (n <= 0.0) continue;
         sw += n; sx += n * x; sy += n * y; sxx += n * x * x; sxy += n * x * y;
@@ -1990,13 +1990,13 @@ static const char *loc_mode_name(uint32_t configured)
 static double loc_pct(double a, double b) { return b > 0.0 ? 100.0 * a / b : 0.0; }
 static void print_brain_locality(const uint32_t *w)
 {
-    static const char *const types[] = { NTW2_BRAIN_LOC_TYPE_LABELS };
+    static const char *const types[] = { KNTWR_BRAIN_LOC_TYPE_LABELS };
     static const char *const states[] = { "not started", "running", "refused: no RDTSCP/invariant TSC", "refused: storage" };
     static const char *const arms[2][4] = { { "census (all timed)", "cold (B)", "cold (B)", "cold (B)" },
                                             { "", "warm (A)", "prefetch (A)", "prefetch (A)" } };
     static const unsigned cut[] = { 6, 12, 16, 20, 24, 32 };
     static const char *const cutn[] = { "<64 B", "<4 KiB", "<64 KiB", "<1 MiB", "<16 MiB", "any" };
-    const uint32_t *sc = w + NTW2_BRAIN_LOC_SCALAR_BASE, *dh = w + NTW2_BRAIN_LOC_DELTA_BASE, *rh = w + NTW2_BRAIN_LOC_RUN_BASE;
+    const uint32_t *sc = w + KNTWR_BRAIN_LOC_SCALAR_BASE, *dh = w + KNTWR_BRAIN_LOC_DELTA_BASE, *rh = w + KNTWR_BRAIN_LOC_RUN_BASE;
     BrainLocStats t;
     const unsigned mode = (w[1] & 2u) ? 1u : (w[1] & 4u) ? 2u : (w[1] & 8u) ? 3u : 0u;
     double pairs, cum;
@@ -2005,7 +2005,7 @@ static void print_brain_locality(const uint32_t *w)
     if (w[1] & 16u) {
         say(L"  brain locality mark (v%lu, %hs): pass-through runner (no census, touch or TSC), ETW provider {%hs}, event 1 = stage begin, "
             L"event 2 = stage end, UINT32 payload = 1-based stage ordinal; stages completed %lu\n", (unsigned long)w[0],
-            w[2] < 4 ? states[w[2]] : "?", NTW2_BRAIN_LOC_MARK_GUID_TEXT, (unsigned long)w[4]);
+            w[2] < 4 ? states[w[2]] : "?", KNTWR_BRAIN_LOC_MARK_GUID_TEXT, (unsigned long)w[4]);
         return;
     }
     say(L"  brain locality census (v%lu, %hs, %hs; strata of (stage, occurrence ordinal): timed 1/%lu, deep stages 1/8, blocks of %lu):\n",
@@ -2026,11 +2026,11 @@ static void print_brain_locality(const uint32_t *w)
         loc_pct(sc[7], pairs), (unsigned long)sc[8], sc[8] ? pairs / sc[8] : 0.0);
     say(L"    |E_i - E_(i-1)| cumulative:");
     for (b = 0, cum = 0.0, r = 0; r < 6; ++r) {
-        for (; b <= cut[r] && b < NTW2_BRAIN_LOC_DELTA_BINS; ++b) cum += dh[b];
+        for (; b <= cut[r] && b < KNTWR_BRAIN_LOC_DELTA_BINS; ++b) cum += dh[b];
         say(L" %hs %.1f%%", cutn[r], loc_pct(cum, pairs));
     }
     say(L"\n    unit run length log2 histogram:");
-    for (b = 0; b < NTW2_BRAIN_LOC_RUN_BINS; ++b) if (rh[b]) say(L" %lu:%lu", 1ul << b, (unsigned long)rh[b]);
+    for (b = 0; b < KNTWR_BRAIN_LOC_RUN_BINS; ++b) if (rh[b]) say(L" %lu:%lu", 1ul << b, (unsigned long)rh[b]);
     say(L"\n");
     if (t.deep > 0.0) {
         const double invp = (double)s0_u64(sc + 11);
@@ -2042,8 +2042,8 @@ static void print_brain_locality(const uint32_t *w)
     say(L"    mapped hot set per object type (static load map; lines/pages = distinct 64 B lines / 4 KiB pages; stage = per deep stage):\n");
     say(L"      %-14hs %8hs %9hs %9hs %12hs %11hs %11hs %9hs\n", "object", "present", "lines/man", "pages/man", "stage lines", "stage pages",
         "max lines", "MiB");
-    for (r = 0; r < NTW2_BRAIN_LOC_TYPES; ++r) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_TYPE_BASE + r * NTW2_BRAIN_LOC_TYPE_WORDS;
+    for (r = 0; r < KNTWR_BRAIN_LOC_TYPES; ++r) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_TYPE_BASE + r * KNTWR_BRAIN_LOC_TYPE_WORDS;
         if (!q[0] && !q[1]) continue;
         say(L"      %-14hs %7.1f%% %9.2f %9.2f %12.0f %11.0f %11lu %9.2f\n", types[r], loc_pct(q[0], (double)sc[15]),
             q[1] ? (double)q[2] / q[1] : 0.0, q[1] ? (double)q[3] / q[1] : 0.0, t.deep > 0.0 ? q[4] / t.deep : 0.0,
@@ -2052,8 +2052,8 @@ static void print_brain_locality(const uint32_t *w)
     say(L"    step cycles, %hs arm: n=%.0f mean %.1f +-%.1f median %.0f cycles (%.0f ns mean) => step %.3f ms/stage (%.1f%% of the runner loop)\n",
         arms[0][mode], t.n[0], t.mean[0], t.se[0], t.median[0], t.mean[0] / t.cpm * 1e6, t.cold_ms, loc_pct(t.cold_ms, t.loop_ms));
     say(L"    cost vs hot lines not touched by the previous occurrence (cold arm; bucket width 4 lines):\n");
-    for (b = 0; b < NTW2_BRAIN_LOC_BUCKETS; ++b) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + b * NTW2_BRAIN_LOC_BUCKET_WORDS;
+    for (b = 0; b < KNTWR_BRAIN_LOC_BUCKETS; ++b) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_BUCKET_BASE + b * KNTWR_BRAIN_LOC_BUCKET_WORDS;
         const double bn = q[0], bs = (double)s0_u64(q + 1), bq = s0_f64(q + 3);
         double var;
         if (bn <= 0.0) continue;
@@ -2104,7 +2104,7 @@ static void print_unit_policy(const uint32_t *w)
 }
 static void print_unit_fatigue(const uint32_t *f, const uint32_t *h)
 {
-    static const char *const labels[] = { NTW2_UNIT_FATIGUE_LABELS };
+    static const char *const labels[] = { KNTWR_UNIT_FATIGUE_LABELS };
     static const char *const classes[] = { "0 base+env", "1 stat3D0", "2 stat4F0", "3 melee", "4 stat1F0", "5 node20/6D0",
                                            "6 stat250", "7 stat2B0", "8 row-path", "9 stat370", "10 none", "other" };
     static const char *const dacc[] = { "0", "1", "2-3", "4-7", "8-15", "16-63", "64-255", ">=256" };
@@ -2138,7 +2138,7 @@ static void print_unit_fatigue(const uint32_t *f, const uint32_t *h)
     say(L"\n");
 }
 /* Posture / engage half (words 128..255 of brain_unit_policy_words; src/brain2/native_unit_posture_engage.h, labels
-   NTW2_UNIT_POSTURE_ENGAGE_LABELS): p = the half, h = the shared header words (modes). */
+   KNTWR_UNIT_POSTURE_ENGAGE_LABELS): p = the half, h = the shared header words (modes). */
 static void print_unit_posture_engage(const uint32_t *p, const uint32_t *h)
 {
     static const char *const act[] = { "A idle", "B", "C", "D", "E" };
@@ -2315,7 +2315,7 @@ static void print_army_storm(const uint32_t *w)
             (unsigned long)(e[10] & 0x3FFu), (unsigned long)((e[10] >> 10) & 0x3FFu), (unsigned long)((e[10] >> 20) & 0x3FFu));
     }
 }
-/* Army solver (native_army_solver.h): header 55 words (NTW2_ARMY_SOLVER_LABELS), top-16 tick table at 55 (13 words each) and top-16 solve table
+/* Army solver (native_army_solver.h): header 55 words (KNTWR_ARMY_SOLVER_LABELS), top-16 tick table at 55 (13 words each) and top-16 solve table
    at 263 (16 words each), longest solver time first, 519 words in all. Prints nothing when the module is off (version word 0). */
 #define SOLVER_TICK_TABLE 55u
 #define SOLVER_SOLVE_TABLE 263u
@@ -2380,7 +2380,7 @@ static void print_arena(const uint32_t *w)
     unsigned i;
     if (!w[0]) return;
     say(L"arena:\n");
-    for (i = 0; i < NTW2_ARENA_WORDS; ++i)
+    for (i = 0; i < KNTWR_ARENA_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_arena_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
 }
 static void print_overlay_words_row(const uint32_t *w)
@@ -2388,7 +2388,7 @@ static void print_overlay_words_row(const uint32_t *w)
     unsigned i;
     if (!w[0]) return;
     say(L"overlay:\n");
-    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i)
+    for (i = 0; i < KNTWR_OVERLAY_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_overlay_metrics[i], (unsigned long)w[i], (i + 1) % 4 ? L" " : L"\n");
 }
 static void print_overlay_report(const Run *r)
@@ -2398,13 +2398,13 @@ static void print_overlay_report(const Run *r)
     if (!r->have_overlay || !w[0]) return;
     say(L"Overlay / foreign & driver VA report (report-only; unloading an overlay DLL that has hooked Present is unsafe):\n");
     say(L"  modules=%lu foreign_hook=%lu (%.2f MiB) nv_umd=%lu (%.2f MiB) splits_low_hole=%lu nv_driver_threads=%lu (stack_va=%.2f MiB, incl. 256 KiB WOW64/thread) total_foreign_image_stack=%.2f MiB (%lu B)\n",
-        (unsigned long)w[NTW2_OVL_TOTAL_MODULES],
-        (unsigned long)w[NTW2_OVL_FOREIGN_HOOK_MODULES], (double)w[NTW2_OVL_FOREIGN_HOOK_IMAGE_BYTES] / (1024.0 * 1024.0),
-        (unsigned long)w[NTW2_OVL_NV_UMD_MODULES], (double)w[NTW2_OVL_NV_UMD_IMAGE_BYTES] / (1024.0 * 1024.0),
-        (unsigned long)w[NTW2_OVL_SPLITS_LOW_HOLE_COUNT],
-        (unsigned long)w[NTW2_OVL_NV_DRIVER_THREADS], (double)w[NTW2_OVL_NV_DRIVER_STACK_BYTES] / (1024.0 * 1024.0),
-        (double)w[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] / (1024.0 * 1024.0),
-        (unsigned long)w[NTW2_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES]);
+        (unsigned long)w[KNTWR_OVL_TOTAL_MODULES],
+        (unsigned long)w[KNTWR_OVL_FOREIGN_HOOK_MODULES], (double)w[KNTWR_OVL_FOREIGN_HOOK_IMAGE_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[KNTWR_OVL_NV_UMD_MODULES], (double)w[KNTWR_OVL_NV_UMD_IMAGE_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[KNTWR_OVL_SPLITS_LOW_HOLE_COUNT],
+        (unsigned long)w[KNTWR_OVL_NV_DRIVER_THREADS], (double)w[KNTWR_OVL_NV_DRIVER_STACK_BYTES] / (1024.0 * 1024.0),
+        (double)w[KNTWR_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES] / (1024.0 * 1024.0),
+        (unsigned long)w[KNTWR_OVL_TOTAL_FOREIGN_IMAGE_STACK_BYTES]);
     for (i = 0; i < r->overlay_mod_count; ++i) {
         const struct OverlayMod *m = &r->overlay_mods[i];
         say(L"  [%ls] %ls base=0x%08lX..0x%08lX size=%lu KiB (%.2f MiB) splits_low_hole=%ls\n",
@@ -2427,30 +2427,30 @@ static void print_mounted_officer(const uint32_t *w)
         (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8],
         (unsigned long)w[9], (unsigned long)w[10], (unsigned long)w[14], (unsigned long)(w[1] >> 1 & 1u), (unsigned long)w[15]);
     say(L"  mounted_officer words:");
-    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* Clip picker crash guard (src/animation/ntw2_clip_picker_guard.h): always installed; printed only when the guard saw a cold request. */
+/* Clip picker crash guard (src/animation/kntwr_clip_picker_guard.h): always installed; printed only when the guard saw a cold request. */
 static void print_anim_guard(const uint32_t *w)
 {
-    static const char *const names[NTW2_ANIM_GUARD_WORDS] = { NTW2_ANIM_GUARD_LABELS };
+    static const char *const names[KNTWR_ANIM_GUARD_WORDS] = { KNTWR_ANIM_GUARD_LABELS };
     unsigned i;
     if (!w[7] || !w[0]) return;
     say(L"  anim_guard:");
-    for (i = 0; i < NTW2_ANIM_GUARD_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ANIM_GUARD_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
     say(L"\n");
 }
 static void print_engage_census(const uint32_t *w)
 {
     print_engage_census_line(w);
 }
-static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
+static void print_module_words(const kntwr_status *s, uint32_t brain_flags, uint32_t ai_ctrl_flags)
 {
     static const wchar_t *const names[48] = {L"formation", L"query", L"path", L"ballistic", L"formation_diag", L"tick_cadence", L"sim_tick", L"ai_planner", L"planner_walk", L"ai_async", L"ai_async_extra", L"crash", L"brain_header", L"brain2", L"ai_slices", L"ai_validation", L"visual", L"ai_slice_sites", L"brain_state_header", L"collision", L"collide", L"collide_lod", L"ai_ctrl", L"ai_slice_budget", L"ai_park", L"loco", L"loco_gates", L"loco_services", L"loco_grid", L"loco_parallel", L"sweep", L"resolve", L"env", L"env_targets", L"resolve_frames", L"loco_owned", L"loco_owned_detail", L"loco_owned_phase", L"loco_owned_load", L"loco_grid_v2", L"collide_source", L"memory", L"brain_unit", L"collide_contact", L"grid_probation_header", L"loco_relink", L"loco_cw", L"loco_grid_build"};
     const uint32_t *arrays[48] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                   s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
                                   s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->brain2_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->brain_unit_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words};
-    const unsigned counts[48] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_HEADER_WORDS, NTW2_BRAIN2_WORDS, 8, 8, 32, 2, NTW2_BRAIN_STATE_COUNTS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_BRAIN_UNIT_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_HEADER_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS};
+    const unsigned counts[48] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, KNTWR_BRAIN_HEADER_WORDS, KNTWR_BRAIN2_WORDS, 8, 8, 32, 2, KNTWR_BRAIN_STATE_COUNTS, KNTWR_COLLISION_WORDS, KNTWR_COLLIDE_WORDS, KNTWR_COLLIDE_LOD_WORDS, 16, KNTWR_AI_SLICE_BUDGET_WORDS, 8, KNTWR_LOCO_WORDS, KNTWR_LOCO_GATE_WORDS, KNTWR_LOCO_SERVICE_WORDS, KNTWR_LOCO_GRID_WORDS, KNTWR_LOCO_PARALLEL_WORDS, KNTWR_SWEEP_WORDS, KNTWR_RESOLVE_WORDS, KNTWR_ENV_WORDS, KNTWR_ENV_TARGET_WORDS, KNTWR_RESOLVE_FRAME_WORDS, KNTWR_LOCO_OWNED_WORDS, KNTWR_LOCO_OWNED_DETAIL_WORDS, KNTWR_LOCO_OWNED_PHASE_WORDS, KNTWR_LOCO_OWNED_LOAD_WORDS, KNTWR_LOCO_GRID_V2_WORDS, KNTWR_COLLIDE_SOURCE_WORDS, KNTWR_MEMORY_WORDS, KNTWR_BRAIN_UNIT_WORDS, KNTWR_COLLIDE_CONTACT_WORDS, KNTWR_GRID_PROBATION_HEADER_WORDS, KNTWR_LOCO_RELINK_WORDS, KNTWR_LOCO_CW_WORDS, KNTWR_LOCO_GRID_BUILD_WORDS};
     unsigned i, j;
     for (i = 0; i < 48; ++i) {
         say(L"  %ls words:", names[i]);
@@ -2478,9 +2478,9 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
         say(L"  ai_ctrl: dispatched=%lu completed=%lu sum_us=%lu max_us=%lu site33_barriers=%lu\n",
             (unsigned long)c[0], (unsigned long)c[1], (unsigned long)c[4],
             (unsigned long)c[5], (unsigned long)c[11]);
-        for (i=0;i<NTW2_AI_COMPLETION_WORDS;++i)
+        for (i=0;i<KNTWR_AI_COMPLETION_WORDS;++i)
             say(L"  %hs=%lu%ls",k_ai_completion_metrics[i],(unsigned long)a[i],(i+1)%3 ? L" " : L"\n");
-        if (s->requested_mask & NTW2_AI_ASYNC2) {
+        if (s->requested_mask & KNTWR_AI_ASYNC2) {
             const uint32_t *w = s->ai_async2_words, *q = s->ai_async2_route_words;
             unsigned k = 0;
             say(L"  ai_async2 v%lu: dispatches=%lu completions=%lu capacity_joins=%lu lease_waits=%lu "
@@ -2491,9 +2491,9 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
                 L"stall_sum_us=%lu stall_max_us=%lu last_stall_tick=%lu fallback_tick=%lu unrouted_83fd00=%lu\n",
                 (unsigned long)q[2], (unsigned long)q[4], (unsigned long)q[9], pct(q[9], q[4]), (unsigned long)q[11],
                 (unsigned long)q[12], (unsigned long)q[13], (unsigned long)q[14], (unsigned long)q[15], (unsigned long)q[60]);
-            for (i = 0; i < NTW2_AI_ASYNC2_WORDS; ++i)
+            for (i = 0; i < KNTWR_AI_ASYNC2_WORDS; ++i)
                 if (w[i]) say(L"  %hs=%lu%ls", k_ai_async2_metrics[i], (unsigned long)w[i], (++k % 4) ? L"" : L"\n");
-            for (i = 0; i < NTW2_AI_ASYNC2_ROUTE_WORDS; ++i)
+            for (i = 0; i < KNTWR_AI_ASYNC2_ROUTE_WORDS; ++i)
                 if (q[i]) say(L"  route.%hs=%lu%ls", k_ai_async2_route_metrics[i], (unsigned long)q[i], (++k % 4) ? L"" : L"\n");
             if (k % 4) say(L"\n");
             if (s->ai_deferred_words[0]) {
@@ -2506,13 +2506,13 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
                     (unsigned long)d[7], (unsigned long)d[8], (unsigned long)d[4], (unsigned long)d[9], (unsigned long)d[10],
                     (unsigned long)d[11], (unsigned long)d[12], (unsigned long)d[22], d[11] ? (double)d[23] / d[11] : 0.0,
                     (unsigned long)d[17], (unsigned long)d[19], (unsigned long)d[13]);
-                for (i = 0; i < NTW2_AI_DEFERRED_WORDS; ++i)
+                for (i = 0; i < KNTWR_AI_DEFERRED_WORDS; ++i)
                     if (d[i]) say(L"  deferred.%hs=%lu%ls", k_ai_deferred_metrics[i], (unsigned long)d[i], (++k % 4) ? L"" : L"\n");
                 if (k % 4) say(L"\n");
             }
         }
     }
-    if (s->requested_mask & NTW2_BRAIN2) {
+    if (s->requested_mask & KNTWR_BRAIN2) {
         const uint32_t *g = s->brain2_words;
         say(L"  brain2 v%lu: dispatches=%lu occurrences=%lu original=%lu serial_clone=%lu "
             L"fully_inactive=%lu any_active=%lu any_unknown=%lu; census=%lu timing=%lu\n",
@@ -2529,56 +2529,56 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
             (ULONGLONG)g[26] | ((ULONGLONG)g[27] << 32),
             (ULONGLONG)g[46] | ((ULONGLONG)g[47] << 32),
             (ULONGLONG)g[28] | ((ULONGLONG)g[29] << 32));
-        for (i = 0; i < NTW2_BRAIN2_CENSUS_WORDS / 8u; ++i) {
+        for (i = 0; i < KNTWR_BRAIN2_CENSUS_WORDS / 8u; ++i) {
             const uint32_t *q = s->brain2_census_words + i * 8;
             if (q[0]) say(L"    %hs: calls=%lu active=%lu unknown=%lu inactive=%lu first_active=%lu first_unknown=%lu\n",
                 k_brain2_services[i], (unsigned long)q[0], (unsigned long)q[1],
                 (unsigned long)q[2], (unsigned long)q[3], (unsigned long)q[4], (unsigned long)q[5]);
         }
         {
-            static const char *const node_labels[NTW2_NODE_WORDS] = { NTW2_NODE_WORD_LABELS };
-            static const char *const move_labels[NTW2_MOVE_NODE_WORDS] = { NTW2_MOVE_NODE_WORD_LABELS };
-            static const char *const move_event_labels[NTW2_MOVE_NODE_EVENT_WORDS] = { NTW2_MOVE_NODE_EVENT_WORD_LABELS };
-            static const char *const fire_labels[NTW2_FIRE_WORDS] = { NTW2_FIRE_WORD_LABELS };
-            static const char *const commit_labels[NTW2_FIRE_COMMIT_WORDS] = { NTW2_FIRE_COMMIT_LABELS };
+            static const char *const node_labels[KNTWR_NODE_WORDS] = { KNTWR_NODE_WORD_LABELS };
+            static const char *const move_labels[KNTWR_MOVE_NODE_WORDS] = { KNTWR_MOVE_NODE_WORD_LABELS };
+            static const char *const move_event_labels[KNTWR_MOVE_NODE_EVENT_WORDS] = { KNTWR_MOVE_NODE_EVENT_WORD_LABELS };
+            static const char *const fire_labels[KNTWR_FIRE_WORDS] = { KNTWR_FIRE_WORD_LABELS };
+            static const char *const commit_labels[KNTWR_FIRE_COMMIT_WORDS] = { KNTWR_FIRE_COMMIT_LABELS };
             say(L"  brain reference node shadow (vtable=0x01334180, owner only):\n");
-            for (i = 0; i < NTW2_NODE_WORDS; ++i)
+            for (i = 0; i < KNTWR_NODE_WORDS; ++i)
                 say(L"    %hs=%lu\n", node_labels[i], (unsigned long)s->node_words[i]);
             say(L"    event words:");
-            for (i = 0; i < NTW2_NODE_EVENT_WORDS; ++i) say(L" %lu", (unsigned long)s->node_event_words[i]);
+            for (i = 0; i < KNTWR_NODE_EVENT_WORDS; ++i) say(L" %lu", (unsigned long)s->node_event_words[i]);
             say(L"\n  brain descriptor-move node shadow (vtable=0x01348B44, step=0x00819310, owner only):\n");
-            for (i = 0; i < NTW2_MOVE_NODE_WORDS; ++i)
+            for (i = 0; i < KNTWR_MOVE_NODE_WORDS; ++i)
                 say(L"    %hs=%lu\n", move_labels[i], (unsigned long)s->move_node_words[i]);
-            for (i = 0; i < NTW2_MOVE_NODE_EVENT_WORDS; ++i)
+            for (i = 0; i < KNTWR_MOVE_NODE_EVENT_WORDS; ++i)
                 say(L"    %hs=%lu\n", move_event_labels[i], (unsigned long)s->move_node_event_words[i]);
             {
-                static const uint32_t idle_tables[NTW2_IDLE_NODE_CLASSES] = { 0x133405Cu, 0x1334028u };
-                static const uint32_t action_tables[NTW2_ACTION_NODE_CLASSES] = { 0x1347270u, 0x1348D2Cu, 0x1348CC4u };
-                static const char *const idle_labels[NTW2_NODE_WORDS] = { NTW2_IDLE_NODE_WORD_LABELS };
-                static const char *const idle_events[NTW2_NODE_EVENT_WORDS] = { NTW2_IDLE_NODE_EVENT_WORD_LABELS };
-                static const char *const action_labels[NTW2_NODE_WORDS] = { NTW2_ACTION_NODE_WORD_LABELS };
-                static const char *const action_events[NTW2_NODE_EVENT_WORDS] = { NTW2_ACTION_NODE_EVENT_WORD_LABELS };
+                static const uint32_t idle_tables[KNTWR_IDLE_NODE_CLASSES] = { 0x133405Cu, 0x1334028u };
+                static const uint32_t action_tables[KNTWR_ACTION_NODE_CLASSES] = { 0x1347270u, 0x1348D2Cu, 0x1348CC4u };
+                static const char *const idle_labels[KNTWR_NODE_WORDS] = { KNTWR_IDLE_NODE_WORD_LABELS };
+                static const char *const idle_events[KNTWR_NODE_EVENT_WORDS] = { KNTWR_IDLE_NODE_EVENT_WORD_LABELS };
+                static const char *const action_labels[KNTWR_NODE_WORDS] = { KNTWR_ACTION_NODE_WORD_LABELS };
+                static const char *const action_events[KNTWR_NODE_EVENT_WORDS] = { KNTWR_ACTION_NODE_EVENT_WORD_LABELS };
                 uint32_t cls;
-                for (cls = 0; cls < NTW2_IDLE_NODE_CLASSES; ++cls) {
+                for (cls = 0; cls < KNTWR_IDLE_NODE_CLASSES; ++cls) {
                     say(L"  brain idle node shadow (vtable=0x%08lX, owner only):\n", (unsigned long)idle_tables[cls]);
-                    for (i = 0; i < NTW2_NODE_WORDS; ++i)
+                    for (i = 0; i < KNTWR_NODE_WORDS; ++i)
                         say(L"    %hs=%lu\n", idle_labels[i], (unsigned long)s->idle_node_words[cls][i]);
-                    for (i = 0; i < NTW2_NODE_EVENT_WORDS; ++i)
+                    for (i = 0; i < KNTWR_NODE_EVENT_WORDS; ++i)
                         say(L"    %hs=%lu\n", idle_events[i], (unsigned long)s->idle_node_event_words[cls][i]);
                 }
-                for (cls = 0; cls < NTW2_ACTION_NODE_CLASSES; ++cls) {
+                for (cls = 0; cls < KNTWR_ACTION_NODE_CLASSES; ++cls) {
                     say(L"  brain action node shadow (vtable=0x%08lX, owner only):\n", (unsigned long)action_tables[cls]);
-                    for (i = 0; i < NTW2_NODE_WORDS; ++i)
+                    for (i = 0; i < KNTWR_NODE_WORDS; ++i)
                         say(L"    %hs=%lu\n", action_labels[i], (unsigned long)s->action_node_words[cls][i]);
-                    for (i = 0; i < NTW2_NODE_EVENT_WORDS; ++i)
+                    for (i = 0; i < KNTWR_NODE_EVENT_WORDS; ++i)
                         say(L"    %hs=%lu\n", action_events[i], (unsigned long)s->action_node_event_words[cls][i]);
                 }
             }
             say(L"\n  brain request-sequencer shadow (owner only):\n");
-            for (i = 0; i < NTW2_FIRE_WORDS; ++i)
+            for (i = 0; i < KNTWR_FIRE_WORDS; ++i)
                 say(L"    %hs=%lu\n", fire_labels[i], (unsigned long)s->fire_words[i]);
             say(L"  brain sequencer commit refusal guards:\n");
-            for (i = 0; i < NTW2_FIRE_COMMIT_WORDS; ++i)
+            for (i = 0; i < KNTWR_FIRE_COMMIT_WORDS; ++i)
                 say(L"    %hs=%lu\n", commit_labels[i], (unsigned long)s->fire_commit_words[i]);
             {
                 const uint32_t *route = s->brain2_route_words;
@@ -2623,8 +2623,8 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
                 say(L"\n");
             }
             {
-                static const char *const worker_labels[48] = { NTW2_BRAIN_WORKER_WORD_LABELS };
-                static const char *const reason_labels[18] = { NTW2_BRAIN_WORKER_REASON_LABELS };
+                static const char *const worker_labels[48] = { KNTWR_BRAIN_WORKER_WORD_LABELS };
+                static const char *const reason_labels[18] = { KNTWR_BRAIN_WORKER_REASON_LABELS };
                 const uint32_t *w = s->brain_worker_words;
                 if (w[0]) {
                     say(L"  brain workers (Stage 2, owner-ordered guarded commit; receiver=%lu bytes):\n", (unsigned long)w[47]);
@@ -2637,19 +2637,19 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
                     for (i = 0; i < 18u; ++i)
                         if (w[48u + i]) say(L" %hs=%lu", reason_labels[i], (unsigned long)w[48u + i]);
                     say(L"\n    refusing services:");
-                    for (i = 0; i < NTW2_BRAIN2_CENSUS_WORDS / 8u; ++i)
+                    for (i = 0; i < KNTWR_BRAIN2_CENSUS_WORDS / 8u; ++i)
                         if (w[66u + i]) say(L" %hs=%lu", k_brain2_services[i], (unsigned long)w[66u + i]);
                     say(L"\n");
                     {
-                        static const char *const tail_labels[] = { NTW2_BRAIN_WORKER_TAIL_LABELS };
-                        static const char *const guard_labels[] = { NTW2_BRAIN_WORKER_GUARD_LABELS };
+                        static const char *const tail_labels[] = { KNTWR_BRAIN_WORKER_TAIL_LABELS };
+                        static const char *const guard_labels[] = { KNTWR_BRAIN_WORKER_GUARD_LABELS };
                         for (i = 0; i < sizeof(tail_labels) / sizeof(tail_labels[0]); ++i)
                             say(L"    %hs=%lu\n", tail_labels[i], (unsigned long)w[119u + i]);
                         for (i = 0; i < sizeof(guard_labels) / sizeof(guard_labels[0]); ++i)
                             say(L"    %hs=%lu\n", guard_labels[i], (unsigned long)w[128u + i]);
                     }
                     {
-                        static const char *const phase_labels[NTW2_BRAIN_WORKER_PHASE_WORDS] = { NTW2_BRAIN_WORKER_PHASE_LABELS };
+                        static const char *const phase_labels[KNTWR_BRAIN_WORKER_PHASE_WORDS] = { KNTWR_BRAIN_WORKER_PHASE_LABELS };
                         const uint32_t *p = s->brain_worker_phase_words;
                         const double stages = p[2] ? (double)p[2] : 1.0;
                         say(L"    phases (quiet=%lu, stages=%lu; per stage ms: capture %.2f [witness %.2f] dispatch %.2f commit %.2f owner_run %.2f "
@@ -2658,20 +2658,20 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
                             p[5] / stages / 1000.0, p[6] / stages / 1000.0, p[7] / stages / 1000.0, p[8] / stages / 1000.0,
                             p[9] / stages / 1000.0, p[10] / stages / 1000.0, p[11] / stages / 1000.0, p[12] / stages / 1000.0,
                             p[13] / stages / 1000.0, p[14] / stages / 1000.0);
-                        for (i = 0; i < NTW2_BRAIN_WORKER_PHASE_WORDS; ++i)
+                        for (i = 0; i < KNTWR_BRAIN_WORKER_PHASE_WORDS; ++i)
                             say(L"      %hs=%lu\n", phase_labels[i], (unsigned long)p[i]);
                     }
                 }
             }
             print_unit_brain(s->brain_unit_words);
-            if (brain_flags & NTW2_BRAIN_LOCALITY) print_brain_locality(s->brain_s0_words);
+            if (brain_flags & KNTWR_BRAIN_LOCALITY) print_brain_locality(s->brain_s0_words);
             else print_brain_s0(s->brain_s0_words);
             print_unit_policy(s->brain_unit_policy_words);
             print_unit_fatigue(s->brain_unit_policy_words + 32, s->brain_unit_policy_words);
             print_unit_posture_engage(s->brain_unit_policy_words + 128, s->brain_unit_policy_words);
         }
     }
-    if (s->requested_mask & NTW2_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
+    if (s->requested_mask & KNTWR_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_army_storm(s->army_storm_words);
     print_army_solver(s->army_solver_words);
     print_alloc_census(s->alloc_census_words);
@@ -2683,12 +2683,12 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
     print_ai_poly(s->ai_prepass_words, s->ai_completion_words[0] ? s->ai_completion_words[0] : s->planner_walk_words[0]);
-    print_ai_record_test(s->ai_prepass_words + NTW2_AI_POLY_WORDS);
+    print_ai_record_test(s->ai_prepass_words + KNTWR_AI_POLY_WORDS);
     print_ai_spiral(s->ai_spiral_words);
     print_ai_claim_once(s->ai_ctrl_reuse_words);
-    if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_retarget_jitter(s->ai_ctrl_reuse_words); /* words 20..23 are the geometry words under NTW2_AI_CTRL (exclusive) */
-    if (!(s->requested_mask & NTW2_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under NTW2_AI_CTRL (exclusive) */
-    if (s->requested_mask & NTW2_VISUAL) {
+    if (!(s->requested_mask & KNTWR_AI_CTRL)) print_brain_retarget_jitter(s->ai_ctrl_reuse_words); /* words 20..23 are the geometry words under KNTWR_AI_CTRL (exclusive) */
+    if (!(s->requested_mask & KNTWR_AI_CTRL)) print_brain_target_cull(s->ai_ctrl_reuse_words); /* words 16..19 are the geometry words under KNTWR_AI_CTRL (exclusive) */
+    if (s->requested_mask & KNTWR_VISUAL) {
         const uint32_t *v = s->visual_words;
         say(L"  visual: calls=%lu sharded=%lu inline_fallbacks=%lu items_sum=%lu chunks=%lu "
             L"sum_us_sharded=%lu sum_us_inline=%lu max_us=%lu faults=%lu "
@@ -2699,12 +2699,12 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
             (unsigned long)v[8], (unsigned long)v[9], (unsigned long)v[10], (unsigned long)v[11],
             (unsigned long)v[12], (unsigned long)v[13], (unsigned long)v[14], (unsigned long)v[15]);
     }
-    for (i = 0; i < NTW2_ALLOCATOR_THREADS; ++i) {
-        const uint32_t *a = s->allocator_words + i * NTW2_ALLOCATOR_ROW_WORDS;
+    for (i = 0; i < KNTWR_ALLOCATOR_THREADS; ++i) {
+        const uint32_t *a = s->allocator_words + i * KNTWR_ALLOCATOR_ROW_WORDS;
         if (!a[0]) continue;
         say(L"  allocator %ls[%u]: result=0x%lX thread=%lu tls_before=0x%08lX tls_after=0x%08lX "
             L"exception=0x%08lX eip=0x%08lX address=0x%08lX tls_index=%lu\n",
-            i == NTW2_ALLOCATOR_THREADS - 1 ? L"ai" : L"pool", i,
+            i == KNTWR_ALLOCATOR_THREADS - 1 ? L"ai" : L"pool", i,
             (unsigned long)a[0], (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3],
             (unsigned long)a[4], (unsigned long)a[5], (unsigned long)a[6], (unsigned long)a[7]);
     }
@@ -2712,7 +2712,7 @@ static void print_module_words(const ntw2_status *s, uint32_t brain_flags, uint3
 }
 
 /* ------------------------------------------------------------------------------------------------ tick trace */
-static const uint32_t k_site_callee_vas[NTW2_TIMED_SITES] = NTW2_SITE_CALLEE_VAS;
+static const uint32_t k_site_callee_vas[KNTWR_TIMED_SITES] = KNTWR_SITE_CALLEE_VAS;
 static uint64_t trace_qpc(uint32_t lo, uint32_t hi)
 {
     return (uint64_t)lo | ((uint64_t)hi << 32);
@@ -2720,7 +2720,7 @@ static uint64_t trace_qpc(uint32_t lo, uint32_t hi)
 
 /* The producer's written count is cumulative across battle/model tick resets.
    Unsigned subtraction also handles its uint32_t rollover. */
-static void append_tick_log(Run *r, const ntw2_trace_ring *p)
+static void append_tick_log(Run *r, const kntwr_trace_ring *p)
 {
     TickLog *log = &r->tick_log;
     uint32_t added = p->written - log->written, start, i, needed;
@@ -2732,13 +2732,13 @@ static void append_tick_log(Run *r, const ntw2_trace_ring *p)
     needed = log->count + added;
     if (needed > TICK_LOG_MAX_ENTRIES) needed = TICK_LOG_MAX_ENTRIES;
     if (needed > log->capacity) {
-        uint32_t capacity = log->capacity ? log->capacity * 2u : NTW2_TRACE_ENTRIES;
-        ntw2_trace_entry *entries;
+        uint32_t capacity = log->capacity ? log->capacity * 2u : KNTWR_TRACE_ENTRIES;
+        kntwr_trace_entry *entries;
         if (capacity < needed) capacity = needed;
         if (capacity > TICK_LOG_MAX_ENTRIES) capacity = TICK_LOG_MAX_ENTRIES;
         entries = log->entries
-            ? (ntw2_trace_entry *)HeapReAlloc(GetProcessHeap(), 0, log->entries, (size_t)capacity * sizeof *entries)
-            : (ntw2_trace_entry *)HeapAlloc(GetProcessHeap(), 0, (size_t)capacity * sizeof *entries);
+            ? (kntwr_trace_entry *)HeapReAlloc(GetProcessHeap(), 0, log->entries, (size_t)capacity * sizeof *entries)
+            : (kntwr_trace_entry *)HeapAlloc(GetProcessHeap(), 0, (size_t)capacity * sizeof *entries);
         if (!entries) {
             log->failed = TRUE;
             errsay(L"unable to grow the tick log capture buffer.\n");
@@ -2749,11 +2749,11 @@ static void append_tick_log(Run *r, const ntw2_trace_ring *p)
     }
     start = (p->head + p->entries - added) % p->entries;
     for (i = 0; i < added; ++i) {
-        const ntw2_trace_entry *e = &p->ring[(start + i) % p->entries];
+        const kntwr_trace_entry *e = &p->ring[(start + i) % p->entries];
         /* Chronological written deltas exclude old slots; guard the boundary
            identity as well, without scanning the entire accumulated run. */
         if (log->count) {
-            const ntw2_trace_entry *last = &log->entries[log->count - 1u];
+            const kntwr_trace_entry *last = &log->entries[log->count - 1u];
             if (e->tick == last->tick && e->qpc_start_lo == last->qpc_start_lo &&
                 e->qpc_start_hi == last->qpc_start_hi) continue;
         }
@@ -2766,7 +2766,7 @@ static void append_tick_log(Run *r, const ntw2_trace_ring *p)
 static BOOL read_trace(Run *r)
 {
     TickTrace *t = r->trace;
-    ntw2_trace_ring *p;
+    kntwr_trace_ring *p;
     uint32_t next;
     if (!r->active_generations) return TRUE;
     if (!t) return FALSE;
@@ -2774,8 +2774,8 @@ static BOOL read_trace(Run *r)
     p = &t->copies[next];
     /* One full-ring read. No allocation or full-ring local copy per poll. */
     if (!remote_read(r->proc, r->dll_base + r->dll.trace_rva, p, sizeof *p) ||
-        p->abi != NTW2_TRACE_ABI || p->size != sizeof *p ||
-        p->entries != NTW2_TRACE_ENTRIES || p->head >= p->entries)
+        p->abi != KNTWR_TRACE_ABI || p->size != sizeof *p ||
+        p->entries != KNTWR_TRACE_ENTRIES || p->head >= p->entries)
         return FALSE;
     if (r->opt.tick_log[0]) {
         uint32_t header[8];
@@ -2818,14 +2818,14 @@ static void trace_percentiles(uint32_t *values, uint32_t count, uint32_t out[4])
 
 static void analyze_trace(TickTrace *t)
 {
-    const ntw2_trace_ring *p = &t->copies[t->current];
+    const kntwr_trace_ring *p = &t->copies[t->current];
     uint32_t i, start, rank, j;
     if (t->analyzed) return;
     t->count = p->written < p->entries ? p->written : p->entries;
     start = (p->head + p->entries - t->count) % p->entries;
     for (i = 0; i < t->count; ++i) {
         uint32_t index = (start + i) % p->entries;
-        const ntw2_trace_entry *e = &p->ring[index];
+        const kntwr_trace_entry *e = &p->ring[index];
         if (!i) t->first_tick = e->tick;
         t->last_tick = e->tick;
         t->scratch[i] = e->duration_us;
@@ -2833,7 +2833,7 @@ static void analyze_trace(TickTrace *t)
         t->manager_sum += e->manager_us;
         t->ballistics_sum += e->ballistics_us;
         t->path_sum += e->path_us;
-        for (j = 0; j < NTW2_TIMED_SITES; ++j) {
+        for (j = 0; j < KNTWR_TIMED_SITES; ++j) {
             t->site_sum[j] += e->site_us[j];
             t->site_calls[j] += e->site_calls[j];
         }
@@ -2852,7 +2852,7 @@ static void analyze_trace(TickTrace *t)
     }
     trace_percentiles(t->scratch, t->count, t->duration);
     for (i = 0; i < t->count; ++i) {
-        const ntw2_trace_entry *e = &p->ring[(start + i) % p->entries];
+        const kntwr_trace_entry *e = &p->ring[(start + i) % p->entries];
         t->scratch[i] = e->interval_us;
         if ((uint64_t)e->duration_us * 2u > (uint64_t)t->duration[0] * 3u) {
             ++t->mod100[(e->tick % 100u) / 10u];
@@ -2869,7 +2869,7 @@ static void analyze_trace(TickTrace *t)
 static BOOL write_trace(Run *r)
 {
     TickTrace *t = r->trace;
-    const ntw2_trace_ring *p;
+    const kntwr_trace_ring *p;
     uint32_t i, j;
     double share_scale;
     wchar_t path[MAXP + 16], tmp[MAXP + 20];
@@ -2899,12 +2899,12 @@ static BOOL write_trace(Run *r)
         t->manager_sum * share_scale, t->ballistics_sum * share_scale,
         t->path_sum * share_scale, t->remainder_sum * share_scale,
         (unsigned long)t->over100, (unsigned long)t->over150);
-    {   /* Tick core census (ntw2_trace_entry::flags bits 3..31): processor class carrying each routed tick, and placement. */
+    {   /* Tick core census (kntwr_trace_entry::flags bits 3..31): processor class carrying each routed tick, and placement. */
         uint32_t census = 0, census6 = 0, entered_e = 0, pinned_p = 0, pinned_e = 0;
         uint64_t share = 0, share6 = 0, changes = 0;
         const uint32_t first = (p->head + p->entries - t->count) % p->entries;
         for (i = 0; i < t->count; ++i) {
-            const ntw2_trace_entry *e = &p->ring[(first + i) % p->entries];
+            const kntwr_trace_entry *e = &p->ring[(first + i) % p->entries];
             const uint32_t f = e->flags;
             if (!(f & 8u)) continue;
             ++census;
@@ -2924,16 +2924,16 @@ static BOOL write_trace(Run *r)
         L"  Each call is timed and counted; site 2 includes sites 16..25; totals overlap gate timings.\n"
         L"    site callee sum_us calls duration_share\n",
         (unsigned long)t->timed_ticks, (unsigned long)t->count);
-    for (i = 0; i < NTW2_TIMED_SITES; ++i)
+    for (i = 0; i < KNTWR_TIMED_SITES; ++i)
         say(L"    %2lu 0x%06lX %I64u %I64u %.3f%%\n", (unsigned long)i, (unsigned long)k_site_callee_vas[i],
             (unsigned long long)t->site_sum[i], (unsigned long long)t->site_calls[i], t->site_sum[i] * share_scale);
     say(L"  Longest ticks (us): tick duration interval manager ballistics path\n");
     for (i = 0; i < t->top_count; ++i) {
-        const ntw2_trace_entry *e = &p->ring[t->top[i]];
+        const kntwr_trace_entry *e = &p->ring[t->top[i]];
         say(L"    %lu %lu %lu %lu %lu %lu\n", (unsigned long)e->tick, (unsigned long)e->duration_us,
             (unsigned long)e->interval_us, (unsigned long)e->manager_us, (unsigned long)e->ballistics_us, (unsigned long)e->path_us);
         say(L"      Sites (index:callee=us/calls):");
-        for (j = 0; j < NTW2_TIMED_SITES; ++j)
+        for (j = 0; j < KNTWR_TIMED_SITES; ++j)
             say(L" %lu:0x%06lX=%lu/%lu", (unsigned long)j, (unsigned long)k_site_callee_vas[j],
                 (unsigned long)e->site_us[j], (unsigned long)e->site_calls[j]);
         say(L"\n");
@@ -2974,7 +2974,7 @@ static BOOL write_tick_log(Run *r)
     struct {
         char magic[8];
         uint32_t abi, entry_size, count;
-    } header = {{'N', 'T', 'W', '2', 'T', 'L', 'O', 'G'}, NTW2_TRACE_ABI, sizeof(ntw2_trace_entry), 0};
+    } header = {{'N', 'T', 'W', '2', 'T', 'L', 'O', 'G'}, KNTWR_TRACE_ABI, sizeof(kntwr_trace_entry), 0};
     wchar_t tmp[MAXP + 8];
     HANDLE file;
     DWORD wrote, error = 0, bytes;
@@ -3004,9 +3004,9 @@ static BOOL write_tick_log(Run *r)
     return !log->failed;
 }
 
-/* ------------------------------------------------------------------------------------------------ brain sites (NTW2_BRAIN) */
-/* Cumulative since the last activation (ntw2_status::brain_words, layout in ntw2_runtime.h). Families are the entry sites 46..50. */
-static const struct { const wchar_t *name; const char *jname; uint32_t tables, entry_va; } k_brain_families[NTW2_BRAIN_FAMILIES] = {
+/* ------------------------------------------------------------------------------------------------ brain sites (KNTWR_BRAIN) */
+/* Cumulative since the last activation (kntwr_status::brain_words, layout in kntwr_runtime.h). Families are the entry sites 46..50. */
+static const struct { const wchar_t *name; const char *jname; uint32_t tables, entry_va; } k_brain_families[KNTWR_BRAIN_FAMILIES] = {
     { L"slot +0x0C = 0x66CE00 (brain direct)", "direct_66CE00", 11, 0x66CE00u },
     { L"slot +0x0C = 0x6F50F0 (jmp thunk to the brain)", "thunk_6F50F0", 1, 0x6F50F0u },
     { L"slot +0x0C = 0x6F4660 (LOS/registration wrapper)", "wrapper_6F4660", 6, 0x6F4660u },
@@ -3015,20 +3015,20 @@ static const struct { const wchar_t *name; const char *jname; uint32_t tables, e
 };
 #define BRAIN_FIRST_CALLEE 65u
 
-static uint32_t brain_us(const ntw2_status *s, uint32_t f, uint32_t site)
+static uint32_t brain_us(const kntwr_status *s, uint32_t f, uint32_t site)
 {
-    return s->brain_words[NTW2_BRAIN_HEADER_WORDS + 2u * (f * NTW2_BRAIN_SITES + (site - NTW2_BRAIN_SITE_FIRST))];
+    return s->brain_words[KNTWR_BRAIN_HEADER_WORDS + 2u * (f * KNTWR_BRAIN_SITES + (site - KNTWR_BRAIN_SITE_FIRST))];
 }
 
-static uint32_t brain_calls(const ntw2_status *s, uint32_t f, uint32_t site)
+static uint32_t brain_calls(const kntwr_status *s, uint32_t f, uint32_t site)
 {
-    return s->brain_words[NTW2_BRAIN_HEADER_WORDS + 2u * (f * NTW2_BRAIN_SITES + (site - NTW2_BRAIN_SITE_FIRST)) + 1u];
+    return s->brain_words[KNTWR_BRAIN_HEADER_WORDS + 2u * (f * KNTWR_BRAIN_SITES + (site - KNTWR_BRAIN_SITE_FIRST)) + 1u];
 }
 
 /* Sites family f can run: its own entry, its wrapper's callees (51..55 / 56..58 / 59..64) and the brain callees 65..94. */
 static BOOL brain_family_owns(uint32_t f, uint32_t site)
 {
-    if (site == NTW2_BRAIN_SITE_FIRST + f || site >= BRAIN_FIRST_CALLEE) return TRUE;
+    if (site == KNTWR_BRAIN_SITE_FIRST + f || site >= BRAIN_FIRST_CALLEE) return TRUE;
     return (f == 2 && site >= 51 && site <= 55) || (f == 3 && site >= 56 && site <= 58) || (f == 4 && site >= 59 && site <= 64);
 }
 
@@ -3036,7 +3036,7 @@ static BOOL brain_family_owns(uint32_t f, uint32_t site)
 static void brain_site_label(uint32_t site, wchar_t *out, size_t n)
 {
     const uint32_t va = k_site_callee_vas[site];
-    if (site >= NTW2_BRAIN_SITE_FIRST && site < NTW2_BRAIN_SITE_FIRST + NTW2_BRAIN_FAMILIES)
+    if (site >= KNTWR_BRAIN_SITE_FIRST && site < KNTWR_BRAIN_SITE_FIRST + KNTWR_BRAIN_FAMILIES)
         _snwprintf_s(out, n, _TRUNCATE, L"entry 0x%06lX", (unsigned long)va);
     else if (site == 55 || site == 56 || site == 59)
         _snwprintf_s(out, n, _TRUNCATE, L"0x%06lX (brain call)", (unsigned long)va);
@@ -3048,13 +3048,13 @@ static void brain_site_label(uint32_t site, wchar_t *out, size_t n)
 
 static void print_brain_sites(const Run *r)
 {
-    const ntw2_status *s = &r->last;
+    const kntwr_status *s = &r->last;
     const uint32_t ticks = s->brain_words[0], tick_us = s->brain_words[1];
-    uint64_t agg_us[NTW2_TIMED_SITES], agg_calls[NTW2_TIMED_SITES];
+    uint64_t agg_us[KNTWR_TIMED_SITES], agg_calls[KNTWR_TIMED_SITES];
     double scale = tick_us ? 100.0 / (double)tick_us : 0.0;
     uint32_t f, site;
     wchar_t label[64];
-    if (!(r->opt.mask & NTW2_BRAIN) || !r->active_generations) return;
+    if (!(r->opt.mask & KNTWR_BRAIN) || !r->active_generations) return;
     if (!r->have_status || !ticks) {
         say(L"Brain sites: no routed tick with brain profiling was observed.\n");
         return;
@@ -3065,23 +3065,23 @@ static void print_brain_sites(const Run *r)
         L"  Inclusive enter-to-return per call, so rows overlap; every timed call includes its own timing overhead (QPC + FP state\n"
         L"  save/restore), which inflates the enclosing rows in proportion to their nested call counts. share = sum_us / tick sum.\n",
         (unsigned long)ticks, (unsigned long)tick_us);
-    for (f = 0; f < NTW2_BRAIN_FAMILIES; ++f) {
-        const uint32_t entities = brain_calls(s, f, NTW2_BRAIN_SITE_FIRST + f);
-        const uint32_t entry_us = brain_us(s, f, NTW2_BRAIN_SITE_FIRST + f);
+    for (f = 0; f < KNTWR_BRAIN_FAMILIES; ++f) {
+        const uint32_t entities = brain_calls(s, f, KNTWR_BRAIN_SITE_FIRST + f);
+        const uint32_t entry_us = brain_us(s, f, KNTWR_BRAIN_SITE_FIRST + f);
         say(L"  family %lu: %ls, %lu vtables: entities=%lu (%.2f/tick) entry_us=%lu (%.3f%% of tick sum, %.3f us/entity)\n",
             (unsigned long)f, k_brain_families[f].name, (unsigned long)k_brain_families[f].tables, (unsigned long)entities,
             (double)entities / ticks, (unsigned long)entry_us, entry_us * scale, entities ? (double)entry_us / entities : 0.0);
-        for (site = NTW2_BRAIN_SITE_FIRST; site < NTW2_BRAIN_SITE_FIRST + NTW2_BRAIN_SITES; ++site) {
+        for (site = KNTWR_BRAIN_SITE_FIRST; site < KNTWR_BRAIN_SITE_FIRST + KNTWR_BRAIN_SITES; ++site) {
             const uint32_t us = brain_us(s, f, site), calls = brain_calls(s, f, site);
             if (site >= BRAIN_FIRST_CALLEE) { agg_us[site] += us; agg_calls[site] += calls; }
-            if (!brain_family_owns(f, site) || site == NTW2_BRAIN_SITE_FIRST + f || (!calls && !us)) continue;
+            if (!brain_family_owns(f, site) || site == KNTWR_BRAIN_SITE_FIRST + f || (!calls && !us)) continue;
             brain_site_label(site, label, 64);
             say(L"    site %2lu %-24ls sum_us=%lu calls=%lu (%.2f/tick, %.3f us/call) share=%.3f%%\n", (unsigned long)site, label,
                 (unsigned long)us, (unsigned long)calls, (double)calls / ticks, calls ? (double)us / calls : 0.0, us * scale);
         }
     }
     say(L"  brain callees, all families: site callee sum_us calls calls/tick us/call share\n");
-    for (site = BRAIN_FIRST_CALLEE; site < NTW2_BRAIN_SITE_FIRST + NTW2_BRAIN_SITES; ++site) {
+    for (site = BRAIN_FIRST_CALLEE; site < KNTWR_BRAIN_SITE_FIRST + KNTWR_BRAIN_SITES; ++site) {
         brain_site_label(site, label, 64);
         say(L"    %2lu %-18ls %I64u %I64u %.2f %.3f %.3f%%\n", (unsigned long)site, label,
             (unsigned long long)agg_us[site], (unsigned long long)agg_calls[site], (double)agg_calls[site] / ticks,
@@ -3101,12 +3101,12 @@ static void print_collision(const Run *r)
 {
     const uint32_t *w = r->last.collision_words;
     unsigned i;
-    if (!(r->opt.mask & NTW2_PROFILE)) return;
+    if (!(r->opt.mask & KNTWR_PROFILE)) return;
     if (!r->opt.collide_census) {
         say(L"collision: pair census disabled (opt in with --collide-census); site 5 inclusive timing remains enabled.\n");
         return;
     }
-    if (r->opt.mask & NTW2_COLLIDE) {
+    if (r->opt.mask & KNTWR_COLLIDE) {
         say(L"collision: original PROFILE census bypassed by collide; see collide counters.\n");
         return;
     }
@@ -3132,7 +3132,7 @@ static void print_collision(const Run *r)
         (unsigned long)w[22], (unsigned long)w[23]);
 }
 
-static const char *const k_collide_metrics[NTW2_COLLIDE_WORDS] = {
+static const char *const k_collide_metrics[KNTWR_COLLIDE_WORDS] = {
     "stage_calls", "solver_ticks", "fallback_ticks", "capacity_fallbacks", "layout_fallbacks",
     "sticky_fallbacks", "records", "cells", "pairs", "contacts", "callbacks",
     "gather_us", "bin_us", "pairs_us", "apply_us", "worklist_plan_us", "stage_us", "max_stage_us",
@@ -3154,7 +3154,7 @@ static const struct { const char *name; int wall; int thread; const char *nested
     {"audit", 50, 60, "bin"}, {"store", 51, 56, "apply"}, {"redistribute", 52, 57, "apply"},
     {"callback", 53, 58, "apply"}, {"reduction", 54, 59, "apply"}
 };
-static const char *const k_collide_lod_metrics[NTW2_COLLIDE_LOD_WORDS] = {
+static const char *const k_collide_lod_metrics[KNTWR_COLLIDE_LOD_WORDS] = {
     "ticks_gated", "records_seen", "records_skipped", "units", "far_units", "rebuild_ticks_forced",
     "distance_m", "max_proximity_us", "sum_proximity_us", "faults", "disabled",
     "reuse_far_records", "unknown_records", "reuse_ticks", "all_far_refused_ticks", "different_side_pairs"
@@ -3163,33 +3163,33 @@ static void print_collide_lod(const Run *r)
 {
     const uint32_t *w = r->last.collide_lod_words;
     unsigned i;
-    if (!(r->opt.mask & NTW2_COLLIDE_LOD)) return;
+    if (!(r->opt.mask & KNTWR_COLLIDE_LOD)) return;
     if (!r->have_status) { say(L"collide_lod: no runtime status observed.\n"); return; }
     say(L"collide_lod: half-rate far-unit queries; near/unknown and rebuild queries remain full-rate\n");
-    for (i = 0; i < NTW2_COLLIDE_LOD_WORDS; ++i)
+    for (i = 0; i < KNTWR_COLLIDE_LOD_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_collide_lod_metrics[i], (unsigned long)w[i], (i+1)%4 ? L" " : L"\n");
     say(L"  reuse far records skipped=%.3f%%; cumulative counts since activation, latest units/far_units\n",
         w[11] ? 100.0*w[2]/w[11] : 0.0);
 }
 
-static const char *const k_loco_metrics[NTW2_LOCO_WORDS] = { NTW2_LOCO_WORD_LABELS };
-static const char *const k_loco_gate_metrics[NTW2_LOCO_GATE_WORDS] = { NTW2_LOCO_GATE_LABELS };
-static const char *const k_loco_service_metrics[NTW2_LOCO_SERVICE_WORDS] = { NTW2_LOCO_SERVICE_LABELS };
-static const char *const k_loco_grid_metrics[NTW2_LOCO_GRID_WORDS] = { NTW2_LOCO_GRID_LABELS };
-static const char *const k_loco_parallel_metrics[NTW2_LOCO_PARALLEL_WORDS] = { NTW2_LOCO_PARALLEL_LABELS };
-static const char *const k_sweep_metrics[NTW2_SWEEP_WORDS] = { NTW2_SWEEP_WORD_LABELS };
-static const char *const k_resolve_metrics[NTW2_RESOLVE_WORDS] = { NTW2_RESOLVE_WORD_LABELS };
-static const char *const k_env_metrics[NTW2_ENV_WORDS] = { NTW2_ENV_WORD_LABELS };
-static const char *const k_resolve_frame_metrics[NTW2_RESOLVE_FRAME_WORDS] = { NTW2_RESOLVE_FRAME_LABELS };
-static const char *const k_loco_owned_metrics[NTW2_LOCO_OWNED_WORDS] = { NTW2_LOCO_OWNED_LABELS };
-static const char *const k_loco_owned_detail_metrics[NTW2_LOCO_OWNED_DETAIL_WORDS] = { NTW2_LOCO_OWNED_DETAIL_LABELS };
-static const char *const k_loco_owned_phase_metrics[NTW2_LOCO_OWNED_PHASE_WORDS] = { NTW2_LOCO_OWNED_PHASE_LABELS };
-static const char *const k_loco_owned_load_metrics[NTW2_LOCO_OWNED_LOAD_WORDS] = { NTW2_LOCO_OWNED_LOAD_LABELS };
-static const char *const k_loco_grid_v2_metrics[NTW2_LOCO_GRID_V2_WORDS] = { NTW2_LOCO_GRID_V2_LABELS };
-static const char *const k_loco_relink_metrics[NTW2_LOCO_RELINK_WORDS] = { NTW2_LOCO_RELINK_LABELS };
-static const char *const k_loco_cw_metrics[NTW2_LOCO_CW_WORDS] = { NTW2_LOCO_CW_LABELS };
-static const char *const k_loco_grid_build_metrics[NTW2_LOCO_GRID_BUILD_WORDS] = { NTW2_LOCO_GRID_BUILD_LABELS };
-static const char *const k_grid_probation_metrics[NTW2_GRID_PROBATION_HEADER_WORDS] = { NTW2_GRID_PROBATION_LABELS };
+static const char *const k_loco_metrics[KNTWR_LOCO_WORDS] = { KNTWR_LOCO_WORD_LABELS };
+static const char *const k_loco_gate_metrics[KNTWR_LOCO_GATE_WORDS] = { KNTWR_LOCO_GATE_LABELS };
+static const char *const k_loco_service_metrics[KNTWR_LOCO_SERVICE_WORDS] = { KNTWR_LOCO_SERVICE_LABELS };
+static const char *const k_loco_grid_metrics[KNTWR_LOCO_GRID_WORDS] = { KNTWR_LOCO_GRID_LABELS };
+static const char *const k_loco_parallel_metrics[KNTWR_LOCO_PARALLEL_WORDS] = { KNTWR_LOCO_PARALLEL_LABELS };
+static const char *const k_sweep_metrics[KNTWR_SWEEP_WORDS] = { KNTWR_SWEEP_WORD_LABELS };
+static const char *const k_resolve_metrics[KNTWR_RESOLVE_WORDS] = { KNTWR_RESOLVE_WORD_LABELS };
+static const char *const k_env_metrics[KNTWR_ENV_WORDS] = { KNTWR_ENV_WORD_LABELS };
+static const char *const k_resolve_frame_metrics[KNTWR_RESOLVE_FRAME_WORDS] = { KNTWR_RESOLVE_FRAME_LABELS };
+static const char *const k_loco_owned_metrics[KNTWR_LOCO_OWNED_WORDS] = { KNTWR_LOCO_OWNED_LABELS };
+static const char *const k_loco_owned_detail_metrics[KNTWR_LOCO_OWNED_DETAIL_WORDS] = { KNTWR_LOCO_OWNED_DETAIL_LABELS };
+static const char *const k_loco_owned_phase_metrics[KNTWR_LOCO_OWNED_PHASE_WORDS] = { KNTWR_LOCO_OWNED_PHASE_LABELS };
+static const char *const k_loco_owned_load_metrics[KNTWR_LOCO_OWNED_LOAD_WORDS] = { KNTWR_LOCO_OWNED_LOAD_LABELS };
+static const char *const k_loco_grid_v2_metrics[KNTWR_LOCO_GRID_V2_WORDS] = { KNTWR_LOCO_GRID_V2_LABELS };
+static const char *const k_loco_relink_metrics[KNTWR_LOCO_RELINK_WORDS] = { KNTWR_LOCO_RELINK_LABELS };
+static const char *const k_loco_cw_metrics[KNTWR_LOCO_CW_WORDS] = { KNTWR_LOCO_CW_LABELS };
+static const char *const k_loco_grid_build_metrics[KNTWR_LOCO_GRID_BUILD_WORDS] = { KNTWR_LOCO_GRID_BUILD_LABELS };
+static const char *const k_grid_probation_metrics[KNTWR_GRID_PROBATION_HEADER_WORDS] = { KNTWR_GRID_PROBATION_LABELS };
 static const char *const k_grid_probation_modules[4] = { "image", "runtime", "clone", "other" };
 /* --grid-probation: header words then every used caller row (EIP/caller preferred-base VAs; clone rows give the
    original instruction VA plus the clone id). An empty table on a full replay is the Stage C/D entry criterion. */
@@ -3200,10 +3200,10 @@ static void print_grid_probation(const Run *r)
     say(L"grid.probation: %ls; native heads PAGE_NOACCESS outside the owner site-13 relink window; traps are logged, restored and resumed\n",
         r->opt.grid_probation ? L"ENABLED" : L"off");
     if (!r->opt.grid_probation) return;
-    for (i = 0; i < NTW2_GRID_PROBATION_HEADER_WORDS; ++i)
+    for (i = 0; i < KNTWR_GRID_PROBATION_HEADER_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_grid_probation_metrics[i], (unsigned long)w[i], (i+1)%4 ? L" " : L"\n");
-    for (i = 0; i < NTW2_GRID_PROBATION_CALLERS; ++i) {
-        const uint32_t *row = w + NTW2_GRID_PROBATION_HEADER_WORDS + 8u * i;
+    for (i = 0; i < KNTWR_GRID_PROBATION_CALLERS; ++i) {
+        const uint32_t *row = w + KNTWR_GRID_PROBATION_HEADER_WORDS + 8u * i;
         if (!row[4]) continue;
         say(L"  trap eip=0x%08lX(%hs) caller=0x%08lX(%hs) threads=0x%02lX clone=%ld count=%lu writes=%lu first_site=0x%08lX last_site=0x%08lX\n",
             (unsigned long)row[0], k_grid_probation_modules[row[2] & 3u], (unsigned long)row[1],
@@ -3211,27 +3211,27 @@ static void print_grid_probation(const Run *r)
             (long)(row[2] >> 16) - 1, (unsigned long)row[4], (unsigned long)row[5], (unsigned long)row[6], (unsigned long)row[7]);
     }
 }
-static const char *const k_collide_source_metrics[NTW2_COLLIDE_SOURCE_WORDS] = { "source", "native_stages", "owned_stages", "owned_refusals" };
-static const char *const k_memory_metrics[NTW2_MEMORY_WORDS] = { NTW2_MEMORY_WORD_LABELS };
+static const char *const k_collide_source_metrics[KNTWR_COLLIDE_SOURCE_WORDS] = { "source", "native_stages", "owned_stages", "owned_refusals" };
+static const char *const k_memory_metrics[KNTWR_MEMORY_WORDS] = { KNTWR_MEMORY_WORD_LABELS };
 static void print_memory(const Run *r)
 {
     unsigned i;
     if (!r->have_status) return;
     say(L"memory: activation-sized storage; VA total floor=%luMiB, hole floor=%luMiB; periodic low VA (2 consecutive samples) latches native LOCO/COLLIDE fallback until restart\n",
-        (unsigned long)(r->last.memory_words[NTW2_MEM_FLOOR_BYTES] >> 20),
-        (unsigned long)(r->last.memory_words[NTW2_MEM_HOLE_FLOOR_BYTES] >> 20));
-    for (i = 0; i < NTW2_MEMORY_WORDS; ++i)
+        (unsigned long)(r->last.memory_words[KNTWR_MEM_FLOOR_BYTES] >> 20),
+        (unsigned long)(r->last.memory_words[KNTWR_MEM_HOLE_FLOOR_BYTES] >> 20));
+    for (i = 0; i < KNTWR_MEMORY_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_memory_metrics[i], (unsigned long)r->last.memory_words[i], (i+1)%4 ? L" " : L"\n");
-    if (NTW2_MEMORY_WORDS % 4) say(L"\n");
-    if(r->last.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK])
+    if (KNTWR_MEMORY_WORDS % 4) say(L"\n");
+    if(r->last.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK])
         say(L"  Budget fallback mask=0x%08lX (latch_reason=%lu: %ls); retired arenas=%lu; released LOCO=%lu COLLIDE=%lu bytes; LOCO breakdown retains last allocation\n",
-            (unsigned long)r->last.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK],
-            (unsigned long)r->last.memory_words[NTW2_MEM_LATCH_REASON],
-            r->last.memory_words[NTW2_MEM_LATCH_REASON] == NTW2_LATCH_REASON_HOLE ? L"hole" :
-            (r->last.memory_words[NTW2_MEM_LATCH_REASON] == NTW2_LATCH_REASON_TOTAL ? L"total" : L"none"),
-            (unsigned long)r->last.memory_words[NTW2_MEM_BUDGET_RELEASES],
-            (unsigned long)r->last.memory_words[NTW2_MEM_RELEASED_LOCO_BYTES],
-            (unsigned long)r->last.memory_words[NTW2_MEM_RELEASED_COLLIDE_BYTES]);
+            (unsigned long)r->last.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK],
+            (unsigned long)r->last.memory_words[KNTWR_MEM_LATCH_REASON],
+            r->last.memory_words[KNTWR_MEM_LATCH_REASON] == KNTWR_LATCH_REASON_HOLE ? L"hole" :
+            (r->last.memory_words[KNTWR_MEM_LATCH_REASON] == KNTWR_LATCH_REASON_TOTAL ? L"total" : L"none"),
+            (unsigned long)r->last.memory_words[KNTWR_MEM_BUDGET_RELEASES],
+            (unsigned long)r->last.memory_words[KNTWR_MEM_RELEASED_LOCO_BYTES],
+            (unsigned long)r->last.memory_words[KNTWR_MEM_RELEASED_COLLIDE_BYTES]);
 }
 /* Service order equals loco_words[32..39] and native_loco.h ServiceWord slots 12/20/28; us/max/calls start at these word indices. */
 enum { LOCO_SERVICES = 8, LOCO_SVC_US = 12, LOCO_SVC_MAX = 20, LOCO_SVC_CALLS = 28 };
@@ -3268,7 +3268,7 @@ static void print_loco(const Run *r)
     const uint32_t *w = r->last.loco_words;
     const uint32_t *g = r->last.loco_gate_words;
     unsigned i;
-    if (!(r->opt.mask & NTW2_LOCO)) return;
+    if (!(r->opt.mask & KNTWR_LOCO)) return;
     if (!r->have_status) { say(L"loco: no runtime status observed.\n"); return; }
     say(L"loco: Stages A/B/C site-13 movement loop 0x531AF0; optional owned grid v2 published at stage end; clone execution %ls; closed movement workers %ls; owned services %ls\n",
         r->opt.loco_clone ? L"ENABLED" : L"off (observe only: original movement)",
@@ -3276,47 +3276,47 @@ static void print_loco(const Run *r)
         r->opt.loco_owned ? L"ENABLED (--loco-owned-services)" : L"off");
     say(L"loco.mode: quiet %ls (--loco-quiet disables per-service QPC, shadow comparisons and the all-gates histogram; faults/share retained); effective shadow comparisons %ls\n",
         r->opt.loco_quiet ? L"ENABLED" : L"off", loco_shadow_effective(&r->opt) ? L"ENABLED" : L"off");
-    for (i = 0; i < NTW2_LOCO_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_metrics[i], (unsigned long)w[i], (i+1)%4 ? L" " : L"\n");
-    if (NTW2_LOCO_WORDS % 4) say(L"\n");
+    if (KNTWR_LOCO_WORDS % 4) say(L"\n");
     say(L"  admitted %.3f%% of entity occurrences; cloned=%lu native=%lu; us sums are wall time inside the stage (admitted, rejected, dispatch)\n",
         w[2] ? 100.0*w[3]/w[2] : 0.0, (unsigned long)w[27], (unsigned long)w[28]);
     say(L"  serial MOVE enforces Class/Lifetime/Parked/Pending/Environment only; removed first-fail buckets stay zero; no NODE/worker safety claim\n");
     say(L"  all-gates: denominator=%lu active +0x30 occurrences, candidates=%lu, enforced_mask=0x%03lx (bit reason-1); independent failures/details overlap and must not be summed\n",
         (unsigned long)g[1], (unsigned long)g[2], (unsigned long)g[4]);
-    for (i = 0; i < NTW2_LOCO_GATE_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GATE_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_gate_metrics[i], (unsigned long)g[i], (i+1)%4 ? L" " : L"\n");
-    if (NTW2_LOCO_GATE_WORDS % 4) say(L"\n");
+    if (KNTWR_LOCO_GATE_WORDS % 4) say(L"\n");
     say(L"  all-gates admitted %.3f%%; legacy=%lu newly_admitted=%lu; detailed fields are recognized-candidate diagnostics, not first failures\n",
         g[1] ? 100.0*g[3]/g[1] : 0.0, (unsigned long)g[38], (unsigned long)g[39]);
     say(L"  ChargeFire uses DWORD +4E8/+390/+3BC/+3C8; byte +618/+619/+F1/+5AB are corroborating latches only\n");
     print_loco_services(r);
     say(L"loco.grid: %ls; combined COLLIDE borrows the published view; counters cumulative modulo 2^32\n",
         r->opt.loco_grid ? L"ENABLED: owned grid v2 published at site-13 exit" : L"grid disabled; pass --loco-grid or --loco-grid-verify");
-    for (i = 0; i < NTW2_LOCO_GRID_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_grid_metrics[i], (unsigned long)r->last.loco_grid_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.grid_v2: verification %ls; phase words remain the movement measurement\n", r->opt.loco_grid_verify ? L"ENABLED" : L"off");
-    for (i = 0; i < NTW2_LOCO_GRID_V2_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_V2_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_grid_v2_metrics[i], (unsigned long)r->last.loco_grid_v2_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.grid_build: %ls; phase words are owner-QPC microseconds summed over successful builds\n",
         r->opt.loco_grid_incremental ? (r->opt.loco_grid_verify ? L"INCREMENTAL with shadow full rebuild per stage" : L"INCREMENTAL") : L"full builds");
-    for (i = 0; i < NTW2_LOCO_GRID_BUILD_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_BUILD_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_grid_build_metrics[i], (unsigned long)r->last.loco_grid_build_words[i], (i+1)%4 ? L" " : L"\n");
     print_grid_probation(r);
     say(L"loco.relink: %ls; the op log replaces the native grid link services (live) or verifies them on a mirror (shadow)\n",
         r->opt.loco_relink_workers ? L"ENABLED (workers: live parallel apply)" : r->opt.loco_relink_shadow ? L"ENABLED (shadow: native serial apply verified)" : L"off");
     if (r->opt.loco_relink_shadow || r->opt.loco_relink_workers)
-        for (i = 0; i < NTW2_LOCO_RELINK_WORDS; ++i)
+        for (i = 0; i < KNTWR_LOCO_RELINK_WORDS; ++i)
             say(L"  %hs=%lu%ls", k_loco_relink_metrics[i], (unsigned long)r->last.loco_relink_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.class_wrapper: census of the 0x132BA04 occurrences refused as needs_class_wrapper (pre-step, children, aim state, child vtables)\n");
-    for (i = 0; i < NTW2_LOCO_CW_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_CW_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_cw_metrics[i], (unsigned long)r->last.loco_cw_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.parallel: without --loco-owned-services only A1==0 direct/battle occurrences enter workers; native publication is always owner-only; combined collision requires clone+parallel+owned-services+grid\n");
-    for (i = 0; i < NTW2_LOCO_PARALLEL_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_PARALLEL_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_parallel_metrics[i], (unsigned long)r->last.loco_parallel_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.owned: %ls; one dispatch per stage, entity-range chunks claimed atomically by the pool; counters cumulative modulo 2^32; unsupported occurrences are refused to the owner before irreversible writes\n",
         r->opt.loco_owned ? L"ENABLED" : L"off");
-    for (i = 0; i < NTW2_LOCO_OWNED_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_owned_metrics[i], (unsigned long)r->last.loco_owned_words[i], (i+1)%4 ? L" " : L"\n");
     if (r->last.loco_owned_words[31])
         say(L"  active_worker_share=%.3f%% (%lu direct + %lu battle / %lu A1!=0 mover occurrences); PROFILE outer site 13 is the timing acceptance bracket\n",
@@ -3325,25 +3325,25 @@ static void print_loco(const Run *r)
             (unsigned long)r->last.loco_owned_words[31]);
     say(L"loco.owned.detail: quiet_enabled=%lu; staging initial/result A3==0, clamp callback, class and unit-blocked splits, F0 census\n",
         (unsigned long)r->last.loco_owned_detail_words[1]);
-    for (i = 0; i < NTW2_LOCO_OWNED_DETAIL_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_DETAIL_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_owned_detail_metrics[i], (unsigned long)r->last.loco_owned_detail_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.owned.phase: stage/dispatch/chunk timings; replay commit/fallback us are x16 estimates from every 16th occurrence\n");
-    for (i = 0; i < NTW2_LOCO_OWNED_PHASE_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_PHASE_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_owned_phase_metrics[i], (unsigned long)r->last.loco_owned_phase_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.owned.load: activation-only scene/catalog/participants/prefaulted arena; Stage never prepares or grows storage; chunk CPU and worst-chunk wall/CPU remain under quiet\n");
-    for (i = 0; i < NTW2_LOCO_OWNED_LOAD_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_LOAD_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_loco_owned_load_metrics[i], (unsigned long)r->last.loco_owned_load_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"loco.shadow: owner-thread diagnostic only; faults invalidate equivalence; histogram targets use preferred-image VAs (host callbacks retain host addresses); sweep four kinds top2\nsweep:\n");
-    for (i = 0; i < NTW2_SWEEP_WORDS; ++i)
+    for (i = 0; i < KNTWR_SWEEP_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_sweep_metrics[i], (unsigned long)r->last.sweep_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"resolve:\n");
-    for (i = 0; i < NTW2_RESOLVE_WORDS; ++i)
+    for (i = 0; i < KNTWR_RESOLVE_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_resolve_metrics[i], (unsigned long)r->last.resolve_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"resolve frames:\n");
-    for (i = 0; i < NTW2_RESOLVE_FRAME_WORDS; ++i)
+    for (i = 0; i < KNTWR_RESOLVE_FRAME_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_resolve_frame_metrics[i], (unsigned long)r->last.resolve_frame_words[i], (i+1)%4 ? L" " : L"\n");
     say(L"env: direct outputs compared; transition events inferred from flags, notifications unobserved; callback-implied is not proof of callback causality\n");
-    for (i = 0; i < NTW2_ENV_WORDS; ++i)
+    for (i = 0; i < KNTWR_ENV_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_env_metrics[i], (unsigned long)r->last.env_words[i], (i+1)%4 ? L" " : L"\n");
     for (i = 0; i < 3; ++i) {
         unsigned j;
@@ -3365,7 +3365,7 @@ static void print_collide(const Run *r)
 {
     const uint32_t *w = r->last.collide_words;
     unsigned i;
-    if (!(r->opt.mask & NTW2_COLLIDE)) return;
+    if (!(r->opt.mask & KNTWR_COLLIDE)) return;
     if (!r->have_status) {
         say(L"collide: no runtime status observed.\n");
         return;
@@ -3386,27 +3386,27 @@ static void print_collide(const Run *r)
         L"  shaped_pairs = original 0x81A670 calls with >=1 nonnull shape pointer (unshaped circles bypass it)\n"
         L"  *_thread_us = GetThreadTimes user+kernel CPU aggregated over owner+workers, not summed QPC; coarse resolution\n"
         L"  Compare per-stage counts using collide stage_calls vs collision_words[21], never original per-routed-tick averages.\n");
-    for (i = 0; i < NTW2_COLLIDE_WORDS; ++i) {
+    for (i = 0; i < KNTWR_COLLIDE_WORDS; ++i) {
         if (i == 29 || (i >= 34 && i <= 41))
             say(L"  %hs=0x%08lX%ls", k_collide_metrics[i], (unsigned long)w[i], (i+1)%4 ? L" " : L"\n");
         else
             say(L"  %hs=%lu%ls", k_collide_metrics[i], (unsigned long)w[i], (i+1)%4 ? L" " : L"\n");
     }
-    if (NTW2_COLLIDE_WORDS % 4) say(L"\n");
+    if (KNTWR_COLLIDE_WORDS % 4) say(L"\n");
     say(L"collide.source: 0=none, 1=native-audit, 2=owned; missing owned view falls back before writes\n");
-    for (i = 0; i < NTW2_COLLIDE_SOURCE_WORDS; ++i)
+    for (i = 0; i < KNTWR_COLLIDE_SOURCE_WORDS; ++i)
         say(L"  %hs=%lu%ls", k_collide_source_metrics[i], (unsigned long)r->last.collide_source_words[i], (i+1)%4 ? L" " : L"\n");
     {
-        static const char *const contact_labels[NTW2_COLLIDE_CONTACT_WORDS] = { NTW2_COLLIDE_CONTACT_WORD_LABELS };
+        static const char *const contact_labels[KNTWR_COLLIDE_CONTACT_WORDS] = { KNTWR_COLLIDE_CONTACT_WORD_LABELS };
         const uint32_t *c = r->last.collide_contact_words;
         say(L"collide.contact (mode 1=shadow, 2=workers; vtables/slot are image-relative VAs):\n");
-        for (i = 0; i < NTW2_COLLIDE_CONTACT_WORDS; ++i) {
+        for (i = 0; i < KNTWR_COLLIDE_CONTACT_WORDS; ++i) {
             if (i >= 34 && i <= 36)
                 say(L"  %hs=0x%08lX%ls", contact_labels[i], (unsigned long)c[i], (i+1)%4 ? L" " : L"\n");
             else
                 say(L"  %hs=%lu%ls", contact_labels[i], (unsigned long)c[i], (i+1)%4 ? L" " : L"\n");
         }
-        if (NTW2_COLLIDE_CONTACT_WORDS % 4) say(L"\n");
+        if (KNTWR_COLLIDE_CONTACT_WORDS % 4) say(L"\n");
         say(L"  plan_thread_us = per-chunk QPC occupancy summed over owner+workers (elapsed incl. preemption, not CPU time); plan_thread_us/plan_us = plan parallelism\n");
     }
     say(L"  per solver tick (denominator solver_ticks=%lu, NOT stage_calls=%lu which includes fallbacks):\n",
@@ -3459,9 +3459,9 @@ static void brain_state_label(unsigned bucket, BOOL substate, wchar_t *label, si
 static void print_brain_states(const Run *r)
 {
     const uint32_t *w = r->last.brain_state_words;
-    unsigned group, i, order[NTW2_BRAIN_SUBSTATE_BUCKETS];
+    unsigned group, i, order[KNTWR_BRAIN_SUBSTATE_BUCKETS];
     wchar_t label[24];
-    if (!(r->opt.mask & NTW2_BRAIN) || !r->active_generations) return;
+    if (!(r->opt.mask & KNTWR_BRAIN) || !r->active_generations) return;
     if (!r->have_status || !w[0]) {
         say(L"Brain states: no routed tick with brain profiling was observed.\n");
         return;
@@ -3473,8 +3473,8 @@ static void print_brain_states(const Run *r)
     if (!w[1]) say(L"  No brain entries sampled (BRAIN2 suppresses the BRAIN entry hooks).\n");
     if (w[11]) say(L"  WARNING: %lu unit-set storage failures; distinct-unit totals are incomplete.\n", (unsigned long)w[11]);
     for (group = 0; group < 2; ++group) {
-        const unsigned base = group ? NTW2_BRAIN_SUBSTATE_COUNTS : NTW2_BRAIN_STATE_COUNTS;
-        const unsigned n = group ? NTW2_BRAIN_SUBSTATE_BUCKETS : NTW2_BRAIN_STATE_BUCKETS;
+        const unsigned base = group ? KNTWR_BRAIN_SUBSTATE_COUNTS : KNTWR_BRAIN_STATE_COUNTS;
+        const unsigned n = group ? KNTWR_BRAIN_SUBSTATE_BUCKETS : KNTWR_BRAIN_STATE_BUCKETS;
         brain_state_order(w+base, n, order);
         say(L"  %ls: state  entries/tick  entry-share\n", group ? L"Sub-FSM +1D8" : L"Brain +1B8");
         for (i = 0; i < n; ++i) {
@@ -3495,14 +3495,14 @@ static void print_brain_states(const Run *r)
         L"  0x4B -> other state: %.2f entities/tick, %.2f distinct units/tick; %.2f null-unit entities/tick.\n"
         L"    destination  entities/tick  units/tick  transition-share\n",
         (double)w[8]/w[0], (double)w[9]/w[0], (double)w[10]/w[0]);
-    brain_state_order(w+NTW2_BRAIN_TRANSITION_COUNTS, NTW2_BRAIN_STATE_BUCKETS, order);
-    for (i = 0; i < NTW2_BRAIN_STATE_BUCKETS; ++i) {
+    brain_state_order(w+KNTWR_BRAIN_TRANSITION_COUNTS, KNTWR_BRAIN_STATE_BUCKETS, order);
+    for (i = 0; i < KNTWR_BRAIN_STATE_BUCKETS; ++i) {
         const unsigned bucket = order[i];
-        const uint32_t count = w[NTW2_BRAIN_TRANSITION_COUNTS+bucket];
+        const uint32_t count = w[KNTWR_BRAIN_TRANSITION_COUNTS+bucket];
         if (!count) continue;
         brain_state_label(bucket, FALSE, label, 24);
         say(L"    %-11ls %12.2f %11.2f %16.3f%%\n", label, (double)count/w[0],
-            (double)w[NTW2_BRAIN_TRANSITION_UNITS+bucket]/w[0], w[8] ? 100.0*count/w[8] : 0.0);
+            (double)w[KNTWR_BRAIN_TRANSITION_UNITS+bucket]/w[0], w[8] ? 100.0*count/w[8] : 0.0);
     }
 }
 
@@ -3539,10 +3539,10 @@ static void sb_fmt(Sb *b, const char *fmt, ...)
 
 static void sb_brain_locality(Sb *b, const uint32_t *w, int requested)
 {
-    static const char *const header[] = { NTW2_BRAIN_LOC_LABEL_HEADER };
-    static const char *const scalars[] = { NTW2_BRAIN_LOC_LABEL_SCALARS };
-    static const char *const types[] = { NTW2_BRAIN_LOC_TYPE_LABELS };
-    static const char *const tw[] = { NTW2_BRAIN_LOC_TYPE_WORD_LABELS };
+    static const char *const header[] = { KNTWR_BRAIN_LOC_LABEL_HEADER };
+    static const char *const scalars[] = { KNTWR_BRAIN_LOC_LABEL_SCALARS };
+    static const char *const types[] = { KNTWR_BRAIN_LOC_TYPE_LABELS };
+    static const char *const tw[] = { KNTWR_BRAIN_LOC_TYPE_WORD_LABELS };
     static const char *const armn[] = { "cold", "treated" };
     BrainLocStats t;
     unsigned i, k;
@@ -3550,34 +3550,34 @@ static void sb_brain_locality(Sb *b, const uint32_t *w, int requested)
     if (!requested) { sb_fmt(b, "null"); return; }
     ok = brain_loc_stats(w, &t);
     sb_fmt(b, "{\"header\": {");
-    for (i = 0; i < NTW2_BRAIN_LOC_HEADER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", header[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_BRAIN_LOC_HEADER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", header[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"scalars\": {");
-    for (i = 0; i < NTW2_BRAIN_LOC_SCALAR_WORDS; ++i)
-        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", scalars[i], (unsigned long)w[NTW2_BRAIN_LOC_SCALAR_BASE + i]);
+    for (i = 0; i < KNTWR_BRAIN_LOC_SCALAR_WORDS; ++i)
+        sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", scalars[i], (unsigned long)w[KNTWR_BRAIN_LOC_SCALAR_BASE + i]);
     sb_fmt(b, "}, \"delta_log2_hist\": [");
-    for (i = 0; i < NTW2_BRAIN_LOC_DELTA_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_DELTA_BASE + i]);
+    for (i = 0; i < KNTWR_BRAIN_LOC_DELTA_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[KNTWR_BRAIN_LOC_DELTA_BASE + i]);
     sb_fmt(b, "], \"unit_run_log2_hist\": [");
-    for (i = 0; i < NTW2_BRAIN_LOC_RUN_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_RUN_BASE + i]);
+    for (i = 0; i < KNTWR_BRAIN_LOC_RUN_BINS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[KNTWR_BRAIN_LOC_RUN_BASE + i]);
     sb_fmt(b, "], \"types\": {");
-    for (i = 0; i < NTW2_BRAIN_LOC_TYPES; ++i) {
+    for (i = 0; i < KNTWR_BRAIN_LOC_TYPES; ++i) {
         sb_fmt(b, "%s\"%s\": {", i ? ", " : "", types[i]);
-        for (k = 0; k < NTW2_BRAIN_LOC_TYPE_WORDS; ++k)
-            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", tw[k], (unsigned long)w[NTW2_BRAIN_LOC_TYPE_BASE + i * NTW2_BRAIN_LOC_TYPE_WORDS + k]);
+        for (k = 0; k < KNTWR_BRAIN_LOC_TYPE_WORDS; ++k)
+            sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", tw[k], (unsigned long)w[KNTWR_BRAIN_LOC_TYPE_BASE + i * KNTWR_BRAIN_LOC_TYPE_WORDS + k]);
         sb_fmt(b, "}");
     }
     sb_fmt(b, "}, \"new_line_buckets\": [");
-    for (i = 0; i < NTW2_BRAIN_LOC_BUCKETS; ++i) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_BUCKET_BASE + i * NTW2_BRAIN_LOC_BUCKET_WORDS;
+    for (i = 0; i < KNTWR_BRAIN_LOC_BUCKETS; ++i) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_BUCKET_BASE + i * KNTWR_BRAIN_LOC_BUCKET_WORDS;
         sb_fmt(b, "%s{\"new_lines_from\": %lu, \"n\": %lu, \"cycles_sum\": %.0f, \"cycles_sq\": %.6g}", i ? ", " : "", (unsigned long)(4 * i),
                (unsigned long)q[0], (double)s0_u64(q + 1), s0_f64(q + 3));
     }
     sb_fmt(b, "], \"arms\": {");
-    for (i = 0; i < NTW2_BRAIN_LOC_ARMS; ++i) {
-        const uint32_t *q = w + NTW2_BRAIN_LOC_ARM_BASE + i * NTW2_BRAIN_LOC_ARM_WORDS;
+    for (i = 0; i < KNTWR_BRAIN_LOC_ARMS; ++i) {
+        const uint32_t *q = w + KNTWR_BRAIN_LOC_ARM_BASE + i * KNTWR_BRAIN_LOC_ARM_WORDS;
         sb_fmt(b, "%s\"%s\": {\"n\": %lu, \"cycles_sum\": %.0f, \"cycles_sq\": %.6g, \"touch_sum\": %.0f, \"touch_sq\": %.6g, \"hist\": [",
                i ? ", " : "", armn[i], (unsigned long)q[0], (double)s0_u64(q + 1), s0_f64(q + 3), (double)s0_u64(q + 5), s0_f64(q + 7));
-        for (k = 0; k < NTW2_BRAIN_LOC_HIST_BINS; ++k)
-            sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)w[NTW2_BRAIN_LOC_HIST_BASE + i * NTW2_BRAIN_LOC_HIST_BINS + k]);
+        for (k = 0; k < KNTWR_BRAIN_LOC_HIST_BINS; ++k)
+            sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)w[KNTWR_BRAIN_LOC_HIST_BASE + i * KNTWR_BRAIN_LOC_HIST_BINS + k]);
         sb_fmt(b, "]}");
     }
     sb_fmt(b, "}, \"estimated\": %s, \"cycles_per_ms\": %.3f, \"members_per_stage\": %.3f, \"loop_ms_per_stage\": %.6f, "
@@ -3633,7 +3633,7 @@ static void sb_tick_log(Sb *b, const Run *r)
     sb_fmt(b, ",\"count\":%lu,\"lost\":%I64u},\n  \"tick_log_summary\": [",
            (unsigned long)log->count, (unsigned long long)log->lost);
     for (i = 0; i < log->count; ++i) {
-        const ntw2_trace_entry *e = &log->entries[i];
+        const kntwr_trace_entry *e = &log->entries[i];
         sb_fmt(b, "%s{\"tick\":%lu,\"qpc_start\":%I64u,\"qpc_end\":%I64u,"
                "\"duration_us\":%lu,\"interval_us\":%lu,\"site5_us\":%lu,\"site6_us\":%lu,"
                "\"site13_us\":%lu,\"site18_us\":%lu,\"site33_us\":%lu,\"site34_us\":%lu}",
@@ -3648,17 +3648,17 @@ static void sb_tick_log(Sb *b, const Run *r)
     sb_fmt(b, "],\n");
 }
 
-static const char *const k_profile_modules[NTW2_PROFILE_MODULE_COUNT] = {
-    "main_image", "ntw2", "d3d9", "driver", "ntdll", "kernel32", "tbb", "msvcr", "other"
+static const char *const k_profile_modules[KNTWR_PROFILE_MODULE_COUNT] = {
+    "main_image", "kntwr", "d3d9", "driver", "ntdll", "kernel32", "tbb", "msvcr", "other"
 };
-static const char *const k_profile_phases[NTW2_PROFILE_MAIN_PHASES] = { "A1", "B", "C", "A2" };
-static const uint32_t k_profile_phase_order[NTW2_PROFILE_MAIN_PHASES] = {
-    NTW2_PROFILE_PHASE_A1, NTW2_PROFILE_PHASE_A2, NTW2_PROFILE_PHASE_B, NTW2_PROFILE_PHASE_C
+static const char *const k_profile_phases[KNTWR_PROFILE_MAIN_PHASES] = { "A1", "B", "C", "A2" };
+static const uint32_t k_profile_phase_order[KNTWR_PROFILE_MAIN_PHASES] = {
+    KNTWR_PROFILE_PHASE_A1, KNTWR_PROFILE_PHASE_A2, KNTWR_PROFILE_PHASE_B, KNTWR_PROFILE_PHASE_C
 };
 
 static void sb_profile_modules(Sb *b, const Run *r)
 {
-    const ntw2_profile_status *p = &r->profile;
+    const kntwr_profile_status *p = &r->profile;
     uint32_t phase, index, module;
     if (!r->have_profile) {
         sb_fmt(b, "  \"main_thread_profile\": null,\n");
@@ -3668,14 +3668,14 @@ static void sb_profile_modules(Sb *b, const Run *r)
            "\"module_refresh_failed\": %lu, \"module_omitted\": %lu, \"phases\": [",
            (unsigned long)p->abi, (unsigned long)p->main_thread_id, (unsigned long)p->main_post_tick_ms,
            (unsigned long)p->main_start_tick_ms, (unsigned long)p->module_refresh_failed, (unsigned long)p->module_omitted);
-    for (index = 0; index < NTW2_PROFILE_MAIN_PHASES; ++index) {
+    for (index = 0; index < KNTWR_PROFILE_MAIN_PHASES; ++index) {
         phase = k_profile_phase_order[index];
         sb_fmt(b, "%s{\"phase\": \"%s\", \"samples\": %lu, \"wait_samples\": %lu, \"modules\": {",
-               index ? "," : "", k_profile_phases[phase], (unsigned long)NTW2_PROFILE_PHASE_FIELD(p, phase, samples),
-               (unsigned long)NTW2_PROFILE_PHASE_FIELD(p, phase, wait));
-        for (module = 0; module < NTW2_PROFILE_MODULE_COUNT; ++module)
+               index ? "," : "", k_profile_phases[phase], (unsigned long)KNTWR_PROFILE_PHASE_FIELD(p, phase, samples),
+               (unsigned long)KNTWR_PROFILE_PHASE_FIELD(p, phase, wait));
+        for (module = 0; module < KNTWR_PROFILE_MODULE_COUNT; ++module)
             sb_fmt(b, "%s\"%s\": %lu", module ? "," : "", k_profile_modules[module],
-                   (unsigned long)NTW2_PROFILE_PHASE_FIELD(p, phase, modules)[module]);
+                   (unsigned long)KNTWR_PROFILE_PHASE_FIELD(p, phase, modules)[module]);
         sb_fmt(b, "}}");
     }
     sb_fmt(b, "]},\n");
@@ -3683,7 +3683,7 @@ static void sb_profile_modules(Sb *b, const Run *r)
 
 static void sb_trace(Sb *b, const TickTrace *t)
 {
-    const ntw2_trace_ring *p;
+    const kntwr_trace_ring *p;
     double share_scale;
     uint32_t i, j, start;
     if (!t || !t->analyzed) {
@@ -3710,7 +3710,7 @@ static void sb_trace(Sb *b, const TickTrace *t)
     sb_fmt(b, "    \"qpc_frequency\": %I64u,\n    \"qpc_semantics\": \"raw QPC; duration_us includes site-34 AI slice; end includes final hold cleanup\",\n"
            "    \"ticks\": [", (unsigned long long)trace_qpc(p->qpc_freq_lo, p->qpc_freq_hi));
     for (i = 0; i < t->count; ++i) {
-        const ntw2_trace_entry *e = &p->ring[(start + i) % p->entries];
+        const kntwr_trace_entry *e = &p->ring[(start + i) % p->entries];
         sb_fmt(b, "%s\n      {\"tick\": %lu, \"qpc_start\": %I64u, \"qpc_end\": %I64u, \"duration_us\": %lu}",
                i ? "," : "", (unsigned long)e->tick,
                (unsigned long long)trace_qpc(e->qpc_start_lo, e->qpc_start_hi),
@@ -3720,19 +3720,19 @@ static void sb_trace(Sb *b, const TickTrace *t)
     sb_fmt(b, "    \"trace_abi\": %u,\n    \"timed_ticks\": %lu,\n"
            "    \"site_semantics\": \"inclusive enter-to-return per call; site 2 includes sites 16..25; skipped sites zero\",\n"
            "    \"site_share_basis\": \"all retained tick durations\",\n    \"sites\": [",
-           NTW2_TRACE_ABI, (unsigned long)t->timed_ticks);
-    for (i = 0; i < NTW2_TIMED_SITES; ++i)
+           KNTWR_TRACE_ABI, (unsigned long)t->timed_ticks);
+    for (i = 0; i < KNTWR_TIMED_SITES; ++i)
         sb_fmt(b, "%s\n      {\"index\": %lu, \"callee_va\": \"0x%06lX\", \"sum_us\": %I64u, \"calls\": %I64u, \"duration_share\": %.9f}",
                i ? "," : "", (unsigned long)i, (unsigned long)k_site_callee_vas[i],
                (unsigned long long)t->site_sum[i], (unsigned long long)t->site_calls[i], t->site_sum[i] * share_scale);
     sb_fmt(b, "\n    ],\n    \"longest_ticks\": [");
     for (i = 0; i < t->top_count; ++i) {
-        const ntw2_trace_entry *e = &p->ring[t->top[i]];
+        const kntwr_trace_entry *e = &p->ring[t->top[i]];
         sb_fmt(b, "%s\n      {\"tick\": %lu, \"duration_us\": %lu, \"interval_us\": %lu, "
                "\"manager_us\": %lu, \"ballistics_us\": %lu, \"path_us\": %lu, \"sites\": [",
                i ? "," : "", (unsigned long)e->tick, (unsigned long)e->duration_us, (unsigned long)e->interval_us,
                (unsigned long)e->manager_us, (unsigned long)e->ballistics_us, (unsigned long)e->path_us);
-        for (j = 0; j < NTW2_TIMED_SITES; ++j)
+        for (j = 0; j < KNTWR_TIMED_SITES; ++j)
             sb_fmt(b, "%s{\"index\": %lu, \"callee_va\": \"0x%06lX\", \"us\": %lu, \"calls\": %lu}",
                    j ? ", " : "", (unsigned long)j, (unsigned long)k_site_callee_vas[j],
                    (unsigned long)e->site_us[j], (unsigned long)e->site_calls[j]);
@@ -3752,7 +3752,7 @@ static void sb_brain2(Sb *b, const Run *r)
 {
     const uint32_t *g = r->last.brain2_words;
     unsigned i;
-    if (!(r->opt.mask & NTW2_BRAIN2) || !r->have_status) {
+    if (!(r->opt.mask & KNTWR_BRAIN2) || !r->have_status) {
         sb_fmt(b, "  \"brain2\": null,\n");
         return;
     }
@@ -3780,7 +3780,7 @@ static void sb_brain2(Sb *b, const Run *r)
            (unsigned long)g[34], (unsigned long)g[35], (unsigned long)g[36], (unsigned long)g[37]);
     for (i = 0; i < 6; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)g[40+i]);
     sb_fmt(b, "], \"class_order\": [\"core\",\"thunk\",\"wrapper602eb0\",\"wrapper5fceb0\",\"artillery\",\"other\"], \"services\": [");
-    for (i = 0; i < NTW2_BRAIN2_CENSUS_WORDS / 8u; ++i) {
+    for (i = 0; i < KNTWR_BRAIN2_CENSUS_WORDS / 8u; ++i) {
         const uint32_t *q = r->last.brain2_census_words + i * 8;
         sb_fmt(b, "%s{\"id\": %u, \"name\": \"%s\", \"calls\": %lu, \"active\": %lu, \"unknown\": %lu, "
                "\"inactive\": %lu, \"first_active_occurrences\": %lu, \"first_unknown_occurrences\": %lu, \"qpc_ticks\": %I64u}",
@@ -3790,39 +3790,39 @@ static void sb_brain2(Sb *b, const Run *r)
     }
     sb_fmt(b, "], \"requested_node_shadow\": %s, \"requested_fire_shadow\": %s, \"node_words\": [",
            r->opt.brain_node_shadow ? "true" : "false", r->opt.brain_fire_shadow ? "true" : "false");
-    for (i = 0; i < NTW2_NODE_WORDS; ++i)
+    for (i = 0; i < KNTWR_NODE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.node_words[i]);
     sb_fmt(b, "], \"node_event_words\": [");
-    for (i = 0; i < NTW2_NODE_EVENT_WORDS; ++i)
+    for (i = 0; i < KNTWR_NODE_EVENT_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.node_event_words[i]);
     sb_fmt(b, "], \"fire_words\": [");
-    for (i = 0; i < NTW2_FIRE_WORDS; ++i)
+    for (i = 0; i < KNTWR_FIRE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.fire_words[i]);
     sb_fmt(b, "], \"route_words\": [");
-    for (i = 0; i < NTW2_BRAIN2_ROUTE_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN2_ROUTE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain2_route_words[i]);
     sb_fmt(b, "], \"fire_commit_words\": [");
-    for (i = 0; i < NTW2_FIRE_COMMIT_WORDS; ++i)
+    for (i = 0; i < KNTWR_FIRE_COMMIT_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.fire_commit_words[i]);
     sb_fmt(b, "], \"move_node_words\": [");
-    for (i = 0; i < NTW2_MOVE_NODE_WORDS; ++i)
+    for (i = 0; i < KNTWR_MOVE_NODE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.move_node_words[i]);
     sb_fmt(b, "], \"move_node_event_words\": [");
-    for (i = 0; i < NTW2_MOVE_NODE_EVENT_WORDS; ++i)
+    for (i = 0; i < KNTWR_MOVE_NODE_EVENT_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.move_node_event_words[i]);
     sb_fmt(b, "], \"node_target_words\": [");
-    for (i = 0; i < NTW2_BRAIN2_NODE_TARGET_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN2_NODE_TARGET_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain2_node_target_words[i]);
     sb_fmt(b, "], \"requested_parallel\": %s, \"requested_quiet\": %s, \"brain_worker_words\": [",
            r->opt.brain_parallel ? "true" : "false", r->opt.brain_quiet ? "true" : "false");
-    for (i = 0; i < NTW2_BRAIN_WORKER_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN_WORKER_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_worker_words[i]);
     sb_fmt(b, "], \"requested_unit_shadow\": %s, \"brain_unit_words\": [", r->opt.brain_unit_shadow ? "true" : "false");
-    for (i = 0; i < NTW2_BRAIN_UNIT_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN_UNIT_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_unit_words[i]);
     {
-        static const char *const fields[] = { NTW2_BRAIN_UNIT_FIELD_LABELS };
-        static const char *const columns[] = { NTW2_BRAIN_UNIT_FIELD_WORD_LABELS };
+        static const char *const fields[] = { KNTWR_BRAIN_UNIT_FIELD_LABELS };
+        static const char *const columns[] = { KNTWR_BRAIN_UNIT_FIELD_WORD_LABELS };
         unsigned f, c;
         sb_fmt(b, "], \"unit_agreement\": {");
         for (f = 0; f < sizeof(fields) / sizeof(fields[0]); ++f) {
@@ -3830,48 +3830,48 @@ static void sb_brain2(Sb *b, const Run *r)
             for (c = 0; c < sizeof(columns) / sizeof(columns[0]); ++c)
                 sb_fmt(b, "%s\"%s\": %lu", c ? ", " : "", columns[c],
                        (unsigned long)r->last.brain_unit_words[16u + 8u * f + c]);
-            sb_fmt(b, ", \"%s\": %lu}", NTW2_BRAIN_UNIT_TICK_NONE_LABEL, (unsigned long)r->last.brain_unit_words[160u + f]);
+            sb_fmt(b, ", \"%s\": %lu}", KNTWR_BRAIN_UNIT_TICK_NONE_LABEL, (unsigned long)r->last.brain_unit_words[160u + f]);
         }
         {
-            static const char *const roles[] = { NTW2_BRAIN_UNIT_ROLE_LABELS };
+            static const char *const roles[] = { KNTWR_BRAIN_UNIT_ROLE_LABELS };
             for (c = 0; c < 3u; ++c)
                 sb_fmt(b, ", \"%s\": %lu", roles[c], (unsigned long)r->last.brain_unit_words[169u + c]);
         }
     }
     sb_fmt(b, "}, \"brain_worker_phase_words\": [");
-    for (i = 0; i < NTW2_BRAIN_WORKER_PHASE_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN_WORKER_PHASE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_worker_phase_words[i]);
     sb_fmt(b, "], \"requested_s0\": %s, \"requested_locality\": %s, \"brain_locality\": ", r->opt.brain_s0 ? "true" : "false",
            r->opt.brain_locality ? "true" : "false");
     sb_brain_locality(b, r->last.brain_s0_words, r->opt.brain_locality);
     sb_fmt(b, ", \"brain_s0_words\": [");
-    for (i = 0; i < NTW2_BRAIN_S0_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN_S0_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain_s0_words[i]);
     {
         /* Labelled header and the launcher's per-mechanic estimate (print_brain_s0 / brain_s0_table formulas). */
-        static const char *const header[] = { NTW2_BRAIN_S0_HEADER_LABELS };
-        static const char *const rows[] = { NTW2_BRAIN_S0_ROW_LABELS };
+        static const char *const header[] = { KNTWR_BRAIN_S0_HEADER_LABELS };
+        static const char *const rows[] = { KNTWR_BRAIN_S0_ROW_LABELS };
         BrainS0Table t;
         unsigned k;
-        static const uint32_t zero_words[NTW2_BRAIN_S0_WORDS] = { 0 };
+        static const uint32_t zero_words[KNTWR_BRAIN_S0_WORDS] = { 0 };
         const uint32_t *s0w = r->opt.brain_locality ? zero_words : r->last.brain_s0_words;
         const int ok = brain_s0_table(s0w, &t);
         sb_fmt(b, "], \"brain_s0\": {\"header\": {");
-        for (k = 0; k < NTW2_BRAIN_S0_HEADER_WORDS; ++k)
+        for (k = 0; k < KNTWR_BRAIN_S0_HEADER_WORDS; ++k)
             sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", header[k], (unsigned long)s0w[k]);
         sb_fmt(b, "}, \"estimated\": %s, \"cycles_per_ms\": %.3f, \"step_ms_per_stage\": %.6f, \"site6_ms_per_stage\": %.6f, "
                   "\"s0_overhead_ms_per_stage\": %.6f, \"rows\": {", ok ? "true" : "false", t.cycles_per_ms, t.step_ms,
                t.site6_ms, t.overhead_ms);
-        for (k = 0; k < NTW2_BRAIN_S0_ROWS; ++k) {
+        for (k = 0; k < KNTWR_BRAIN_S0_ROWS; ++k) {
             const BrainS0Row *x = &t.rows[k];
             sb_fmt(b, "%s\"%s\": {\"calls_per_stage\": %.3f, \"timed\": %.0f, \"excl_ms\": %.6f, \"excl_stat_ms\": %.6f, "
                       "\"excl_cal_ms\": %.6f, \"incl_ms\": %.6f, \"incl_stat_ms\": %.6f, \"share\": %.6f}", k ? ", " : "",
                    rows[k], x->calls, x->sampled, x->excl_ms, x->excl_stat, x->excl_cal, x->incl_ms, x->incl_stat, x->share);
         }
         {
-            static const char *const policy_labels[] = { NTW2_UNIT_POLICY_HEADER_LABELS };
-            static const char *const fatigue_labels[] = { NTW2_UNIT_FATIGUE_LABELS };
-            static const char *const posture_labels[] = { NTW2_UNIT_POSTURE_ENGAGE_LABELS };
+            static const char *const policy_labels[] = { KNTWR_UNIT_POLICY_HEADER_LABELS };
+            static const char *const fatigue_labels[] = { KNTWR_UNIT_FATIGUE_LABELS };
+            static const char *const posture_labels[] = { KNTWR_UNIT_POSTURE_ENGAGE_LABELS };
             const uint32_t *u = r->last.brain_unit_policy_words;
             sb_fmt(b, "}}, \"requested_unit_fatigue\": %s, \"requested_unit_fatigue_shadow\": %s, \"requested_unit_posture\": %s, "
                       "\"requested_unit_posture_shadow\": %s, \"requested_unit_engage\": %s, \"requested_unit_engage_shadow\": %s, "
@@ -3879,7 +3879,7 @@ static void sb_brain2(Sb *b, const Run *r)
                    r->opt.brain_unit_fatigue ? "true" : "false", r->opt.brain_unit_fatigue_shadow ? "true" : "false",
                    r->opt.brain_unit_posture ? "true" : "false", r->opt.brain_unit_posture_shadow ? "true" : "false",
                    r->opt.brain_unit_engage ? "true" : "false", r->opt.brain_unit_engage_shadow ? "true" : "false");
-            for (k = 0; k < NTW2_BRAIN_UNIT_POLICY_WORDS; ++k) sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)u[k]);
+            for (k = 0; k < KNTWR_BRAIN_UNIT_POLICY_WORDS; ++k) sb_fmt(b, "%s%lu", k ? "," : "", (unsigned long)u[k]);
             sb_fmt(b, "], \"unit_policy\": {");
             for (k = 0; k < 32; ++k) sb_fmt(b, "%s\"%s\": %lu", k ? ", " : "", policy_labels[k], (unsigned long)u[k]);
             sb_fmt(b, "}, \"unit_fatigue\": {");
@@ -3889,20 +3889,20 @@ static void sb_brain2(Sb *b, const Run *r)
             sb_fmt(b, "}, \"unknown_site_words\": [");
         }
     }
-    for (i = 0; i < NTW2_BRAIN2_UNKNOWN_SITE_WORDS; ++i)
+    for (i = 0; i < KNTWR_BRAIN2_UNKNOWN_SITE_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.brain2_unknown_site_words[i]);
     sb_fmt(b, "], \"idle_node_words\": [");
-    for (i = 0; i < NTW2_IDLE_NODE_CLASSES * NTW2_NODE_WORDS; ++i)
-        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.idle_node_words[i / NTW2_NODE_WORDS][i % NTW2_NODE_WORDS]);
+    for (i = 0; i < KNTWR_IDLE_NODE_CLASSES * KNTWR_NODE_WORDS; ++i)
+        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.idle_node_words[i / KNTWR_NODE_WORDS][i % KNTWR_NODE_WORDS]);
     sb_fmt(b, "], \"idle_node_event_words\": [");
-    for (i = 0; i < NTW2_IDLE_NODE_CLASSES * NTW2_NODE_EVENT_WORDS; ++i)
-        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.idle_node_event_words[i / NTW2_NODE_EVENT_WORDS][i % NTW2_NODE_EVENT_WORDS]);
+    for (i = 0; i < KNTWR_IDLE_NODE_CLASSES * KNTWR_NODE_EVENT_WORDS; ++i)
+        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.idle_node_event_words[i / KNTWR_NODE_EVENT_WORDS][i % KNTWR_NODE_EVENT_WORDS]);
     sb_fmt(b, "], \"action_node_words\": [");
-    for (i = 0; i < NTW2_ACTION_NODE_CLASSES * NTW2_NODE_WORDS; ++i)
-        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.action_node_words[i / NTW2_NODE_WORDS][i % NTW2_NODE_WORDS]);
+    for (i = 0; i < KNTWR_ACTION_NODE_CLASSES * KNTWR_NODE_WORDS; ++i)
+        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.action_node_words[i / KNTWR_NODE_WORDS][i % KNTWR_NODE_WORDS]);
     sb_fmt(b, "], \"action_node_event_words\": [");
-    for (i = 0; i < NTW2_ACTION_NODE_CLASSES * NTW2_NODE_EVENT_WORDS; ++i)
-        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.action_node_event_words[i / NTW2_NODE_EVENT_WORDS][i % NTW2_NODE_EVENT_WORDS]);
+    for (i = 0; i < KNTWR_ACTION_NODE_CLASSES * KNTWR_NODE_EVENT_WORDS; ++i)
+        sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.action_node_event_words[i / KNTWR_NODE_EVENT_WORDS][i % KNTWR_NODE_EVENT_WORDS]);
     sb_fmt(b, "]},\n");
 }
 
@@ -3910,13 +3910,13 @@ static void sb_brain2(Sb *b, const Run *r)
    feature was requested and a routed tick was observed. Shares divide by the routed tick duration sum (brain_words[1]). */
 static void sb_brain(Sb *b, const Run *r)
 {
-    const ntw2_status *s = &r->last;
+    const kntwr_status *s = &r->last;
     const uint32_t ticks = s->brain_words[0], tick_us = s->brain_words[1];
     const double scale = tick_us ? 1.0 / (double)tick_us : 0.0;
-    uint64_t agg_us[NTW2_TIMED_SITES], agg_calls[NTW2_TIMED_SITES];
+    uint64_t agg_us[KNTWR_TIMED_SITES], agg_calls[KNTWR_TIMED_SITES];
     uint32_t f, site;
     char callee[24];
-    if (!(r->opt.mask & NTW2_BRAIN) || !r->have_status || !ticks) {
+    if (!(r->opt.mask & KNTWR_BRAIN) || !r->have_status || !ticks) {
         sb_fmt(b, "  \"brain_sites\": null,\n");
         return;
     }
@@ -3927,19 +3927,19 @@ static void sb_brain(Sb *b, const Run *r)
            "each timed call's own timing overhead; tick_share = sum_us / tick_sum_us; callee is the original VA or vt+offset\",\n"
            "    \"families\": [",
            (unsigned long)ticks, (unsigned long)tick_us);
-    for (f = 0; f < NTW2_BRAIN_FAMILIES; ++f) {
-        const uint32_t entities = brain_calls(s, f, NTW2_BRAIN_SITE_FIRST + f);
-        const uint32_t entry_us = brain_us(s, f, NTW2_BRAIN_SITE_FIRST + f);
+    for (f = 0; f < KNTWR_BRAIN_FAMILIES; ++f) {
+        const uint32_t entities = brain_calls(s, f, KNTWR_BRAIN_SITE_FIRST + f);
+        const uint32_t entry_us = brain_us(s, f, KNTWR_BRAIN_SITE_FIRST + f);
         uint32_t rows = 0;
         sb_fmt(b, "%s\n      {\"index\": %lu, \"name\": \"%s\", \"vtables\": %lu, \"entry_va\": \"0x%06lX\", \"entities\": %lu, "
                "\"entities_per_tick\": %.6f, \"entry_sum_us\": %lu, \"entry_tick_share\": %.9f, \"sites\": [",
                f ? "," : "", (unsigned long)f, k_brain_families[f].jname, (unsigned long)k_brain_families[f].tables,
                (unsigned long)k_brain_families[f].entry_va, (unsigned long)entities, (double)entities / ticks,
                (unsigned long)entry_us, entry_us * scale);
-        for (site = NTW2_BRAIN_SITE_FIRST; site < NTW2_BRAIN_SITE_FIRST + NTW2_BRAIN_SITES; ++site) {
+        for (site = KNTWR_BRAIN_SITE_FIRST; site < KNTWR_BRAIN_SITE_FIRST + KNTWR_BRAIN_SITES; ++site) {
             const uint32_t us = brain_us(s, f, site), calls = brain_calls(s, f, site);
             if (site >= BRAIN_FIRST_CALLEE) { agg_us[site] += us; agg_calls[site] += calls; }
-            if (!brain_family_owns(f, site) || site == NTW2_BRAIN_SITE_FIRST + f) continue;
+            if (!brain_family_owns(f, site) || site == KNTWR_BRAIN_SITE_FIRST + f) continue;
             if (k_site_callee_vas[site] < 0x400000u)
                 _snprintf_s(callee, sizeof callee, _TRUNCATE, "vt+0x%lX", (unsigned long)k_site_callee_vas[site]);
             else
@@ -3952,7 +3952,7 @@ static void sb_brain(Sb *b, const Run *r)
         sb_fmt(b, "\n      ]}");
     }
     sb_fmt(b, "\n    ],\n    \"brain_callees_all_families\": [");
-    for (site = BRAIN_FIRST_CALLEE; site < NTW2_BRAIN_SITE_FIRST + NTW2_BRAIN_SITES; ++site) {
+    for (site = BRAIN_FIRST_CALLEE; site < KNTWR_BRAIN_SITE_FIRST + KNTWR_BRAIN_SITES; ++site) {
         if (k_site_callee_vas[site] < 0x400000u)
             _snprintf_s(callee, sizeof callee, _TRUNCATE, "vt+0x%lX", (unsigned long)k_site_callee_vas[site]);
         else
@@ -3970,7 +3970,7 @@ static void sb_collision(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.collision_words;
     unsigned i;
-    if (!r->opt.collide_census || !(r->opt.mask & NTW2_PROFILE) || (r->opt.mask & NTW2_COLLIDE) || !r->have_status || !w[0]) {
+    if (!r->opt.collide_census || !(r->opt.mask & KNTWR_PROFILE) || (r->opt.mask & KNTWR_COLLIDE) || !r->have_status || !w[0]) {
         sb_fmt(b, "  \"collision\": null,\n");
         return;
     }
@@ -3999,46 +3999,46 @@ static void sb_ratio(Sb *b, uint32_t sum, uint32_t denominator)
     else sb_fmt(b, "null");
 }
 
-static const char *const k_grid_threads[NTW2_GRID_THREADS] = {
+static const char *const k_grid_threads[KNTWR_GRID_THREADS] = {
     "tick_owner", "main_render", "other"
 };
 
 static const char *grid_route_name(uint32_t route)
 {
     switch (route) {
-    case NTW2_GRID_ROUTE_IMAGE: return "image";
-    case NTW2_GRID_ROUTE_BINDING: return "binding";
-    case NTW2_GRID_ROUTE_CLONE: return "clone";
-    case NTW2_GRID_ROUTE_OTHER: return "other";
+    case KNTWR_GRID_ROUTE_IMAGE: return "image";
+    case KNTWR_GRID_ROUTE_BINDING: return "binding";
+    case KNTWR_GRID_ROUTE_CLONE: return "clone";
+    case KNTWR_GRID_ROUTE_OTHER: return "other";
     default: return "unknown";
     }
 }
 
 static void print_grid_census(const Run *r)
 {
-    const ntw2_grid_census_status *c = &r->last.grid_census;
+    const kntwr_grid_census_status *c = &r->last.grid_census;
     unsigned i, j;
-    if (!(r->opt.mask & NTW2_GRID_CENSUS)) return;
+    if (!(r->opt.mask & KNTWR_GRID_CENSUS)) return;
     if (!r->have_status || c->version != 1u) {
         say(L"Grid census: no initialized census snapshot available.\n");
         return;
     }
     say(L"Grid census: %lu routed ticks; %lu readers (capacity %u), %lu instrumented edges (capacity %u).\n",
-        (unsigned long)c->routed_ticks, (unsigned long)c->reader_count, NTW2_GRID_READERS,
-        (unsigned long)c->edge_count, NTW2_GRID_EDGES);
+        (unsigned long)c->routed_ticks, (unsigned long)c->reader_count, KNTWR_GRID_READERS,
+        (unsigned long)c->edge_count, KNTWR_GRID_EDGES);
     say(L"  Route calls count retargeted private-clone edges. Only IMAGE destinations prove native reader entries.\n"
         L"  Binding/clone/other destinations may defer, skip or replace readers; route calls are NOT reader entries.\n"
         L"  Rates divide the corresponding in-tick calls by routed ticks (n/a if zero). Samples are EIP occupancy, never calls.\n"
         L"  Totals wrap modulo 2^32 over this start/stop session. Phase/site/thread histograms count routes, not entries.\n"
         L"  Last tick/site/thread/phase are hints; site %u is unknown; non-owner sites observe the owner's dispatch site.\n",
-        NTW2_GRID_UNKNOWN_SITE);
+        KNTWR_GRID_UNKNOWN_SITE);
     say(L"  sample_attempts=%lu sample_failures=%lu unknown_samples=%lu attribution_dropped=%lu edge_dropped=%lu unresolved_edges=%lu\n",
         (unsigned long)c->sample_attempts, (unsigned long)c->sample_failures,
         (unsigned long)c->unknown_samples, (unsigned long)c->attribution_dropped,
         (unsigned long)c->edge_dropped, (unsigned long)c->unresolved_edges);
     say(L"  unresolved_edges counts ungated internal-call/direct-jump references, not measured calls or complete coverage.\n");
-    for (i = 0; i < c->reader_count && i < NTW2_GRID_READERS; ++i) {
-        const ntw2_grid_reader_status *v = &c->readers[i];
+    for (i = 0; i < c->reader_count && i < KNTWR_GRID_READERS; ++i) {
+        const kntwr_grid_reader_status *v = &c->readers[i];
         say(L"  reader %u [0x%08lX,0x%08lX): route_calls=%lu route_tick_calls=%lu routes/routed_tick=",
             i, (unsigned long)v->va, (unsigned long)v->end,
             (unsigned long)v->route_calls, (unsigned long)v->route_tick_calls);
@@ -4052,19 +4052,19 @@ static void print_grid_census(const Run *r)
             (unsigned long)v->original_samples, (unsigned long)v->clone_samples,
             (unsigned long)v->last_tick, (unsigned long)v->last_site,
             (unsigned long)v->last_thread, (unsigned long)v->last_phase);
-        for (j = 0; j < NTW2_GRID_PHASES; ++j)
+        for (j = 0; j < KNTWR_GRID_PHASES; ++j)
             say(L"    phase %-2hs route_calls=%lu occupancy=%lu\n", k_profile_phases[j],
                 (unsigned long)v->calls_phase[j], (unsigned long)v->samples_phase[j]);
-        for (j = 0; j < NTW2_GRID_THREADS; ++j)
+        for (j = 0; j < KNTWR_GRID_THREADS; ++j)
             say(L"    thread %-17hs route_calls=%lu occupancy=%lu\n", k_grid_threads[j],
                 (unsigned long)v->calls_thread[j], (unsigned long)v->samples_thread[j]);
-        for (j = 0; j < NTW2_GRID_SITES; ++j)
+        for (j = 0; j < KNTWR_GRID_SITES; ++j)
             if (v->calls_site[j] || v->samples_site[j])
                 say(L"    site %u route_calls=%lu occupancy=%lu\n", j,
                     (unsigned long)v->calls_site[j], (unsigned long)v->samples_site[j]);
     }
-    for (i = 0; i < c->edge_count && i < NTW2_GRID_EDGES; ++i) {
-        const ntw2_grid_edge_status *e = &c->edges[i];
+    for (i = 0; i < c->edge_count && i < KNTWR_GRID_EDGES; ++i) {
+        const kntwr_grid_edge_status *e = &c->edges[i];
         say(L"  edge %u reader=%lu callsite=0x%08lX source_clone=0x%08lX route=%hs route_calls=%lu route_tick_calls=%lu routes/routed_tick=",
             i, (unsigned long)e->reader, (unsigned long)e->site, (unsigned long)e->source_clone,
             grid_route_name(e->route), (unsigned long)e->route_calls, (unsigned long)e->route_tick_calls);
@@ -4076,9 +4076,9 @@ static void print_grid_census(const Run *r)
 
 static void sb_grid_census(Sb *b, const Run *r)
 {
-    const ntw2_grid_census_status *c = &r->last.grid_census;
+    const kntwr_grid_census_status *c = &r->last.grid_census;
     unsigned i, j;
-    if (!(r->opt.mask & NTW2_GRID_CENSUS) || !r->have_status || c->version != 1u) {
+    if (!(r->opt.mask & KNTWR_GRID_CENSUS) || !r->have_status || c->version != 1u) {
         sb_fmt(b, "  \"grid_census\": null,\n");
         return;
     }
@@ -4087,7 +4087,7 @@ static void sb_grid_census(Sb *b, const Run *r)
            "\"sample_attempts\":%lu,\"sample_failures\":%lu,\"unknown_samples\":%lu,"
            "\"attribution_dropped\":%lu,\"edge_dropped\":%lu,\"unresolved_edges\":%lu,\n",
            (unsigned long)c->version, (unsigned long)c->reader_count, (unsigned long)c->edge_count,
-           NTW2_GRID_READERS, NTW2_GRID_EDGES, (unsigned long)c->routed_ticks,
+           KNTWR_GRID_READERS, KNTWR_GRID_EDGES, (unsigned long)c->routed_ticks,
            (unsigned long)c->sample_attempts, (unsigned long)c->sample_failures,
            (unsigned long)c->unknown_samples, (unsigned long)c->attribution_dropped,
            (unsigned long)c->edge_dropped, (unsigned long)c->unresolved_edges);
@@ -4100,8 +4100,8 @@ static void sb_grid_census(Sb *b, const Run *r)
            "unresolved_edges counts ungated internal-call/direct-jump references, not measured calls; "
            "edge site/source_clone are preferred-image VAs; reader id joins the static census readers array\","
            "\"readers\":[");
-    for (i = 0; i < c->reader_count && i < NTW2_GRID_READERS; ++i) {
-        const ntw2_grid_reader_status *v = &c->readers[i];
+    for (i = 0; i < c->reader_count && i < KNTWR_GRID_READERS; ++i) {
+        const kntwr_grid_reader_status *v = &c->readers[i];
         sb_fmt(b, "%s{\"id\":%u,\"va\":%lu,\"end\":%lu,\"route_calls\":%lu,\"route_tick_calls\":%lu,"
                "\"route_calls_per_routed_tick\":", i ? "," : "", i,
                (unsigned long)v->va, (unsigned long)v->end,
@@ -4115,27 +4115,27 @@ static void sb_grid_census(Sb *b, const Run *r)
                (unsigned long)v->original_samples, (unsigned long)v->clone_samples,
                (unsigned long)v->last_tick, (unsigned long)v->last_site,
                (unsigned long)v->last_thread, (unsigned long)v->last_phase);
-        for (j = 0; j < NTW2_GRID_PHASES; ++j)
+        for (j = 0; j < KNTWR_GRID_PHASES; ++j)
             sb_fmt(b, "%s\"%s\":{\"route_calls\":%lu,\"samples\":%lu}", j ? "," : "", k_profile_phases[j],
                    (unsigned long)v->calls_phase[j], (unsigned long)v->samples_phase[j]);
         sb_fmt(b, "},\"thread_classes\":{");
-        for (j = 0; j < NTW2_GRID_THREADS; ++j)
+        for (j = 0; j < KNTWR_GRID_THREADS; ++j)
             sb_fmt(b, "%s\"%s\":{\"route_calls\":%lu,\"samples\":%lu}", j ? "," : "", k_grid_threads[j],
                    (unsigned long)v->calls_thread[j], (unsigned long)v->samples_thread[j]);
         sb_fmt(b, "},\"sites\":[");
-        for (j = 0; j < NTW2_GRID_SITES; ++j)
+        for (j = 0; j < KNTWR_GRID_SITES; ++j)
             sb_fmt(b, "%s{\"site\":%u,\"route_calls\":%lu,\"samples\":%lu}", j ? "," : "", j,
                    (unsigned long)v->calls_site[j], (unsigned long)v->samples_site[j]);
         sb_fmt(b, "]}");
     }
     sb_fmt(b, "],\"edges\":[");
-    for (i = 0; i < c->edge_count && i < NTW2_GRID_EDGES; ++i) {
-        const ntw2_grid_edge_status *e = &c->edges[i];
+    for (i = 0; i < c->edge_count && i < KNTWR_GRID_EDGES; ++i) {
+        const kntwr_grid_edge_status *e = &c->edges[i];
         sb_fmt(b, "%s{\"id\":%u,\"reader\":%lu,\"site\":%lu,\"source_clone\":%lu,\"route\":%lu,\"route_name\":\"%s\","
                "\"native_entry_proven\":%s,\"route_calls\":%lu,\"route_tick_calls\":%lu,\"route_calls_per_routed_tick\":",
                i ? "," : "", i, (unsigned long)e->reader, (unsigned long)e->site,
                (unsigned long)e->source_clone, (unsigned long)e->route, grid_route_name(e->route),
-               e->route==NTW2_GRID_ROUTE_IMAGE ? "true" : "false",
+               e->route==KNTWR_GRID_ROUTE_IMAGE ? "true" : "false",
                (unsigned long)e->route_calls, (unsigned long)e->route_tick_calls);
         sb_ratio(b, e->route_tick_calls, c->routed_ticks);
         sb_fmt(b, ",\"last_tick\":%lu,\"last_thread\":%lu}",
@@ -4144,7 +4144,7 @@ static void sb_grid_census(Sb *b, const Run *r)
     sb_fmt(b, "]},\n");
 }
 
-/* ---- AI mutation census (NTW2_AI_CENSUS): word layout documented at ntw2_status::ai_census_words in include/ntw2_runtime.h ---- */
+/* ---- AI mutation census (KNTWR_AI_CENSUS): word layout documented at kntwr_status::ai_census_words in include/kntwr_runtime.h ---- */
 #define AIC_HEADER 16u
 #define AIC_TARGETS 7u
 #define AIC_TARGET_HEADER 8u
@@ -4153,7 +4153,7 @@ static void sb_grid_census(Sb *b, const Run *r)
 #define AIC_TARGET_WORDS (AIC_TARGET_HEADER + AIC_TOP * AIC_CALLER)
 #define AIC_RANGES 3u
 #define AIC_RANGE_WORDS 8u
-typedef char ntw2_launcher_ai_census_layout[(NTW2_AI_CENSUS_WORDS == AIC_HEADER + AIC_TARGETS * AIC_TARGET_WORDS + AIC_RANGES * AIC_RANGE_WORDS) ? 1 : -1];
+typedef char kntwr_launcher_ai_census_layout[(KNTWR_AI_CENSUS_WORDS == AIC_HEADER + AIC_TARGETS * AIC_TARGET_WORDS + AIC_RANGES * AIC_RANGE_WORDS) ? 1 : -1];
 static const char *const k_ai_census_targets[AIC_TARGETS] = {
     "0x6EA520 delegate replacement virtual: slot 19 of vtables 0x13378F8 0x1337998 0x1337BB8 0x1337C30 0x1349C18",
     "0x6B3010 delegate sibling virtual: slot 20 of vtables 0x1337BB8 0x1337C30 0x1349C18",
@@ -4188,7 +4188,7 @@ static void print_ai_census(const Run *r)
     const uint32_t *w = r->last.ai_census_words;
     unsigned t, k, c;
     char a[64], b[96];
-    if (!(r->opt.mask & NTW2_AI_CENSUS)) return;
+    if (!(r->opt.mask & KNTWR_AI_CENSUS)) return;
     if (!r->have_status || w[0] != 1u) {
         say(L"AI mutation census: no initialized census snapshot available.\n");
         return;
@@ -4223,19 +4223,19 @@ static void print_ai_census(const Run *r)
     }
 }
 
-/* army_unit (NTW2_ARMY_UNIT_SHADOW): raw words plus the labelled header/reason/foreign words and command rows; b0 holds
+/* army_unit (KNTWR_ARMY_UNIT_SHADOW): raw words plus the labelled header/reason/foreign words and command rows; b0 holds
    the labelled Stage B0 qualification row (army_b0_words, native_army_unit.h B0Word). */
 static void sb_army_unit(Sb *b, const Run *r)
 {
-    static const char *const header[] = { NTW2_ARMY_UNIT_HEADER_LABELS };
-    static const char *const reasons[] = { NTW2_ARMY_UNIT_REASON_LABELS };
-    static const char *const details[] = { NTW2_ARMY_UNIT_DETAIL_LABELS };
-    static const char *const foreign[] = { NTW2_ARMY_UNIT_FOREIGN_LABELS };
-    static const char *const command[] = { NTW2_ARMY_UNIT_COMMAND_LABELS };
-    static const char *const b0[] = { NTW2_ARMY_B0_LABELS };
+    static const char *const header[] = { KNTWR_ARMY_UNIT_HEADER_LABELS };
+    static const char *const reasons[] = { KNTWR_ARMY_UNIT_REASON_LABELS };
+    static const char *const details[] = { KNTWR_ARMY_UNIT_DETAIL_LABELS };
+    static const char *const foreign[] = { KNTWR_ARMY_UNIT_FOREIGN_LABELS };
+    static const char *const command[] = { KNTWR_ARMY_UNIT_COMMAND_LABELS };
+    static const char *const b0[] = { KNTWR_ARMY_B0_LABELS };
     const uint32_t *w = r->last.army_unit_words;
     unsigned i, c;
-    if (!(r->opt.mask & NTW2_ARMY_UNIT_SHADOW) || !r->have_status || !w[0]) {
+    if (!(r->opt.mask & KNTWR_ARMY_UNIT_SHADOW) || !r->have_status || !w[0]) {
         sb_fmt(b, "  \"army_unit\": null,\n");
         return;
     }
@@ -4259,39 +4259,39 @@ static void sb_army_unit(Sb *b, const Run *r)
         sb_fmt(b, "}");
     }
     sb_fmt(b, "], \"words\": [");
-    for (i = 0; i < NTW2_ARMY_UNIT_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ARMY_UNIT_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "], \"b0\": {");
-    for (i = 0; i < NTW2_ARMY_B0_WORDS; ++i)
+    for (i = 0; i < KNTWR_ARMY_B0_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", b0[i], (unsigned long)r->last.army_b0_words[i]);
     sb_fmt(b, "}, \"b0_words\": [");
-    for (i = 0; i < NTW2_ARMY_B0_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.army_b0_words[i]);
+    for (i = 0; i < KNTWR_ARMY_B0_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)r->last.army_b0_words[i]);
     sb_fmt(b, "]},\n");
 }
-/* army_storm (NTW2_ARMY_STORM_CENSUS): every labelled word of army_storm_words (native_army_storm.h) plus the decoded top-8 table. */
+/* army_storm (KNTWR_ARMY_STORM_CENSUS): every labelled word of army_storm_words (native_army_storm.h) plus the decoded top-8 table. */
 static void sb_army_storm(Sb *b, const Run *r)
 {
-    static const char *const labels[NTW2_ARMY_STORM_WORDS] = { NTW2_ARMY_STORM_LABELS };
+    static const char *const labels[KNTWR_ARMY_STORM_WORDS] = { KNTWR_ARMY_STORM_LABELS };
     const uint32_t *w = r->last.army_storm_words;
     unsigned i;
-    if (!(r->cfg.va_watch_flags & NTW2_ARMY_STORM_CENSUS) || !r->have_status || !w[1]) {
+    if (!(r->cfg.va_watch_flags & KNTWR_ARMY_STORM_CENSUS) || !r->have_status || !w[1]) {
         sb_fmt(b, "  \"army_storm\": null,\n");
         return;
     }
-    sb_fmt(b, "  \"army_storm\": {\"sample_ms\": %lu, \"words\": {", (unsigned long)((r->cfg.va_watch_flags & NTW2_ARMY_STORM_SAMPLE_MASK) >> NTW2_ARMY_STORM_SAMPLE_SHIFT));
-    for (i = 0; i < NTW2_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    sb_fmt(b, "  \"army_storm\": {\"sample_ms\": %lu, \"words\": {", (unsigned long)((r->cfg.va_watch_flags & KNTWR_ARMY_STORM_SAMPLE_MASK) >> KNTWR_ARMY_STORM_SAMPLE_SHIFT));
+    for (i = 0; i < KNTWR_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"raw\": [");
-    for (i = 0; i < NTW2_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
-/* army_solver (NTW2_ARMY_SOLVER_MEMO/SHADOW): every labelled header word of army_solver_words (native_army_solver.h) plus the decoded top-16 tick and solve tables. */
+/* army_solver (KNTWR_ARMY_SOLVER_MEMO/SHADOW): every labelled header word of army_solver_words (native_army_solver.h) plus the decoded top-16 tick and solve tables. */
 static void sb_army_solver(Sb *b, const Run *r)
 {
-    static const char *const labels[55] = { NTW2_ARMY_SOLVER_LABELS };
-    static const char *const tick_labels[13] = { NTW2_ARMY_SOLVER_TICK_LABELS };
-    static const char *const solve_labels[16] = { NTW2_ARMY_SOLVER_SOLVE_LABELS };
+    static const char *const labels[55] = { KNTWR_ARMY_SOLVER_LABELS };
+    static const char *const tick_labels[13] = { KNTWR_ARMY_SOLVER_TICK_LABELS };
+    static const char *const solve_labels[16] = { KNTWR_ARMY_SOLVER_SOLVE_LABELS };
     const uint32_t *w = r->last.army_solver_words;
     unsigned i, j, first;
-    if (!(r->cfg.va_watch_flags & (NTW2_ARMY_SOLVER_MEMO | NTW2_ARMY_SOLVER_SHADOW)) || !r->have_status || !w[0]) {
+    if (!(r->cfg.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO | KNTWR_ARMY_SOLVER_SHADOW)) || !r->have_status || !w[0]) {
         sb_fmt(b, "  \"army_solver\": null,\n");
         return;
     }
@@ -4314,14 +4314,14 @@ static void sb_army_solver(Sb *b, const Run *r)
         sb_fmt(b, "}");
     }
     sb_fmt(b, "], \"raw\": [");
-    for (i = 0; i < NTW2_ARMY_SOLVER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ARMY_SOLVER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
 static void sb_alloc_census(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.alloc_census_words;
     unsigned i, first;
-    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (NTW2_ALLOC_CENSUS | NTW2_ALLOC_FIX)))) {
+    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (KNTWR_ALLOC_CENSUS | KNTWR_ALLOC_FIX)))) {
         sb_fmt(b, "  \"alloc_census\": null,\n");
         return;
     }
@@ -4337,21 +4337,21 @@ static void sb_alloc_census(Sb *b, const Run *r)
         first = 0;
     }
     sb_fmt(b, "], \"raw\": [");
-    for (i = 0; i < NTW2_ALLOC_CENSUS_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ALLOC_CENSUS_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
 static void sb_arena(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.arena_words;
     unsigned i;
-    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (NTW2_ARENA_RELEASE | NTW2_HEAP_OPTIMIZE)))) {
+    if (!r->have_status || (!w[0] && !(r->cfg.va_watch_flags & (KNTWR_ARENA_RELEASE | KNTWR_HEAP_OPTIMIZE)))) {
         sb_fmt(b, "  \"arena\": null,\n");
         return;
     }
     sb_fmt(b, "  \"arena\": {\"words\": {");
-    for (i = 0; i < NTW2_ARENA_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_arena_metrics[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ARENA_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_arena_metrics[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"raw\": [");
-    for (i = 0; i < NTW2_ARENA_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_ARENA_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
 static void sb_overlay(Sb *b, const Run *r)
@@ -4363,7 +4363,7 @@ static void sb_overlay(Sb *b, const Run *r)
         return;
     }
     sb_fmt(b, "  \"overlay\": {\"note\": \"report-only; unloading an overlay DLL that has hooked Present is unsafe\", \"words\": {");
-    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_overlay_metrics[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_OVERLAY_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_overlay_metrics[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"modules\": [");
     for (i = 0; i < r->overlay_mod_count; ++i) {
         const struct OverlayMod *m = &r->overlay_mods[i];
@@ -4374,10 +4374,10 @@ static void sb_overlay(Sb *b, const Run *r)
                m->splits_low_hole ? "true" : "false");
     }
     sb_fmt(b, "], \"raw\": [");
-    for (i = 0; i < NTW2_OVERLAY_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_OVERLAY_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
-/* --mounted-officer (src/army/ntw2_mounted_officer.h): the gate counters; null unless requested. */
+/* --mounted-officer (src/army/kntwr_mounted_officer.h): the gate counters; null unless requested. */
 static void sb_mounted_officer(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.mounted_officer_words;
@@ -4387,22 +4387,22 @@ static void sb_mounted_officer(Sb *b, const Run *r)
         return;
     }
     sb_fmt(b, "  \"mounted_officer\": {\"have_status\": %s, \"words\": {", r->have_status ? "true" : "false");
-    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_mounted_officer_metrics[i], (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_mounted_officer_metrics[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"raw\": [");
-    for (i = 0; i < NTW2_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    for (i = 0; i < KNTWR_MOUNTED_OFFICER_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
 /* Clip picker crash guard (always on): the counters of the entry redirect at 0xE5F760. */
 static void sb_anim_guard(Sb *b, const Run *r)
 {
-    static const char *const names[NTW2_ANIM_GUARD_WORDS] = { NTW2_ANIM_GUARD_LABELS };
+    static const char *const names[KNTWR_ANIM_GUARD_WORDS] = { KNTWR_ANIM_GUARD_LABELS };
     unsigned i;
     if (!r->have_status) {
         sb_fmt(b, "  \"anim_guard\": null,\n");
         return;
     }
     sb_fmt(b, "  \"anim_guard\": {");
-    for (i = 0; i < NTW2_ANIM_GUARD_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.anim_guard_words[i]);
+    for (i = 0; i < KNTWR_ANIM_GUARD_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.anim_guard_words[i]);
     sb_fmt(b, "},\n");
 }
 static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
@@ -4424,7 +4424,7 @@ static void sb_engage_rows(Sb *b, const char *name, const uint32_t *base, unsign
     }
     sb_fmt(b, "]");
 }
-/* --engage-census (src/ai/ntw2_engage_census.h): counters, histograms and rows as raw uint32 words (floats are IEEE bit patterns; -1.0f = 0xBF800000 = unknown); null unless requested.
+/* --engage-census (src/ai/kntwr_engage_census.h): counters, histograms and rows as raw uint32 words (floats are IEEE bit patterns; -1.0f = 0xBF800000 = unknown); null unless requested.
    Rows: [tick, unit, type(1 HALT/2 FIRE_START), dC, dM, dMe, range, B34, ring count, ring index, cmd vtable, class, members, ticks_stopped, enemy unit, side, destD, destEnemyD, flags, 0]. */
 static void sb_engage_census(Sb *b, const Run *r)
 {
@@ -4544,7 +4544,7 @@ static void sb_ai_census(Sb *b, const Run *r)
     const uint32_t *w = r->last.ai_census_words;
     unsigned t, k, c;
     char a[64], s[96];
-    if (!(r->opt.mask & NTW2_AI_CENSUS) || !r->have_status || w[0] != 1u) {
+    if (!(r->opt.mask & KNTWR_AI_CENSUS) || !r->have_status || w[0] != 1u) {
         sb_fmt(b, "  \"ai_census\": null,\n");
         return;
     }
@@ -4597,7 +4597,7 @@ static void sb_ai_census(Sb *b, const Run *r)
 static void sb_collide_lod(Sb *b, const Run *r)
 {
     unsigned i;
-    if (!(r->opt.mask & NTW2_COLLIDE_LOD) || !r->have_status) {
+    if (!(r->opt.mask & KNTWR_COLLIDE_LOD) || !r->have_status) {
         sb_fmt(b, "  \"collide_lod\": null,\n");
         return;
     }
@@ -4605,8 +4605,8 @@ static void sb_collide_lod(Sb *b, const Run *r)
            "\"semantics\": \"far units skip alternating model ticks by stable unit index; near and unknown units and rebuild ticks full-rate; "
            "counts cumulative modulo 2^32 since activation; units/far_units latest proximity classification before all-far multi-army refusal; "
            "different_side_pairs compares the original +0x44 pointers; faults disable skipping until activation\", \"metrics\": {",
-           (unsigned long)(r->cfg.collide_lod_m & NTW2_COLLIDE_LOD_METRES_MASK));
-    for (i = 0; i < NTW2_COLLIDE_LOD_WORDS; ++i)
+           (unsigned long)(r->cfg.collide_lod_m & KNTWR_COLLIDE_LOD_METRES_MASK));
+    for (i = 0; i < KNTWR_COLLIDE_LOD_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_collide_lod_metrics[i], (unsigned long)r->last.collide_lod_words[i]);
     sb_fmt(b, "}, \"reuse_far_skip_fraction\": ");
     sb_ratio(b, r->last.collide_lod_words[2], r->last.collide_lod_words[11]);
@@ -4619,11 +4619,11 @@ static void sb_grid_probation(Sb *b, const Run *r)
     const uint32_t *w = r->last.grid_probation_words;
     unsigned i, n = 0;
     sb_fmt(b, "{\"enabled\": %s, \"metrics\": {", r->opt.grid_probation ? "true" : "false");
-    for (i = 0; i < NTW2_GRID_PROBATION_HEADER_WORDS; ++i)
+    for (i = 0; i < KNTWR_GRID_PROBATION_HEADER_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_grid_probation_metrics[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"callers\": [");
-    for (i = 0; i < NTW2_GRID_PROBATION_CALLERS; ++i) {
-        const uint32_t *row = w + NTW2_GRID_PROBATION_HEADER_WORDS + 8u * i;
+    for (i = 0; i < KNTWR_GRID_PROBATION_CALLERS; ++i) {
+        const uint32_t *row = w + KNTWR_GRID_PROBATION_HEADER_WORDS + 8u * i;
         if (!row[4]) continue;
         sb_fmt(b, "%s{\"eip\": \"0x%08lX\", \"eip_module\": \"%s\", \"caller\": \"0x%08lX\", \"caller_module\": \"%s\", "
                   "\"thread_mask\": %lu, \"clone\": %ld, \"clone_address\": \"0x%08lX\", \"count\": %lu, \"writes\": %lu, "
@@ -4646,7 +4646,7 @@ static void sb_loco_services(Sb *b, const Run *r)
            "gate/service/QPC instrumentation outside service brackets; all-gates classification occurs before the clone wall; "
            "intervals include FP save/restore, trampoline and QPC perturbation and are not the uninstrumented decomposition\", \"version\": %lu, \"enabled\": %s, \"denominators\": {\"clones\": %lu, \"stages\": %lu}, \"metrics\": {",
            (unsigned long)t[0], t[1] ? "true" : "false", (unsigned long)w[27], (unsigned long)w[1]);
-    for (i = 0; i < NTW2_LOCO_SERVICE_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_SERVICE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_service_metrics[i], (unsigned long)t[i]);
     sb_fmt(b, "}, \"totals\": {\"timed_calls\": %lu, \"overflows\": %lu, \"abandoned\": %lu, \"max_depth\": %lu, \"qpc_failures\": %lu, \"clone_wall_us\": %lu, "
            "\"union_us\": %lu, \"outside_us\": %lu, \"clone_wall_us_per_clone\": ",
@@ -4682,7 +4682,7 @@ static void sb_loco_services(Sb *b, const Run *r)
 static void sb_loco(Sb *b, const Run *r)
 {
     unsigned i;
-    if (!(r->opt.mask & NTW2_LOCO) || !r->have_status) {
+    if (!(r->opt.mask & KNTWR_LOCO) || !r->have_status) {
         sb_fmt(b, "  \"loco\": null,\n");
         return;
     }
@@ -4692,7 +4692,7 @@ static void sb_loco(Sb *b, const Run *r)
            "serial MOVE enforces Class/Lifetime/Parked/Pending/Environment only (mask 0x233), not worker admission; "
            "counts cumulative modulo 2^32 since activation; us sums are wall time inside the stage\", \"metrics\": {",
            r->opt.loco_clone ? "true" : "false", r->opt.loco_parallel ? "true" : "false");
-    for (i = 0; i < NTW2_LOCO_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_metrics[i], (unsigned long)r->last.loco_words[i]);
     sb_fmt(b, "}, \"derived\": {\"admitted_fraction\": ");
     sb_ratio(b, r->last.loco_words[3], r->last.loco_words[2]);
@@ -4702,7 +4702,7 @@ static void sb_loco(Sb *b, const Run *r)
            "enforced_mask uses bit(reason-1); ChargeFire is DWORD +4E8/+390/+3BC/+3C8, while byte +618/+619/+F1/+5AB are corroborating latches only; "
            "legacy_admitted clears all ten diagnostics, newly_admitted passes serial MOVE with a removed diagnostic failing\", \"metrics\": {",
            (unsigned long)r->last.loco_words[2], (unsigned long)r->last.loco_words[1]);
-    for (i = 0; i < NTW2_LOCO_GATE_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GATE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_gate_metrics[i], (unsigned long)r->last.loco_gate_words[i]);
     sb_fmt(b, "}, \"derived\": {\"denominator_entities\": %lu, \"candidates\": %lu, \"enforced_mask\": %lu, \"admitted_fraction\": ",
            (unsigned long)r->last.loco_gate_words[1], (unsigned long)r->last.loco_gate_words[2], (unsigned long)r->last.loco_gate_words[4]);
@@ -4710,26 +4710,26 @@ static void sb_loco(Sb *b, const Run *r)
     sb_fmt(b, "}}, \"services\": ");
     sb_loco_services(b, r);
     sb_fmt(b, ", \"grid\": {\"enabled\": %s, \"metrics\": {", r->opt.loco_grid ? "true" : "false");
-    for (i = 0; i < NTW2_LOCO_GRID_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_grid_metrics[i], (unsigned long)r->last.loco_grid_words[i]);
     sb_fmt(b, "}}, \"grid_v2\": {\"verify\": %s, \"metrics\": {", r->opt.loco_grid_verify ? "true" : "false");
-    for (i = 0; i < NTW2_LOCO_GRID_V2_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_V2_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_grid_v2_metrics[i], (unsigned long)r->last.loco_grid_v2_words[i]);
     sb_fmt(b, "}}, \"grid_build\": {\"incremental\": %s, \"metrics\": {", r->opt.loco_grid_incremental ? "true" : "false");
-    for (i = 0; i < NTW2_LOCO_GRID_BUILD_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_GRID_BUILD_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_grid_build_metrics[i], (unsigned long)r->last.loco_grid_build_words[i]);
     sb_fmt(b, "}}, \"grid_probation\": ");
     sb_grid_probation(b, r);
     sb_fmt(b, ", \"relink\": {\"mode\": \"%s\", \"metrics\": {", r->opt.loco_relink_workers ? "workers" : r->opt.loco_relink_shadow ? "shadow" : "off");
-    for (i = 0; i < NTW2_LOCO_RELINK_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_RELINK_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_relink_metrics[i], (unsigned long)r->last.loco_relink_words[i]);
     sb_fmt(b, "}}");
     sb_fmt(b, ", \"class_wrapper\": {\"metrics\": {");
-    for (i = 0; i < NTW2_LOCO_CW_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_CW_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_cw_metrics[i], (unsigned long)r->last.loco_cw_words[i]);
     sb_fmt(b, "}}");
     sb_fmt(b, ", \"parallel\": {\"metrics\": {");
-    for (i = 0; i < NTW2_LOCO_PARALLEL_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_PARALLEL_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_parallel_metrics[i], (unsigned long)r->last.loco_parallel_words[i]);
     sb_fmt(b, "}, \"derived\": {\"worker_fraction_of_active\": ");
     if (r->opt.loco_parallel) sb_ratio(b, r->last.loco_parallel_words[3], r->last.loco_words[2]);
@@ -4743,13 +4743,13 @@ static void sb_loco(Sb *b, const Run *r)
     if (r->last.loco_words[1]) sb_fmt(b, "%.9f", (double)r->last.loco_words[23]/r->last.loco_words[1]/12000.0);
     else sb_fmt(b, "null");
     sb_fmt(b, "}}, \"owned\": {\"enabled\": %s, \"quiet\": %s, \"semantics\": \"one dispatch per stage; entity-range chunks claimed atomically by the pool; chunks and duplicate_refusals replace the former unit counters\", \"metrics\": {", r->opt.loco_owned ? "true" : "false", r->opt.loco_quiet ? "true" : "false");
-    for (i = 0; i < NTW2_LOCO_OWNED_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_owned_metrics[i], (unsigned long)r->last.loco_owned_words[i]);
     sb_fmt(b, "}, \"detail\": {\"quiet_enabled\": %lu, \"metrics\": {", (unsigned long)r->last.loco_owned_detail_words[1]);
-    for (i = 0; i < NTW2_LOCO_OWNED_DETAIL_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_DETAIL_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_owned_detail_metrics[i], (unsigned long)r->last.loco_owned_detail_words[i]);
     sb_fmt(b, "}}, \"phase\": {\"semantics\": \"phase timers remain under quiet; replay commit/fallback us are x16 estimates from every 16th occurrence\", \"metrics\": {");
-    for (i = 0; i < NTW2_LOCO_OWNED_PHASE_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_PHASE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_owned_phase_metrics[i], (unsigned long)r->last.loco_owned_phase_words[i]);
     sb_fmt(b, "}, \"derived\": {\"dispatches_per_stage\": ");
     sb_ratio(b, r->last.loco_owned_phase_words[1], r->last.loco_words[1]);
@@ -4766,7 +4766,7 @@ static void sb_loco(Sb *b, const Run *r)
     sb_fmt(b, ", \"list_entities_per_stage\": ");
     sb_ratio(b, r->last.loco_owned_phase_words[3], r->last.loco_words[1]);
     sb_fmt(b, "}}, \"load\": {\"semantics\": \"activation-only scene/catalog/participants/prefaulted arena; no tick-time preparation or growth; chunk CPU and worst-chunk wall/CPU remain under quiet\", \"metrics\": {");
-    for (i = 0; i < NTW2_LOCO_OWNED_LOAD_WORDS; ++i)
+    for (i = 0; i < KNTWR_LOCO_OWNED_LOAD_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_loco_owned_load_metrics[i], (unsigned long)r->last.loco_owned_load_words[i]);
     sb_fmt(b, "}}, \"active_worker_fraction\": ");
     if (r->last.loco_owned_words[31])
@@ -4776,19 +4776,19 @@ static void sb_loco(Sb *b, const Run *r)
     sb_fmt(b, ", \"shadow\": {\"enabled\": %s, \"requested\": %s, \"suppressed_by_quiet\": %s, \"sweep\": {",
            loco_shadow_effective(&r->opt) ? "true" : "false", r->opt.loco_shadow ? "true" : "false",
            (r->opt.loco_shadow && r->opt.loco_quiet) ? "true" : "false");
-    for (i = 0; i < NTW2_SWEEP_WORDS; ++i)
+    for (i = 0; i < KNTWR_SWEEP_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_sweep_metrics[i], (unsigned long)r->last.sweep_words[i]);
     sb_fmt(b, "}, \"resolve\": {");
-    for (i = 0; i < NTW2_RESOLVE_WORDS; ++i)
+    for (i = 0; i < KNTWR_RESOLVE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_resolve_metrics[i], (unsigned long)r->last.resolve_words[i]);
     sb_fmt(b, "}, \"resolve_frames\": {");
-    for (i = 0; i < NTW2_RESOLVE_FRAME_WORDS; ++i)
+    for (i = 0; i < KNTWR_RESOLVE_FRAME_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_resolve_frame_metrics[i], (unsigned long)r->last.resolve_frame_words[i]);
     sb_fmt(b, "}, \"env\": {");
-    for (i = 0; i < NTW2_ENV_WORDS; ++i)
+    for (i = 0; i < KNTWR_ENV_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_env_metrics[i], (unsigned long)r->last.env_words[i]);
     sb_fmt(b, "}, \"env_targets\": [");
-    for (i = 0; i < NTW2_ENV_TARGET_WORDS; ++i)
+    for (i = 0; i < KNTWR_ENV_TARGET_WORDS; ++i)
         sb_fmt(b, "%s%lu", i ? ", " : "", (unsigned long)r->last.env_target_words[i]);
     sb_fmt(b, "], \"env_event_evidence\": \"post-state inference only; notification unobserved\"}");
     sb_fmt(b, "},\n");
@@ -4797,7 +4797,7 @@ static void sb_loco(Sb *b, const Run *r)
 static void sb_collide(Sb *b, const Run *r)
 {
     unsigned i;
-    if (!(r->opt.mask & NTW2_COLLIDE) || !r->have_status) {
+    if (!(r->opt.mask & KNTWR_COLLIDE) || !r->have_status) {
         sb_fmt(b, "  \"collide\": null,\n");
         return;
     }
@@ -4847,16 +4847,16 @@ static void sb_collide(Sb *b, const Run *r)
     sb_fmt(b, "primary and secondary registries supply destinations, but only worklist records query; "
            "reason 10 means owner absent from known registries, not a stale expected_record mapping; "
            "numerical and ordering tolerance is defined by the differential oracle\", \"metrics\": {");
-    for (i = 0; i < NTW2_COLLIDE_WORDS; ++i)
+    for (i = 0; i < KNTWR_COLLIDE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_collide_metrics[i], (unsigned long)r->last.collide_words[i]);
     sb_fmt(b, "}, \"source\": {");
-    for (i = 0; i < NTW2_COLLIDE_SOURCE_WORDS; ++i)
+    for (i = 0; i < KNTWR_COLLIDE_SOURCE_WORDS; ++i)
         sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", k_collide_source_metrics[i], (unsigned long)r->last.collide_source_words[i]);
     {
-        static const char *const contact_labels[NTW2_COLLIDE_CONTACT_WORDS] = { NTW2_COLLIDE_CONTACT_WORD_LABELS };
+        static const char *const contact_labels[KNTWR_COLLIDE_CONTACT_WORDS] = { KNTWR_COLLIDE_CONTACT_WORD_LABELS };
         sb_fmt(b, "}, \"contact\": {\"requested_shadow\": %s, \"requested_workers\": %s, \"metrics\": {",
                r->opt.collide_contact_shadow ? "true" : "false", r->opt.collide_contact_workers ? "true" : "false");
-        for (i = 0; i < NTW2_COLLIDE_CONTACT_WORDS; ++i)
+        for (i = 0; i < KNTWR_COLLIDE_CONTACT_WORDS; ++i)
             sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", contact_labels[i], (unsigned long)r->last.collide_contact_words[i]);
         sb_fmt(b, "}");
     }
@@ -4886,9 +4886,9 @@ static void sb_collide(Sb *b, const Run *r)
 static void sb_brain_states(Sb *b, const Run *r)
 {
     const uint32_t *w = r->last.brain_state_words;
-    unsigned group, i, rows, order[NTW2_BRAIN_SUBSTATE_BUCKETS];
+    unsigned group, i, rows, order[KNTWR_BRAIN_SUBSTATE_BUCKETS];
     wchar_t label[24];
-    if (!(r->opt.mask & NTW2_BRAIN) || !r->have_status || !w[0]) {
+    if (!(r->opt.mask & KNTWR_BRAIN) || !r->have_status || !w[0]) {
         sb_fmt(b, "  \"brain_states\": null,\n");
         return;
     }
@@ -4902,8 +4902,8 @@ static void sb_brain_states(Sb *b, const Run *r)
            (unsigned long)w[0], (unsigned long)w[1], (double)w[1]/w[0], (double)w[7]/w[0],
            w[11] ? "false" : "true", (unsigned long)w[11]);
     for (group = 0; group < 2; ++group) {
-        const unsigned base = group ? NTW2_BRAIN_SUBSTATE_COUNTS : NTW2_BRAIN_STATE_COUNTS;
-        const unsigned n = group ? NTW2_BRAIN_SUBSTATE_BUCKETS : NTW2_BRAIN_STATE_BUCKETS;
+        const unsigned base = group ? KNTWR_BRAIN_SUBSTATE_COUNTS : KNTWR_BRAIN_STATE_COUNTS;
+        const unsigned n = group ? KNTWR_BRAIN_SUBSTATE_BUCKETS : KNTWR_BRAIN_STATE_BUCKETS;
         brain_state_order(w+base, n, order);
         sb_fmt(b, "    \"%s\": [", group ? "sub_states" : "states");
         rows = 0;
@@ -4929,17 +4929,17 @@ static void sb_brain_states(Sb *b, const Run *r)
     sb_fmt(b, "},\n    \"transitions_from_0x4B\": {\"entities\": %lu, \"entities_per_tick\": %.6f, "
            "\"distinct_units_per_tick\": %.6f, \"null_unit_entities_per_tick\": %.6f, \"destinations\": [",
            (unsigned long)w[8], (double)w[8]/w[0], (double)w[9]/w[0], (double)w[10]/w[0]);
-    brain_state_order(w+NTW2_BRAIN_TRANSITION_COUNTS, NTW2_BRAIN_STATE_BUCKETS, order);
+    brain_state_order(w+KNTWR_BRAIN_TRANSITION_COUNTS, KNTWR_BRAIN_STATE_BUCKETS, order);
     rows = 0;
-    for (i = 0; i < NTW2_BRAIN_STATE_BUCKETS; ++i) {
+    for (i = 0; i < KNTWR_BRAIN_STATE_BUCKETS; ++i) {
         const unsigned bucket = order[i];
-        const uint32_t count = w[NTW2_BRAIN_TRANSITION_COUNTS+bucket];
+        const uint32_t count = w[KNTWR_BRAIN_TRANSITION_COUNTS+bucket];
         if (!count) continue;
         brain_state_label(bucket, FALSE, label, 24);
         sb_fmt(b, "%s{\"bucket\": %u, \"state\": ", rows++ ? "," : "", bucket);
         sb_wstr(b, label);
         sb_fmt(b, ", \"entities\": %lu, \"entities_per_tick\": %.6f, \"distinct_units_per_tick\": %.6f, \"transition_share\": %.9f}",
-               (unsigned long)count, (double)count/w[0], (double)w[NTW2_BRAIN_TRANSITION_UNITS+bucket]/w[0],
+               (unsigned long)count, (double)count/w[0], (double)w[KNTWR_BRAIN_TRANSITION_UNITS+bucket]/w[0],
                w[8] ? (double)count/w[8] : 0.0);
     }
     sb_fmt(b, "]}\n  },\n");
@@ -4986,8 +4986,8 @@ static void sb_brain_states(Sb *b, const Run *r)
  * reconstruct chronology. Two alternating slots retain the last complete copy.
  * --tick-log FILE additionally drains new written entries on every monitor poll
  * (10 ms wait instead of 200 ms), retaining at most 200000 chronological entries.
- * FILE has an 8-byte ASCII NTW2TLOG magic, then uint32 LE abi, entry_size, count,
- * followed by count unmodified ntw2_trace_entry records (20-byte header).
+ * FILE has an 8-byte ASCII KNTWRTLOG magic, then uint32 LE abi, entry_size, count,
+ * followed by count unmodified kntwr_trace_entry records (20-byte header).
  * tick_log: {file,count,lost}; lost counts overwritten and capacity-dropped entries.
  * tick_log_summary contains every retained entry's tick, raw QPC start/end,
  * duration_us, interval_us and site5/6/13/18/33/34_us (zero-based ABI sites).
@@ -4999,7 +4999,7 @@ static void sb_brain_states(Sb *b, const Run *r)
  * (denominator of every tick_share), families[5] {index, name, vtables, entry_va, entities, entities_per_tick, entry_sum_us,
  * entry_tick_share, sites[] {index, callee (original VA or vt+offset), sum_us, calls, calls_per_tick, us_per_call, tick_share}} and
  * brain_callees_all_families[30] (the same fields summed over families). Cumulative since the last activation, inclusive per call,
- * rows overlap and include each timed call's own timing overhead. last_status.brain_words carries the raw ntw2_status words.
+ * rows overlap and include each timed call's own timing overhead. last_status.brain_words carries the raw kntwr_status words.
  * brain_states: brain entry-state/sub-FSM histograms sorted by entry share, entry predicates and core-return self-deactivation,
  * unit+AA0 combat proxy, per-tick distinct units and 0x4B -> destination entity/unit counts. Raw brain_state_words is append-only.
  * loco.services: version, enabled (clone execution only), denominators {clones = loco_words[27], stages = loco_words[1]}, metrics (all 40 labelled
@@ -5010,10 +5010,10 @@ static void sb_brain_states(Sb *b, const Run *r)
  * (loco_owned_words follows resolve_frame_words; loco_owned_detail_words[16], loco_owned_phase_words[32] and loco_owned_load_words[16] follow it). loco.owned.enabled records --loco-owned-services (requires loco, loco_clone and loco_parallel);
  * loco.owned.quiet records --loco-quiet (requires --loco-owned-services); loco.owned.detail.metrics holds all 16 labelled detail words. loco.shadow.enabled is the EFFECTIVE state (false under quiet), requested/suppressed_by_quiet report the CLI.
  * loco_parallel records --loco-parallel (requires loco and loco_clone); loco.grid.enabled records effective grid mode (--loco-grid or --loco-grid-verify), default off.
- * loco.grid_v2.metrics exports the 16 NTW2_LOCO_GRID_V2_LABELS words; verify records --loco-grid-verify. collide.source exports source/native_stages/owned_stages/owned_refusals.
+ * loco.grid_v2.metrics exports the 16 KNTWR_LOCO_GRID_V2_LABELS words; verify records --loco-grid-verify. collide.source exports source/native_stages/owned_stages/owned_refusals.
  * loco_grid_v2_words[16], collide_source_words[4], memory_words[60], then ai_completion_words[24] append at the status tail.
- * loco.grid_build.metrics exports the 16 NTW2_LOCO_GRID_BUILD_LABELS words (loco_grid_build_words[16], the last status row); loco_grid_incremental records --loco-grid-incremental.
- * loco.grid_probation (--grid-probation) exports the 32 NTW2_GRID_PROBATION_LABELS words and every used caller row
+ * loco.grid_build.metrics exports the 16 KNTWR_LOCO_GRID_BUILD_LABELS words (loco_grid_build_words[16], the last status row); loco_grid_incremental records --loco-grid-incremental.
+ * loco.grid_probation (--grid-probation) exports the 32 KNTWR_GRID_PROBATION_LABELS words and every used caller row
  * {eip, eip_module, caller, caller_module, thread_mask, clone, clone_address, count, writes, first_site, last_site}.
  * grid_census follows ai_completion_words as a typed status tail, not an entry in the raw uint32 counts[] tables.
  * grid_census is null without the explicit feature or an initialized snapshot. It exports <=64 reader rows and <=512
@@ -5039,14 +5039,14 @@ static BOOL write_receipt(Run *r, int exit_code)
        top tick plus 128 per site, 192 per aggregate site and 4096 for other totals.
        Retained raw-QPC tick rows reserve 192 bytes each; module rows reserve 4096.
        Individual sb_fmt calls stay below 2048 bytes. */
-    static char storage[MAXP * 24u + 16384u + 4096u + 8192u + 65536u + NTW2_BRAIN2_CENSUS_WORDS * 96u +
-                        NTW2_GRID_READERS * (2048u + NTW2_GRID_SITES * 80u) + NTW2_GRID_EDGES * 384u +
-                        16u * (256u + NTW2_TIMED_SITES * 128u) + NTW2_TIMED_SITES * 192u +
-                        NTW2_TRACE_ENTRIES * 192u + 4096u + NTW2_BRAIN_STATE_WORDS * 192u + NTW2_COLLISION_WORDS * 192u + NTW2_BRAIN2_WORDS * 192u + (NTW2_LOCO_WORDS + NTW2_LOCO_GATE_WORDS + NTW2_LOCO_SERVICE_WORDS + NTW2_LOCO_GRID_WORDS + NTW2_LOCO_PARALLEL_WORDS + NTW2_SWEEP_WORDS + NTW2_RESOLVE_WORDS + NTW2_ENV_WORDS + NTW2_ENV_TARGET_WORDS + NTW2_RESOLVE_FRAME_WORDS + NTW2_LOCO_OWNED_WORDS) * 192u +
-                        NTW2_GRID_PROBATION_WORDS * 12u + NTW2_GRID_PROBATION_CALLERS * 320u +
-                        NTW2_ARMY_B0_WORDS * 64u + NTW2_BRAIN_S0_WORDS * 16u +
-                        NTW2_BRAIN_S0_HEADER_WORDS * 64u + NTW2_BRAIN_S0_ROWS * 320u + NTW2_BRAIN_UNIT_POLICY_WORDS * 48u +
-                        NTW2_BRAIN_LOC_WORDS * 24u + NTW2_ENGAGE_CENSUS_WORDS * 24u + 16384u + 8192u + 4096u];
+    static char storage[MAXP * 24u + 16384u + 4096u + 8192u + 65536u + KNTWR_BRAIN2_CENSUS_WORDS * 96u +
+                        KNTWR_GRID_READERS * (2048u + KNTWR_GRID_SITES * 80u) + KNTWR_GRID_EDGES * 384u +
+                        16u * (256u + KNTWR_TIMED_SITES * 128u) + KNTWR_TIMED_SITES * 192u +
+                        KNTWR_TRACE_ENTRIES * 192u + 4096u + KNTWR_BRAIN_STATE_WORDS * 192u + KNTWR_COLLISION_WORDS * 192u + KNTWR_BRAIN2_WORDS * 192u + (KNTWR_LOCO_WORDS + KNTWR_LOCO_GATE_WORDS + KNTWR_LOCO_SERVICE_WORDS + KNTWR_LOCO_GRID_WORDS + KNTWR_LOCO_PARALLEL_WORDS + KNTWR_SWEEP_WORDS + KNTWR_RESOLVE_WORDS + KNTWR_ENV_WORDS + KNTWR_ENV_TARGET_WORDS + KNTWR_RESOLVE_FRAME_WORDS + KNTWR_LOCO_OWNED_WORDS) * 192u +
+                        KNTWR_GRID_PROBATION_WORDS * 12u + KNTWR_GRID_PROBATION_CALLERS * 320u +
+                        KNTWR_ARMY_B0_WORDS * 64u + KNTWR_BRAIN_S0_WORDS * 16u +
+                        KNTWR_BRAIN_S0_HEADER_WORDS * 64u + KNTWR_BRAIN_S0_ROWS * 320u + KNTWR_BRAIN_UNIT_POLICY_WORDS * 48u +
+                        KNTWR_BRAIN_LOC_WORDS * 24u + KNTWR_ENGAGE_CENSUS_WORDS * 24u + 16384u + 8192u + 4096u];
     char ts[48];
     FILETIME now;
     wchar_t tmp[MAXP + 8];
@@ -5078,7 +5078,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     }
     GetSystemTimePreciseAsFileTime(&now);
     sb_put(&b, "{\n", 2);
-    sb_fmt(&b, "  \"tool\": \"ntw2.exe\",\n  \"abi\": %u,\n", NTW2_ABI);
+    sb_fmt(&b, "  \"tool\": \"kntwr.exe\",\n  \"abi\": %u,\n", KNTWR_ABI);
     iso_time(&r->t_start, ts, sizeof ts);
     sb_fmt(&b, "  \"started\": \"%s\",\n", ts);
     iso_time(&now, ts, sizeof ts);
@@ -5093,11 +5093,11 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_put(&b, ",\n  \"image_path\": ", 18);
     sb_wstr(&b, r->exe_path);
     sb_fmt(&b, ",\n  \"image_sha256\": \"%s\",\n  \"image_size\": %I64u,\n  \"image_sha256_expected\": \"%s\",\n", r->exe_sha,
-           (unsigned long long)r->exe_size, NTW2_IMAGE_SHA256);
+           (unsigned long long)r->exe_size, KNTWR_IMAGE_SHA256);
     sb_fmt(&b, "  \"image_on_disk\": \"%s\",\n  \"image_sha256_stock_expected\": \"%s\",\n",
-           r->exe_is_stock ? "stock" : "patched", NTW2_STOCK_IMAGE_SHA256);
+           r->exe_is_stock ? "stock" : "patched", KNTWR_STOCK_IMAGE_SHA256);
     {
-        const ntw2_gp_report *g = &r->gp_rep;
+        const kntwr_gp_report *g = &r->gp_rep;
         sb_fmt(&b, "  \"gameplay_patch\": {\n    \"on_disk\": \"%s\",\n    \"applied\": %s,\n    \"status\": %lu,\n"
                    "    \"runs_total\": %lu,\n    \"runs_header\": %lu,\n    \"runs_applied\": %lu,\n    \"runs_skipped\": %lu,\n    \"bytes_applied\": %lu,\n"
                    "    \"fixups_stock_unrelocated\": %lu,\n    \"fixups_patched_relocated\": %lu,\n"
@@ -5133,8 +5133,8 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_mask(&b, r->cfg.enabled_mask);
     sb_fmt(&b, ",\n  \"workers\": %lu,\n  \"poll_ms\": %lu,\n", (unsigned long)r->cfg.workers, (unsigned long)r->cfg.poll_ms);
     sb_fmt(&b, "  \"collide_census\": %s,\n", r->opt.collide_census ? "true" : "false");
-    sb_fmt(&b, "  \"grid_census_requested\": %s,\n", (r->opt.mask & NTW2_GRID_CENSUS) ? "true" : "false");
-    sb_fmt(&b, "  \"ai_census_requested\": %s,\n", (r->opt.mask & NTW2_AI_CENSUS) ? "true" : "false");
+    sb_fmt(&b, "  \"grid_census_requested\": %s,\n", (r->opt.mask & KNTWR_GRID_CENSUS) ? "true" : "false");
+    sb_fmt(&b, "  \"ai_census_requested\": %s,\n", (r->opt.mask & KNTWR_AI_CENSUS) ? "true" : "false");
     sb_fmt(&b, "  \"loco_clone\": %s,\n", r->opt.loco_clone ? "true" : "false");
     sb_fmt(&b, "  \"loco_parallel\": %s,\n", r->opt.loco_parallel ? "true" : "false");
     sb_fmt(&b, "  \"loco_owned_services\": %s,\n", r->opt.loco_owned ? "true" : "false");
@@ -5149,7 +5149,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"loco_relink_workers\": %s,\n", r->opt.loco_relink_workers ? "true" : "false");
     sb_fmt(&b, "  \"loco_cw_shadow\": %s,\n", r->opt.loco_cw_shadow ? "true" : "false");
     sb_fmt(&b, "  \"loco_cw_workers\": %s,\n", r->opt.loco_cw_workers ? "true" : "false");
-    sb_fmt(&b, "  \"ai_poly_requested\": %s,\n  \"ai_prepass_flags\": %lu,\n", (r->opt.ai_prepass_flags & NTW2_AI_POLY) ? "true" : "false",
+    sb_fmt(&b, "  \"ai_poly_requested\": %s,\n  \"ai_prepass_flags\": %lu,\n", (r->opt.ai_prepass_flags & KNTWR_AI_POLY) ? "true" : "false",
            (unsigned long)r->opt.ai_prepass_flags);
     sb_fmt(&b, "  \"tick_pcore\": %s,\n", r->opt.tick_pcore ? "true" : "false");
     sb_fmt(&b, "  \"army_solver_memo\": %s,\n", r->opt.army_solver_memo ? "true" : "false");
@@ -5161,8 +5161,8 @@ static BOOL write_receipt(Run *r, int exit_code)
            r->opt.mounted_officer_widen ? "true" : "false");
     sb_fmt(&b, "  \"engage_census_requested\": %s,\n", r->opt.engage_census ? "true" : "false");
     sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
-           (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (NTW2_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
-           (unsigned long)(r->opt.va_hole_mib ? r->opt.va_hole_mib : (NTW2_MEMORY_MIN_LARGEST_HOLE >> 20)));
+           (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (KNTWR_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
+           (unsigned long)(r->opt.va_hole_mib ? r->opt.va_hole_mib : (KNTWR_MEMORY_MIN_LARGEST_HOLE >> 20)));
     sb_fmt(&b, "  \"brain_parallel\": %s,\n", r->opt.brain_parallel ? "true" : "false");
     sb_fmt(&b, "  \"brain_quiet\": %s,\n", r->opt.brain_quiet ? "true" : "false");
     sb_fmt(&b, "  \"brain_unit_shadow\": %s,\n", r->opt.brain_unit_shadow ? "true" : "false");
@@ -5180,7 +5180,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"brain_unit_engage_shadow\": %s,\n", r->opt.brain_unit_engage_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
-    sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & NTW2_ARMY_UNIT_SHADOW) ? "true" : "false");
+    sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & KNTWR_ARMY_UNIT_SHADOW) ? "true" : "false");
     sb_fmt(&b, "  \"armed\": %s,\n  \"reached_full_activation\": %s,\n  \"remote_thread_outstanding\": %s,\n",
            r->ever_armed ? "true" : "false", r->ever_full ? "true" : "false", r->remote_leaked ? "true" : "false");
     sb_fmt(&b, "  \"game_exited\": %s,\n  \"game_exit_code\": %lu,\n", r->game_exited ? "true" : "false",
@@ -5229,7 +5229,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     if (r->have_status) {
         unsigned memory_index;
         sb_fmt(&b, "  \"memory\": {\"metrics\": {");
-        for (memory_index = 0; memory_index < NTW2_MEMORY_WORDS; ++memory_index)
+        for (memory_index = 0; memory_index < KNTWR_MEMORY_WORDS; ++memory_index)
             sb_fmt(&b, "%s\"%s\": %lu", memory_index ? ", " : "", k_memory_metrics[memory_index],
                    (unsigned long)r->last.memory_words[memory_index]);
         sb_fmt(&b, "}},\n");
@@ -5237,19 +5237,19 @@ static BOOL write_receipt(Run *r, int exit_code)
     if (r->have_status) {
         unsigned ai_index;
         sb_fmt(&b, "  \"ai_completion\": {\"metrics\": {");
-        for (ai_index=0;ai_index<NTW2_AI_COMPLETION_WORDS;++ai_index)
+        for (ai_index=0;ai_index<KNTWR_AI_COMPLETION_WORDS;++ai_index)
             sb_fmt(&b, "%s\"%s\": %lu",ai_index ? ", " : "",k_ai_completion_metrics[ai_index],
                    (unsigned long)r->last.ai_completion_words[ai_index]);
         sb_fmt(&b, "}},\n");
     } else sb_fmt(&b, "  \"ai_completion\": null,\n");
-    if (r->have_status && (r->opt.mask & NTW2_AI_ASYNC2)) {
+    if (r->have_status && (r->opt.mask & KNTWR_AI_ASYNC2)) {
         unsigned ai2_index;
         sb_fmt(&b, "  \"ai_async2\": {\"metrics\": {");
-        for (ai2_index = 0; ai2_index < NTW2_AI_ASYNC2_WORDS; ++ai2_index)
+        for (ai2_index = 0; ai2_index < KNTWR_AI_ASYNC2_WORDS; ++ai2_index)
             sb_fmt(&b, "%s\"%s\": %lu", ai2_index ? ", " : "", k_ai_async2_metrics[ai2_index],
                    (unsigned long)r->last.ai_async2_words[ai2_index]);
         sb_fmt(&b, "}, \"route\": {");
-        for (ai2_index = 0; ai2_index < NTW2_AI_ASYNC2_ROUTE_WORDS; ++ai2_index)
+        for (ai2_index = 0; ai2_index < KNTWR_AI_ASYNC2_ROUTE_WORDS; ++ai2_index)
             sb_fmt(&b, "%s\"%s\": %lu", ai2_index ? ", " : "", k_ai_async2_route_metrics[ai2_index],
                    (unsigned long)r->last.ai_async2_route_words[ai2_index]);
         sb_fmt(&b, "}, \"complete_before_next_tick_fraction\": ");
@@ -5259,29 +5259,29 @@ static BOOL write_receipt(Run *r, int exit_code)
     if (r->have_status && r->cfg.ai_deferred) {
         unsigned defer_index;
         sb_fmt(&b, "  \"ai_deferred\": {");
-        for (defer_index = 0; defer_index < NTW2_AI_DEFERRED_WORDS; ++defer_index)
+        for (defer_index = 0; defer_index < KNTWR_AI_DEFERRED_WORDS; ++defer_index)
             sb_fmt(&b, "%s\"%s\": %lu", defer_index ? ", " : "", k_ai_deferred_metrics[defer_index],
                    (unsigned long)r->last.ai_deferred_words[defer_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_deferred\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CTRL_MODE_MASK)) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & KNTWR_AI_CTRL_MODE_MASK)) {
         /* Words 16..23 belong to the brain levers when one is on (their own receipt objects carry them); 24..31 to claim-once. */
-        const unsigned ctrl_count = (r->cfg.ai_ctrl_flags & NTW2_AI_BRAIN_STEP_BITS) ? 16u : 24u;
+        const unsigned ctrl_count = (r->cfg.ai_ctrl_flags & KNTWR_AI_BRAIN_STEP_BITS) ? 16u : 24u;
         unsigned ctrl_index;
         sb_fmt(&b, "  \"ai_ctrl\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
         for (ctrl_index = 0; ctrl_index < ctrl_count; ++ctrl_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_ctrl_reuse_metrics[ctrl_index], (unsigned long)r->last.ai_ctrl_reuse_words[ctrl_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_ctrl\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_BITS)) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & KNTWR_AI_CLAIM_BITS)) {
         const uint32_t *cw = r->last.ai_ctrl_reuse_words;
         sb_fmt(&b, "  \"ai_claim_once\": {\"mode\": \"%s\", \"calls\": %lu, \"entries\": %lu, \"masked_recomputes\": %lu, \"calls_masked\": %lu, \"refused_state\": %lu, "
                    "\"refused_other\": %lu, \"max_entries\": %lu, \"no_final_tail\": %lu, \"hashed_calls\": %lu, \"hash\": %lu},\n",
-               (r->cfg.ai_ctrl_flags & NTW2_AI_CLAIM_ONCE) ? "once" : "census", (unsigned long)cw[24], (unsigned long)cw[25], (unsigned long)cw[26],
+               (r->cfg.ai_ctrl_flags & KNTWR_AI_CLAIM_ONCE) ? "once" : "census", (unsigned long)cw[24], (unsigned long)cw[25], (unsigned long)cw[26],
                (unsigned long)cw[27], (unsigned long)cw[28], (unsigned long)cw[29], (unsigned long)(cw[30] & 0xFFu), (unsigned long)((cw[30] >> 8) & 0xFFu),
                (unsigned long)(cw[30] >> 16), (unsigned long)cw[31]);
     } else sb_fmt(&b, "  \"ai_claim_once\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & NTW2_AI_RETARGET_JITTER)) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & KNTWR_AI_RETARGET_JITTER)) {
         const uint32_t *jw = r->last.ai_ctrl_reuse_words + 20;
         unsigned jitter_index;
         sb_fmt(&b, "  \"brain_retarget_jitter\": {\"flags\": %lu", (unsigned long)r->cfg.ai_ctrl_flags);
@@ -5295,10 +5295,10 @@ static BOOL write_receipt(Run *r, int exit_code)
         sb_ratio(&b, jw[3], jw[2]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"brain_retarget_jitter\": null,\n");
-    if (r->have_status && (r->cfg.ai_ctrl_flags & (NTW2_AI_TARGET_CULL_SHADOW | NTW2_AI_TARGET_CULL))) {
+    if (r->have_status && (r->cfg.ai_ctrl_flags & (KNTWR_AI_TARGET_CULL_SHADOW | KNTWR_AI_TARGET_CULL))) {
         const uint32_t *tw = r->last.ai_ctrl_reuse_words + 16;
         unsigned cull_index;
-        sb_fmt(&b, "  \"brain_target_cull\": {\"mode\": \"%s\"", (r->cfg.ai_ctrl_flags & NTW2_AI_TARGET_CULL) ? "live" : "shadow");
+        sb_fmt(&b, "  \"brain_target_cull\": {\"mode\": \"%s\"", (r->cfg.ai_ctrl_flags & KNTWR_AI_TARGET_CULL) ? "live" : "shadow");
         for (cull_index = 0; cull_index < 3; ++cull_index)
             sb_fmt(&b, ", \"%s\": %lu", k_brain_target_cull_metrics[cull_index], (unsigned long)tw[cull_index]);
         sb_fmt(&b, ", \"mismatch_result\": %lu, \"mismatch_score\": %lu, \"mismatch_scratch\": %lu, \"flag_searches\": %lu",
@@ -5312,36 +5312,36 @@ static BOOL write_receipt(Run *r, int exit_code)
     if (r->have_status && r->cfg.ai_prepass_flags) {
         unsigned prepass_index;
         sb_fmt(&b, "  \"ai_prepass_census\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
-        for (prepass_index = 0; prepass_index < NTW2_AI_PREPASS_CENSUS_WORDS; ++prepass_index)
+        for (prepass_index = 0; prepass_index < KNTWR_AI_PREPASS_CENSUS_WORDS; ++prepass_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_prepass_census_metrics[prepass_index], (unsigned long)r->last.ai_prepass_census_words[prepass_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_prepass_census\": null,\n");
-    if (r->have_status && (r->cfg.ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY))) {
+    if (r->have_status && (r->cfg.ai_prepass_flags & (KNTWR_AI_POLY_SHADOW | KNTWR_AI_POLY))) {
         unsigned poly_index;
         sb_fmt(&b, "  \"ai_poly\": {\"flags\": %lu", (unsigned long)r->cfg.ai_prepass_flags);
-        for (poly_index = 0; poly_index < NTW2_AI_POLY_WORDS; ++poly_index)
+        for (poly_index = 0; poly_index < KNTWR_AI_POLY_WORDS; ++poly_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_poly_metrics[poly_index], (unsigned long)r->last.ai_prepass_words[poly_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_poly\": null,\n");
-    if (r->have_status && (r->cfg.ai_prepass_flags & NTW2_AI_RECORD_TEST_BITS)) {
+    if (r->have_status && (r->cfg.ai_prepass_flags & KNTWR_AI_RECORD_TEST_BITS)) {
         unsigned rt_index;
-        const uint32_t *rt = r->last.ai_prepass_words + NTW2_AI_POLY_WORDS;
+        const uint32_t *rt = r->last.ai_prepass_words + KNTWR_AI_POLY_WORDS;
         sb_fmt(&b, "  \"ai_record_test\": {\"flags\": %lu, \"mode_name\": \"%s\", \"served_fast_us\": %.1f", (unsigned long)r->cfg.ai_prepass_flags,
                rt[1] == 1 ? "shadow" : rt[1] == 2 ? "live" : "off", rt[23] ? (double)rt[18] * 1024.0 / (double)rt[23] : 0.0);
-        for (rt_index = 0; rt_index < NTW2_AI_RECORD_TEST_WORDS; ++rt_index)
+        for (rt_index = 0; rt_index < KNTWR_AI_RECORD_TEST_WORDS; ++rt_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_record_test_metrics[rt_index], (unsigned long)rt[rt_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_record_test\": null,\n");
-    if (r->have_status && (r->cfg.ai_prepass_flags & NTW2_AI_SPIRAL_BITS)) {
+    if (r->have_status && (r->cfg.ai_prepass_flags & KNTWR_AI_SPIRAL_BITS)) {
         unsigned spiral_index;
         sb_fmt(&b, "  \"ai_spiral\": {\"flags\": %lu, \"requested_cap_m\": %lu", (unsigned long)r->cfg.ai_prepass_flags,
-               (unsigned long)(r->cfg.ai_prepass_flags >> NTW2_AI_SPIRAL_CAP_SHIFT));
-        for (spiral_index = 0; spiral_index < NTW2_AI_SPIRAL_WORDS; ++spiral_index)
+               (unsigned long)(r->cfg.ai_prepass_flags >> KNTWR_AI_SPIRAL_CAP_SHIFT));
+        for (spiral_index = 0; spiral_index < KNTWR_AI_SPIRAL_WORDS; ++spiral_index)
             sb_fmt(&b, ", \"%s\": %lu", k_ai_spiral_metrics[spiral_index], (unsigned long)r->last.ai_spiral_words[spiral_index]);
         sb_fmt(&b, "},\n");
     } else sb_fmt(&b, "  \"ai_spiral\": null,\n");
     if (r->have_status) {
-        const ntw2_status *s = &r->last;
+        const kntwr_status *s = &r->last;
         sb_put(&b, "  \"last_status\": {\n    \"phase\": ", 32);
         sb_wstr(&b, phase_name(s->phase));
         sb_fmt(&b,
@@ -5367,7 +5367,7 @@ static BOOL write_receipt(Run *r, int exit_code)
         {
             unsigned ai_index;
             sb_fmt(&b, "    \"ai_completion_words\": [");
-            for (ai_index=0;ai_index<NTW2_AI_COMPLETION_WORDS;++ai_index)
+            for (ai_index=0;ai_index<KNTWR_AI_COMPLETION_WORDS;++ai_index)
                 sb_fmt(&b, "%s%lu",ai_index ? "," : "",(unsigned long)s->ai_completion_words[ai_index]);
             sb_fmt(&b, "],\n");
         }
@@ -5378,7 +5378,7 @@ static BOOL write_receipt(Run *r, int exit_code)
             const uint32_t *arrays[52] = {s->formation_words, s->query_words, s->path_words, s->ballistic_words,
                                           s->formation_diag, s->tick_words, s->sim_words, s->planner_words, s->planner_walk_words,
                                           s->ai_words, s->ai_extra_words, s->crash_words, s->brain_words, s->ai_slice_words, s->ai_validation_words, s->visual_words, s->allocator_words, s->ai_slice_site_words, s->brain_state_words, s->collision_words, s->collide_words, s->brain2_words, s->collide_lod_words, s->ai_ctrl_words, s->ai_slice_budget_words, s->ai_park_words, s->loco_words, s->loco_gate_words, s->loco_service_words, s->loco_grid_words, s->loco_parallel_words, s->sweep_words, s->resolve_words, s->env_words, s->env_target_words, s->resolve_frame_words, s->loco_owned_words, s->loco_owned_detail_words, s->loco_owned_phase_words, s->loco_owned_load_words, s->loco_grid_v2_words, s->collide_source_words, s->memory_words, s->collide_contact_words, s->grid_probation_words, s->loco_relink_words, s->loco_cw_words, s->loco_grid_build_words, s->va_watch_words, s->alloc_census_words, s->arena_words, s->overlay_words};
-            const unsigned counts[52] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, NTW2_BRAIN_WORDS, 8, 8, 32, NTW2_ALLOCATOR_WORDS, 2, NTW2_BRAIN_STATE_WORDS, NTW2_COLLISION_WORDS, NTW2_COLLIDE_WORDS, NTW2_BRAIN2_WORDS, NTW2_COLLIDE_LOD_WORDS, 16, NTW2_AI_SLICE_BUDGET_WORDS, 8, NTW2_LOCO_WORDS, NTW2_LOCO_GATE_WORDS, NTW2_LOCO_SERVICE_WORDS, NTW2_LOCO_GRID_WORDS, NTW2_LOCO_PARALLEL_WORDS, NTW2_SWEEP_WORDS, NTW2_RESOLVE_WORDS, NTW2_ENV_WORDS, NTW2_ENV_TARGET_WORDS, NTW2_RESOLVE_FRAME_WORDS, NTW2_LOCO_OWNED_WORDS, NTW2_LOCO_OWNED_DETAIL_WORDS, NTW2_LOCO_OWNED_PHASE_WORDS, NTW2_LOCO_OWNED_LOAD_WORDS, NTW2_LOCO_GRID_V2_WORDS, NTW2_COLLIDE_SOURCE_WORDS, NTW2_MEMORY_WORDS, NTW2_COLLIDE_CONTACT_WORDS, NTW2_GRID_PROBATION_WORDS, NTW2_LOCO_RELINK_WORDS, NTW2_LOCO_CW_WORDS, NTW2_LOCO_GRID_BUILD_WORDS, NTW2_VA_WATCH_WORDS, NTW2_ALLOC_CENSUS_WORDS, NTW2_ARENA_WORDS, NTW2_OVERLAY_WORDS};
+            const unsigned counts[52] = {16, 16, 24, 8, 192, 16, 16, 64, 16, 16, 32, 32, KNTWR_BRAIN_WORDS, 8, 8, 32, KNTWR_ALLOCATOR_WORDS, 2, KNTWR_BRAIN_STATE_WORDS, KNTWR_COLLISION_WORDS, KNTWR_COLLIDE_WORDS, KNTWR_BRAIN2_WORDS, KNTWR_COLLIDE_LOD_WORDS, 16, KNTWR_AI_SLICE_BUDGET_WORDS, 8, KNTWR_LOCO_WORDS, KNTWR_LOCO_GATE_WORDS, KNTWR_LOCO_SERVICE_WORDS, KNTWR_LOCO_GRID_WORDS, KNTWR_LOCO_PARALLEL_WORDS, KNTWR_SWEEP_WORDS, KNTWR_RESOLVE_WORDS, KNTWR_ENV_WORDS, KNTWR_ENV_TARGET_WORDS, KNTWR_RESOLVE_FRAME_WORDS, KNTWR_LOCO_OWNED_WORDS, KNTWR_LOCO_OWNED_DETAIL_WORDS, KNTWR_LOCO_OWNED_PHASE_WORDS, KNTWR_LOCO_OWNED_LOAD_WORDS, KNTWR_LOCO_GRID_V2_WORDS, KNTWR_COLLIDE_SOURCE_WORDS, KNTWR_MEMORY_WORDS, KNTWR_COLLIDE_CONTACT_WORDS, KNTWR_GRID_PROBATION_WORDS, KNTWR_LOCO_RELINK_WORDS, KNTWR_LOCO_CW_WORDS, KNTWR_LOCO_GRID_BUILD_WORDS, KNTWR_VA_WATCH_WORDS, KNTWR_ALLOC_CENSUS_WORDS, KNTWR_ARENA_WORDS, KNTWR_OVERLAY_WORDS};
             unsigned i, j;
             for (i = 0; i < 52; ++i) {
                 sb_fmt(&b, "    \"%s\": [", names[i]);
@@ -5416,44 +5416,44 @@ done:
    bounded-age profile. Live copies are deliberately observational (see ABI). */
 static BOOL read_profile(Run *r)
 {
-    ntw2_profile_status p;
-    ntw2_profile_runtime_header runtime;
-    ntw2_profile_runtime_header *stored;
+    kntwr_profile_status p;
+    kntwr_profile_runtime_header runtime;
+    kntwr_profile_runtime_header *stored;
     SIZE_T bytes, image_bytes;
     uint32_t phase, runtime_va;
-    if (!(r->opt.mask & (NTW2_PROFILE | NTW2_GRID_CENSUS | NTW2_AI_CENSUS))) return TRUE;
+    if (!(r->opt.mask & (KNTWR_PROFILE | KNTWR_GRID_CENSUS | KNTWR_AI_CENSUS))) return TRUE;
     if (!remote_read(r->proc, r->dll_base + r->dll.profile_rva, &p, sizeof p) ||
-        p.abi != NTW2_PROFILE_ABI || p.size != sizeof p ||
-        p.bucket_bytes != NTW2_PROFILE_BUCKET_BYTES || !p.bucket_count ||
-        p.bucket_count > 0x10000000u / NTW2_PROFILE_BUCKET_BYTES ||
+        p.abi != KNTWR_PROFILE_ABI || p.size != sizeof p ||
+        p.bucket_bytes != KNTWR_PROFILE_BUCKET_BYTES || !p.bucket_count ||
+        p.bucket_count > 0x10000000u / KNTWR_PROFILE_BUCKET_BYTES ||
         !p.hist_va || !p.tick_hist_va || !p.frames_hist_va)
         return FALSE;
-    for (phase = 0; phase < NTW2_PROFILE_MAIN_PHASES; ++phase)
-        if (!NTW2_PROFILE_PHASE_FIELD(&p, phase, hist_va)) return FALSE;
+    for (phase = 0; phase < KNTWR_PROFILE_MAIN_PHASES; ++phase)
+        if (!KNTWR_PROFILE_PHASE_FIELD(&p, phase, hist_va)) return FALSE;
     bytes = (SIZE_T)p.bucket_count * sizeof(uint32_t);
-    image_bytes = bytes * (3 + NTW2_PROFILE_MAIN_PHASES);
+    image_bytes = bytes * (3 + KNTWR_PROFILE_MAIN_PHASES);
     if ((uint64_t)p.hist_va + image_bytes + sizeof runtime > UINT32_MAX) return FALSE;
     runtime_va = p.hist_va + (uint32_t)image_bytes;
     if (!remote_read(r->proc, runtime_va, &runtime, sizeof runtime) ||
-        runtime.magic != NTW2_PROFILE_RUNTIME_MAGIC || runtime.version != NTW2_PROFILE_RUNTIME_VERSION ||
+        runtime.magic != KNTWR_PROFILE_RUNTIME_MAGIC || runtime.version != KNTWR_PROFILE_RUNTIME_VERSION ||
         runtime.runtime_base != r->dll_base || !runtime.runtime_size || runtime.runtime_size > 0x10000000u ||
-        runtime.bucket_bytes != NTW2_PROFILE_BUCKET_BYTES ||
+        runtime.bucket_bytes != KNTWR_PROFILE_BUCKET_BYTES ||
         !runtime.bucket_count ||
-        runtime.bucket_count > (runtime.runtime_size + NTW2_PROFILE_BUCKET_BYTES - 1) / NTW2_PROFILE_BUCKET_BYTES ||
-        (!(runtime.flags & 8u) && runtime.bucket_count != (runtime.runtime_size + NTW2_PROFILE_BUCKET_BYTES - 1) / NTW2_PROFILE_BUCKET_BYTES) ||
-        runtime.histogram_count != NTW2_PROFILE_RUNTIME_HISTOGRAMS ||
-        runtime.pair_capacity != NTW2_PROFILE_RUNTIME_PAIRS || runtime.wait_capacity != NTW2_PROFILE_RUNTIME_WAITS ||
-        runtime.bytes != NTW2_PROFILE_RUNTIME_BYTES(runtime.bucket_count) ||
+        runtime.bucket_count > (runtime.runtime_size + KNTWR_PROFILE_BUCKET_BYTES - 1) / KNTWR_PROFILE_BUCKET_BYTES ||
+        (!(runtime.flags & 8u) && runtime.bucket_count != (runtime.runtime_size + KNTWR_PROFILE_BUCKET_BYTES - 1) / KNTWR_PROFILE_BUCKET_BYTES) ||
+        runtime.histogram_count != KNTWR_PROFILE_RUNTIME_HISTOGRAMS ||
+        runtime.pair_capacity != KNTWR_PROFILE_RUNTIME_PAIRS || runtime.wait_capacity != KNTWR_PROFILE_RUNTIME_WAITS ||
+        runtime.bytes != KNTWR_PROFILE_RUNTIME_BYTES(runtime.bucket_count) ||
         (uint64_t)runtime_va + runtime.bytes > UINT32_MAX) return FALSE;
     if (r->profile_arrays) {
         if (p.bucket_count != r->profile.bucket_count) return FALSE;
-        stored = (ntw2_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
+        stored = (kntwr_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
         if (stored->bytes != runtime.bytes) return FALSE;
     } else {
         r->profile_arrays = (uint32_t *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, image_bytes + runtime.bytes);
         if (!r->profile_arrays) return FALSE;
         r->profile = p;
-        stored = (ntw2_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
+        stored = (kntwr_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
         *stored = runtime;
     }
     r->have_profile = FALSE;
@@ -5461,10 +5461,10 @@ static BOOL read_profile(Run *r)
         !remote_read(r->proc, p.tick_hist_va, r->profile_arrays + p.bucket_count, bytes) ||
         !remote_read(r->proc, p.frames_hist_va, r->profile_arrays + p.bucket_count * 2, bytes))
         return FALSE;
-    for (phase = 0; phase < NTW2_PROFILE_MAIN_PHASES; ++phase)
-        if (!remote_read(r->proc, NTW2_PROFILE_PHASE_FIELD(&p, phase, hist_va),
+    for (phase = 0; phase < KNTWR_PROFILE_MAIN_PHASES; ++phase)
+        if (!remote_read(r->proc, KNTWR_PROFILE_PHASE_FIELD(&p, phase, hist_va),
                          r->profile_arrays + p.bucket_count * (3 + phase), bytes)) return FALSE;
-    stored = (ntw2_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
+    stored = (kntwr_profile_runtime_header *)((uint8_t *)r->profile_arrays + image_bytes);
     if (!remote_read(r->proc, runtime_va, stored, runtime.bytes)) return FALSE;
     /* Metadata is immutable while sampling; never trust a changed layout. */
     if (stored->magic != runtime.magic || stored->version != runtime.version || stored->bytes != runtime.bytes ||
@@ -5478,10 +5478,10 @@ static BOOL read_profile(Run *r)
     return TRUE;
 }
 
-static void print_profile_threads(const ntw2_profile_status *p)
+static void print_profile_threads(const kntwr_profile_status *p)
 {
-    uint32_t order[NTW2_PROFILE_THREADS], count = 0, i, rank;
-    for (i = 0; i < NTW2_PROFILE_THREADS; ++i) {
+    uint32_t order[KNTWR_PROFILE_THREADS], count = 0, i, rank;
+    for (i = 0; i < KNTWR_PROFILE_THREADS; ++i) {
         if (!p->thread_id[i]) continue;
         for (rank = count; rank && p->in_image[i] > p->in_image[order[rank - 1]]; --rank)
             order[rank] = order[rank - 1];
@@ -5510,10 +5510,10 @@ static void print_profile_threads(const ntw2_profile_status *p)
     }
 }
 
-static void print_profile_waits(const ntw2_profile_status *p)
+static void print_profile_waits(const kntwr_profile_status *p)
 {
-    uint32_t order[NTW2_PROFILE_WAIT_HANDLES], count = 0, i, rank;
-    for (i = 0; i < NTW2_PROFILE_WAIT_HANDLES; ++i) {
+    uint32_t order[KNTWR_PROFILE_WAIT_HANDLES], count = 0, i, rank;
+    for (i = 0; i < KNTWR_PROFILE_WAIT_HANDLES; ++i) {
         if (!p->wait_count[i]) continue;
         for (rank = count; rank && p->wait_count[i] > p->wait_count[order[rank - 1]]; --rank)
             order[rank] = order[rank - 1];
@@ -5534,7 +5534,7 @@ static void print_profile_waits(const ntw2_profile_status *p)
         (unsigned long)p->tick_samples);
 }
 
-static void print_profile_top(const wchar_t *name, const uint32_t *counts, const ntw2_profile_status *p,
+static void print_profile_top(const wchar_t *name, const uint32_t *counts, const kntwr_profile_status *p,
                               uint32_t samples, uint32_t limit)
 {
     struct { uint32_t bucket, count; } top[30] = {{0, 0}};
@@ -5561,14 +5561,14 @@ static void print_profile_top(const wchar_t *name, const uint32_t *counts, const
 }
 
 static void print_profile_chains(const wchar_t *name, const uint32_t *counts, const uint32_t *lengths,
-                                 const uint32_t chains[][NTW2_PROFILE_CHAIN_DEPTH],
+                                 const uint32_t chains[][KNTWR_PROFILE_CHAIN_DEPTH],
                                  uint32_t uncaptured, uint32_t samples, uint32_t limit)
 {
     struct { uint32_t index, count; } top[12] = {{0, 0}};
     uint32_t i, rank, frame;
-    for (i = 0; i < NTW2_PROFILE_CHAINS; ++i) {
+    for (i = 0; i < KNTWR_PROFILE_CHAINS; ++i) {
         uint32_t count = counts[i];
-        if (!lengths[i] || lengths[i] > NTW2_PROFILE_CHAIN_DEPTH ||
+        if (!lengths[i] || lengths[i] > KNTWR_PROFILE_CHAIN_DEPTH ||
             !count || count <= top[limit - 1].count) continue;
         for (rank = limit - 1; rank && count > top[rank - 1].count; --rank)
             top[rank] = top[rank - 1];
@@ -5589,9 +5589,9 @@ static void print_profile_chains(const wchar_t *name, const uint32_t *counts, co
     }
 }
 
-static void print_profile_main(const ntw2_profile_status *p, const uint32_t *arrays)
+static void print_profile_main(const kntwr_profile_status *p, const uint32_t *arrays)
 {
-    static const wchar_t *const names[NTW2_PROFILE_MAIN_PHASES] = {
+    static const wchar_t *const names[KNTWR_PROFILE_MAIN_PHASES] = {
         L"main A1 (tick start)", L"main B (post-tick)", L"main C (otherwise)", L"main A2 (remaining tick)"
     };
     static const wchar_t *const kinds[6] = { L"single", L"multiple-set", L"delay",
@@ -5603,28 +5603,28 @@ static void print_profile_main(const ntw2_profile_status *p, const uint32_t *arr
     say(L"  Shares use ALL successful main-thread samples in each phase (including waits/non-image EIPs).\n");
     say(L"  Module refresh failures=%lu, capacity omissions=%lu; ranges refresh about every 2 s.\n",
         (unsigned long)p->module_refresh_failed, (unsigned long)p->module_omitted);
-    say(L"  ntw2 includes clones; driver=nv*/atiu*/ig*, msvcr=msvcr*; unlisted modules (including KernelBase) count as other.\n");
-    for (index = 0; index < NTW2_PROFILE_MAIN_PHASES; ++index) {
-        uint32_t order[NTW2_PROFILE_WAIT_HANDLES], count = 0, samples, waits;
+    say(L"  kntwr includes clones; driver=nv*/atiu*/ig*, msvcr=msvcr*; unlisted modules (including KernelBase) count as other.\n");
+    for (index = 0; index < KNTWR_PROFILE_MAIN_PHASES; ++index) {
+        uint32_t order[KNTWR_PROFILE_WAIT_HANDLES], count = 0, samples, waits;
         const uint32_t *counts, *handles, *handle_kinds, *wait_kinds, *modules;
         phase = k_profile_phase_order[index];
-        samples = NTW2_PROFILE_PHASE_FIELD(p, phase, samples);
-        waits = NTW2_PROFILE_PHASE_FIELD(p, phase, wait);
-        counts = NTW2_PROFILE_PHASE_FIELD(p, phase, wait_count);
-        handles = NTW2_PROFILE_PHASE_FIELD(p, phase, wait_handle);
-        handle_kinds = NTW2_PROFILE_PHASE_FIELD(p, phase, wait_handle_kind);
-        wait_kinds = NTW2_PROFILE_PHASE_FIELD(p, phase, wait_kind);
-        modules = NTW2_PROFILE_PHASE_FIELD(p, phase, modules);
+        samples = KNTWR_PROFILE_PHASE_FIELD(p, phase, samples);
+        waits = KNTWR_PROFILE_PHASE_FIELD(p, phase, wait);
+        counts = KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_count);
+        handles = KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_handle);
+        handle_kinds = KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_handle_kind);
+        wait_kinds = KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_kind);
+        modules = KNTWR_PROFILE_PHASE_FIELD(p, phase, modules);
         say(L"  %ls: samples=%lu waits=%lu wait=%.3f%%\n", names[phase],
             (unsigned long)samples, (unsigned long)waits, samples ? 100.0 * waits / samples : 0.0);
         say(L"    Module EIP occupancy (%% of phase samples):\n");
-        for (i = 0; i < NTW2_PROFILE_MODULE_COUNT; ++i)
+        for (i = 0; i < KNTWR_PROFILE_MODULE_COUNT; ++i)
             say(L"      %-12hs %10lu %8.3f%%\n", k_profile_modules[i], (unsigned long)modules[i],
                 samples ? 100.0 * modules[i] / samples : 0.0);
         say(L"    Wait-stub occupancy:");
         for (i = 0; i < 6; ++i) say(L" %ls=%lu", kinds[i], (unsigned long)wait_kinds[i]);
         say(L"\n    Top handles by exact (stub, HANDLE) counts:\n");
-        for (i = 0; i < NTW2_PROFILE_WAIT_HANDLES; ++i) {
+        for (i = 0; i < KNTWR_PROFILE_WAIT_HANDLES; ++i) {
             if (!counts[i]) continue;
             for (rank = count; rank && counts[i] > counts[order[rank - 1]]; --rank)
                 order[rank] = order[rank - 1];
@@ -5639,26 +5639,26 @@ static void print_profile_main(const ntw2_profile_status *p, const uint32_t *arr
                 (unsigned long)handles[i], (unsigned long)counts[i]);
         }
         say(L"    unsafe reads=%lu; untracked observations after 4096 (stub, HANDLE) keys=%lu\n",
-            (unsigned long)NTW2_PROFILE_PHASE_FIELD(p, phase, wait_read_failed),
-            (unsigned long)NTW2_PROFILE_PHASE_FIELD(p, phase, wait_overflow));
+            (unsigned long)KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_read_failed),
+            (unsigned long)KNTWR_PROFILE_PHASE_FIELD(p, phase, wait_overflow));
         print_profile_top(names[phase], arrays + p->bucket_count * phase, p, samples, 20);
     }
     say(L"  Wait EIPs are occupancy, not proof of blocking. Multiple-set rows count each distinct set member;\n");
     say(L"  delay/alert have no HANDLE; keyed-event HANDLE may be NULL and does not identify the key.\n");
     print_profile_chains(L"main A1", p->main_start_chain_count, p->main_start_chain_len,
-                         p->main_start_chains, p->main_start_chain_uncaptured, p->main_samples[NTW2_PROFILE_PHASE_A1], 10);
+                         p->main_start_chains, p->main_start_chain_uncaptured, p->main_samples[KNTWR_PROFILE_PHASE_A1], 10);
     print_profile_chains(L"main B", p->main_post_chain_count, p->main_post_chain_len,
-                         p->main_post_chains, p->main_post_chain_uncaptured, p->main_samples[NTW2_PROFILE_PHASE_B], 10);
+                         p->main_post_chains, p->main_post_chain_uncaptured, p->main_samples[KNTWR_PROFILE_PHASE_B], 10);
 }
 
-static void print_profile_main_diff(const ntw2_profile_status *p, const uint32_t *arrays,
+static void print_profile_main_diff(const kntwr_profile_status *p, const uint32_t *arrays,
                                     uint32_t first, uint32_t second)
 {
     struct { uint32_t bucket; double first, second, delta; } top[20] = {{0, 0, 0, 0}};
     uint32_t i, rank, count = 0;
     const uint32_t *a = arrays + p->bucket_count * first, *b = arrays + p->bucket_count * second;
-    const uint32_t samples_a = NTW2_PROFILE_PHASE_FIELD(p, first, samples);
-    const uint32_t samples_b = NTW2_PROFILE_PHASE_FIELD(p, second, samples);
+    const uint32_t samples_a = KNTWR_PROFILE_PHASE_FIELD(p, first, samples);
+    const uint32_t samples_b = KNTWR_PROFILE_PHASE_FIELD(p, second, samples);
     say(L"Profile main %hs vs %hs: top 20 bucket share differences, descending (percentage points; per-tick work candidates)\n",
         k_profile_phases[first], k_profile_phases[second]);
     if (!samples_a || !samples_b) {
@@ -5690,14 +5690,14 @@ static void print_profile_main_diff(const ntw2_profile_status *p, const uint32_t
     }
 }
 
-static void print_profile_runtime(const ntw2_profile_runtime_header *header)
+static void print_profile_runtime(const kntwr_profile_runtime_header *header)
 {
-    static const wchar_t *const names[NTW2_PROFILE_RUNTIME_HISTOGRAMS] = {
+    static const wchar_t *const names[KNTWR_PROFILE_RUNTIME_HISTOGRAMS] = {
         L"all observed threads", L"actual tick owner", L"workers (heuristic)", L"selected-gate tick owner"
     };
-    const uint32_t *histograms = NTW2_PROFILE_RUNTIME_HIST(header);
-    const ntw2_profile_runtime_pair *pairs = NTW2_PROFILE_RUNTIME_PAIR_TABLE(header);
-    const ntw2_profile_runtime_wait *waits = NTW2_PROFILE_RUNTIME_WAIT_TABLE(header);
+    const uint32_t *histograms = KNTWR_PROFILE_RUNTIME_HIST(header);
+    const kntwr_profile_runtime_pair *pairs = KNTWR_PROFILE_RUNTIME_PAIR_TABLE(header);
+    const kntwr_profile_runtime_wait *waits = KNTWR_PROFILE_RUNTIME_WAIT_TABLE(header);
     uint32_t table, i, rank;
     struct { uint32_t rva, key, count; } top[20];
     say(L"Profile runtime: module base=0x%08lX size=0x%08lX; selected site=%ld (-1=whole tick).\n",
@@ -5705,15 +5705,15 @@ static void print_profile_runtime(const ntw2_profile_runtime_header *header)
         header->selected_site ? (long)header->selected_site - 1 : -1L);
     say(L"  Workers exclude actual tick owner and published AI thread; not exact pool membership.\n");
     say(L"  All-thread runtime samples cover actual ticks plus main-thread observations outside ticks.\n");
-    for (table = 0; table < NTW2_PROFILE_RUNTIME_HISTOGRAMS + 2; ++table) {
-        uint32_t size = table < NTW2_PROFILE_RUNTIME_HISTOGRAMS ? header->bucket_count :
-            table == NTW2_PROFILE_RUNTIME_HISTOGRAMS ? header->pair_capacity : header->wait_capacity;
+    for (table = 0; table < KNTWR_PROFILE_RUNTIME_HISTOGRAMS + 2; ++table) {
+        uint32_t size = table < KNTWR_PROFILE_RUNTIME_HISTOGRAMS ? header->bucket_count :
+            table == KNTWR_PROFILE_RUNTIME_HISTOGRAMS ? header->pair_capacity : header->wait_capacity;
         ZeroMemory(top, sizeof top);
         for (i = 0; i < size; ++i) {
             uint32_t count, rva, key = 0;
-            if (table < NTW2_PROFILE_RUNTIME_HISTOGRAMS) {
+            if (table < KNTWR_PROFILE_RUNTIME_HISTOGRAMS) {
                 count = histograms[table * header->bucket_count + i]; rva = i * header->bucket_bytes;
-            } else if (table == NTW2_PROFILE_RUNTIME_HISTOGRAMS) {
+            } else if (table == KNTWR_PROFILE_RUNTIME_HISTOGRAMS) {
                 count = pairs[i].count; rva = pairs[i].rva; key = pairs[i].frame_rva;
             } else {
                 count = waits[i].count; rva = waits[i].rva; key = waits[i].kind;
@@ -5722,14 +5722,14 @@ static void print_profile_runtime(const ntw2_profile_runtime_header *header)
             for (rank = 19; rank && count > top[rank - 1].count; --rank) top[rank] = top[rank - 1];
             top[rank].rva = rva; top[rank].key = key; top[rank].count = count;
         }
-        say(L"  Top 20 runtime %ls:\n", table < NTW2_PROFILE_RUNTIME_HISTOGRAMS ? names[table] :
-            table == NTW2_PROFILE_RUNTIME_HISTOGRAMS ? L"tick owner / main-image frame pairs" : L"tick wait-stub callers (exact RVAs)");
+        say(L"  Top 20 runtime %ls:\n", table < KNTWR_PROFILE_RUNTIME_HISTOGRAMS ? names[table] :
+            table == KNTWR_PROFILE_RUNTIME_HISTOGRAMS ? L"tick owner / main-image frame pairs" : L"tick wait-stub callers (exact RVAs)");
         for (rank = 0; rank < 20 && top[rank].count; ++rank) {
             say(L"    RVA 0x%08lX  %10lu", (unsigned long)top[rank].rva, (unsigned long)top[rank].count);
-            if (table == NTW2_PROFILE_RUNTIME_HISTOGRAMS)
+            if (table == KNTWR_PROFILE_RUNTIME_HISTOGRAMS)
                 say(L"  frame RVA=0x%08lX preferred VA=0x%08lX", (unsigned long)top[rank].key,
                     (unsigned long)(0x400000u + top[rank].key));
-            else if (table == NTW2_PROFILE_RUNTIME_HISTOGRAMS + 1)
+            else if (table == KNTWR_PROFILE_RUNTIME_HISTOGRAMS + 1)
                 say(L"  wait kind=%lu", (unsigned long)top[rank].key);
             say(L"\n");
         }
@@ -5744,18 +5744,18 @@ static void print_profile_runtime(const ntw2_profile_runtime_header *header)
 
 static BOOL write_profile(Run *r)
 {
-    ntw2_profile_status p;
-    const ntw2_profile_runtime_header *runtime;
+    kntwr_profile_status p;
+    const kntwr_profile_runtime_header *runtime;
     wchar_t path[MAXP + 16], tmp[MAXP + 20];
     HANDLE file;
     DWORD wrote, bytes, error = 0;
-    if (!(r->opt.mask & (NTW2_PROFILE | NTW2_GRID_CENSUS | NTW2_AI_CENSUS))) return TRUE;
+    if (!(r->opt.mask & (KNTWR_PROFILE | KNTWR_GRID_CENSUS | KNTWR_AI_CENSUS))) return TRUE;
     if (!r->have_profile) {
         errsay(L"no complete profiling snapshot is available (sampling may not have started).\n");
         return FALSE;
     }
     p = r->profile;
-    runtime = (const ntw2_profile_runtime_header *)(r->profile_arrays + p.bucket_count * (3 + NTW2_PROFILE_MAIN_PHASES));
+    runtime = (const kntwr_profile_runtime_header *)(r->profile_arrays + p.bucket_count * (3 + KNTWR_PROFILE_MAIN_PHASES));
     say(L"Profile: %lu samples, %lu failed, %lu rounds; runtime=%lu clones=%lu tbb=%lu wait=%lu other=%lu outside-tick=%lu.\n",
         (unsigned long)p.samples, (unsigned long)p.failed, (unsigned long)p.rounds,
         (unsigned long)p.overflow[0], (unsigned long)p.overflow[1], (unsigned long)p.overflow[2],
@@ -5770,9 +5770,9 @@ static BOOL write_profile(Run *r)
     print_profile_top(L"frames", r->profile_arrays + p.bucket_count * 2, &p, p.tick_samples, 30);
     print_profile_chains(L"tick", p.chain_count, p.chain_len, p.chains, p.chain_uncaptured, p.tick_samples, 12);
     print_profile_main(&p, r->profile_arrays + p.bucket_count * 3);
-    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, NTW2_PROFILE_PHASE_A1, NTW2_PROFILE_PHASE_C);
-    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, NTW2_PROFILE_PHASE_A1, NTW2_PROFILE_PHASE_A2);
-    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, NTW2_PROFILE_PHASE_B, NTW2_PROFILE_PHASE_C);
+    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, KNTWR_PROFILE_PHASE_A1, KNTWR_PROFILE_PHASE_C);
+    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, KNTWR_PROFILE_PHASE_A1, KNTWR_PROFILE_PHASE_A2);
+    print_profile_main_diff(&p, r->profile_arrays + p.bucket_count * 3, KNTWR_PROFILE_PHASE_B, KNTWR_PROFILE_PHASE_C);
     print_profile_runtime(runtime);
     if (!r->opt.receipt[0]) {
         say(L"No --receipt path: profile printed only; no binary written.\n");
@@ -5788,7 +5788,7 @@ static BOOL write_profile(Run *r)
     p.hist_va = p.tick_hist_va = p.frames_hist_va = 0;
     ZeroMemory(p.main_hist_va, sizeof p.main_hist_va);
     p.main_rest.hist_va = 0;
-    bytes = p.bucket_count * sizeof(uint32_t) * (3 + NTW2_PROFILE_MAIN_PHASES);
+    bytes = p.bucket_count * sizeof(uint32_t) * (3 + KNTWR_PROFILE_MAIN_PHASES);
     if (!WriteFile(file, &p, sizeof p, &wrote, NULL) || wrote != sizeof p ||
         !WriteFile(file, r->profile_arrays, bytes, &wrote, NULL) || wrote != bytes ||
         !WriteFile(file, p.chain_count, sizeof p.chain_count, &wrote, NULL) || wrote != sizeof p.chain_count ||
@@ -6016,8 +6016,8 @@ static int install_runtime(Run *r)
     if (r->mss32_state == MSS_STOCK) {
         NameFind mf;
         uint32_t msz = 0, tries;
-        const uint8_t *mb = ntw2_gp_mss32_blob(&msz);
-        ntw2_gp_memory mm = ntw2_gp_process_memory(r->proc);
+        const uint8_t *mb = kntwr_gp_mss32_blob(&msz);
+        kntwr_gp_memory mm = kntwr_gp_process_memory(r->proc);
         ThreadFreeze fz;
         wchar_t why_freeze[256];
         unsigned fz_count;
@@ -6042,8 +6042,8 @@ static int install_runtime(Run *r)
             return EXIT_INSTALL;
         }
         fz_count = fz.n;
-        mrc = ntw2_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
-        if (mrc != 0 && r->mss32_rep.rollback == NTW2_GP_ROLLBACK_FAILED) {
+        mrc = kntwr_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
+        if (mrc != 0 && r->mss32_rep.rollback == KNTWR_GP_ROLLBACK_FAILED) {
             /* The patch is partly written and could not be undone: the launcher-owned game must not run. */
             errsay(L"applying the in-memory mss32.dll patch failed and could not be rolled back: %hs. Terminating the launched game (pid %lu).\n",
                    r->mss32_rep.error, (unsigned long)r->pid);
@@ -6057,7 +6057,7 @@ static int install_runtime(Run *r)
         thaw_threads(&fz);   /* only after success, nothing-written, or a verified rollback */
         if (mrc != 0) {
             errsay(L"applying the in-memory mss32.dll patch failed (%ls): %hs.\n",
-                   r->mss32_rep.rollback == NTW2_GP_ROLLBACK_RESTORED ? L"original bytes restored and verified" : L"nothing was written", r->mss32_rep.error);
+                   r->mss32_rep.rollback == KNTWR_GP_ROLLBACK_RESTORED ? L"original bytes restored and verified" : L"nothing was written", r->mss32_rep.error);
             return EXIT_INSTALL;
         }
         r->mss32_applied = TRUE;
@@ -6067,7 +6067,7 @@ static int install_runtime(Run *r)
 
     if (!resolve_remote_loadlibrary(r, &ll_addr)) return EXIT_INSTALL;
 
-    /* One remote page-granular block: [0,sizeof ntw2_config) ntw2_config, [sizeof ntw2_config,...) runtime DLL path. */
+    /* One remote page-granular block: [0,sizeof kntwr_config) kntwr_config, [sizeof kntwr_config,...) runtime DLL path. */
     plen_bytes = (wcslen(r->dll_path) + 1) * sizeof(wchar_t);
     total = sizeof r->cfg + plen_bytes;
     mem = (uint32_t)(uintptr_t)VirtualAllocEx(r->proc, NULL, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -6075,51 +6075,51 @@ static int install_runtime(Run *r)
     local = (uint8_t *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total);
     if (!local) { errsay(L"out of memory.\n"); VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE); return EXIT_INSTALL; }
 
-    r->cfg.abi = NTW2_ABI;
+    r->cfg.abi = KNTWR_ABI;
     r->cfg.size = sizeof r->cfg;
     r->cfg.enabled_mask = r->opt.mask;
     r->cfg.workers = r->opt.workers;
     r->cfg.image_base = r->exe_base;
     r->cfg.poll_ms = r->opt.poll_ms;
     r->cfg.profile_site = r->opt.profile_site;
-    r->cfg.collide_lod_m = r->opt.collide_lod_m | (r->opt.collide_census ? NTW2_COLLIDE_CENSUS : 0u);
+    r->cfg.collide_lod_m = r->opt.collide_lod_m | (r->opt.collide_census ? KNTWR_COLLIDE_CENSUS : 0u);
     r->cfg.loco_flags = loco_flags_from(&r->opt);
-    r->cfg.brain_flags = (r->opt.brain_census ? NTW2_BRAIN_CENSUS : 0u) |
-                         (r->opt.brain_timing ? NTW2_BRAIN_TIMING : 0u) |
-                         (r->opt.brain_node_shadow ? NTW2_BRAIN_NODE_SHADOW : 0u) |
-                         (r->opt.brain_fire_shadow ? NTW2_BRAIN_FIRE_SHADOW : 0u) |
-                         (r->opt.brain_finalizer_shadow ? NTW2_BRAIN_FINALIZER_SHADOW : 0u) |
-                         (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
-                         (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
-                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
-                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
-                         (r->opt.brain_locality ? NTW2_BRAIN_LOCALITY : 0u) |
-                         (r->opt.brain_locality_warm ? NTW2_BRAIN_LOCALITY_WARM : 0u) |
-                         (r->opt.brain_locality_prefetch ? NTW2_BRAIN_LOCALITY_PREFETCH : 0u) |
-                         (r->opt.brain_locality_prefetch2 ? NTW2_BRAIN_LOCALITY_PREFETCH2 : 0u) |
-                         (r->opt.brain_locality_mark ? NTW2_BRAIN_LOCALITY_MARK : 0u) |
-                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
-                         (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
-                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |
-                         (r->opt.brain_unit_posture_shadow ? NTW2_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
-                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? NTW2_BRAIN_UNIT_ENGAGE : 0u) |
-                         (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
-    r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
-                           (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
-                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
-                            (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
-    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
-                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
-                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
-                             (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
-                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? NTW2_FORMATION_CENSUS : 0u) |
-                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
-                             ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
-    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
-                           (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
-                           (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
+    r->cfg.brain_flags = (r->opt.brain_census ? KNTWR_BRAIN_CENSUS : 0u) |
+                         (r->opt.brain_timing ? KNTWR_BRAIN_TIMING : 0u) |
+                         (r->opt.brain_node_shadow ? KNTWR_BRAIN_NODE_SHADOW : 0u) |
+                         (r->opt.brain_fire_shadow ? KNTWR_BRAIN_FIRE_SHADOW : 0u) |
+                         (r->opt.brain_finalizer_shadow ? KNTWR_BRAIN_FINALIZER_SHADOW : 0u) |
+                         (r->opt.brain_parallel ? KNTWR_BRAIN_PARALLEL : 0u) |
+                         (r->opt.brain_quiet ? KNTWR_BRAIN_QUIET : 0u) |
+                         (r->opt.brain_unit_shadow ? KNTWR_BRAIN_UNIT_SHADOW : 0u) |
+                         (r->opt.brain_s0 ? KNTWR_BRAIN_S0 : 0u) |
+                         (r->opt.brain_locality ? KNTWR_BRAIN_LOCALITY : 0u) |
+                         (r->opt.brain_locality_warm ? KNTWR_BRAIN_LOCALITY_WARM : 0u) |
+                         (r->opt.brain_locality_prefetch ? KNTWR_BRAIN_LOCALITY_PREFETCH : 0u) |
+                         (r->opt.brain_locality_prefetch2 ? KNTWR_BRAIN_LOCALITY_PREFETCH2 : 0u) |
+                         (r->opt.brain_locality_mark ? KNTWR_BRAIN_LOCALITY_MARK : 0u) |
+                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? KNTWR_BRAIN_UNIT_FATIGUE : 0u) |
+                         (r->opt.brain_unit_fatigue_shadow ? KNTWR_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? KNTWR_BRAIN_UNIT_POSTURE : 0u) |
+                         (r->opt.brain_unit_posture_shadow ? KNTWR_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? KNTWR_BRAIN_UNIT_ENGAGE : 0u) |
+                         (r->opt.brain_unit_engage_shadow ? KNTWR_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
+    r->cfg.collide_flags = (r->opt.collide_contact_shadow ? KNTWR_COLLIDE_CONTACT_SHADOW : 0u) |
+                           (r->opt.collide_contact_workers ? KNTWR_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.va_watch_flags = (r->opt.va_watch ? KNTWR_VA_WATCH : 0u) | (r->opt.army_storm_census ? KNTWR_ARMY_STORM_CENSUS : 0u) |
+                            (r->opt.army_storm_sample_ms << KNTWR_ARMY_STORM_SAMPLE_SHIFT) |
+                            (r->opt.tick_pcore ? KNTWR_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? KNTWR_TICK_CORE_AB : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? KNTWR_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? KNTWR_ARMY_SOLVER_SHADOW : 0u) |
+                             (r->opt.alloc_census ? KNTWR_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? KNTWR_ALLOC_FIX : 0u) |
+                             (r->opt.arena_release ? KNTWR_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? KNTWR_HEAP_OPTIMIZE : 0u) |
+                             (r->opt.mounted_officer ? KNTWR_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? KNTWR_MOUNTED_OFFICER_WIDEN : 0u) |
+                             (r->opt.engage_census ? KNTWR_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? KNTWR_FORMATION_CENSUS : 0u) |
+                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / KNTWR_VA_FLOOR_UNIT_MIB)) << KNTWR_VA_FLOOR_SHIFT) |
+                             ((r->opt.va_hole_mib / KNTWR_VA_FLOOR_UNIT_MIB) << KNTWR_VA_HOLE_SHIFT);
+    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << KNTWR_AI_DEFERRED_BUDGET_SHIFT) : 0u;
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? KNTWR_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? KNTWR_AI_CLAIM_ONCE_CENSUS : 0u) |
+                           (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
+                           (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + sizeof r->cfg, r->dll_path, plen_bytes);
@@ -6173,29 +6173,29 @@ static int install_runtime(Run *r)
 
     rc = remote_call(r, r->dll_base + r->dll.start_rva, mem, 30000, &code, &err);
     if (rc != RC_OK) {
-        if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(ntw2_start)", err);
-        else errsay(L"ntw2_start %ls.\n", rc_text(rc));
+        if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(kntwr_start)", err);
+        else errsay(L"kntwr_start %ls.\n", rc_text(rc));
         if (rc == RC_TIMEOUT) r->remote_leaked = TRUE;
         else if (rc != RC_DIED) VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);
         if (rc == RC_DIED) { GetExitCodeProcess(r->proc, &code); r->game_exited = TRUE; r->game_exit = code; }
         return EXIT_INSTALL;
     }
     if (code != 0) {
-        errsay(L"ntw2_start rejected the configuration or failed (returned 0x%08lX).\n", (unsigned long)code);
+        errsay(L"kntwr_start rejected the configuration or failed (returned 0x%08lX).\n", (unsigned long)code);
         {
-            ntw2_status s;
+            kntwr_status s;
             const wchar_t *sw;
             if (read_status(r, &s, &sw)) { r->last = s; r->have_status = TRUE; print_status(&s, r->opt.mask); }
         }
         VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);
         return EXIT_INSTALL;
     }
-    VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);   /* ntw2_start copied the config; thread has returned */
+    VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);   /* kntwr_start copied the config; thread has returned */
     return EXIT_OK;
 }
 
-/* Stop wait policy. A runtime tick in shadow modes can run for tens of seconds, and ntw2_stop only confirms
-   NTW2_STOPPED after the tick owner drains, slots are restored, and modules are stopped. The launcher therefore
+/* Stop wait policy. A runtime tick in shadow modes can run for tens of seconds, and kntwr_stop only confirms
+   KNTWR_STOPPED after the tick owner drains, slots are restored, and modules are stopped. The launcher therefore
    waits at least kStopTimeoutMs and keeps waiting up to kStopProgressCapMs while the status still changes. */
 enum { kStopTimeoutMs = 15000, kStopProgressCapMs = 60000 };
 
@@ -6203,20 +6203,20 @@ static BOOL request_stop(Run *r)
 {
     DWORD code = 0, err = 0;
     int rc;
-    ntw2_status s;
+    kntwr_status s;
     const wchar_t *why;
     uint64_t t0, last_change;
     BOOL have_prev = FALSE;
-    ntw2_status prev;
+    kntwr_status prev;
     say(L"Stopping the runtime (restoring hooks); the game keeps running ...\n");
     rc = remote_call(r, r->dll_base + r->dll.stop_rva, 0, kStopProgressCapMs, &code, &err);
     if (rc != RC_OK) {
-        if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(ntw2_stop)", err);
-        else errsay(L"ntw2_stop %ls.\n", rc_text(rc));
+        if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(kntwr_stop)", err);
+        else errsay(L"kntwr_stop %ls.\n", rc_text(rc));
         if (rc == RC_TIMEOUT) r->remote_leaked = TRUE;
         return FALSE;
     }
-    if (code != 0) { errsay(L"ntw2_stop returned 0x%08lX.\n", (unsigned long)code); }
+    if (code != 0) { errsay(L"kntwr_stop returned 0x%08lX.\n", (unsigned long)code); }
     t0 = last_change = now_ms();
     memset(&prev, 0, sizeof prev);
     for (;;) {
@@ -6225,8 +6225,8 @@ static BOOL request_stop(Run *r)
             r->last = s;
             if (r->have_overlay) memcpy(r->last.overlay_words, r->overlay_words, sizeof r->overlay_words);
             r->have_status = TRUE;
-            if (s.phase == NTW2_STOPPED) break;
-            if (s.phase == NTW2_FAILED) break;
+            if (s.phase == KNTWR_STOPPED) break;
+            if (s.phase == KNTWR_FAILED) break;
             if (!have_prev || memcmp(&prev, &s, sizeof s)) { prev = s; have_prev = TRUE; last_change = now_ms(); }
         }
         if (!process_alive(r->proc)) break;
@@ -6236,13 +6236,13 @@ static BOOL request_stop(Run *r)
         Sleep(50);
     }
     if (r->have_status) print_status(&r->last, r->opt.mask);
-    r->stop_confirmed = code == 0 && r->have_status && r->last.phase == NTW2_STOPPED;
+    r->stop_confirmed = code == 0 && r->have_status && r->last.phase == KNTWR_STOPPED;
     return r->stop_confirmed;
 }
 
-static void observe_status(Run *r, const ntw2_status *s)
+static void observe_status(Run *r, const kntwr_status *s)
 {
-    if (s->phase == NTW2_ACTIVE) {
+    if (s->phase == KNTWR_ACTIVE) {
         if (!r->active_generations || r->last_active_generation != s->generation) {
             ++r->active_generations;
             r->last_active_generation = s->generation;
@@ -6252,11 +6252,11 @@ static void observe_status(Run *r, const ntw2_status *s)
             r->waiting_after_active = FALSE;
         }
         r->battle_active = TRUE;
-        if (r->have_status && r->last.phase == NTW2_ACTIVE &&
+        if (r->have_status && r->last.phase == KNTWR_ACTIVE &&
             r->last.generation == s->generation && r->last.model == s->model &&
             r->last.root == s->root && s->tick >= r->last.tick)
             r->battle_tick_advance += s->tick - r->last.tick;
-    } else if (s->phase == NTW2_WAITING_BATTLE && r->battle_active) {
+    } else if (s->phase == KNTWR_WAITING_BATTLE && r->battle_active) {
         ++r->battle_returns;
         r->battle_active = FALSE;
         r->waiting_after_active = TRUE;
@@ -6368,10 +6368,10 @@ static int monitor(Run *r)
         r->opt.observe_s ? L" or the observation bound elapses" : L" (Ctrl+C stops the runtime, not the game)");
     capture_overlay_report(r, TRUE);
     for (;;) {
-        ntw2_status s;
+        kntwr_status s;
         DWORD w;
         r->observed_ms = now_ms() - t0;
-        if ((r->opt.mask & (NTW2_PROFILE | NTW2_GRID_CENSUS | NTW2_AI_CENSUS)) && (!last_profile || now_ms() - last_profile >= 1000)) {
+        if ((r->opt.mask & (KNTWR_PROFILE | KNTWR_GRID_CENSUS | KNTWR_AI_CENSUS)) && (!last_profile || now_ms() - last_profile >= 1000)) {
             read_profile(r);
             last_profile = now_ms();
         }
@@ -6417,7 +6417,7 @@ static int monitor(Run *r)
             say(L"Game exited with code 0x%08lX.\n", (unsigned long)r->game_exit);
             if (r->have_status) { print_status(&r->last, r->opt.mask); print_crash(&r->last); if (r->opt.va_watch) print_va_watch(&r->last, TRUE); }
             if (r->game_exit != 0) say(L"  (non-zero exit: the runtime state above is the last snapshot taken before exit)\n");
-            if (r->opt.mask & (NTW2_PROFILE | NTW2_GRID_CENSUS | NTW2_AI_CENSUS))
+            if (r->opt.mask & (KNTWR_PROFILE | KNTWR_GRID_CENSUS | KNTWR_AI_CENSUS))
                 say(L"Game exited before final capture; using the last periodic profile snapshot (normally <=1.2 s old).\n");
             if (r->active_generations)
                 say(L"Game exited before final tick capture; using the last complete periodic tick trace.\n");
@@ -6427,7 +6427,7 @@ static int monitor(Run *r)
         if (!read_status(r, &s, &why)) {
             ++bad;
             if (!r->have_status && now_ms() > first_ok_deadline) {
-                errsay(L"no valid runtime status within 15 s of ntw2_start: %ls.\n", why);
+                errsay(L"no valid runtime status within 15 s of kntwr_start: %ls.\n", why);
                 return EXIT_INSTALL;
             }
             if (r->have_status && bad >= 50) {
@@ -6438,7 +6438,7 @@ static int monitor(Run *r)
         }
         bad = 0;
         observe_status(r, &s);
-        if (s.phase == NTW2_WAITING_BATTLE || s.phase == NTW2_ACTIVATING || s.phase == NTW2_ACTIVE) r->ever_armed = TRUE;
+        if (s.phase == KNTWR_WAITING_BATTLE || s.phase == KNTWR_ACTIVATING || s.phase == KNTWR_ACTIVE) r->ever_armed = TRUE;
         if (!have_prev || s.phase != prev_phase || s.active_mask != prev_active || s.generation != prev_gen || s.error != prev_err) {
             have_prev = TRUE;
             prev_phase = s.phase;
@@ -6446,35 +6446,35 @@ static int monitor(Run *r)
             prev_gen = s.generation;
             prev_err = s.error;
             switch (s.phase) {
-            case NTW2_VERIFYING: say(L"Runtime verifying the live image ...\n"); break;
-            case NTW2_WAITING_BATTLE: say(L"Runtime ARMED: waiting for a battle. NOT active yet.\n"); break;
-            case NTW2_ACTIVATING: say(L"Runtime activating ...\n"); break;
-            case NTW2_ACTIVE:
+            case KNTWR_VERIFYING: say(L"Runtime verifying the live image ...\n"); break;
+            case KNTWR_WAITING_BATTLE: say(L"Runtime ARMED: waiting for a battle. NOT active yet.\n"); break;
+            case KNTWR_ACTIVATING: say(L"Runtime activating ...\n"); break;
+            case KNTWR_ACTIVE:
                 if ((s.active_mask & r->opt.mask) == r->opt.mask) {
                     r->ever_full = TRUE;
                     say(L"Runtime ACTIVE: every requested feature is active.\n");
                 } else {
-                    if(s.memory_words[NTW2_MEM_BUDGET_DISABLED_MASK])
+                    if(s.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK])
                         say(L"Runtime ACTIVE with VA-budget fallback: LOCO/COLLIDE use originals; budget_refusals=%lu; other features continue.\n",
-                            (unsigned long)s.memory_words[NTW2_MEM_BUDGET_REFUSALS]);
+                            (unsigned long)s.memory_words[KNTWR_MEM_BUDGET_REFUSALS]);
                     else say(L"Runtime ACTIVE but PARTIAL: not every requested feature is active.\n");
                 }
                 capture_overlay_report(r, TRUE);
                 break;
-            case NTW2_RESTORING: say(L"Runtime restoring original code ...\n"); break;
-            case NTW2_FAILED: errsay(L"runtime reported FAILED.\n"); break;
-            case NTW2_STOPPED: say(L"Runtime STOPPED.\n"); break;
+            case KNTWR_RESTORING: say(L"Runtime restoring original code ...\n"); break;
+            case KNTWR_FAILED: errsay(L"runtime reported FAILED.\n"); break;
+            case KNTWR_STOPPED: say(L"Runtime STOPPED.\n"); break;
             default: break;
             }
             print_status(&s, r->opt.mask);
             last_stats = now_ms();
-        } else if (s.phase == NTW2_ACTIVE && now_ms() - last_stats >= 15000) {
+        } else if (s.phase == KNTWR_ACTIVE && now_ms() - last_stats >= 15000) {
             print_counters(&s);
             last_stats = now_ms();
         }
         if (r->opt.va_watch && now_ms() - last_va >= 10000) { print_va_watch(&s, FALSE); last_va = now_ms(); }
-        if (r->opt.engage_census && s.phase == NTW2_ACTIVE && now_ms() - last_ec >= 10000) { print_engage_census_line(s.engage_census_words); last_ec = now_ms(); }
-        if (s.phase == NTW2_FAILED) {
+        if (r->opt.engage_census && s.phase == KNTWR_ACTIVE && now_ms() - last_ec >= 10000) { print_engage_census_line(s.engage_census_words); last_ec = now_ms(); }
+        if (s.phase == KNTWR_FAILED) {
             errsay(L"runtime failure: error=0x%08lX detail=0x%08lX. Requesting stop so original code is restored.\n",
                    (unsigned long)s.error, (unsigned long)s.error_detail);
             write_profile(r);
@@ -6482,7 +6482,7 @@ static int monitor(Run *r)
             r->stop_requested = TRUE;
             return EXIT_RUNTIME_FAILED;
         }
-        if (s.phase == NTW2_STOPPED) {
+        if (s.phase == KNTWR_STOPPED) {
             errsay(L"runtime stopped without a launcher request.\n");
             write_profile(r);
             return EXIT_RUNTIME_FAILED;
@@ -6609,21 +6609,21 @@ static BOOL launch_game(Run *r)
     else {
         if (r->opt.gp_filter_listed)
             say(L"  gameplay patch: SUBSET (--gameplay-patch-%ls-runs: %lu run bits listed; header and appended sections always applied)\n",
-                r->opt.gp_filter.mode == NTW2_GP_ONLY ? L"only" : L"skip",
+                r->opt.gp_filter.mode == KNTWR_GP_ONLY ? L"only" : L"skip",
                 (unsigned long)(__popcnt(r->opt.gp_filter.runs[0]) + __popcnt(r->opt.gp_filter.runs[1]) + __popcnt(r->opt.gp_filter.runs[2]) + __popcnt(r->opt.gp_filter.runs[3])));
         if (r->opt.no_d3d9_swap && r->exe_is_stock) say(L"  gameplay patch: D3D9 swap OFF (--no-d3d9-swap: Direct3DCreate9 runs 65, 92 left stock)\n");
         else if (r->opt.no_d3d9_swap) say(L"  note: Napoleon.exe is patched on disk, so its D3D9 swap is already in the file and cannot be left out.\n");
     }
     if (r->opt.formation_census && r->opt.activate) {   /* the in-process census reads its path / period from the game's environment */
         wchar_t ev[16];
-        SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_CSV", r->opt.formation_census_csv);
+        SetEnvironmentVariableW(L"KNTWR_FORMATION_CENSUS_CSV", r->opt.formation_census_csv);
         _snwprintf_s(ev, 16, _TRUNCATE, L"%lu", (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u));
-        SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_EVERY", ev);
-        if (r->opt.formation_census_men) SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_MEN", L"1");
+        SetEnvironmentVariableW(L"KNTWR_FORMATION_CENSUS_EVERY", ev);
+        if (r->opt.formation_census_men) SetEnvironmentVariableW(L"KNTWR_FORMATION_CENSUS_MEN", L"1");
     }
     /* --steam: a game created outside Steam has no app id, so SteamAPI_Init cannot attach (no steam_appid.txt, no
        RestartAppIfNecessary) and multiplayer, lobbies and the overlay are unavailable. Give the child what a Steam launch gives
-       it; values already present (NTW2 started by Steam or by the user) are kept. Opt-in: with Steam attached, the patched
+       it; values already present (KNTWR started by Steam or by the user) are kept. Opt-in: with Steam attached, the patched
        image crashed during startup in 6 of 8 launches (2026-10-21, cause under investigation). */
     if (r->opt.steam) {
         static const wchar_t *const steam_vars[2] = { L"SteamAppId", L"SteamGameId" };
@@ -6632,8 +6632,8 @@ static BOOL launch_game(Run *r)
         for (v = 0; v < 2; ++v) {
             const DWORD got = GetEnvironmentVariableW(steam_vars[v], val, 64);
             const BOOL keep = got > 0 && got < 64;
-            if (!keep) SetEnvironmentVariableW(steam_vars[v], NTW2_STEAM_APP_ID);
-            say(L"  steam: %ls=%ls (%ls)\n", steam_vars[v], keep ? val : NTW2_STEAM_APP_ID, keep ? L"inherited" : L"set by ntw2");
+            if (!keep) SetEnvironmentVariableW(steam_vars[v], KNTWR_STEAM_APP_ID);
+            say(L"  steam: %ls=%ls (%ls)\n", steam_vars[v], keep ? val : KNTWR_STEAM_APP_ID, keep ? L"inherited" : L"set by kntwr");
         }
     }
     memset(&pi, 0, sizeof pi);
@@ -6643,14 +6643,14 @@ static BOOL launch_game(Run *r)
         if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, flags, NULL, r->game_dir, &si, &pi)) {
             DWORD e = GetLastError();
             if (e == ERROR_ELEVATION_REQUIRED)
-                errsay(L"Windows says Napoleon.exe requires elevation. Run ntw2.exe from an elevated prompt (nothing was started).\n");
+                errsay(L"Windows says Napoleon.exe requires elevation. Run kntwr.exe from an elevated prompt (nothing was started).\n");
             else win_fail(L"CreateProcessW(Napoleon.exe)", e);
             return FALSE;
         }
         if (r->exe_is_stock) {
             uint32_t base = 0, bsz = 0;
-            const uint8_t *blob = ntw2_gp_napoleon_blob(&bsz);
-            ntw2_gp_memory pm = ntw2_gp_process_memory(pi.hProcess);
+            const uint8_t *blob = kntwr_gp_napoleon_blob(&bsz);
+            kntwr_gp_memory pm = kntwr_gp_process_memory(pi.hProcess);
             int grc;
             if (!query_peb32_image_base(pi.hProcess, &base)) {
                 errsay(L"unable to read the suspended game's image base from the PEB.\n");
@@ -6667,8 +6667,8 @@ static BOOL launch_game(Run *r)
                 say(L"  gameplay patch NOT applied (--no-gameplay-patch): stock image resumed at base 0x%08lX (delta %+ld).\n", (unsigned long)base, (long)(base - 0x400000u));
                 break;
             }
-            grc = ntw2_gp_apply_filtered(&pm, base, 0x400000u, blob, bsz, &r->opt.gp_filter, &r->gp_rep);
-            if (grc == NTW2_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 16) {
+            grc = kntwr_gp_apply_filtered(&pm, base, 0x400000u, blob, bsz, &r->opt.gp_filter, &r->gp_rep);
+            if (grc == KNTWR_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 16) {
                 say(L"  attempt %d: the range above the game image is busy in this process (early private allocation); starting a new process.\n", attempt);
                 TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, 2000);
                 CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
@@ -6706,8 +6706,8 @@ static BOOL launch_game(Run *r)
 /* ------------------------------------------------------------------------------------------------ command line */
 static void usage(void)
 {
-    say(L"ntw2 - Napoleon Total War native multithreading launcher\n\n"
-        L"usage: ntw2.exe [--game DIR] [options]\n"
+    say(L"kntwr - KNTWR, Kaung's Napoleon Total War Runtime (native multithreading launcher)\n\n"
+        L"usage: kntwr.exe [--game DIR] [options]\n"
         L"  --game DIR            folder containing Napoleon.exe (prompted when omitted)\n"
         L"  --replay FILE         start the game on a replay (game_startup_mode replay \"FILE\")\n"
         L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
@@ -6800,7 +6800,7 @@ static void usage(void)
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
-        L"                        words: engage_census_words (src/ai/ntw2_engage_census.h), receipt engage_census (counters, histograms, event rows).\n"
+        L"                        words: engage_census_words (src/ai/kntwr_engage_census.h), receipt engage_census (counters, histograms, event rows).\n"
         L"  --formation-census[=EVERY] --formation-census-csv FILE  opt-in READ-ONLY diagnostic (NEVER implied by --features all): every EVERY model ticks (default 30)\n"
         L"                        one CSV row per live unit of both alliances: men centroid / RMS spread vs the spread of the formation's slot positions (collapsed =\n"
         L"                        moving, >= 60 men, men_rms < 0.35 x slot_rms), nearest-neighbour spacing, spacing and layout floats; FILE.summary.txt has the counts.\n"
@@ -6895,7 +6895,7 @@ static void usage(void)
         L"  --ai-presize          behaviour-preserving query-local reserve of the 0x559090 hit-pair buffer (vtable word 0x13247EC); may combine\n"
         L"                        with --ai-prepass-census; needs a routed tick, excludes ai_async2\n"
         L"  --ai-poly-shadow      needs a routed tick, excludes ai_async2/--ai-prepass-census/--ai-poly: exact-kernel shadow. The native 0x80DCF0 OBB/polygon\n"
-        L"                        predicate answers; its SSE replacement (src/ai/ntw2_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
+        L"                        predicate answers; its SSE replacement (src/ai/kntwr_planner_search) is compared bit-for-bit (AL, x87 status, MXCSR);\n"
         L"                        the observer route 0x13376FC+0x40 runs on pure-retarget clones (ai_poly row)\n");
     say(L"%ls",
         L"  --ai-poly             same routing; the replacement answers, native on any guard refusal (counted by reason in the ai_poly row)\n"
@@ -6927,7 +6927,7 @@ static void usage(void)
         L"                        native 40..55-tick failed-search wait). Forced melee targets (enemy within 3 m), the periodic 64-tick clear and the\n"
         L"                        failed-search cooldown stay native. Needs a routed tick (e.g. --features all) and excludes ai_ctrl/ai_async2 and\n"
         L"                        --ai-ctrl-geometry (brain_retarget_jitter row: tracker_calls, losses, jittered, delay_sum)\n"
-        L"  --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/ntw2_target_cull.h); no gameplay\n"
+        L"  --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/kntwr_target_cull.h); no gameplay\n"
         L"                        change. Needs a routed tick, excludes ai_ctrl/ai_async2/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
         L"  --brain-target-cull-shadow  native answers every target search while the host replacement runs beside it and is compared (mismatch\n"
         L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
@@ -6945,7 +6945,7 @@ static void usage(void)
         L"  --receipt FILE        JSON status every second and final outcome (atomic replace)\n"
         L"                        profile or grid-census also writes FILE.profile.bin at observation end (before exit/stop)\n"
         L"  --tick-log FILE       retain every observed tick (10 ms launcher polls, maximum 200000 entries)\n"
-        L"                        write NTW2TLOG binary at observation end; receipt includes summary and loss count\n"
+        L"                        write KNTWRTLOG binary at observation end; receipt includes summary and loss count\n"
         L"  --no-activate         launch the game without installing the runtime\n"
         L"  --validate-only       validate Napoleon.exe and the runtime DLL, start nothing\n"
         L"  --allow-concurrent    diagnostic: allow a second game instance (replay verification); timings are not comparable between concurrent runs\n"
@@ -6986,7 +6986,7 @@ static BOOL parse_features(const wchar_t *s, uint32_t *mask)
             errsay(L"--features contains an empty item (leading, trailing, or repeated comma).\n");
             return FALSE;
         }
-        if (_wcsicmp(tok, L"all") == 0) bit = NTW2_ALL;
+        if (_wcsicmp(tok, L"all") == 0) bit = KNTWR_ALL;
         for (i = 0; i < NFEATURES; ++i)
             if (_wcsicmp(tok, k_features[i].name) == 0) { bit = k_features[i].bit; break; }
         if (!bit) {
@@ -7008,11 +7008,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 {
     int i;
     uint32_t feature_options = 0;
-    o->mask = NTW2_ALL;
+    o->mask = KNTWR_ALL;
     o->workers = 4;
     o->poll_ms = 100;
-    o->ai_deferred_k = NTW2_AI_DEFERRED_DEFAULT_K;
-    o->ai_deferred_budget = NTW2_AI_DEFERRED_DEFAULT_BUDGET;
+    o->ai_deferred_k = KNTWR_AI_DEFERRED_DEFAULT_K;
+    o->ai_deferred_budget = KNTWR_AI_DEFERRED_DEFAULT_BUDGET;
     o->ai_ctrl_flags = 0;
     o->ai_claim_once = FALSE;
     o->ai_claim_once_census = FALSE;
@@ -7037,8 +7037,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         if (!wcscmp(name, L"--help") || !wcscmp(name, L"-h")) return 1;
         else if (!wcscmp(name, L"--no-activate")) o->activate = FALSE;
         else if (!wcscmp(name, L"--collide-census")) o->collide_census = TRUE;
-        else if (!wcscmp(name, L"--grid-census")) feature_options |= NTW2_GRID_CENSUS;
-        else if (!wcscmp(name, L"--army-unit-shadow")) feature_options |= NTW2_ARMY_UNIT_SHADOW;
+        else if (!wcscmp(name, L"--grid-census")) feature_options |= KNTWR_GRID_CENSUS;
+        else if (!wcscmp(name, L"--army-unit-shadow")) feature_options |= KNTWR_ARMY_UNIT_SHADOW;
         else if (!wcscmp(name, L"--loco-clone")) o->loco_clone = TRUE;
         else if (!wcscmp(name, L"--loco-parallel")) o->loco_parallel = TRUE;
         else if (!wcscmp(name, L"--loco-owned-services")) o->loco_owned = TRUE;
@@ -7062,17 +7062,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--brain-unit-posture-shadow")) o->brain_unit_posture = o->brain_unit_posture_shadow = TRUE;
         else if (!wcscmp(name, L"--brain-unit-engage")) o->brain_unit_engage = TRUE;
         else if (!wcscmp(name, L"--brain-unit-engage-shadow")) o->brain_unit_engage = o->brain_unit_engage_shadow = TRUE;
-        else if (!wcscmp(name, L"--ai-ctrl-census")) o->ai_ctrl_flags |= NTW2_AI_CTRL_CENSUS;
-        else if (!wcscmp(name, L"--ai-ctrl-histogram")) o->ai_ctrl_flags |= NTW2_AI_CTRL_HISTOGRAM;
-        else if (!wcscmp(name, L"--ai-ctrl-geometry")) o->ai_ctrl_flags |= NTW2_AI_CTRL_GEOMETRY;
-        else if (!wcscmp(name, L"--ai-ctrl-verify")) o->ai_ctrl_flags |= NTW2_AI_CTRL_VERIFY;
-        else if (!wcscmp(name, L"--ai-prepass-census")) o->ai_prepass_flags |= NTW2_AI_PREPASS_CENSUS;
-        else if (!wcscmp(name, L"--ai-presize")) o->ai_prepass_flags |= NTW2_AI_PRESIZE;
-        else if (!wcscmp(name, L"--ai-poly-shadow")) o->ai_prepass_flags |= NTW2_AI_POLY_SHADOW;
-        else if (!wcscmp(name, L"--ai-poly")) o->ai_prepass_flags |= NTW2_AI_POLY;
-        else if (!wcscmp(name, L"--ai-record-test-shadow")) o->ai_prepass_flags |= NTW2_AI_RECORD_TEST_SHADOW;
-        else if (!wcscmp(name, L"--ai-record-test")) o->ai_prepass_flags |= NTW2_AI_RECORD_TEST;
-        else if (!wcscmp(name, L"--ai-spiral-census")) o->ai_prepass_flags |= NTW2_AI_SPIRAL_CENSUS;
+        else if (!wcscmp(name, L"--ai-ctrl-census")) o->ai_ctrl_flags |= KNTWR_AI_CTRL_CENSUS;
+        else if (!wcscmp(name, L"--ai-ctrl-histogram")) o->ai_ctrl_flags |= KNTWR_AI_CTRL_HISTOGRAM;
+        else if (!wcscmp(name, L"--ai-ctrl-geometry")) o->ai_ctrl_flags |= KNTWR_AI_CTRL_GEOMETRY;
+        else if (!wcscmp(name, L"--ai-ctrl-verify")) o->ai_ctrl_flags |= KNTWR_AI_CTRL_VERIFY;
+        else if (!wcscmp(name, L"--ai-prepass-census")) o->ai_prepass_flags |= KNTWR_AI_PREPASS_CENSUS;
+        else if (!wcscmp(name, L"--ai-presize")) o->ai_prepass_flags |= KNTWR_AI_PRESIZE;
+        else if (!wcscmp(name, L"--ai-poly-shadow")) o->ai_prepass_flags |= KNTWR_AI_POLY_SHADOW;
+        else if (!wcscmp(name, L"--ai-poly")) o->ai_prepass_flags |= KNTWR_AI_POLY;
+        else if (!wcscmp(name, L"--ai-record-test-shadow")) o->ai_prepass_flags |= KNTWR_AI_RECORD_TEST_SHADOW;
+        else if (!wcscmp(name, L"--ai-record-test")) o->ai_prepass_flags |= KNTWR_AI_RECORD_TEST;
+        else if (!wcscmp(name, L"--ai-spiral-census")) o->ai_prepass_flags |= KNTWR_AI_SPIRAL_CENSUS;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--va-watch")) o->va_watch = TRUE;
@@ -7104,11 +7104,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--no-d3d9-swap")) o->no_d3d9_swap = TRUE;
         else if (!wcscmp(name, L"--steam")) o->steam = TRUE;
         else if (!wcscmp(name, L"--gameplay-patch-only-runs") || !wcscmp(name, L"--gameplay-patch-skip-runs")) {
-            const uint32_t want = name[wcslen(L"--gameplay-patch-")] == L'o' ? NTW2_GP_ONLY : NTW2_GP_SKIP;
+            const uint32_t want = name[wcslen(L"--gameplay-patch-")] == L'o' ? KNTWR_GP_ONLY : KNTWR_GP_SKIP;
             char narrow[256];
             NEEDVAL();
-            if (o->gp_filter.mode != NTW2_GP_ALL && o->gp_filter.mode != want) { errsay(L"--gameplay-patch-only-runs and --gameplay-patch-skip-runs are exclusive.\n"); return -1; }
-            if (WideCharToMultiByte(CP_ACP, 0, val, -1, narrow, (int)sizeof narrow, NULL, NULL) <= 0 || ntw2_gp_filter_parse(narrow, &o->gp_filter) != 0) {
+            if (o->gp_filter.mode != KNTWR_GP_ALL && o->gp_filter.mode != want) { errsay(L"--gameplay-patch-only-runs and --gameplay-patch-skip-runs are exclusive.\n"); return -1; }
+            if (WideCharToMultiByte(CP_ACP, 0, val, -1, narrow, (int)sizeof narrow, NULL, NULL) <= 0 || kntwr_gp_filter_parse(narrow, &o->gp_filter) != 0) {
                 errsay(L"%ls needs a run list like 14-16,36-38,44 (runs 0..127 of the patch).\n", name);
                 return -1;
             }
@@ -7128,7 +7128,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         }
         else if (!wcscmp(name, L"--va-floor-mib")) {
             NEEDVAL();
-            if (!parse_uint(val, 64, 1024, &o->va_floor_mib) || (o->va_floor_mib % NTW2_VA_FLOOR_UNIT_MIB != 0) ||
+            if (!parse_uint(val, 64, 1024, &o->va_floor_mib) || (o->va_floor_mib % KNTWR_VA_FLOOR_UNIT_MIB != 0) ||
                 (o->va_floor_mib > 512 && o->va_floor_mib != 1024)) {
                 errsay(L"--va-floor-mib must be 64..512 in multiples of 32, or 1024.\n");
                 return -1;
@@ -7136,7 +7136,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         }
         else if (!wcscmp(name, L"--va-hole-mib")) {
             NEEDVAL();
-            if (!parse_uint(val, 32, 512, &o->va_hole_mib) || (o->va_hole_mib % NTW2_VA_FLOOR_UNIT_MIB != 0)) {
+            if (!parse_uint(val, 32, 512, &o->va_hole_mib) || (o->va_hole_mib % KNTWR_VA_FLOOR_UNIT_MIB != 0)) {
                 errsay(L"--va-hole-mib must be 32..512 in multiples of 32.\n");
                 return -1;
             }
@@ -7151,7 +7151,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--loco-cw-shadow")) o->loco_cw_shadow = TRUE;
         else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
         else if (!wcscmp(name, L"--loco-shadow")) o->loco_shadow = TRUE;
-        else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= NTW2_AI_CTRL;
+        else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= KNTWR_AI_CTRL;
         else if (!wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
         else if (!wcscmp(name, L"--allow-concurrent")) o->allow_concurrent = TRUE;
         else if (!wcscmp(name, L"--no-focus")) o->focus = FALSE;
@@ -7175,7 +7175,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             o->ai_deferred = TRUE;
         } else if (!wcscmp(name, L"--ai-deferred-k")) {
             NEEDVAL();
-            if (!parse_uint(val, 1, NTW2_AI_DEFERRED_MAX_K, &o->ai_deferred_k)) { errsay(L"--ai-deferred-k must be 1..%u.\n", NTW2_AI_DEFERRED_MAX_K); return -1; }
+            if (!parse_uint(val, 1, KNTWR_AI_DEFERRED_MAX_K, &o->ai_deferred_k)) { errsay(L"--ai-deferred-k must be 1..%u.\n", KNTWR_AI_DEFERRED_MAX_K); return -1; }
         } else if (!wcscmp(name, L"--ai-deferred-budget")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 65535, &o->ai_deferred_budget)) { errsay(L"--ai-deferred-budget must be 1..65535.\n"); return -1; }
@@ -7198,15 +7198,15 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         } else if (!wcscmp(name, L"--ai-spiral-cap-m")) {
             uint32_t cap;
             NEEDVAL();
-            if (!parse_uint(val, 0, NTW2_AI_SPIRAL_CAP_MASK >> NTW2_AI_SPIRAL_CAP_SHIFT, &cap) || (cap && cap < NTW2_AI_SPIRAL_CAP_MIN_M)) {
+            if (!parse_uint(val, 0, KNTWR_AI_SPIRAL_CAP_MASK >> KNTWR_AI_SPIRAL_CAP_SHIFT, &cap) || (cap && cap < KNTWR_AI_SPIRAL_CAP_MIN_M)) {
                 errsay(L"--ai-spiral-cap-m must be 0 (native unlimited) or 20..65535 (the first spiral ring, radius 20 m, always runs).\n");
                 return -1;
             }
-            o->ai_prepass_flags = (o->ai_prepass_flags & ~NTW2_AI_SPIRAL_CAP_MASK) | (cap << NTW2_AI_SPIRAL_CAP_SHIFT);
+            o->ai_prepass_flags = (o->ai_prepass_flags & ~KNTWR_AI_SPIRAL_CAP_MASK) | (cap << KNTWR_AI_SPIRAL_CAP_SHIFT);
         } else if (!wcscmp(name, L"--profile-site")) {
             uint32_t site;
             NEEDVAL();
-            if (!parse_uint(val, 0, NTW2_TIMED_SITES - 1, &site)) { errsay(L"--profile-site must be 0..%u.\n", NTW2_TIMED_SITES - 1); return -1; }
+            if (!parse_uint(val, 0, KNTWR_TIMED_SITES - 1, &site)) { errsay(L"--profile-site must be 0..%u.\n", KNTWR_TIMED_SITES - 1); return -1; }
             o->profile_site = site + 1;
         } else if (!wcscmp(name, L"--observe-seconds")) {
             NEEDVAL();
@@ -7224,7 +7224,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     /* The shipping set implies its verified default switches (dn-cwlive2 reference stack): loco
        clone+parallel+owned+quiet+grid+incremental+cw workers and collide contact workers. Any explicit
        --loco-* / --grid-* / --collide-contact-* switch opts out and keeps the previous behavior. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL &&
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL &&
         !o->loco_clone && !o->loco_parallel && !o->loco_shadow && !o->loco_owned && !o->loco_quiet &&
         !o->loco_grid && !o->loco_grid_verify && !o->loco_grid_incremental && !o->grid_probation &&
         !o->loco_relink_shadow && !o->loco_relink_workers && !o->loco_cw_shadow && !o->loco_cw_workers &&
@@ -7235,31 +7235,31 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     /* The shipping set also implies the live polygon kernel (--ai-poly; dp-polylive2 S=2.98, 0 mismatches).
        An explicit --ai-poly-shadow / --ai-prepass-census or the ai_async2 feature opts out. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & NTW2_AI_ASYNC2) &&
-        !(o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY | NTW2_AI_PREPASS_CENSUS)))
-        o->ai_prepass_flags |= NTW2_AI_POLY;
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & KNTWR_AI_ASYNC2) &&
+        !(o->ai_prepass_flags & (KNTWR_AI_POLY_SHADOW | KNTWR_AI_POLY | KNTWR_AI_PREPASS_CENSUS)))
+        o->ai_prepass_flags |= KNTWR_AI_POLY;
     /* The shipping set also implies P-core placement of the tick thread (--tick-pcore; ta-pc: perf bad mean tick
        61.5 -> 54.6 ms, p90 97 -> 74, borodino p99 -30 ms; inert on a non-hybrid host). --tick-core-ab opts out. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->tick_core_ab) o->tick_pcore = TRUE;
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->tick_core_ab) o->tick_pcore = TRUE;
     /* The shipping set also implies the bit-exact slot solver kernel (--army-solver-memo; sv-memo4: perf bad storm-tick
        site 18 2306 -> 473 ms, ticks >300 ms 5 -> 1; 0 mismatches over 2132 live shadow solves). --army-solver-shadow opts out. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
     /* The shipping set also implies the two planner-tail levers (dx-gate, perf bad: tick p99 132 -> 88 ms, max 618 -> 283, ticks >150 ms
        28 -> 6, planner sum 26.9 -> 13.7 s; borodino unchanged):
        - --ai-record-test: the alternate placement delegate 0x13376AC routed into the bit-exact poly kernel (rt-shadow: 304,318 compares,
          0 mismatches). Needs the poly kernel live, so it follows --ai-poly; --ai-record-test-shadow opts out.
        - --ai-claim-once (AI-only deviation, user-approved): one placement recompute per fallback claim call (controller-state hash equal
          to the native-recompute census over 3000 multi-entry calls). --ai-claim-once-census, ai_ctrl, ai_async2 opt out. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && (o->ai_prepass_flags & NTW2_AI_POLY) && !(o->ai_prepass_flags & NTW2_AI_RECORD_TEST_SHADOW))
-        o->ai_prepass_flags |= NTW2_AI_RECORD_TEST;
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->ai_claim_once_census && !o->ai_deferred)
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && (o->ai_prepass_flags & KNTWR_AI_POLY) && !(o->ai_prepass_flags & KNTWR_AI_RECORD_TEST_SHADOW))
+        o->ai_prepass_flags |= KNTWR_AI_RECORD_TEST;
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) && !o->ai_claim_once_census && !o->ai_deferred)
         o->ai_claim_once = TRUE;
     /* The shipping set also implies the bit-exact melee target-search replacement (--brain-target-cull; tc-shadow/tc-shadow2:
        4.7 M compares, 0 mismatches; frontier: brain >80 ms 21 ticks -> 0, brain max 168 -> 49 ms, mean brain -2.4 ms/tick;
        perf bad / waterloo unchanged at p50). --brain-target-cull-shadow, --ai-ctrl-geometry, ai_ctrl and ai_async2 opt out.
        --brain-retarget-jitter (NO-GO as a lever, behaviour change) is never implied. */
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !(o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) && !o->brain_target_cull_shadow &&
-        !(o->ai_ctrl_flags & NTW2_AI_CTRL_GEOMETRY))
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) && !o->brain_target_cull_shadow &&
+        !(o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY))
         o->brain_target_cull = TRUE;
     /* The shipping set also implies pathfinder +0x17C waypoint subnode leak reclamation
        (--alloc-fix; lh-fix/lh-fix600: 3.00 M nodes / 336.3 MiB reclaimed in 1800 s, non-arena heap leak slope
@@ -7269,7 +7269,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--alloc-fix and --no-alloc-fix are exclusive.\n");
         return -1;
     }
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_alloc_fix)
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_alloc_fix)
         o->alloc_fix = TRUE;
     /* The shipping set also implies pose/scene 1 MB arena release + 600-frame high-water tail trim
        (--arena-release; lever4-arena: 25 blocks / 23.8 MiB trimmed in-battle + 33 blocks / 31.5 MiB released
@@ -7278,7 +7278,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--arena-release and --no-arena-release are exclusive.\n");
         return -1;
     }
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_arena_release)
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_arena_release)
         o->arena_release = TRUE;
     /* The shipping set also implies the mounted officer (user decision 2026-10-21; infantry spacing unless --mounted-officer-widen).
        --no-mounted-officer opts out. */
@@ -7286,94 +7286,94 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--mounted-officer / --mounted-officer-widen and --no-mounted-officer are exclusive.\n");
         return -1;
     }
-    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_mounted_officer)
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_mounted_officer)
         o->mounted_officer = TRUE;
-    if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
+    if ((o->mask & KNTWR_GRID_CENSUS) && !(o->mask & KNTWR_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
     }
-    if ((o->mask & NTW2_AI_CENSUS) && !(o->mask & NTW2_AI_ASYNC)) {
+    if ((o->mask & KNTWR_AI_CENSUS) && !(o->mask & KNTWR_AI_ASYNC)) {
         errsay(L"ai_census requires --features ai (or a feature list containing ai).\n");
         return -1;
     }
-    if ((o->mask & NTW2_ARMY_UNIT_SHADOW) &&
-        !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 |
-                     NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+    if ((o->mask & KNTWR_ARMY_UNIT_SHADOW) &&
+        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 |
+                     KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
         errsay(L"--army-unit-shadow needs a routed tick: add profile or a simulation feature (e.g. --features ai,profile).\n");
         return -1;
     }
-    if ((o->mask & NTW2_AI_ASYNC2) && (!(o->mask & NTW2_AI_ASYNC) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_CENSUS)))) {
+    if ((o->mask & KNTWR_AI_ASYNC2) && (!(o->mask & KNTWR_AI_ASYNC) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_CENSUS)))) {
         errsay(L"ai_async2 requires --features ai and excludes ai_ctrl and ai_census (shared worker, site 33 and slots).\n");
         return -1;
     }
-    if (o->ai_deferred && !(o->mask & NTW2_AI_ASYNC2)) {
+    if (o->ai_deferred && !(o->mask & KNTWR_AI_ASYNC2)) {
         errsay(L"--ai-deferred requires --features ai,ai_async2 (it is a schedule of the ai_async2 machinery; ai_ctrl and ai_census stay excluded).\n");
         return -1;
     }
-    if (((o->ai_ctrl_flags & NTW2_AI_CTRL_CENSUS) && (o->ai_ctrl_flags & (NTW2_AI_CTRL_HISTOGRAM | NTW2_AI_CTRL_GEOMETRY))) ||
-        ((o->ai_ctrl_flags & NTW2_AI_CTRL_VERIFY) && !(o->ai_ctrl_flags & (NTW2_AI_CTRL_HISTOGRAM | NTW2_AI_CTRL_GEOMETRY))) ||
-        (o->ai_ctrl_flags && (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)))) {
+    if (((o->ai_ctrl_flags & KNTWR_AI_CTRL_CENSUS) && (o->ai_ctrl_flags & (KNTWR_AI_CTRL_HISTOGRAM | KNTWR_AI_CTRL_GEOMETRY))) ||
+        ((o->ai_ctrl_flags & KNTWR_AI_CTRL_VERIFY) && !(o->ai_ctrl_flags & (KNTWR_AI_CTRL_HISTOGRAM | KNTWR_AI_CTRL_GEOMETRY))) ||
+        (o->ai_ctrl_flags && (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)))) {
         errsay(L"--ai-ctrl-census is shadow-only (excludes -histogram/-geometry); --ai-ctrl-verify needs -histogram or -geometry; "
                L"every --ai-ctrl-* excludes the ai_ctrl and ai_async2 features.\n");
         return -1;
     }
-    if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
-                             !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
+    if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
+                             !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO)))) {
         errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
                L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
         return -1;
     }
     if ((o->brain_target_cull || o->brain_target_cull_shadow || o->brain_retarget_jitter) &&
-        ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & NTW2_AI_CTRL_GEOMETRY) || (o->mask & (NTW2_AI_CTRL | NTW2_AI_ASYNC2)) ||
-         !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO)))) {
+        ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
+         !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO)))) {
         errsay(L"--brain-target-cull / --brain-target-cull-shadow / --brain-retarget-jitter need a routed tick (add profile or a simulation feature, e.g. --features all), "
                L"exclude the ai_ctrl and ai_async2 features and --ai-ctrl-geometry; --brain-target-cull and --brain-target-cull-shadow are exclusive.\n");
         return -1;
     }
-    if (o->ai_prepass_flags && (o->mask & NTW2_AI_ASYNC2)) {
+    if (o->ai_prepass_flags && (o->mask & KNTWR_AI_ASYNC2)) {
         errsay(L"--ai-prepass-census / --ai-presize / --ai-poly* / --ai-spiral-* exclude the ai_async2 feature (its think runs on private clones outside a site-34 scope).\n");
         return -1;
     }
-    if (((o->ai_prepass_flags & NTW2_AI_POLY_SHADOW) && (o->ai_prepass_flags & NTW2_AI_POLY)) ||
-        ((o->ai_prepass_flags & NTW2_AI_PREPASS_CENSUS) && (o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)))) {
+    if (((o->ai_prepass_flags & KNTWR_AI_POLY_SHADOW) && (o->ai_prepass_flags & KNTWR_AI_POLY)) ||
+        ((o->ai_prepass_flags & KNTWR_AI_PREPASS_CENSUS) && (o->ai_prepass_flags & (KNTWR_AI_POLY_SHADOW | KNTWR_AI_POLY)))) {
         errsay(L"--ai-poly-shadow, --ai-poly and --ai-prepass-census are mutually exclusive (the census perturbs timing; shadow and live are separate gates).\n");
         return -1;
     }
-    if (((o->ai_prepass_flags & NTW2_AI_RECORD_TEST_SHADOW) && (o->ai_prepass_flags & NTW2_AI_RECORD_TEST)) ||
-        ((o->ai_prepass_flags & NTW2_AI_RECORD_TEST_BITS) && !(o->ai_prepass_flags & (NTW2_AI_POLY_SHADOW | NTW2_AI_POLY)))) {
+    if (((o->ai_prepass_flags & KNTWR_AI_RECORD_TEST_SHADOW) && (o->ai_prepass_flags & KNTWR_AI_RECORD_TEST)) ||
+        ((o->ai_prepass_flags & KNTWR_AI_RECORD_TEST_BITS) && !(o->ai_prepass_flags & (KNTWR_AI_POLY_SHADOW | KNTWR_AI_POLY)))) {
         errsay(L"--ai-record-test-shadow and --ai-record-test are mutually exclusive and need --ai-poly or --ai-poly-shadow (--features all implies --ai-poly; "
                L"an explicit --ai-prepass-census opts out of it).\n");
         return -1;
     }
     if (o->army_storm_census &&
-        !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
         errsay(L"--army-storm-census needs the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
         return -1;
     }
-    if (o->army_storm_census && (o->mask & NTW2_ARMY_UNIT_SHADOW)) {
+    if (o->army_storm_census && (o->mask & KNTWR_ARMY_UNIT_SHADOW)) {
         errsay(L"--army-storm-census and --army-unit-shadow are exclusive (both bind sites 101/103).\n");
         return -1;
     }
     /* The gated sampler is generic in the runtime (entry QPC of the selected --profile-site); the launcher admits site 18
        (with the storm census) and site 34 (planner think tails, no census needed). */
     if (o->army_storm_sample_ms &&
-        (!(o->mask & NTW2_PROFILE) || (o->profile_site != 7u && o->profile_site != 19u && o->profile_site != 35u) || (o->profile_site == 19u && !o->army_storm_census))) {
+        (!(o->mask & KNTWR_PROFILE) || (o->profile_site != 7u && o->profile_site != 19u && o->profile_site != 35u) || (o->profile_site == 19u && !o->army_storm_census))) {
         errsay(L"--army-storm-sample-ms requires --features profile and --profile-site 18 (with --army-storm-census) , --profile-site 34 or --profile-site 6.\n");
         return -1;
     }
     if ((o->tick_pcore || o->tick_core_ab) &&
-        !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
         errsay(L"--tick-pcore/--tick-core-ab need a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
     if (o->engage_census &&
-        !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
         errsay(L"--engage-census needs a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
     if (o->formation_census) {
         if (!o->formation_census_csv[0]) { errsay(L"--formation-census needs --formation-census-csv FILE.\n"); return -1; }
-        if (o->activate && !(o->mask & (NTW2_PROFILE | NTW2_PATH | NTW2_FORMATION | NTW2_BALLISTICS | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        if (o->activate && !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
             errsay(L"--formation-census with a runtime needs a routed tick: add profile or a simulation feature (e.g. --features all); or use --no-activate for the launcher-side census.\n");
             return -1;
         }
@@ -7381,18 +7381,18 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--formation-census-csv needs --formation-census.\n");
         return -1;
     }
-    if (o->no_gameplay_patch && (o->activate || o->gp_filter.mode != NTW2_GP_ALL || o->no_d3d9_swap)) {
+    if (o->no_gameplay_patch && (o->activate || o->gp_filter.mode != KNTWR_GP_ALL || o->no_d3d9_swap)) {
         errsay(L"--no-gameplay-patch needs --no-activate (the runtime requires the patched image) and excludes --gameplay-patch-only-runs/--gameplay-patch-skip-runs/--no-d3d9-swap.\n");
         return -1;
     }
     /* --no-d3d9-swap: the gameplay patch without its Direct3DCreate9 swap (runs 65, 92; no clone, pin or binding depends on them). */
-    if (o->no_d3d9_swap) ntw2_gp_filter_exclude_d3d9_swap(&o->gp_filter);
+    if (o->no_d3d9_swap) kntwr_gp_filter_exclude_d3d9_swap(&o->gp_filter);
     if (o->tick_pcore && o->tick_core_ab) {
         errsay(L"--tick-pcore and --tick-core-ab are exclusive.\n");
         return -1;
     }
     if ((o->army_solver_memo || o->army_solver_shadow) &&
-        !(o->mask & (NTW2_PROFILE | NTW2_AI_ASYNC | NTW2_BRAIN2 | NTW2_COLLIDE | NTW2_COLLIDE_LOD | NTW2_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
         errsay(L"--army-solver-memo/--army-solver-shadow need the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
         return -1;
     }
@@ -7400,27 +7400,27 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--army-solver-memo and --army-solver-shadow are exclusive.\n");
         return -1;
     }
-    if (!o->ai_deferred && (o->ai_deferred_k != NTW2_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != NTW2_AI_DEFERRED_DEFAULT_BUDGET)) {
+    if (!o->ai_deferred && (o->ai_deferred_k != KNTWR_AI_DEFERRED_DEFAULT_K || o->ai_deferred_budget != KNTWR_AI_DEFERRED_DEFAULT_BUDGET)) {
         errsay(L"--ai-deferred-k / --ai-deferred-budget require --ai-deferred.\n");
         return -1;
     }
-    if ((o->mask & NTW2_BRAIN) && !(o->mask & NTW2_PROFILE)) {
+    if ((o->mask & KNTWR_BRAIN) && !(o->mask & KNTWR_PROFILE)) {
         errsay(L"--features brain requires profile (brain sites exist only inside the profiling epoch).\n");
         return -1;
     }
-    if ((o->mask & NTW2_AI_CTRL) && !(o->mask & NTW2_AI_ASYNC)) {
+    if ((o->mask & KNTWR_AI_CTRL) && !(o->mask & KNTWR_AI_ASYNC)) {
         errsay(L"Controller offload (ai_ctrl) requires --features ai (or a list containing ai).\n");
         return -1;
     }
-    if (o->collide_census && !(o->mask & NTW2_PROFILE)) {
+    if (o->collide_census && !(o->mask & KNTWR_PROFILE)) {
         errsay(L"--collide-census requires --features profile (or a feature list containing profile).\n");
         return -1;
     }
-    if ((o->mask & NTW2_COLLIDE_LOD) && (o->mask & (NTW2_COLLIDE | NTW2_FORMATION))) {
+    if ((o->mask & KNTWR_COLLIDE_LOD) && (o->mask & (KNTWR_COLLIDE | KNTWR_FORMATION))) {
         errsay(L"collide_lod cannot combine with collide or formation; its original-query gate requires the private manager.\n");
         return -1;
     }
-    if ((o->collide_contact_shadow || o->collide_contact_workers) && !(o->mask & NTW2_COLLIDE)) {
+    if ((o->collide_contact_shadow || o->collide_contact_workers) && !(o->mask & KNTWR_COLLIDE)) {
         errsay(L"--collide-contact-shadow and --collide-contact-workers require --features collide.\n");
         return -1;
     }
@@ -7429,11 +7429,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->brain_census || o->brain_timing || o->brain_node_shadow || o->brain_fire_shadow || o->brain_finalizer_shadow ||
-         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0 || o->brain_locality) && !(o->mask & NTW2_BRAIN2)) {
+         o->brain_parallel || o->brain_quiet || o->brain_unit_shadow || o->brain_s0 || o->brain_locality) && !(o->mask & KNTWR_BRAIN2)) {
         errsay(L"--brain-census, --brain-timing, --brain-parallel, --brain-quiet, --brain-unit-shadow, --brain-s0, --brain-locality* and brain shadow options require --features brain2.\n");
         return -1;
     }
-    if ((o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage) && !(o->mask & NTW2_BRAIN2)) {
+    if ((o->brain_unit_fatigue || o->brain_unit_posture || o->brain_unit_engage) && !(o->mask & KNTWR_BRAIN2)) {
         errsay(L"--brain-unit-* options require --features brain2.\n");
         return -1;
     }
@@ -7473,40 +7473,40 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--brain-locality-warm, --brain-locality-prefetch, --brain-locality-prefetch2 and --brain-locality-mark are exclusive modes.\n");
         return -1;
     }
-    if ((o->mask & NTW2_LOCO) && (o->mask & (NTW2_BRAIN | NTW2_COLLIDE_LOD))) {
+    if ((o->mask & KNTWR_LOCO) && (o->mask & (KNTWR_BRAIN | KNTWR_COLLIDE_LOD))) {
         errsay(L"loco cannot combine with brain or collide_lod.\n");
         return -1;
     }
-    if ((o->mask & (NTW2_LOCO | NTW2_COLLIDE)) == (NTW2_LOCO | NTW2_COLLIDE) &&
+    if ((o->mask & (KNTWR_LOCO | KNTWR_COLLIDE)) == (KNTWR_LOCO | KNTWR_COLLIDE) &&
         (!o->loco_clone || !o->loco_parallel || !o->loco_owned || !(o->loco_grid || o->loco_grid_verify))) {
         errsay(L"loco+collide requires --loco-clone, --loco-parallel, --loco-owned-services and --loco-grid (or --loco-grid-verify).\n");
         return -1;
     }
-    if (o->loco_clone && !(o->mask & NTW2_LOCO)) {
+    if (o->loco_clone && !(o->mask & KNTWR_LOCO)) {
         errsay(L"--loco-clone requires --features loco (or a feature list containing loco).\n");
         return -1;
     }
-    if (o->loco_parallel && (!(o->mask & NTW2_LOCO) || !o->loco_clone)) {
+    if (o->loco_parallel && (!(o->mask & KNTWR_LOCO) || !o->loco_clone)) {
         errsay(L"--loco-parallel requires --features loco (or a feature list containing loco) and --loco-clone.\n");
         return -1;
     }
-    if (o->loco_shadow && (!(o->mask & NTW2_LOCO) || !o->loco_clone)) {
+    if (o->loco_shadow && (!(o->mask & KNTWR_LOCO) || !o->loco_clone)) {
         errsay(L"--loco-shadow requires --features loco and --loco-clone.\n");
         return -1;
     }
-    if (o->loco_owned && (!(o->mask & NTW2_LOCO) || !o->loco_clone || !o->loco_parallel)) {
+    if (o->loco_owned && (!(o->mask & KNTWR_LOCO) || !o->loco_clone || !o->loco_parallel)) {
         errsay(L"--loco-owned-services requires --features loco (or a feature list containing loco), --loco-clone and --loco-parallel.\n");
         return -1;
     }
-    if (o->loco_quiet && (!(o->mask & NTW2_LOCO) || !o->loco_clone || !o->loco_parallel || !o->loco_owned)) {
+    if (o->loco_quiet && (!(o->mask & KNTWR_LOCO) || !o->loco_clone || !o->loco_parallel || !o->loco_owned)) {
         errsay(L"--loco-quiet requires --features loco, --loco-clone, --loco-parallel and --loco-owned-services.\n");
         return -1;
     }
-    if ((o->loco_grid || o->loco_grid_verify) && !(o->mask & NTW2_LOCO)) {
+    if ((o->loco_grid || o->loco_grid_verify) && !(o->mask & KNTWR_LOCO)) {
         errsay(L"--loco-grid and --loco-grid-verify require --features loco (or a feature list containing loco).\n");
         return -1;
     }
-    if (o->loco_grid_incremental && (!(o->mask & NTW2_LOCO) || !(o->loco_grid || o->loco_grid_verify))) {
+    if (o->loco_grid_incremental && (!(o->mask & KNTWR_LOCO) || !(o->loco_grid || o->loco_grid_verify))) {
         errsay(L"--loco-grid-incremental requires --features loco and --loco-grid (or --loco-grid-verify).\n");
         return -1;
     }
@@ -7515,7 +7515,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->loco_relink_shadow || o->loco_relink_workers) &&
-        (!(o->mask & NTW2_LOCO) || !o->loco_owned || !(o->loco_grid || o->loco_grid_verify))) {
+        (!(o->mask & KNTWR_LOCO) || !o->loco_owned || !(o->loco_grid || o->loco_grid_verify))) {
         errsay(L"--loco-relink-shadow and --loco-relink-workers require --features loco, --loco-owned-services and --loco-grid (or --loco-grid-verify).\n");
         return -1;
     }
@@ -7523,24 +7523,24 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--loco-cw-shadow and --loco-cw-workers are exclusive.\n");
         return -1;
     }
-    if ((o->loco_cw_shadow || o->loco_cw_workers) && (!(o->mask & NTW2_LOCO) || !o->loco_owned)) {
+    if ((o->loco_cw_shadow || o->loco_cw_workers) && (!(o->mask & KNTWR_LOCO) || !o->loco_owned)) {
         errsay(L"--loco-cw-shadow and --loco-cw-workers require --features loco and --loco-owned-services.\n");
         return -1;
     }
-    if (o->grid_probation && (!(o->mask & NTW2_LOCO) || !o->loco_grid || (o->mask & NTW2_BALLISTICS))) {
+    if (o->grid_probation && (!(o->mask & KNTWR_LOCO) || !o->loco_grid || (o->mask & KNTWR_BALLISTICS))) {
         errsay(L"--grid-probation requires --features loco with --loco-grid (or --loco-grid-verify) and is refused with ballistic "
                L"(its query cache walks the native cell heads itself).\n");
         return -1;
     }
-    if ((o->mask & NTW2_LOCO) && (o->mask & NTW2_FORMATION))
+    if ((o->mask & KNTWR_LOCO) && (o->mask & KNTWR_FORMATION))
         say(L"note: loco stays inert while formation is enabled (the original manager bypasses the ACTIVE clone); omit formation to run it.\n");
-    if ((o->mask & NTW2_BRAIN2) && (o->mask & NTW2_FORMATION))
+    if ((o->mask & KNTWR_BRAIN2) && (o->mask & KNTWR_FORMATION))
         say(L"note: brain2 stays inert while formation is enabled (the formation module runs the original army manager, so the per-entity "
             L"loop is not reached through the private clones); omit formation to run it.\n");
-    if ((o->mask & NTW2_BRAIN2) && (o->mask & NTW2_BRAIN))
+    if ((o->mask & KNTWR_BRAIN2) && (o->mask & KNTWR_BRAIN))
         say(L"note: brain2 runs the private clones, so the brain profiling entry slots are not published (brain sites stay empty); "
             L"the brain2 counters measure the loop instead.\n");
-    if ((o->mask & NTW2_COLLIDE) && (o->mask & NTW2_FORMATION))
+    if ((o->mask & KNTWR_COLLIDE) && (o->mask & KNTWR_FORMATION))
         say(L"note: collide stays inert while formation is enabled (the original manager bypasses the ACTIVE clone); "
             L"omit formation to run the experimental solver.\n");
     if (o->exit_game_after_observe && (!o->observe_s || (!o->activate && !o->formation_census))) {
@@ -7594,48 +7594,48 @@ int wmain(int argc, wchar_t **argv)
     GetSystemTimePreciseAsFileTime(&r->t_start);
     pr = parse_args(argc, argv, &r->opt);
     if (pr == 1) { usage(); return EXIT_OK; }
-    if (pr < 0) { say(L"Run ntw2.exe --help for usage.\n"); return EXIT_USAGE; }
+    if (pr < 0) { say(L"Run kntwr.exe --help for usage.\n"); return EXIT_USAGE; }
     r->cfg.enabled_mask = r->opt.mask;
     r->cfg.workers = r->opt.workers;
     r->cfg.poll_ms = r->opt.poll_ms;
-    r->cfg.collide_lod_m = r->opt.collide_lod_m | (r->opt.collide_census ? NTW2_COLLIDE_CENSUS : 0u);
+    r->cfg.collide_lod_m = r->opt.collide_lod_m | (r->opt.collide_census ? KNTWR_COLLIDE_CENSUS : 0u);
     r->cfg.loco_flags = loco_flags_from(&r->opt);
-    r->cfg.brain_flags = (r->opt.brain_census ? NTW2_BRAIN_CENSUS : 0u) |
-                         (r->opt.brain_timing ? NTW2_BRAIN_TIMING : 0u) |
-                         (r->opt.brain_node_shadow ? NTW2_BRAIN_NODE_SHADOW : 0u) |
-                         (r->opt.brain_fire_shadow ? NTW2_BRAIN_FIRE_SHADOW : 0u) |
-                         (r->opt.brain_finalizer_shadow ? NTW2_BRAIN_FINALIZER_SHADOW : 0u) |
-                         (r->opt.brain_parallel ? NTW2_BRAIN_PARALLEL : 0u) |
-                         (r->opt.brain_quiet ? NTW2_BRAIN_QUIET : 0u) |
-                         (r->opt.brain_unit_shadow ? NTW2_BRAIN_UNIT_SHADOW : 0u) |
-                         (r->opt.brain_s0 ? NTW2_BRAIN_S0 : 0u) |
-                         (r->opt.brain_locality ? NTW2_BRAIN_LOCALITY : 0u) |
-                         (r->opt.brain_locality_warm ? NTW2_BRAIN_LOCALITY_WARM : 0u) |
-                         (r->opt.brain_locality_prefetch ? NTW2_BRAIN_LOCALITY_PREFETCH : 0u) |
-                         (r->opt.brain_locality_prefetch2 ? NTW2_BRAIN_LOCALITY_PREFETCH2 : 0u) |
-                         (r->opt.brain_locality_mark ? NTW2_BRAIN_LOCALITY_MARK : 0u) |
-                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? NTW2_BRAIN_UNIT_FATIGUE : 0u) |
-                         (r->opt.brain_unit_fatigue_shadow ? NTW2_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
-                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? NTW2_BRAIN_UNIT_POSTURE : 0u) |
-                         (r->opt.brain_unit_posture_shadow ? NTW2_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
-                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? NTW2_BRAIN_UNIT_ENGAGE : 0u) |
-                         (r->opt.brain_unit_engage_shadow ? NTW2_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
-    r->cfg.collide_flags = (r->opt.collide_contact_shadow ? NTW2_COLLIDE_CONTACT_SHADOW : 0u) |
-                           (r->opt.collide_contact_workers ? NTW2_COLLIDE_CONTACT_WORKERS : 0u);
-    r->cfg.va_watch_flags = (r->opt.va_watch ? NTW2_VA_WATCH : 0u) | (r->opt.army_storm_census ? NTW2_ARMY_STORM_CENSUS : 0u) |
-                            (r->opt.army_storm_sample_ms << NTW2_ARMY_STORM_SAMPLE_SHIFT) |
-                            (r->opt.tick_pcore ? NTW2_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? NTW2_TICK_CORE_AB : 0u);
-    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? NTW2_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? NTW2_ARMY_SOLVER_SHADOW : 0u) |
-                             (r->opt.alloc_census ? NTW2_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? NTW2_ALLOC_FIX : 0u) |
-                             (r->opt.arena_release ? NTW2_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? NTW2_HEAP_OPTIMIZE : 0u) |
-                             (r->opt.mounted_officer ? NTW2_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? NTW2_MOUNTED_OFFICER_WIDEN : 0u) |
-                             (r->opt.engage_census ? NTW2_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? NTW2_FORMATION_CENSUS : 0u) |
-                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / NTW2_VA_FLOOR_UNIT_MIB)) << NTW2_VA_FLOOR_SHIFT) |
-                             ((r->opt.va_hole_mib / NTW2_VA_FLOOR_UNIT_MIB) << NTW2_VA_HOLE_SHIFT);
-    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << NTW2_AI_DEFERRED_BUDGET_SHIFT) : 0u;
-    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? NTW2_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? NTW2_AI_CLAIM_ONCE_CENSUS : 0u) |
-                           (r->opt.brain_target_cull_shadow ? NTW2_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? NTW2_AI_TARGET_CULL : 0u) |
-                           (r->opt.brain_retarget_jitter ? NTW2_AI_RETARGET_JITTER : 0u);
+    r->cfg.brain_flags = (r->opt.brain_census ? KNTWR_BRAIN_CENSUS : 0u) |
+                         (r->opt.brain_timing ? KNTWR_BRAIN_TIMING : 0u) |
+                         (r->opt.brain_node_shadow ? KNTWR_BRAIN_NODE_SHADOW : 0u) |
+                         (r->opt.brain_fire_shadow ? KNTWR_BRAIN_FIRE_SHADOW : 0u) |
+                         (r->opt.brain_finalizer_shadow ? KNTWR_BRAIN_FINALIZER_SHADOW : 0u) |
+                         (r->opt.brain_parallel ? KNTWR_BRAIN_PARALLEL : 0u) |
+                         (r->opt.brain_quiet ? KNTWR_BRAIN_QUIET : 0u) |
+                         (r->opt.brain_unit_shadow ? KNTWR_BRAIN_UNIT_SHADOW : 0u) |
+                         (r->opt.brain_s0 ? KNTWR_BRAIN_S0 : 0u) |
+                         (r->opt.brain_locality ? KNTWR_BRAIN_LOCALITY : 0u) |
+                         (r->opt.brain_locality_warm ? KNTWR_BRAIN_LOCALITY_WARM : 0u) |
+                         (r->opt.brain_locality_prefetch ? KNTWR_BRAIN_LOCALITY_PREFETCH : 0u) |
+                         (r->opt.brain_locality_prefetch2 ? KNTWR_BRAIN_LOCALITY_PREFETCH2 : 0u) |
+                         (r->opt.brain_locality_mark ? KNTWR_BRAIN_LOCALITY_MARK : 0u) |
+                         ((r->opt.brain_unit_fatigue || r->opt.brain_unit_fatigue_shadow) ? KNTWR_BRAIN_UNIT_FATIGUE : 0u) |
+                         (r->opt.brain_unit_fatigue_shadow ? KNTWR_BRAIN_UNIT_FATIGUE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_posture || r->opt.brain_unit_posture_shadow) ? KNTWR_BRAIN_UNIT_POSTURE : 0u) |
+                         (r->opt.brain_unit_posture_shadow ? KNTWR_BRAIN_UNIT_POSTURE_SHADOW : 0u) |
+                         ((r->opt.brain_unit_engage || r->opt.brain_unit_engage_shadow) ? KNTWR_BRAIN_UNIT_ENGAGE : 0u) |
+                         (r->opt.brain_unit_engage_shadow ? KNTWR_BRAIN_UNIT_ENGAGE_SHADOW : 0u);
+    r->cfg.collide_flags = (r->opt.collide_contact_shadow ? KNTWR_COLLIDE_CONTACT_SHADOW : 0u) |
+                           (r->opt.collide_contact_workers ? KNTWR_COLLIDE_CONTACT_WORKERS : 0u);
+    r->cfg.va_watch_flags = (r->opt.va_watch ? KNTWR_VA_WATCH : 0u) | (r->opt.army_storm_census ? KNTWR_ARMY_STORM_CENSUS : 0u) |
+                            (r->opt.army_storm_sample_ms << KNTWR_ARMY_STORM_SAMPLE_SHIFT) |
+                            (r->opt.tick_pcore ? KNTWR_TICK_PCORE : 0u) | (r->opt.tick_core_ab ? KNTWR_TICK_CORE_AB : 0u);
+    r->cfg.va_watch_flags |= (r->opt.army_solver_memo ? KNTWR_ARMY_SOLVER_MEMO : 0u) | (r->opt.army_solver_shadow ? KNTWR_ARMY_SOLVER_SHADOW : 0u) |
+                             (r->opt.alloc_census ? KNTWR_ALLOC_CENSUS : 0u) | (r->opt.alloc_fix ? KNTWR_ALLOC_FIX : 0u) |
+                             (r->opt.arena_release ? KNTWR_ARENA_RELEASE : 0u) | (r->opt.heap_optimize ? KNTWR_HEAP_OPTIMIZE : 0u) |
+                             (r->opt.mounted_officer ? KNTWR_MOUNTED_OFFICER : 0u) | (r->opt.mounted_officer_widen ? KNTWR_MOUNTED_OFFICER_WIDEN : 0u) |
+                             (r->opt.engage_census ? KNTWR_ENGAGE_CENSUS : 0u) | (r->opt.formation_census ? KNTWR_FORMATION_CENSUS : 0u) |
+                             ((r->opt.va_floor_mib == 1024u ? 17u : (r->opt.va_floor_mib / KNTWR_VA_FLOOR_UNIT_MIB)) << KNTWR_VA_FLOOR_SHIFT) |
+                             ((r->opt.va_hole_mib / KNTWR_VA_FLOOR_UNIT_MIB) << KNTWR_VA_HOLE_SHIFT);
+    r->cfg.ai_deferred = r->opt.ai_deferred ? r->opt.ai_deferred_k | (r->opt.ai_deferred_budget << KNTWR_AI_DEFERRED_BUDGET_SHIFT) : 0u;
+    r->cfg.ai_ctrl_flags = r->opt.ai_ctrl_flags | (r->opt.ai_claim_once ? KNTWR_AI_CLAIM_ONCE : 0u) | (r->opt.ai_claim_once_census ? KNTWR_AI_CLAIM_ONCE_CENSUS : 0u) |
+                           (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
+                           (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
 
     if (r->opt.replay[0]) {

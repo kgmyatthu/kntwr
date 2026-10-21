@@ -6,7 +6,7 @@
 #include "loco/native_sweep.h"
 
 static_assert(sizeof(void*) == 4, "sequence port requires the pinned x86 ABI");
-namespace ntw2_fire {
+namespace kntwr_fire {
 namespace {
 U delta, words[WordCount], commitWords[CommitWordCount];
 bool enabled, active;
@@ -81,7 +81,7 @@ void Position(U descriptor, float out[2]) {
  out[0] = Add(Add(Add(Mul(F(transform + 0xA0), y), Mul(F(transform + 0x9C), x)), Mul(F(transform + 0xA4), z)), F(transform + 0x80));
  out[1] = Add(Add(Add(Mul(F(transform + 0xB8), y), Mul(F(transform + 0xB4), x)), Mul(F(transform + 0xBC), z)), F(transform + 0x88));
 }
-void CaptureBody(U soldier, Snapshot& s, const ntw2_sweep::WorkerScene* environment) {
+void CaptureBody(U soldier, Snapshot& s, const kntwr_sweep::WorkerScene* environment) {
  s = Snapshot{}; s.identity = soldier;
  memcpy(s.soldier, reinterpret_cast<const void*>(soldier), SoldierBytes);
  s.tick_step = F(delta + 0x131A7B0);
@@ -218,7 +218,7 @@ void Mismatch(U offset, U expected, U actual) {
  }
 }
 }
-bool Capture(U soldier, Snapshot& s, const ntw2_sweep::WorkerScene* environment) {
+bool Capture(U soldier, Snapshot& s, const kntwr_sweep::WorkerScene* environment) {
  __try { CaptureBody(soldier, s, environment); return true; }
  __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }

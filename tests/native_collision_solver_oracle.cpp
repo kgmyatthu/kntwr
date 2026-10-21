@@ -56,9 +56,9 @@ using U = uint32_t;
 using B = unsigned char;
 using Pair = std::array<U, 2>; // unordered record pair {min, max}
 static_assert(sizeof(void*) == 4, "owned x86 oracle");
-static_assert(ntw2_collide::WordCount == 61, "oracle samples the full 61-word diagnostic block");
-static_assert(ntw2_collide::UnsupportedCells == 43 && ntw2_collide::ShapedPairs == 44 &&
-    ntw2_collide::AuditThreadUs == 60, "performance diagnostics append after the existing 44 words");
+static_assert(kntwr_collide::WordCount == 61, "oracle samples the full 61-word diagnostic block");
+static_assert(kntwr_collide::UnsupportedCells == 43 && kntwr_collide::ShapedPairs == 44 &&
+    kntwr_collide::AuditThreadUs == 60, "performance diagnostics append after the existing 44 words");
 extern "C" {
 U __stdcall ntw_pool_init(ntw_pool*, const ntw_pool_config*);
 U __stdcall ntw_pool_shutdown(ntw_pool*);
@@ -458,9 +458,9 @@ static void Compare(const Fixture& expected, const Fixture& actual, const Spec& 
 }
 // Dense differential fixtures deliberately exceed the live replay's contacts/primary ratio.
 // Their explicit activation budget admits those worlds without restoring global maxima.
-static const ntw2_workload::Capacity oracleCapacity{4096,4096,1024,16384,262144};
+static const kntwr_workload::Capacity oracleCapacity{4096,4096,1024,16384,262144};
 static void ActivateFixture(Fixture& f) {
-    Require(ntw2_collide::Activate(f.manager.data(),oracleCapacity), "explicit fixture activation");
+    Require(kntwr_collide::Activate(f.manager.data(),oracleCapacity), "explicit fixture activation");
 }
 static void Execute(Fixture& f, bool native) {
     events = &f.calls; f.calls.clear(); ResetFp();
@@ -469,47 +469,47 @@ static void Execute(Fixture& f, bool native) {
     raiseAfterContact = f.callbackFault && !native;
     poisonShape = f.workerFault && !native ? f.records[0].bytes : nullptr;
     if (native) reinterpret_cast<U(__fastcall*)(void*)>(At(0x57dc30))(f.manager.data());
-    else ntw2_collide::Stage(f.manager.data());
+    else kntwr_collide::Stage(f.manager.data());
     Require(!raiseAfterContact, "requested callback fault was reached");
     Require(!poisonShape, "requested gather snapshot injection was reached");
     events = nullptr; mutationTarget = nullptr; mutationMode = 0;
 }
 static void CheckLocalQueries(const Fixture& f, const Spec& spec, const U* before, const U* after) {
     if (!spec.expectedNativeQueries) return;
-    Require(after[ntw2_collide::NativeQueries] == before[ntw2_collide::NativeQueries] + spec.expectedNativeQueries,
+    Require(after[kntwr_collide::NativeQueries] == before[kntwr_collide::NativeQueries] + spec.expectedNativeQueries,
         "only affected records execute original queries");
-    Require(after[ntw2_collide::NodeFallbacks] == before[ntw2_collide::NodeFallbacks] + spec.expectedNativeQueries,
+    Require(after[kntwr_collide::NodeFallbacks] == before[kntwr_collide::NodeFallbacks] + spec.expectedNativeQueries,
         "unsupported nodes count per-record native queries");
-    Require(after[ntw2_collide::UnsupportedCells] > before[ntw2_collide::UnsupportedCells],
+    Require(after[kntwr_collide::UnsupportedCells] > before[kntwr_collide::UnsupportedCells],
         "unsupported cells recorded without refusing the stage");
-    Require(after[ntw2_collide::Faults] == before[ntw2_collide::Faults], "safe native aliases do not fault");
-    Require(after[ntw2_collide::LayoutFallbacks] == before[ntw2_collide::LayoutFallbacks],
+    Require(after[kntwr_collide::Faults] == before[kntwr_collide::Faults], "safe native aliases do not fault");
+    Require(after[kntwr_collide::LayoutFallbacks] == before[kntwr_collide::LayoutFallbacks],
         "local node incompatibility is not a global layout refusal");
     if (spec.expectedSolverContacts != 0xffffffffu) {
-        Require(after[ntw2_collide::Contacts] == before[ntw2_collide::Contacts] + spec.expectedSolverContacts,
+        Require(after[kntwr_collide::Contacts] == before[kntwr_collide::Contacts] + spec.expectedSolverContacts,
             "unaffected cluster retains solver contacts");
-        Require(after[ntw2_collide::Callbacks] == before[ntw2_collide::Callbacks] + spec.expectedSolverContacts,
+        Require(after[kntwr_collide::Callbacks] == before[kntwr_collide::Callbacks] + spec.expectedSolverContacts,
             "unaffected cluster retains owner solver callbacks");
     }
-    if (before[ntw2_collide::DiagnosticReason]) {
-        for (U i = ntw2_collide::DiagnosticReason; i <= ntw2_collide::DiagnosticExpectedRecord; ++i)
+    if (before[kntwr_collide::DiagnosticReason]) {
+        for (U i = kntwr_collide::DiagnosticReason; i <= kntwr_collide::DiagnosticExpectedRecord; ++i)
             Require(after[i] == before[i], "first unsupported-node snapshot retained across stages");
     } else {
         const bool external = f.registry.size() < f.records.size();
         const U owner = external ? U(f.registry.size()) : 0;
         const Node& node = f.nodes[owner][0];
-        Require(after[ntw2_collide::DiagnosticReason] == (external ? ntw2_collide::ChainOwner : ntw2_collide::OwnType),
+        Require(after[kntwr_collide::DiagnosticReason] == (external ? kntwr_collide::ChainOwner : kntwr_collide::OwnType),
             "first synthetic unsupported-node reason");
-        Require(after[ntw2_collide::DiagnosticNode] == A(&node), "diagnostic identifies actual offending node");
-        Require(after[ntw2_collide::DiagnosticType] == node.type, "diagnostic captures node type");
-        Require(after[ntw2_collide::DiagnosticOwner] == node.owner, "diagnostic captures raw owner pointer");
-        Require(after[ntw2_collide::DiagnosticPayload] == node.payload, "diagnostic captures raw payload pointer");
-        Require(after[ntw2_collide::DiagnosticId] == node.serial, "diagnostic captures full node ID");
-        Require(after[ntw2_collide::DiagnosticCell] == (node.head - A(f.cells.data())) / sizeof(U),
+        Require(after[kntwr_collide::DiagnosticNode] == A(&node), "diagnostic identifies actual offending node");
+        Require(after[kntwr_collide::DiagnosticType] == node.type, "diagnostic captures node type");
+        Require(after[kntwr_collide::DiagnosticOwner] == node.owner, "diagnostic captures raw owner pointer");
+        Require(after[kntwr_collide::DiagnosticPayload] == node.payload, "diagnostic captures raw payload pointer");
+        Require(after[kntwr_collide::DiagnosticId] == node.serial, "diagnostic captures full node ID");
+        Require(after[kntwr_collide::DiagnosticCell] == (node.head - A(f.cells.data())) / sizeof(U),
             "diagnostic captures actual native cell");
-        Require(after[ntw2_collide::DiagnosticVtable] == A(vtable), "diagnostic captures known record vtable");
-        Require(after[ntw2_collide::DiagnosticRecord] == 0, "diagnostic identifies first known querying record");
-        Require(after[ntw2_collide::DiagnosticExpectedRecord] == A(f.records[0].bytes),
+        Require(after[kntwr_collide::DiagnosticVtable] == A(vtable), "diagnostic captures known record vtable");
+        Require(after[kntwr_collide::DiagnosticRecord] == 0, "diagnostic identifies first known querying record");
+        Require(after[kntwr_collide::DiagnosticExpectedRecord] == A(f.records[0].bytes),
             "diagnostic captures expected known record address");
     }
 }
@@ -519,17 +519,17 @@ static void CheckSolverCounts(const Fixture& actual, const Spec& spec, const U* 
     const std::vector<bool> local = NativeLocal(actual, spec);
     U solverPairs = 0;
     for (const Event& e : actual.calls) if (!local[e.receiver] && !local[e.argument]) ++solverPairs;
-    Require(after[ntw2_collide::Contacts] - before[ntw2_collide::Contacts] == solverPairs,
+    Require(after[kntwr_collide::Contacts] - before[kntwr_collide::Contacts] == solverPairs,
         "solver Contacts counter equals non-native-local unordered pairs (no double processing)");
-    Require(after[ntw2_collide::Callbacks] - before[ntw2_collide::Callbacks] == solverPairs,
+    Require(after[kntwr_collide::Callbacks] - before[kntwr_collide::Callbacks] == solverPairs,
         "solver Callbacks counter equals non-native-local unordered pairs (no double callbacks)");
     // These samples come from the production solver, not an instrumented radius-leaf mock.
     // Count attempted shaped radius tests even when the original leaf rejects the contact.
     if (std::none_of(spec.input.begin(), spec.input.end(), [](const Input& in) { return in.shape != 0; }))
-        Require(after[ntw2_collide::ShapedPairs] == before[ntw2_collide::ShapedPairs],
+        Require(after[kntwr_collide::ShapedPairs] == before[kntwr_collide::ShapedPairs],
             "unshaped circles bypass the original radius leaf");
     if (spec.expectedShapedPairs != 0xffffffffu)
-        Require(after[ntw2_collide::ShapedPairs] - before[ntw2_collide::ShapedPairs] == spec.expectedShapedPairs,
+        Require(after[kntwr_collide::ShapedPairs] - before[kntwr_collide::ShapedPairs] == spec.expectedShapedPairs,
             "original radius leaf runs exactly once per eligible shaped pair");
     if (spec.checkCellHistogram) {
         U occupied = 0, candidates = 0;
@@ -541,9 +541,9 @@ static void CheckSolverCounts(const Fixture& actual, const Spec& spec, const U* 
                 if (actual.ShareCell(i, k)) candidates += 2;
         }
         Require(occupied > 1 && multicell, "dense histogram fixture spans multiple real native cells");
-        Require(after[ntw2_collide::Cells] - before[ntw2_collide::Cells] == occupied,
+        Require(after[kntwr_collide::Cells] - before[kntwr_collide::Cells] == occupied,
             "histogram occupied-cell total matches real native insertion");
-        Require(after[ntw2_collide::Pairs] - before[ntw2_collide::Pairs] == candidates,
+        Require(after[kntwr_collide::Pairs] - before[kntwr_collide::Pairs] == candidates,
             "histogram scatter preserves every directed shared-cell candidate exactly once");
     }
     // Eligible-query gate at stage entry: snapshot +30 nonzero (NOT active==1) and (flags&3)!=0.
@@ -553,7 +553,7 @@ static void CheckSolverCounts(const Fixture& actual, const Spec& spec, const U* 
         const Input& in = spec.input[Get<U>(reinterpret_cast<const void*>(r), 0x2c)];
         if (in.active != 0 && (in.flags & 3) != 0) ++eligible;
     }
-    Require(after[ntw2_collide::EligibleQueries] - before[ntw2_collide::EligibleQueries] == eligible,
+    Require(after[kntwr_collide::EligibleQueries] - before[kntwr_collide::EligibleQueries] == eligible,
         "EligibleQueries equals initial worklist entries with +30 nonzero and flags&3 (queries only, no destinations)");
 }
 static void CheckFrozenSelection(const Fixture& actual, const Spec& spec) {
@@ -593,7 +593,7 @@ static void Run(const char* name, const Spec& spec, bool fallback = false, bool 
     // A callback fault still runs the solver's numeric commit and owner continuation; only
     // true fallbacks execute the original stage (bit-exact callback observations).
     const bool original = fallback && !spec.callbackFault;
-    U before[ntw2_collide::WordCount], after[ntw2_collide::WordCount]; ntw2_collide::Sample(before);
+    U before[kntwr_collide::WordCount], after[kntwr_collide::WordCount]; kntwr_collide::Sample(before);
     if (spec.expectedNativeQueries && spec.expectedSolverContacts != 0xffffffffu) {
         // Validate original insertion isolates one bad cell from a valid cluster.
         const U local = actual.nodes[0][0].head;
@@ -611,42 +611,42 @@ static void Run(const char* name, const Spec& spec, bool fallback = false, bool 
             "controlled mutation records share exactly one native cell");
     }
     Execute(expected, true); Execute(actual, false); Compare(expected, actual, reference, original);
-    ntw2_collide::Sample(after);
-    Require(after[ntw2_collide::Calls] == before[ntw2_collide::Calls] + 1, "one routed stage counter");
-    if (fallback) Require(after[ntw2_collide::FallbackTicks] == before[ntw2_collide::FallbackTicks] + 1, "original fallback exercised");
+    kntwr_collide::Sample(after);
+    Require(after[kntwr_collide::Calls] == before[kntwr_collide::Calls] + 1, "one routed stage counter");
+    if (fallback) Require(after[kntwr_collide::FallbackTicks] == before[kntwr_collide::FallbackTicks] + 1, "original fallback exercised");
     else {
-        Require(after[ntw2_collide::SolverTicks] == before[ntw2_collide::SolverTicks] + 1, "production solver exercised, not silent fallback");
-        Require(after[ntw2_collide::FallbackTicks] == before[ntw2_collide::FallbackTicks], "supported fixture does not fall back");
+        Require(after[kntwr_collide::SolverTicks] == before[kntwr_collide::SolverTicks] + 1, "production solver exercised, not silent fallback");
+        Require(after[kntwr_collide::FallbackTicks] == before[kntwr_collide::FallbackTicks], "supported fixture does not fall back");
         CheckSolverCounts(actual, spec, before, after);
     }
     CheckLocalQueries(actual, spec, before, after);
     if (spec.secondaryRegistry) {
-        Require(after[ntw2_collide::DiagnosticReason] == 0 && before[ntw2_collide::DiagnosticReason] == 0,
+        Require(after[kntwr_collide::DiagnosticReason] == 0 && before[kntwr_collide::DiagnosticReason] == 0,
             "registered secondary owner records no unsupported-node diagnostic");
-        Require(after[ntw2_collide::NativeQueries] == before[ntw2_collide::NativeQueries] &&
-            after[ntw2_collide::NodeFallbacks] == before[ntw2_collide::NodeFallbacks] &&
-            after[ntw2_collide::UnsupportedCells] == before[ntw2_collide::UnsupportedCells],
+        Require(after[kntwr_collide::NativeQueries] == before[kntwr_collide::NativeQueries] &&
+            after[kntwr_collide::NodeFallbacks] == before[kntwr_collide::NodeFallbacks] &&
+            after[kntwr_collide::UnsupportedCells] == before[kntwr_collide::UnsupportedCells],
             "registered secondary owner needs no native-local query");
-        Require(after[ntw2_collide::Contacts] - before[ntw2_collide::Contacts] == PairSet(actual.calls, "production solver").size() &&
-            after[ntw2_collide::Callbacks] - before[ntw2_collide::Callbacks] == actual.calls.size(),
+        Require(after[kntwr_collide::Contacts] - before[kntwr_collide::Contacts] == PairSet(actual.calls, "production solver").size() &&
+            after[kntwr_collide::Callbacks] - before[kntwr_collide::Callbacks] == actual.calls.size(),
             "solver counters cover every contact touching the secondary owner exactly once");
     }
     if (spec.mutation) CheckFrozenSelection(actual, spec);
     if (spec.workerFault) {
-        Require(after[ntw2_collide::Faults] == before[ntw2_collide::Faults] + 1, "one numeric chunk fault recorded");
-        Require(after[ntw2_collide::StickyFallbacks] == before[ntw2_collide::StickyFallbacks] + 1, "chunk fault makes fallback sticky");
-        Require(after[ntw2_collide::SolverTicks] == before[ntw2_collide::SolverTicks], "chunk fault refuses before apply");
-        Require(after[ntw2_collide::OwnerContinuations] == before[ntw2_collide::OwnerContinuations], "pre-write chunk fault needs no owner continuation");
-        Require(after[ntw2_collide::LastException] == EXCEPTION_ACCESS_VIOLATION, "snapshot shape access fault retained");
+        Require(after[kntwr_collide::Faults] == before[kntwr_collide::Faults] + 1, "one numeric chunk fault recorded");
+        Require(after[kntwr_collide::StickyFallbacks] == before[kntwr_collide::StickyFallbacks] + 1, "chunk fault makes fallback sticky");
+        Require(after[kntwr_collide::SolverTicks] == before[kntwr_collide::SolverTicks], "chunk fault refuses before apply");
+        Require(after[kntwr_collide::OwnerContinuations] == before[kntwr_collide::OwnerContinuations], "pre-write chunk fault needs no owner continuation");
+        Require(after[kntwr_collide::LastException] == EXCEPTION_ACCESS_VIOLATION, "snapshot shape access fault retained");
     }
     if (spec.callbackFault) {
-        Require(after[ntw2_collide::Faults] == before[ntw2_collide::Faults] + 1, "one callback fault recorded");
+        Require(after[kntwr_collide::Faults] == before[kntwr_collide::Faults] + 1, "one callback fault recorded");
         // Numeric effects are already committed: the owner finishes the remaining precomputed
         // redistribution/callback records (counted as an owner continuation); it never re-queries
         // natively, and the original stage takes over only on the NEXT tick (sticky).
-        Require(after[ntw2_collide::OwnerContinuations] == before[ntw2_collide::OwnerContinuations] + 1, "remaining records finish through owner continuation");
-        Require(after[ntw2_collide::NativeQueries] == before[ntw2_collide::NativeQueries], "callback fault continuation issues no native queries");
-        Require(after[ntw2_collide::LastException] == 0xe0422001u, "callback exception code retained");
+        Require(after[kntwr_collide::OwnerContinuations] == before[kntwr_collide::OwnerContinuations] + 1, "remaining records finish through owner continuation");
+        Require(after[kntwr_collide::NativeQueries] == before[kntwr_collide::NativeQueries], "callback fault continuation issues no native queries");
+        Require(after[kntwr_collide::LastException] == 0xe0422001u, "callback exception code retained");
     }
     ++cases;
     if (reuseAfter) {
@@ -659,12 +659,12 @@ static void Run(const char* name, const Spec& spec, bool fallback = false, bool 
         }
         Put(expected.model.data(), 0x58, U(101)); Put(actual.model.data(), 0x58, U(101));
         Spec reuse = reference; reuse.tick = 101; reuse.rebuild = 0; reuse.breadthFirst = false;
-        ntw2_collide::Sample(before);
+        kntwr_collide::Sample(before);
         Execute(expected, true); Execute(actual, false); Compare(expected, actual, reuse, false);
-        ntw2_collide::Sample(after);
-        Require(after[ntw2_collide::SolverTicks] == before[ntw2_collide::SolverTicks] + 1,
+        kntwr_collide::Sample(after);
+        Require(after[kntwr_collide::SolverTicks] == before[kntwr_collide::SolverTicks] + 1,
             "post-rebuild reuse remains a solver tick");
-        Require(after[ntw2_collide::FallbackTicks] == before[ntw2_collide::FallbackTicks],
+        Require(after[kntwr_collide::FallbackTicks] == before[kntwr_collide::FallbackTicks],
             "post-rebuild reuse avoids whole-stage fallback");
         CheckSolverCounts(actual, reuse, before, after);
         CheckLocalQueries(actual, reuse, before, after); ++cases;
@@ -840,7 +840,7 @@ static void PlanChunkCases() {
     Run("contact plan chunks split record contact runs", s);
 }
 static __declspec(align(64)) ntw_pool pool;
-static ntw2_collide::Binding Binding(U workers) { return {delta, &ntw_pool_dispatch, A(&pool), workers}; }
+static kntwr_collide::Binding Binding(U workers) { return {delta, &ntw_pool_dispatch, A(&pool), workers}; }
 static void StartPool(U workers) {
     ntw_pool_config cfg{}; cfg.abi = NTW_POOL_ABI; cfg.workers = workers;
     cfg.api.create_event = Fn(&CreateEventW); cfg.api.close_handle = Fn(&CloseHandle);
@@ -873,61 +873,61 @@ static void LandPlanCases() {
     for (U i = 0; i < spec.input.size(); ++i)
         for (U j = i + 1; j < spec.input.size() && j / 5 == i / 5; ++j) pairs.push_back({i, j});
     Require(pairs.size() == 1280, "LAND cluster world has 1280 geometric pairs");
-    std::vector<ntw2_contact::Plan> firstRows;
+    std::vector<kntwr_contact::Plan> firstRows;
     std::vector<U> firstState;
-    for (U workers : {1u, 3u, 8u}) for (U mode : {U(ntw2_contact::ModeShadow), U(ntw2_contact::ModeWorkers)}) {
-        currentCase = mode == ntw2_contact::ModeShadow ? "LAND contact plans (shadow)" : "LAND contact plans (workers)";
+    for (U workers : {1u, 3u, 8u}) for (U mode : {U(kntwr_contact::ModeShadow), U(kntwr_contact::ModeWorkers)}) {
+        currentCase = mode == kntwr_contact::ModeShadow ? "LAND contact plans (shadow)" : "LAND contact plans (workers)";
         StartPool(workers); auto bind = Binding(workers); bind.contact_mode = mode;
-        Require(ntw2_collide::Start(bind), "contact-mode solver starts");
+        Require(kntwr_collide::Start(bind), "contact-mode solver starts");
         Fixture expected(spec), actual(spec); MakeLand(expected); MakeLand(actual);
         ActivateFixture(actual);
-        U before[ntw2_collide::WordCount], after[ntw2_collide::WordCount]; ntw2_collide::Sample(before);
+        U before[kntwr_collide::WordCount], after[kntwr_collide::WordCount]; kntwr_collide::Sample(before);
         Execute(expected, true); Execute(actual, false);
         Compare(expected, actual, spec, false);
-        ntw2_collide::Sample(after);
-        Require(after[ntw2_collide::SolverTicks] == before[ntw2_collide::SolverTicks] + 1 &&
-            after[ntw2_collide::Callbacks] - before[ntw2_collide::Callbacks] == pairs.size(), "LAND world runs the solver");
-        U c[ntw2_contact::WordCount]; ntw2_contact::Sample(c);
-        Require(c[ntw2_contact::Contacts] == pairs.size() && c[ntw2_contact::PortContacts] == pairs.size(),
+        kntwr_collide::Sample(after);
+        Require(after[kntwr_collide::SolverTicks] == before[kntwr_collide::SolverTicks] + 1 &&
+            after[kntwr_collide::Callbacks] - before[kntwr_collide::Callbacks] == pairs.size(), "LAND world runs the solver");
+        U c[kntwr_contact::WordCount]; kntwr_contact::Sample(c);
+        Require(c[kntwr_contact::Contacts] == pairs.size() && c[kntwr_contact::PortContacts] == pairs.size(),
             "every LAND contact is consumed once as a port plan");
-        Require(c[ntw2_contact::PredictedWriteR] > 0 && c[ntw2_contact::PredictedWriteS] > 0,
+        Require(c[kntwr_contact::PredictedWriteR] > 0 && c[kntwr_contact::PredictedWriteS] > 0,
             "fixture distinguishes receiver and argument writes");
-        if (mode == ntw2_contact::ModeShadow)
-            Require(c[ntw2_contact::Compared] == pairs.size() && c[ntw2_contact::Mismatches] == 0,
+        if (mode == kntwr_contact::ModeShadow)
+            Require(c[kntwr_contact::Compared] == pairs.size() && c[kntwr_contact::Mismatches] == 0,
                 "every row agrees with the original callback on the pair it was replayed for");
         else
-            Require(c[ntw2_contact::Replays] == pairs.size() && c[ntw2_contact::OwnerCallbacks] == 0,
+            Require(c[kntwr_contact::Replays] == pairs.size() && c[kntwr_contact::OwnerCallbacks] == 0,
                 "workers replay every LAND row without the original");
         U rows = 0, predicted = 0;
-        const ntw2_contact::Plan* plans = ntw2_collide::ContactPlans(rows, predicted);
+        const kntwr_contact::Plan* plans = kntwr_collide::ContactPlans(rows, predicted);
         Require(plans && rows == pairs.size() && predicted == rows, "every row predicted exactly once at plan time");
         std::vector<Pair> keyed;
         for (U n = 0; n < rows; ++n) keyed.push_back({std::min<U>(plans[n].keyR, plans[n].keyS), std::max<U>(plans[n].keyR, plans[n].keyS)});
         std::sort(keyed.begin(), keyed.end());
         Require(keyed == pairs, "plan rows cover the geometric pair set exactly once");
         // Plan inputs are untouched by the callback pass, so post-stage state re-derives every row.
-        ntw2_contact::Stage stage; ResetFp();
-        Require(ntw2_contact::BeginStage(stage, actual.model.data()), "serial reference stage admits");
+        kntwr_contact::Stage stage; ResetFp();
+        Require(kntwr_contact::BeginStage(stage, actual.model.data()), "serial reference stage admits");
         for (U n = 0; n < rows; ++n) {
-            ntw2_contact::Plan p;
-            ntw2_contact::Predict(stage, p, actual.records[plans[n].keyR].bytes, actual.records[plans[n].keyS].bytes);
+            kntwr_contact::Plan p;
+            kntwr_contact::Predict(stage, p, actual.records[plans[n].keyR].bytes, actual.records[plans[n].keyS].bytes);
             Require(!std::memcmp(&p, &plans[n], sizeof(p)), "row equals a serial prediction of its own (R, S)");
         }
         std::vector<U> state;
         for (const Record& r : actual.records) state.push_back(Get<U>(r.bytes, 0x13c));
         if (firstRows.empty()) { firstRows.assign(plans, plans + rows); firstState = state; }
         else {
-            Require(!std::memcmp(firstRows.data(), plans, rows * sizeof(ntw2_contact::Plan)), "plan rows identical across lane counts and modes");
+            Require(!std::memcmp(firstRows.data(), plans, rows * sizeof(kntwr_contact::Plan)), "plan rows identical across lane counts and modes");
             Require(state == firstState, "final +0x13C state identical across lane counts and modes");
         }
-        ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after LAND plans");
+        kntwr_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after LAND plans");
         ++cases;
     }
 }
 static void FallbackCases(U workers) {
     Spec s = Two(); s.invalidGrid = true;
     Run("unsupported grid pre-write fallback", s, true);
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart after layout refusal");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart after layout refusal");
     // Type16 uses the native payload alias but deliberately has no type8 callback.
     s = Two(); s.foreignNodes = true; s.expectedContacts = 0; s.expectedNativeQueries = 2;
     Run("foreign nodes use record-local original queries", s);
@@ -942,7 +942,7 @@ static void FallbackCases(U workers) {
     s.input[0].nodeType = 16; s.expectedNativeQueries = 2;
     s.expectedContacts = 2; s.expectedSolverContacts = 1;
     Run("own type16 alias local cluster and distant solver callbacks", s);
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart for mixed own-node diagnostic");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart for mixed own-node diagnostic");
     // Interleave registry IDs across clusters: native query IDs must enqueue
     // local 2/4 before the distant seed1, not silently fall back to seed order.
     s = Spec{}; s.input.resize(6); s.reverseInsertion = true; s.rebuild = 1; s.breadthFirst = true;
@@ -963,7 +963,7 @@ static void FallbackCases(U workers) {
     // secondary-registry owner is supported by the solver this stays an original native-local
     // cluster (Reason ChainOwner, original ordering and intermediate callback observations);
     // supporting it replaces this fixture with a solver-owned one (expectedNativeQueries 0).
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart for foreign-owner diagnostic");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart for foreign-owner diagnostic");
     s = Spec{}; s.input.resize(5); s.primaryCount = 4; s.reverseInsertion = true;
     for (U i = 0; i < s.input.size(); ++i) {
         s.input[i].x = i == 4 ? 2.25f : 1.5f + float(i / 2) * 16.0f + float(i % 2) * 0.375f;
@@ -976,14 +976,14 @@ static void FallbackCases(U workers) {
     // Registered in the secondary registry (manager +278/+27C), the same producer is a
     // destination-only solver slot: no native query, no unsupported-node diagnostic, and the
     // solver itself applies and calls back every contact that touches it, once.
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart for registered secondary owner");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart for registered secondary owner");
     s.secondaryRegistry = true; s.expectedNativeQueries = 0; s.expectedSolverContacts = 0xffffffffu; s.expectedContacts = 4;
     // The original constructor selects the secondary wrapper iff record+66 == 1; the solver reads the
     // actual byte, so the secondary record carries it. Native comparison proves the weight override
     // and the no-redistribution neighbor semantics for a destination-only slot.
     s.input[4].weight = 1;
     Run("secondary-registered chain owner is a solver destination slot", s);
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart after local node cases");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart after local node cases");
     currentCase = "capacity pre-write fallback";
     // A safe native reuse list larger than the arena. Every entry is inactive;
     // refusal must precede any worklist uniqueness/layout inspection or writes.
@@ -995,38 +995,38 @@ static void FallbackCases(U workers) {
     Put(a.manager.data(), 0x264, A(wa.data())); Put(b.manager.data(), 0x264, A(wb.data()));
     Put(a.manager.data(), 0x24c, U(wa.size())); Put(b.manager.data(), 0x24c, U(wb.size()));
     Put(a.manager.data(), 0x250, A(wa.data())); Put(b.manager.data(), 0x250, A(wb.data()));
-    U before[ntw2_collide::WordCount], after[ntw2_collide::WordCount]; ntw2_collide::Sample(before);
+    U before[kntwr_collide::WordCount], after[kntwr_collide::WordCount]; kntwr_collide::Sample(before);
     Execute(a, true); Execute(b, false);
     Require(!std::memcmp(a.records[0].bytes + 0x30, b.records[0].bytes + 0x30, 0x74), "capacity refusal leaves native record outputs");
     Require(a.calls.empty() && b.calls.empty(), "inactive capacity fallback has no callbacks");
-    ntw2_collide::Sample(after);
-    Require(after[ntw2_collide::FallbackTicks] == before[ntw2_collide::FallbackTicks] + 1, "capacity invokes original stage");
-    Require(after[ntw2_collide::CapacityFallbacks] == before[ntw2_collide::CapacityFallbacks] + 1, "capacity reason recorded");
+    kntwr_collide::Sample(after);
+    Require(after[kntwr_collide::FallbackTicks] == before[kntwr_collide::FallbackTicks] + 1, "capacity invokes original stage");
+    Require(after[kntwr_collide::CapacityFallbacks] == before[kntwr_collide::CapacityFallbacks] + 1, "capacity reason recorded");
     ++cases;
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart after capacity refusal");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart after capacity refusal");
     s = Two(); s.expectedContacts = 1; Run("restart restores solver", s);
     s = Spec{}; s.input.resize(4); s.reverseInsertion = true; s.callbackFault = true;
     for (Input& in : s.input) { in.radius = 0.5f; in.z = 2.0f; }
     s.input[0].x = 1.5f; s.input[1].x = 1.875f; s.input[2].x = 2.375f; s.input[3].x = 2.75f;
     s.expectedContacts = 5;
     Run("callback fault finishes current pairs through owner continuation", s, true);
-    ntw2_collide::Sample(before);
+    kntwr_collide::Sample(before);
     s = Two(); s.expectedContacts = 1; Run("post-fault sticky original stage", s, true);
-    ntw2_collide::Sample(after);
-    Require(after[ntw2_collide::StickyFallbacks] == before[ntw2_collide::StickyFallbacks] + 1, "fault remains sticky until restart");
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart clears callback fault");
+    kntwr_collide::Sample(after);
+    Require(after[kntwr_collide::StickyFallbacks] == before[kntwr_collide::StickyFallbacks] + 1, "fault remains sticky until restart");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart clears callback fault");
     Run("restart after callback fault restores solver", s);
-    ntw2_collide::Stop();
+    kntwr_collide::Stop();
     auto poisonBinding = Binding(workers); poisonBinding.dispatch = &PoisonGatherDispatch;
-    Require(ntw2_collide::Start(poisonBinding), "start with real dispatch snapshot injection seam");
+    Require(kntwr_collide::Start(poisonBinding), "start with real dispatch snapshot injection seam");
     s = Two(); s.workerFault = true; s.expectedContacts = 1;
     Run("numeric chunk fault restores inputs before original fallback", s, true);
-    ntw2_collide::Sample(before);
+    kntwr_collide::Sample(before);
     s = Two(); s.expectedContacts = 1; Run("post-chunk-fault sticky original stage", s, true);
-    ntw2_collide::Sample(after);
-    Require(after[ntw2_collide::StickyFallbacks] == before[ntw2_collide::StickyFallbacks] + 1, "chunk fault stays sticky");
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "restart clears chunk fault");
-    ntw2_collide::Sample(after);
+    kntwr_collide::Sample(after);
+    Require(after[kntwr_collide::StickyFallbacks] == before[kntwr_collide::StickyFallbacks] + 1, "chunk fault stays sticky");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "restart clears chunk fault");
+    kntwr_collide::Sample(after);
     for (U word : after) Require(word == 0, "restart resets all solver counters");
     Run("restart after chunk fault restores solver", s);
 }
@@ -1037,14 +1037,14 @@ static void FallbackCases(U workers) {
 // native-audit solver, and the owned-view solver. Owned and native-audit stages must select the
 // same pair set (here also bit-identical state, because the synthetic CSR keeps chain order).
 // ---------------------------------------------------------------------------------------------
-static const ntw2_loco::GridView* gView;
-static const ntw2_loco::GridView* ReadView(void*) { return gView; }
+static const kntwr_loco::GridView* gView;
+static const kntwr_loco::GridView* ReadView(void*) { return gView; }
 static B* P(U address) { return reinterpret_cast<B*>(static_cast<uintptr_t>(address)); }
 struct OwnedView {
     std::vector<U> record, serial, incarnation, team, flags, active, left, right, top, bottom, inserted,
         nodeType, cellIds, offsets, occupants, cellDense;
     std::vector<float> x, z, y, extent, radius;
-    ntw2_loco::GridView view{};
+    kntwr_loco::GridView view{};
 };
 template<class T> static void Size(std::vector<T>& v, size_t n) { v.assign(n + 1, T()); } // never null
 // dense=false imports native chain order. dense=true builds the production-style stable dense-slot CSR
@@ -1110,7 +1110,7 @@ static void BuildView(const Fixture& f, U tick, OwnedView& v, bool dense = false
     std::copy(ids.begin(), ids.end(), v.cellIds.begin());
     std::copy(offsets.begin(), offsets.end(), v.offsets.begin());
     std::copy(occupants.begin(), occupants.end(), v.occupants.begin());
-    ntw2_loco::GridView& g = v.view; g = ntw2_loco::GridView{};
+    kntwr_loco::GridView& g = v.view; g = kntwr_loco::GridView{};
     g.generation = 1; g.epoch = 1; g.count = U(count); g.cells = U(ids.size()); g.memberships = memberships;
     g.record = v.record.data(); g.serial = v.serial.data(); g.incarnation = v.incarnation.data();
     g.team = v.team.data(); g.flags = v.flags.data(); g.x = v.x.data(); g.z = v.z.data(); g.y = v.y.data();
@@ -1152,14 +1152,14 @@ struct OwnedCase {
     bool skipCounts = false; // mutated worlds no longer match the spec-derived counter expectations
 };
 struct Sampled {
-    U before[ntw2_collide::WordCount], after[ntw2_collide::WordCount];
-    U sourceBefore[ntw2_collide::SourceWordCount], sourceAfter[ntw2_collide::SourceWordCount];
+    U before[kntwr_collide::WordCount], after[kntwr_collide::WordCount];
+    U sourceBefore[kntwr_collide::SourceWordCount], sourceAfter[kntwr_collide::SourceWordCount];
 };
 static void ExecuteSampled(Fixture& f, Sampled& s) {
     ActivateFixture(f);
-    ntw2_collide::Sample(s.before); ntw2_collide::SampleSource(s.sourceBefore);
+    kntwr_collide::Sample(s.before); kntwr_collide::SampleSource(s.sourceBefore);
     Execute(f, false);
-    ntw2_collide::Sample(s.after); ntw2_collide::SampleSource(s.sourceAfter);
+    kntwr_collide::Sample(s.after); kntwr_collide::SampleSource(s.sourceAfter);
 }
 static void CompareExact(const Fixture& a, const Fixture& b, const char* what) {
     Require(a.calls.size() == b.calls.size(), what);
@@ -1382,7 +1382,7 @@ static void OwnedCases(U workers) {
     std::vector<Sampled> auditedSample(n);
     U accepted = 0, refused = 0;
     // Phase 1: native-audit solver (no read_grid) is the same-world baseline.
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(Binding(workers)), "native-audit solver starts");
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(Binding(workers)), "native-audit solver starts");
     for (size_t k = 0; k < n; ++k) {
         const OwnedCase& c = worlds[k]; currentCase = c.name;
         if (c.refuse) continue;
@@ -1391,20 +1391,20 @@ static void OwnedCases(U workers) {
         if (c.mutate) c.mutate(*audited[k]);
         ExecuteSampled(*audited[k], auditedSample[k]);
         const Sampled& m = auditedSample[k];
-        Require(m.after[ntw2_collide::SolverTicks] == m.before[ntw2_collide::SolverTicks] + 1 &&
-            m.after[ntw2_collide::FallbackTicks] == m.before[ntw2_collide::FallbackTicks], "baseline is a native-audit solver stage");
-        Require(m.sourceAfter[ntw2_collide::Source] == ntw2_collide::SourceNativeAudit &&
-            m.sourceAfter[ntw2_collide::NativeStages] == m.sourceBefore[ntw2_collide::NativeStages] + 1 &&
-            m.sourceAfter[ntw2_collide::OwnedStages] == 0 && m.sourceAfter[ntw2_collide::OwnedRefusals] == 0,
+        Require(m.after[kntwr_collide::SolverTicks] == m.before[kntwr_collide::SolverTicks] + 1 &&
+            m.after[kntwr_collide::FallbackTicks] == m.before[kntwr_collide::FallbackTicks], "baseline is a native-audit solver stage");
+        Require(m.sourceAfter[kntwr_collide::Source] == kntwr_collide::SourceNativeAudit &&
+            m.sourceAfter[kntwr_collide::NativeStages] == m.sourceBefore[kntwr_collide::NativeStages] + 1 &&
+            m.sourceAfter[kntwr_collide::OwnedStages] == 0 && m.sourceAfter[kntwr_collide::OwnedRefusals] == 0,
             "native-audit stages report native-audit source telemetry only");
         ++accepted;
     }
-    U sourceWords[ntw2_collide::SourceWordCount];
+    U sourceWords[kntwr_collide::SourceWordCount];
     // Phase 2: owned-view solver on the identical worlds, with the original image as the oracle.
-    ntw2_collide::Stop();
-    ntw2_collide::Binding owned = Binding(workers); owned.read_grid = &ReadView;
-    Require(ntw2_collide::Start(owned), "owned-view solver starts");
-    ntw2_collide::SampleSource(sourceWords);
+    kntwr_collide::Stop();
+    kntwr_collide::Binding owned = Binding(workers); owned.read_grid = &ReadView;
+    Require(kntwr_collide::Start(owned), "owned-view solver starts");
+    kntwr_collide::SampleSource(sourceWords);
     for (U word : sourceWords) Require(word == 0, "restart resets source telemetry");
     U expectedOwned = 0, expectedRefusals = 0;
     for (size_t k = 0; k < n; ++k) {
@@ -1421,42 +1421,42 @@ static void OwnedCases(U workers) {
         Sampled s; ExecuteSampled(own, s);
         gView = nullptr;
         Require(Hash(*view) == hash, "the borrowed publication is never mutated");
-        Require(s.after[ntw2_collide::Calls] == s.before[ntw2_collide::Calls] + 1, "one routed stage counter");
-        Require(s.after[ntw2_collide::Faults] == s.before[ntw2_collide::Faults] &&
-            s.after[ntw2_collide::StickyFallbacks] == s.before[ntw2_collide::StickyFallbacks], "owned stage has no faults");
+        Require(s.after[kntwr_collide::Calls] == s.before[kntwr_collide::Calls] + 1, "one routed stage counter");
+        Require(s.after[kntwr_collide::Faults] == s.before[kntwr_collide::Faults] &&
+            s.after[kntwr_collide::StickyFallbacks] == s.before[kntwr_collide::StickyFallbacks], "owned stage has no faults");
         if (c.refuse) {
-            Require(s.after[ntw2_collide::SolverTicks] == s.before[ntw2_collide::SolverTicks], "refused view runs no solver stage");
-            Require(s.after[ntw2_collide::FallbackTicks] == s.before[ntw2_collide::FallbackTicks] + 1 &&
-                s.after[ntw2_collide::LayoutFallbacks] == s.before[ntw2_collide::LayoutFallbacks] + 1,
+            Require(s.after[kntwr_collide::SolverTicks] == s.before[kntwr_collide::SolverTicks], "refused view runs no solver stage");
+            Require(s.after[kntwr_collide::FallbackTicks] == s.before[kntwr_collide::FallbackTicks] + 1 &&
+                s.after[kntwr_collide::LayoutFallbacks] == s.before[kntwr_collide::LayoutFallbacks] + 1,
                 "stale or missing view is a layout refusal to the original stage");
-            Require(s.after[ntw2_collide::NativeQueries] == s.before[ntw2_collide::NativeQueries], "refusal is not a native-local query");
-            Require(s.sourceAfter[ntw2_collide::Source] == ntw2_collide::SourceNone &&
-                s.sourceAfter[ntw2_collide::OwnedRefusals] == s.sourceBefore[ntw2_collide::OwnedRefusals] + 1 &&
-                s.sourceAfter[ntw2_collide::OwnedStages] == s.sourceBefore[ntw2_collide::OwnedStages] &&
-                s.sourceAfter[ntw2_collide::NativeStages] == 0, "refusal telemetry");
+            Require(s.after[kntwr_collide::NativeQueries] == s.before[kntwr_collide::NativeQueries], "refusal is not a native-local query");
+            Require(s.sourceAfter[kntwr_collide::Source] == kntwr_collide::SourceNone &&
+                s.sourceAfter[kntwr_collide::OwnedRefusals] == s.sourceBefore[kntwr_collide::OwnedRefusals] + 1 &&
+                s.sourceAfter[kntwr_collide::OwnedStages] == s.sourceBefore[kntwr_collide::OwnedStages] &&
+                s.sourceAfter[kntwr_collide::NativeStages] == 0, "refusal telemetry");
             // Refusal precedes the first write: bit-identical to the untouched original stage.
             CompareExact(ref, own, "refused owned stage equals the untouched original bit-for-bit");
             ++expectedRefusals; ++refused; ++cases;
             continue;
         }
         const Sampled& m = auditedSample[k];
-        Require(s.after[ntw2_collide::SolverTicks] == s.before[ntw2_collide::SolverTicks] + 1 &&
-            s.after[ntw2_collide::FallbackTicks] == s.before[ntw2_collide::FallbackTicks], "owned view is consumed, not refused");
-        Require(s.sourceAfter[ntw2_collide::Source] == ntw2_collide::SourceOwned &&
-            s.sourceAfter[ntw2_collide::OwnedStages] == s.sourceBefore[ntw2_collide::OwnedStages] + 1 &&
-            s.sourceAfter[ntw2_collide::NativeStages] == 0 &&
-            s.sourceAfter[ntw2_collide::OwnedRefusals] == s.sourceBefore[ntw2_collide::OwnedRefusals], "owned source telemetry");
-        Require(s.after[ntw2_collide::NativeQueries] == s.before[ntw2_collide::NativeQueries] &&
-            s.after[ntw2_collide::UnsupportedCells] == 0, "owned stage never needs native-local handling");
+        Require(s.after[kntwr_collide::SolverTicks] == s.before[kntwr_collide::SolverTicks] + 1 &&
+            s.after[kntwr_collide::FallbackTicks] == s.before[kntwr_collide::FallbackTicks], "owned view is consumed, not refused");
+        Require(s.sourceAfter[kntwr_collide::Source] == kntwr_collide::SourceOwned &&
+            s.sourceAfter[kntwr_collide::OwnedStages] == s.sourceBefore[kntwr_collide::OwnedStages] + 1 &&
+            s.sourceAfter[kntwr_collide::NativeStages] == 0 &&
+            s.sourceAfter[kntwr_collide::OwnedRefusals] == s.sourceBefore[kntwr_collide::OwnedRefusals], "owned source telemetry");
+        Require(s.after[kntwr_collide::NativeQueries] == s.before[kntwr_collide::NativeQueries] &&
+            s.after[kntwr_collide::UnsupportedCells] == 0, "owned stage never needs native-local handling");
         // No chain audit or CSR binning on the owned path.
-        Require(s.after[ntw2_collide::AuditUs] == 0 && s.after[ntw2_collide::AuditThreadUs] == 0 &&
-            s.after[ntw2_collide::BinUs] == 0 && s.after[ntw2_collide::BinThreadUs] == 0, "owned stage neither audits nor bins");
+        Require(s.after[kntwr_collide::AuditUs] == 0 && s.after[kntwr_collide::AuditThreadUs] == 0 &&
+            s.after[kntwr_collide::BinUs] == 0 && s.after[kntwr_collide::BinThreadUs] == 0, "owned stage neither audits nor bins");
         Require(PairSet(audited[k]->calls, "native-audit solver") == PairSet(own.calls, "owned-view solver"),
             "native-audited CSR and owned view select the same pair set");
         CompareExact(*audited[k], own, "owned and native-audit solvers agree bit-for-bit on same-order CSR");
-        for (ntw2_collide::Word w : {ntw2_collide::Records, ntw2_collide::Cells, ntw2_collide::Pairs, ntw2_collide::Contacts,
-                ntw2_collide::Callbacks, ntw2_collide::Rebuilds, ntw2_collide::Redistributions, ntw2_collide::LabelChanges,
-                ntw2_collide::EligibleQueries, ntw2_collide::ShapedPairs})
+        for (kntwr_collide::Word w : {kntwr_collide::Records, kntwr_collide::Cells, kntwr_collide::Pairs, kntwr_collide::Contacts,
+                kntwr_collide::Callbacks, kntwr_collide::Rebuilds, kntwr_collide::Redistributions, kntwr_collide::LabelChanges,
+                kntwr_collide::EligibleQueries, kntwr_collide::ShapedPairs})
             Require(s.after[w] - s.before[w] == m.after[w] - m.before[w], "owned and native-audit stage counters agree");
         if (c.loose) CompareLoose(ref, own);
         else {
@@ -1478,20 +1478,20 @@ static void OwnedCases(U workers) {
             Sampled d; ExecuteSampled(dense, d);
             gView = nullptr;
             Require(Hash(*dview) == dhash, "the dense borrowed publication is never mutated");
-            Require(d.after[ntw2_collide::SolverTicks] == d.before[ntw2_collide::SolverTicks] + 1 &&
-                d.after[ntw2_collide::FallbackTicks] == d.before[ntw2_collide::FallbackTicks], "dense view is consumed, not refused");
-            Require(d.sourceAfter[ntw2_collide::Source] == ntw2_collide::SourceOwned &&
-                d.sourceAfter[ntw2_collide::OwnedStages] == d.sourceBefore[ntw2_collide::OwnedStages] + 1 &&
-                d.sourceAfter[ntw2_collide::OwnedRefusals] == d.sourceBefore[ntw2_collide::OwnedRefusals], "dense owned source telemetry");
-            Require(d.after[ntw2_collide::NativeQueries] == d.before[ntw2_collide::NativeQueries] &&
-                d.after[ntw2_collide::AuditUs] == 0 && d.after[ntw2_collide::BinUs] == 0, "dense owned stage neither audits, bins nor queries natively");
+            Require(d.after[kntwr_collide::SolverTicks] == d.before[kntwr_collide::SolverTicks] + 1 &&
+                d.after[kntwr_collide::FallbackTicks] == d.before[kntwr_collide::FallbackTicks], "dense view is consumed, not refused");
+            Require(d.sourceAfter[kntwr_collide::Source] == kntwr_collide::SourceOwned &&
+                d.sourceAfter[kntwr_collide::OwnedStages] == d.sourceBefore[kntwr_collide::OwnedStages] + 1 &&
+                d.sourceAfter[kntwr_collide::OwnedRefusals] == d.sourceBefore[kntwr_collide::OwnedRefusals], "dense owned source telemetry");
+            Require(d.after[kntwr_collide::NativeQueries] == d.before[kntwr_collide::NativeQueries] &&
+                d.after[kntwr_collide::AuditUs] == 0 && d.after[kntwr_collide::BinUs] == 0, "dense owned stage neither audits, bins nor queries natively");
             const auto pairs = PairSet(dense.calls, "owned dense CSR");
             Require(pairs == PairSet(audited[k]->calls, "native-audit solver"), "dense-slot CSR and native-audited CSR select the same unordered pair set");
             Require(pairs == PairSet(ref.calls, "original image"), "dense-slot CSR selects the original image's unordered pair set");
-            Require(dense.calls.size() == pairs.size() && d.after[ntw2_collide::Contacts] - d.before[ntw2_collide::Contacts] == pairs.size() &&
-                d.after[ntw2_collide::Callbacks] - d.before[ntw2_collide::Callbacks] == pairs.size(), "dense order processes each pair exactly once");
-            for (ntw2_collide::Word w : {ntw2_collide::Records, ntw2_collide::Cells, ntw2_collide::Pairs, ntw2_collide::Contacts,
-                    ntw2_collide::Callbacks, ntw2_collide::Rebuilds, ntw2_collide::EligibleQueries, ntw2_collide::ShapedPairs})
+            Require(dense.calls.size() == pairs.size() && d.after[kntwr_collide::Contacts] - d.before[kntwr_collide::Contacts] == pairs.size() &&
+                d.after[kntwr_collide::Callbacks] - d.before[kntwr_collide::Callbacks] == pairs.size(), "dense order processes each pair exactly once");
+            for (kntwr_collide::Word w : {kntwr_collide::Records, kntwr_collide::Cells, kntwr_collide::Pairs, kntwr_collide::Contacts,
+                    kntwr_collide::Callbacks, kntwr_collide::Rebuilds, kntwr_collide::EligibleQueries, kntwr_collide::ShapedPairs})
                 Require(d.after[w] - d.before[w] == m.after[w] - m.before[w], "dense and native-audit order-independent counters agree");
             for (U i = 0; i < dense.records.size(); ++i)
                 Require(Get<B>(dense.records[i].bytes, 0x40) == Get<B>(audited[k]->records[i].bytes, 0x40) &&
@@ -1506,105 +1506,105 @@ static void OwnedCases(U workers) {
             ++expectedOwned; ++cases;
         }
     }
-    ntw2_collide::SampleSource(sourceWords);
-    Require(sourceWords[ntw2_collide::OwnedStages] == expectedOwned && sourceWords[ntw2_collide::OwnedRefusals] == expectedRefusals &&
-        sourceWords[ntw2_collide::NativeStages] == 0, "cumulative source telemetry");
+    kntwr_collide::SampleSource(sourceWords);
+    Require(sourceWords[kntwr_collide::OwnedStages] == expectedOwned && sourceWords[kntwr_collide::OwnedRefusals] == expectedRefusals &&
+        sourceWords[kntwr_collide::NativeStages] == 0, "cumulative source telemetry");
     Require(2 * accepted == expectedOwned && refused == expectedRefusals, "every accepted case ran in baseline, chain-order and dense-order configurations");
     // Workers must be idle across a Stop/Start cycle with no view published yet: untouched fallback.
     currentCase = "owned first stage before any publication";
-    ntw2_collide::Stop(); Require(ntw2_collide::Start(owned), "owned solver restarts without a publication");
-    ntw2_collide::SampleSource(sourceWords);
+    kntwr_collide::Stop(); Require(kntwr_collide::Start(owned), "owned solver restarts without a publication");
+    kntwr_collide::SampleSource(sourceWords);
     for (U word : sourceWords) Require(word == 0, "restart resets source telemetry again");
     Spec first = Two(); first.expectedContacts = 1;
     Fixture ref(first), own(first); Execute(ref, true); gView = nullptr;
     Sampled s; ExecuteSampled(own, s);
-    Require(s.after[ntw2_collide::FallbackTicks] == 1 && s.after[ntw2_collide::SolverTicks] == 0 &&
-        s.sourceAfter[ntw2_collide::OwnedRefusals] == 1, "missing first publication falls back untouched");
+    Require(s.after[kntwr_collide::FallbackTicks] == 1 && s.after[kntwr_collide::SolverTicks] == 0 &&
+        s.sourceAfter[kntwr_collide::OwnedRefusals] == 1, "missing first publication falls back untouched");
     CompareExact(ref, own, "missing first publication equals the original stage");
     ++cases;
 }
 static void CapacityCases(U workers) {
     currentCase = "activation storage is workload bounded and owned mode allocates no audit storage";
     Spec pair = Two(); Fixture sizing(pair);
-    const ntw2_workload::Capacity small{4,4,1024,64,12};
+    const kntwr_workload::Capacity small{4,4,1024,64,12};
     auto owned = Binding(workers); owned.read_grid = &ReadView;
-    Require(ntw2_collide::Start(owned), "bind owned solver without workload storage");
-    Require(ntw2_collide::StorageBytes() == 0, "Start reserves no workload address space");
-    const U smallEstimate = ntw2_collide::EstimateActivationBytes(small);
-    const ntw2_workload::Capacity replayCapacity{48128,74752,1048576,160256,3080192};
-    Require(ntw2_collide::EstimateActivationBytes(replayCapacity) <= 16 * 1024 * 1024,
+    Require(kntwr_collide::Start(owned), "bind owned solver without workload storage");
+    Require(kntwr_collide::StorageBytes() == 0, "Start reserves no workload address space");
+    const U smallEstimate = kntwr_collide::EstimateActivationBytes(small);
+    const kntwr_workload::Capacity replayCapacity{48128,74752,1048576,160256,3080192};
+    Require(kntwr_collide::EstimateActivationBytes(replayCapacity) <= 16 * 1024 * 1024,
         "candidate-free replay-sized collision reservation stays below sixteen MiB");
     auto invalid = small; invalid.records = 3;
-    Require(ntw2_collide::EstimateActivationBytes(invalid) == 0xffffffffu, "invalid capacity estimate fails closed");
+    Require(kntwr_collide::EstimateActivationBytes(invalid) == 0xffffffffu, "invalid capacity estimate fails closed");
     invalid = small; invalid.pairs = 0xffffffffu;
-    Require(ntw2_collide::EstimateActivationBytes(invalid) == 0xffffffffu, "overflowing capacity estimate fails closed");
-    Require(ntw2_collide::StorageBytes() == 0, "estimates neither reserve nor retain workload storage");
-    Require(ntw2_collide::Activate(sizing.manager.data(),small), "activate small owned workload");
-    const U ownedBytes = ntw2_collide::StorageBytes();
+    Require(kntwr_collide::EstimateActivationBytes(invalid) == 0xffffffffu, "overflowing capacity estimate fails closed");
+    Require(kntwr_collide::StorageBytes() == 0, "estimates neither reserve nor retain workload storage");
+    Require(kntwr_collide::Activate(sizing.manager.data(),small), "activate small owned workload");
+    const U ownedBytes = kntwr_collide::StorageBytes();
     Require(ownedBytes == smallEstimate, "planned and actual owned reservation agree exactly");
     Require(ownedBytes > 0 && ownedBytes <= 65536, "small owned workload uses one reservation granule");
     auto larger = small; larger.cells = 1048576;
-    Require(ntw2_collide::Activate(sizing.manager.data(),larger), "activate wider borrowed grid");
-    Require(ntw2_collide::StorageBytes() == ownedBytes, "owned collision reserves no native cell audit tables");
+    Require(kntwr_collide::Activate(sizing.manager.data(),larger), "activate wider borrowed grid");
+    Require(kntwr_collide::StorageBytes() == ownedBytes, "owned collision reserves no native cell audit tables");
     larger = small; larger.memberships += 65536;
-    Require(ntw2_collide::Activate(sizing.manager.data(),larger), "activate larger cell-order geometry cache");
-    Require(ntw2_collide::StorageBytes() == ownedBytes + 12 * 65536,
+    Require(kntwr_collide::Activate(sizing.manager.data(),larger), "activate larger cell-order geometry cache");
+    Require(kntwr_collide::StorageBytes() == ownedBytes + 12 * 65536,
         "owned memberships allocate only xyz-radius SoA, not chains or radix entries");
     larger = small; larger.records += 65536;
-    Require(ntw2_collide::EstimateActivationBytes(larger) < 7 * 1024 * 1024,
+    Require(kntwr_collide::EstimateActivationBytes(larger) < 7 * 1024 * 1024,
         "secondary slots do not duplicate borrowed geometry or primary query metadata");
-    Require(ntw2_collide::Activate(sizing.manager.data(),larger), "activate secondary-heavy owned capacity");
-    Require(ntw2_collide::StorageBytes() == ntw2_collide::EstimateActivationBytes(larger),
+    Require(kntwr_collide::Activate(sizing.manager.data(),larger), "activate secondary-heavy owned capacity");
+    Require(kntwr_collide::StorageBytes() == kntwr_collide::EstimateActivationBytes(larger),
         "secondary-heavy estimate matches actual allocation");
-    const ntw2_workload::Capacity candidateBudget{4096,4096,1024,64,4096};
+    const kntwr_workload::Capacity candidateBudget{4096,4096,1024,64,4096};
     larger = candidateBudget; larger.pairs = 65536; // Same contact capacity: 4096 in both.
-    Require(ntw2_collide::EstimateActivationBytes(larger) == ntw2_collide::EstimateActivationBytes(candidateBudget),
+    Require(kntwr_collide::EstimateActivationBytes(larger) == kntwr_collide::EstimateActivationBytes(candidateBudget),
         "candidate capacity allocates no candidate array at all");
-    const ntw2_workload::Capacity maximum{131072,131072,1048576,2097152,4194304};
-    Require(ntw2_collide::EstimateActivationBytes(maximum) != 0xffffffffu,
+    const kntwr_workload::Capacity maximum{131072,131072,1048576,2097152,4194304};
+    Require(kntwr_collide::EstimateActivationBytes(maximum) != 0xffffffffu,
         "maximum supported contact capacity remains below the packet-link sentinel");
     auto otherLanes = owned; otherLanes.workers = workers == 8 ? 1 : 8;
-    Require(ntw2_collide::Start(otherLanes) && ntw2_collide::Activate(sizing.manager.data(),small),
+    Require(kntwr_collide::Start(otherLanes) && kntwr_collide::Activate(sizing.manager.data(),small),
         "activate another owned lane count");
-    Require(ntw2_collide::StorageBytes() == ownedBytes, "owned canonical-cell dedup allocates no lane stamp tables");
-    Require(ntw2_collide::Start(Binding(workers)) && ntw2_collide::Activate(sizing.manager.data(),small),
+    Require(kntwr_collide::StorageBytes() == ownedBytes, "owned canonical-cell dedup allocates no lane stamp tables");
+    Require(kntwr_collide::Start(Binding(workers)) && kntwr_collide::Activate(sizing.manager.data(),small),
         "activate native audit separately");
-    const U auditBytes = ntw2_collide::StorageBytes();
+    const U auditBytes = kntwr_collide::StorageBytes();
     Require(auditBytes > ownedBytes && auditBytes < 1024 * 1024, "native audit storage is explicit and workload bounded");
     larger = small; larger.cells = 1048576;
-    Require(ntw2_collide::Activate(sizing.manager.data(),larger), "activate wide native audit");
-    Require(ntw2_collide::StorageBytes() > auditBytes, "only audit mode owns native cell address tables");
-    ntw2_collide::Stop();
-    Require(ntw2_collide::StorageBytes() == 0, "Stop releases actual reservation and accounting");
+    Require(kntwr_collide::Activate(sizing.manager.data(),larger), "activate wide native audit");
+    Require(kntwr_collide::StorageBytes() > auditBytes, "only audit mode owns native cell address tables");
+    kntwr_collide::Stop();
+    Require(kntwr_collide::StorageBytes() == 0, "Stop releases actual reservation and accounting");
 
     for (bool borrowed : {false,true}) {
         auto bind = Binding(workers); if (borrowed) bind.read_grid = &ReadView;
-        auto run = [&](const char* name, Spec spec, ntw2_workload::Capacity cap, bool refuse) {
+        auto run = [&](const char* name, Spec spec, kntwr_workload::Capacity cap, bool refuse) {
             currentCase = name;
             Fixture ref(spec), own(spec);
             OwnedView view; if (borrowed) BuildView(own,spec.tick,view);
             gView = borrowed ? &view.view : nullptr;
-            Require(ntw2_collide::Start(bind), "bind capacity regression");
-            Require(ntw2_collide::StorageBytes() == 0, "binding has no hidden allocation");
-            U estimate = ntw2_collide::EstimateActivationBytes(cap);
-            Require(ntw2_collide::StorageBytes() == 0, "capacity estimate is allocation-free in either mode");
-            Require(ntw2_collide::Activate(own.manager.data(),cap), "activate fixed capacity regression");
-            U bytes = ntw2_collide::StorageBytes();
+            Require(kntwr_collide::Start(bind), "bind capacity regression");
+            Require(kntwr_collide::StorageBytes() == 0, "binding has no hidden allocation");
+            U estimate = kntwr_collide::EstimateActivationBytes(cap);
+            Require(kntwr_collide::StorageBytes() == 0, "capacity estimate is allocation-free in either mode");
+            Require(kntwr_collide::Activate(own.manager.data(),cap), "activate fixed capacity regression");
+            U bytes = kntwr_collide::StorageBytes();
             Require(bytes == estimate, "estimate matches actual owned or audit reservation");
             const uint64_t viewHash = borrowed ? Hash(view) : 0;
             Execute(ref,true); Execute(own,false);
             if (borrowed) Require(Hash(view) == viewHash, "borrowed geometry and inclusive bounds remain read-only");
-            U words[ntw2_collide::WordCount]; ntw2_collide::Sample(words);
-            Require(ntw2_collide::StorageBytes() == bytes, "stage never grows or replaces activation storage");
-            Require(words[ntw2_collide::Faults] == 0, "capacity boundary is a clean refusal, never an access fault");
+            U words[kntwr_collide::WordCount]; kntwr_collide::Sample(words);
+            Require(kntwr_collide::StorageBytes() == bytes, "stage never grows or replaces activation storage");
+            Require(words[kntwr_collide::Faults] == 0, "capacity boundary is a clean refusal, never an access fault");
             if (refuse) {
-                Require(words[ntw2_collide::CapacityFallbacks] == 1 && words[ntw2_collide::SolverTicks] == 0 &&
-                    words[ntw2_collide::Callbacks] == 0, "capacity failure precedes all solver writes and callbacks");
+                Require(words[kntwr_collide::CapacityFallbacks] == 1 && words[kntwr_collide::SolverTicks] == 0 &&
+                    words[kntwr_collide::Callbacks] == 0, "capacity failure precedes all solver writes and callbacks");
                 CompareExact(ref,own,"capacity refusal runs the complete original with bit-identical observations");
             } else {
-                Require(words[ntw2_collide::SolverTicks] == 1 && words[ntw2_collide::FallbackTicks] == 0,
+                Require(words[kntwr_collide::SolverTicks] == 1 && words[kntwr_collide::FallbackTicks] == 0,
                     "exact capacity boundary is admitted");
-                Require(words[ntw2_collide::NativeQueries] == spec.expectedNativeQueries,
+                Require(words[kntwr_collide::NativeQueries] == spec.expectedNativeQueries,
                     "streaming retains exactly the requested native-local query set");
                 Compare(ref,own,spec,false);
             }
@@ -1653,7 +1653,7 @@ static void CapacityCases(U workers) {
                 mixed.input[i].label = 20-i; mixed.order.push_back(5-i);
             }
             mixed.input[0].nodeType = 16;
-            const ntw2_workload::Capacity mixedCapacity{6,6,1024,64,512};
+            const kntwr_workload::Capacity mixedCapacity{6,6,1024,64,512};
             run("streaming mixed native-local BFS preserves raw-ID order",mixed,mixedCapacity,false);
             mixed.rebuild = 0; mixed.breadthFirst = false;
             // Reverse reuse queries record 0 last. Its type-16 destination nodes do not
@@ -1682,7 +1682,7 @@ static void CapacityCases(U workers) {
             parallel.input[i].z = -56.0f + float(pair / 32) * 4.0f;
             parallel.input[i].radius = 0.25f;
         }
-        const ntw2_workload::Capacity lanes{640,640,1024,2560,10240};
+        const kntwr_workload::Capacity lanes{640,640,1024,2560,10240};
         run("compact contacts preserve order across every worker lane",parallel,lanes,false);
         parallel.rebuild = 1;
         run("owner rebuild then streamed contacts preserve every lane's order",parallel,lanes,false);
@@ -1698,48 +1698,48 @@ static void CapacityCases(U workers) {
         parallel.rebuild = 1;
         run("concurrent streamed overflow leaves original rebuild untouched",parallel,lanes,true);
     }
-    ntw2_collide::Stop();
+    kntwr_collide::Stop();
 }
 
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_collision_solver_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]); ownerThread = GetCurrentThreadId(); vtable[0x44 / 4] = Fn(&Contact);
     for (U workers : {1u, 3u}) {
-        StartPool(workers); Require(ntw2_collide::Start(Binding(workers)), "production solver arena starts");
+        StartPool(workers); Require(kntwr_collide::Start(Binding(workers)), "production solver arena starts");
         TwoRecordCases(); MultiRecordCases();
-        U counters[ntw2_collide::WordCount]; ntw2_collide::Sample(counters);
-        Require(counters[ntw2_collide::Contacts] > 0 && counters[ntw2_collide::Callbacks] > 0, "contact/callback coverage");
-        Require(counters[ntw2_collide::Rebuilds] > 0 && counters[ntw2_collide::Redistributions] > 0, "rebuild/redistribution coverage");
-        Require(counters[ntw2_collide::ShapedPairs] > 0, "real original shaped radius leaf coverage");
-        Require(counters[ntw2_collide::Faults] == 0, "supported fixtures have no solver faults");
+        U counters[kntwr_collide::WordCount]; kntwr_collide::Sample(counters);
+        Require(counters[kntwr_collide::Contacts] > 0 && counters[kntwr_collide::Callbacks] > 0, "contact/callback coverage");
+        Require(counters[kntwr_collide::Rebuilds] > 0 && counters[kntwr_collide::Redistributions] > 0, "rebuild/redistribution coverage");
+        Require(counters[kntwr_collide::ShapedPairs] > 0, "real original shaped radius leaf coverage");
+        Require(counters[kntwr_collide::Faults] == 0, "supported fixtures have no solver faults");
         FallbackCases(workers);
-        ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains");
+        kntwr_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains");
     }
     // Contact-response wiring: the fixture recorder tables are foreign classes, so every planned
     // contact still runs the original callback; Run() compares callback order with the native stage.
-    for (U mode : {U(ntw2_contact::ModeShadow), U(ntw2_contact::ModeWorkers)}) {
-        currentCase = mode == ntw2_contact::ModeShadow ? "contact shadow wiring" : "contact workers wiring";
+    for (U mode : {U(kntwr_contact::ModeShadow), U(kntwr_contact::ModeWorkers)}) {
+        currentCase = mode == kntwr_contact::ModeShadow ? "contact shadow wiring" : "contact workers wiring";
         StartPool(3); auto bind = Binding(3); bind.contact_mode = mode;
-        Require(ntw2_collide::Start(bind), "contact-mode solver starts");
+        Require(kntwr_collide::Start(bind), "contact-mode solver starts");
         TwoRecordCases(); MultiRecordCases(); PlanChunkCases();
-        U counters[ntw2_collide::WordCount], contact[ntw2_contact::WordCount];
-        ntw2_collide::Sample(counters); ntw2_contact::Sample(contact);
-        Require(contact[ntw2_contact::ModeWord] == mode && contact[ntw2_contact::Stages] == counters[ntw2_collide::SolverTicks],
+        U counters[kntwr_collide::WordCount], contact[kntwr_contact::WordCount];
+        kntwr_collide::Sample(counters); kntwr_contact::Sample(contact);
+        Require(contact[kntwr_contact::ModeWord] == mode && contact[kntwr_contact::Stages] == counters[kntwr_collide::SolverTicks],
             "every solver stage opens one contact stage");
-        Require(contact[ntw2_contact::Contacts] == counters[ntw2_collide::Callbacks] && contact[ntw2_contact::Contacts] > 0,
+        Require(contact[kntwr_contact::Contacts] == counters[kntwr_collide::Callbacks] && contact[kntwr_contact::Contacts] > 0,
             "every solver callback is planned exactly once");
-        Require(contact[ntw2_contact::OwnerForeignClass] == contact[ntw2_contact::Contacts] &&
-            contact[ntw2_contact::Mismatches] == 0 && contact[ntw2_contact::IdentityRefusals] == 0, "recorder tables plan as foreign classes");
-        Require(contact[mode == ntw2_contact::ModeShadow ? ntw2_contact::OwnerKindCallbacks : ntw2_contact::OwnerCallbacks] ==
-            contact[ntw2_contact::Contacts], "every foreign plan runs the original callback");
-        ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after contact wiring");
+        Require(contact[kntwr_contact::OwnerForeignClass] == contact[kntwr_contact::Contacts] &&
+            contact[kntwr_contact::Mismatches] == 0 && contact[kntwr_contact::IdentityRefusals] == 0, "recorder tables plan as foreign classes");
+        Require(contact[mode == kntwr_contact::ModeShadow ? kntwr_contact::OwnerKindCallbacks : kntwr_contact::OwnerCallbacks] ==
+            contact[kntwr_contact::Contacts], "every foreign plan runs the original callback");
+        kntwr_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after contact wiring");
     }
     LandPlanCases();
     for (U workers : {1u, 4u, 8u}) {
         StartPool(workers);
         OwnedCases(workers);
         CapacityCases(workers);
-        ntw2_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after owned-grid cases");
+        kntwr_collide::Stop(); Require(ntw_pool_shutdown(&pool) == NTW_POOL_OK, "real pool drains after owned-grid cases");
     }
     Require(VirtualFree(image, 0, MEM_RELEASE) != 0, "release private image");
     std::printf("collision solver: %u differential stages; %u checks; real worker pools 1/3 plus owned-grid pools 1/4/8\n", cases, checks);

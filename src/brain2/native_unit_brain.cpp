@@ -5,7 +5,7 @@
 #include <string.h>
 #include <new>
 
-namespace ntw2_unit_brain {
+namespace kntwr_unit_brain {
 namespace {
 constexpr U kRowCapacity = 2048, kRowLimit = kRowCapacity / 4 * 3; // a quarter stays empty: short failed lookups
 constexpr U kMaxChunks = 16, kUnitsPerChunk = 16;
@@ -32,8 +32,8 @@ struct Obs { U row; U vt; U values[kFields]; };
 struct Storage {
     Row rows[kRowCapacity];
     U dense[kRowCapacity];
-    ntw2_region::Table tables[kMaxChunks];
-    ntw2_region::Table owner;
+    kntwr_region::Table tables[kMaxChunks];
+    kntwr_region::Table owner;
     Obs obs[kBufferCapacity];
 };
 struct DecideJob { Storage* s; U count, chunks, stage; };
@@ -72,7 +72,7 @@ void ClearAccumulation(Row& r, U stage) {
     memset(r.classCount, 0, sizeof(r.classCount));
 }
 // Decision of one row from its unit-level inputs: the held record when the signature it was formed under still holds.
-void DecideRow(Row& r, ntw2_region::Table& table, U& queries, U stage) {
+void DecideRow(Row& r, kntwr_region::Table& table, U& queries, U stage) {
     ClearAccumulation(r, stage);
     U inputs[kInputs];
     r.changed = 0; r.decisionMask = 0;
@@ -85,7 +85,7 @@ void DecideRow(Row& r, ntw2_region::Table& table, U& queries, U stage) {
 }
 void __fastcall DecideChunk(void* context, U chunk) {
     DecideJob& job = *static_cast<DecideJob*>(context);
-    ntw2_region::Table& table = job.s->tables[chunk];
+    kntwr_region::Table& table = job.s->tables[chunk];
     table.Clear();
     U queries = 0;
     const U begin = static_cast<U>(static_cast<unsigned long long>(job.count) * chunk / job.chunks);
@@ -98,7 +98,7 @@ U Fnv(U hash, U value) {
 }
 } // namespace
 
-bool ReadUnitInputs(U u, ntw2_region::Table& t, U& q, U* in) {
+bool ReadUnitInputs(U u, kntwr_region::Table& t, U& q, U* in) {
     if (!u || !t.Readable(u, kUnitBytes, q)) return false;
     in[0] = D(u + 0x930); in[1] = D(u + 0x934);
     // 53EEE0 dispatches the current command Q = U+398 + U+934*0x90 only while U+930 != 0.
@@ -135,7 +135,7 @@ U Signature(const U* in) {
     for (U i = 0; i < kInputs; ++i) hash = Fnv(hash, in[i]);
     return hash;
 }
-bool ExtractSoldier(U a, ntw2_region::Table& t, U& q, Soldier& out) {
+bool ExtractSoldier(U a, kntwr_region::Table& t, U& q, Soldier& out) {
     memset(&out, 0, sizeof(out));
     if (!a || !t.Readable(a, kSoldierBytes, q)) return false;
     const U table = D(a);
@@ -380,4 +380,4 @@ void EndStage() {
 }
 
 void Snapshot(U* words) { memcpy(words, g_words, sizeof(g_words)); }
-} // namespace ntw2_unit_brain
+} // namespace kntwr_unit_brain

@@ -46,9 +46,9 @@
 // = 0) and 0x10F5C60 (fsm.vt+4 = 0x5562A0 -> getter +0x0C = state 0x1454168, its enter 0x7DE0B0): PostureClosure
 // covers both, and neither reaches 0x66B7E0. Its foreign store is 0x7F7380 -> 0x811C60 (unlink from [R+0x178]).
 #ifdef __cplusplus
-namespace ntw2_finalizer {
+namespace kntwr_finalizer {
 using U = uint32_t;
-constexpr U kReceiverBytes = 0x700;   // ntw2_brain_workers::kReceiverBytes
+constexpr U kReceiverBytes = 0x700;   // kntwr_brain_workers::kReceiverBytes
 enum Refusal : U { Closed, Attached, Surface, Heading, FsmTable, FsmState, World, Animation };
 // Histogram detail for a refused 819770: FSM state / heading target VA, else kDetailBase + Refusal.
 constexpr U kDetailBase = 0xF1A10000u;
@@ -87,5 +87,5 @@ void ShadowAfter();
 void Reset();
 enum Word : U { ShadowCalls, ShadowMismatches, ShadowFaults, ShadowFirstOffset, ShadowSkippedUnreadable, WordCount };
 U Counter(Word word);
-} // namespace ntw2_finalizer
+} // namespace kntwr_finalizer
 #endif

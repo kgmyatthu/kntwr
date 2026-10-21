@@ -4,7 +4,7 @@
 #include <xmmintrin.h>
 #pragma fenv_access(on)
 
-namespace ntw2_node {
+namespace kntwr_node {
 namespace {
 static_assert(sizeof(void*) == 4, "reference-node ABI is Win32");
 U imageBase, words[kWords], eventWords[kEventWords];
@@ -444,4 +444,4 @@ const U* FakeVtable() {
     };
     return table;
 }
-} // namespace ntw2_node
+} // namespace kntwr_node

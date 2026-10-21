@@ -2,12 +2,12 @@
 // allocator state the kernel replicates (ntw_solver).
 #include "native_army_solver.h"
 #include "formation/native_formation_solver.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include <windows.h>
 #include <intrin.h>
 #include <string.h>
 
-namespace ntw2_army_solver {
+namespace kntwr_army_solver {
 namespace {
 using u64 = unsigned long long;
 using ntw_solver::Entry12;
@@ -229,9 +229,9 @@ void Bind(U delta, uint32_t* bindings) {
     g_nativeSolve = V(0x502770);
     g_nativeAssign = V(0x18f0a00);
     g_gateAddress = FnAddress(reinterpret_cast<const void*>(&SolveGate));
-    bindings[NTW2_BIND_SOLVER_ASSIGN] = FnAddress(reinterpret_cast<const void*>(&AssignGate));
-    bindings[NTW2_BIND_SOLVER_SOLVE] = g_gateAddress;
-    bindings[NTW2_BIND_SOLVER_SHIM] = FnAddress(reinterpret_cast<const void*>(&SolveShim));
+    bindings[KNTWR_BIND_SOLVER_ASSIGN] = FnAddress(reinterpret_cast<const void*>(&AssignGate));
+    bindings[KNTWR_BIND_SOLVER_SOLVE] = g_gateAddress;
+    bindings[KNTWR_BIND_SOLVER_SHIM] = FnAddress(reinterpret_cast<const void*>(&SolveShim));
 }
 
 bool Start(const Binding& binding) {
@@ -257,7 +257,7 @@ bool Start(const Binding& binding) {
     g_ws = ntw_solver::CreateWorkspace();
     if (!g_ws) return false;
     g_cloneAssign = binding.cloneAssign;
-    g_shimExpected = binding.cloneAssign + NTW2_SOLVER_ASSIGN_RET_OFFSET;
+    g_shimExpected = binding.cloneAssign + KNTWR_SOLVER_ASSIGN_RET_OFFSET;
     QueryPerformanceFrequency(&g_frequency);
     { // TSC rate: ~20 ms spin against QPC (the kernel's phase counters are raw rdtsc ticks)
         LARGE_INTEGER a, b;
@@ -273,7 +273,7 @@ bool Start(const Binding& binding) {
     return true;
 }
 void Stop() {
-    // Called from StopModules (src/core/ntw2_runtime.cpp), which first waits until tickOwner == 0, so no gate/assign occurrence is live here.
+    // Called from StopModules (src/core/kntwr_runtime.cpp), which first waits until tickOwner == 0, so no gate/assign occurrence is live here.
     g_started = false;
     if (g_ws) ntw_solver::DestroyWorkspace(g_ws);
     g_ws = nullptr;
@@ -344,4 +344,4 @@ void Snapshot(U* w) {
         e[SScans] = r.scans; e[SCostUs] = TscUs(r.costQ); e[SLoopUs] = TscUs(r.loopQ);
     }
 }
-} // namespace ntw2_army_solver
+} // namespace kntwr_army_solver

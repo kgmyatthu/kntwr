@@ -3,7 +3,7 @@
 #include <windows.h>
 
 static_assert(sizeof(void*) == 4, "0x819770 is the pinned Win32 x86 original");
-namespace ntw2_finalizer {
+namespace kntwr_finalizer {
 namespace {
 U g_delta;
 bool g_bound, g_shadow, g_shadowSticky;
@@ -222,4 +222,4 @@ void ShadowAfter() {
         return;
     }
 }
-} // namespace ntw2_finalizer
+} // namespace kntwr_finalizer

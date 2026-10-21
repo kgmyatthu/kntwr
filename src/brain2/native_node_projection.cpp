@@ -6,7 +6,7 @@
 
 static_assert(sizeof(void*) == 4, "native node projection is a Win32 x86 adapter");
 
-namespace ntw2_node {
+namespace kntwr_node {
 namespace projection {
 namespace {
 
@@ -43,9 +43,9 @@ static_assert(offsetof(Participant, visit) + 0x1C == 0x20, "bitset must be 16-al
 static_assert(offsetof(Participant, lookup) % 16 == 12, "lookup image must be 12 mod 16");
 static_assert(kVisitWords * 4 == 0x15AFBA4 - 0x15ADB74, "visit image covers 15ADB74..15AFBA3");
 static_assert(kIdGuard == kVisitWords - 1, "id guard is the last visit word");
-static_assert(NTW2_BIND_NODE_PROJ_LOOKUP_0 == NTW2_BIND_NODE_PROJ_VISIT_0 + NTW2_NODE_PROJ_PARTICIPANTS,
+static_assert(KNTWR_BIND_NODE_PROJ_LOOKUP_0 == KNTWR_BIND_NODE_PROJ_VISIT_0 + KNTWR_NODE_PROJ_PARTICIPANTS,
               "binding order: VISIT_0..8 then LOOKUP_0..8");
-static_assert(NTW2_CLONE_NODE_PROJ_67A790_8 == NTW2_CLONE_NODE_PROJ_7FD070_0 + 4 * NTW2_NODE_PROJ_PARTICIPANTS - 1,
+static_assert(KNTWR_CLONE_NODE_PROJ_67A790_8 == KNTWR_CLONE_NODE_PROJ_7FD070_0 + 4 * KNTWR_NODE_PROJ_PARTICIPANTS - 1,
               "clone order: four contiguous clones per participant");
 
 Participant* g_participants;
@@ -162,12 +162,12 @@ bool Initialize(uint32_t imageBase, uint32_t* bindings) {
         }
     }
     for (unsigned p = 0; p < kParticipants; ++p) {
-        bindings[NTW2_BIND_NODE_PROJ_VISIT_0 + p] = Address(&g_participants[p].visit[0]);
-        bindings[NTW2_BIND_NODE_PROJ_LOOKUP_0 + p] = Address(&g_participants[p].lookup[0]);
+        bindings[KNTWR_BIND_NODE_PROJ_VISIT_0 + p] = Address(&g_participants[p].visit[0]);
+        bindings[KNTWR_BIND_NODE_PROJ_LOOKUP_0 + p] = Address(&g_participants[p].lookup[0]);
     }
-    bindings[NTW2_BIND_NODE_PROJ_CELL] = Address(reinterpret_cast<const void*>(&CheckedCell));
-    bindings[NTW2_BIND_NODE_PROJ_EDGE] = Address(reinterpret_cast<const void*>(&CheckedEdge));
-    bindings[NTW2_BIND_NODE_PROJ_DESCRIPTOR] = Address(reinterpret_cast<const void*>(&CheckedDescriptor));
+    bindings[KNTWR_BIND_NODE_PROJ_CELL] = Address(reinterpret_cast<const void*>(&CheckedCell));
+    bindings[KNTWR_BIND_NODE_PROJ_EDGE] = Address(reinterpret_cast<const void*>(&CheckedEdge));
+    bindings[KNTWR_BIND_NODE_PROJ_DESCRIPTOR] = Address(reinterpret_cast<const void*>(&CheckedDescriptor));
     return true;
 }
 
@@ -185,7 +185,7 @@ void Release() {
 
 uint32_t Entry(const uint32_t* cloneEntries, unsigned participant) {
     if (!g_participants || !cloneEntries || participant >= kParticipants) return 0;
-    return cloneEntries[NTW2_CLONE_NODE_PROJ_7FD070_0 + 4 * participant];
+    return cloneEntries[KNTWR_CLONE_NODE_PROJ_7FD070_0 + 4 * participant];
 }
 
 bool Ready(unsigned participant) {
@@ -224,4 +224,4 @@ uint32_t DescriptorEntry(uint32_t imageBase) {
 }
 
 } // namespace projection
-} // namespace ntw2_node
+} // namespace kntwr_node

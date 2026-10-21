@@ -5,9 +5,9 @@
 #include <string.h>
 #include <algorithm>
 #include <new>
-#include "core/ntw2_guard.h"
+#include "core/kntwr_guard.h"
 
-namespace ntw2_army_unit {
+namespace kntwr_army_unit {
 namespace {
 constexpr U kUnitBytes = 0xE00;            // highest field read: U+DCC
 constexpr U kFormationBytes = 0x6F0;       // F+18 .. F+6EC (pose transform pointer at F+62C+B0+10)
@@ -24,7 +24,7 @@ U B(U a) { return *reinterpret_cast<const volatile uint8_t*>(static_cast<uintptr
 
 struct Slot { U key, stamp, flags; };
 struct Storage {
-    ntw2_region::Table table;
+    kntwr_region::Table table;
     Slot foreign[kSetSlots]; // per occurrence (stamp = occurrence number)
     Slot seen[kSetSlots];    // per stage (stamp = stage number): repeated occurrences
     U tickCosts[kTickCapacity];
@@ -83,7 +83,7 @@ void AddForeign(U key, U flag) {
 }
 // Inserts the entries of a native pointer list except `self`; returns the entry count read, ~0 when unreadable.
 U AddList(U count, U data, U self, U flag) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     if (!count) return 0;
     if (count > kListCap || !t.Readable(data, count * 4, g_queries)) return ~0u;
     U n = 0;
@@ -96,7 +96,7 @@ U AddList(U count, U data, U self, U flag) {
 }
 // 5821B0 enumerates the candidate list 531E40(U) = [[U+1EC]+D8] (count +44, data +48) early in 57F070.
 void NeighbourWitness(U u) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     const U c = D(u + 0x1EC);
     const U list = c && t.Readable(c + 0xD8, 4, g_queries) ? D(c + 0xD8) : 0;
     const U n = list && t.Readable(list + 0x44, 8, g_queries) ? AddList(D(list + 0x44), D(list + 0x48), u, kFlagNeighbour) : ~0u;
@@ -105,7 +105,7 @@ void NeighbourWitness(U u) {
 // 53A9E0 (last but two in 581F30) enumerates [U+1EC]+F0/F4 behind gates; the pure-read ones are replayed on the
 // post-call state, the 55AC40/55C480 predicates and the U+1B0/U+1AF command-query branch are not (upper bound).
 void AggregationWitness(U u) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     const U c = D(u + 0x1EC);
     if (!c || !t.Readable(c + 0xD8, 0x20, g_queries)) { ++g_words[ForeignUnreadable]; return; }
     const U p = D(c + 0xD8), count = D(c + 0xF0);
@@ -119,7 +119,7 @@ void AggregationWitness(U u) {
 }
 // Section 8.4 cells of one listed unit, copied into module storage (measures the frozen-view cost only).
 U CopyCells(U u, U* out) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     U n = 0;
     if (!t.Readable(u, kUnitBytes, g_queries)) return 0;
     out[n++] = B(u + 0xD9E); out[n++] = D(u + 0xC2C);
@@ -189,7 +189,7 @@ void Census(U command, bool dynamicOwner, bool rng, LONGLONG q) {
 }
 } // namespace
 
-bool ReadProbe(U u, U delta, ntw2_region::Table& t, U& q, Probe& o) {
+bool ReadProbe(U u, U delta, kntwr_region::Table& t, U& q, Probe& o) {
     memset(&o, 0, sizeof(o));
     if (!u || !t.Readable(u, kUnitBytes, q)) return false;
     o.readable = 1;
@@ -270,7 +270,7 @@ U SecondaryStateIndex(U s) {
     if (s == kSentinel) return 4;
     return s - kSecondaryFirst < 4 * 4 && !((s - kSecondaryFirst) & 3) ? (s - kSecondaryFirst) / 4 : 5;
 }
-void ReadGlobals(U delta, ntw2_region::Table& t, U& q, Globals& g) {
+void ReadGlobals(U delta, kntwr_region::Table& t, U& q, Globals& g) {
     memset(&g, 0, sizeof(g));
     if (t.Readable(kDistanceHeader + delta, kRecordHeader + 0x14 - kDistanceHeader, q)) {
         g.scratchOk = 1;
@@ -298,7 +298,7 @@ U RecorderAppends(const Globals& a, const Globals& b) {
     if (!a.managerOk || !b.managerOk || a.manager != b.manager) return ~0u;
     return (b.m4 - a.m4) + (b.m20 - a.m20);
 }
-bool ReadB0Probe(U u, U delta, ntw2_region::Table& t, U& q, B0Probe& o) {
+bool ReadB0Probe(U u, U delta, kntwr_region::Table& t, U& q, B0Probe& o) {
     memset(&o, 0, sizeof(o));
     if (!u || !t.Readable(u, kUnitObjectBytes, q)) return false;
     o.readable = 1;
@@ -367,75 +367,75 @@ U AllocSplit(U detail, bool growth, bool reserved) {
 }
 
 // Guarded observation. Proofs are re-established first: a native call (this unit's or an earlier occurrence's) may
-// have freed or decommitted probed memory. Every load runs under SEH bracketed by ntw2::probeDepth, so a stale or
+// have freed or decommitted probed memory. Every load runs under SEH bracketed by kntwr::probeDepth, so a stale or
 // racing range records an unreadable observation instead of faulting (and is not taken as a crash capture).
 struct Reading { Probe probe; U rng, rngValid; };
 static void Observe(U u, bool before, Reading& out) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     t.Clear();
     bool ok = false;
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         out.rngValid = g_model && t.Readable(g_model + 0x50, 4, g_queries) ? 1u : 0u;
         out.rng = out.rngValid ? D(g_model + 0x50) : 0;
         ok = ReadProbe(u, g_delta, t, g_queries, out.probe);
         if (ok) { if (before) NeighbourWitness(u); else AggregationWitness(u); }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     if (!ok) { out.probe.readable = 0; out.rngValid = 0; }
 }
 static U SnapshotContainer(U c) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     U units = 0;
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         if (c && t.Readable(c + 0xF0, 8, g_queries)) SnapshotList(D(c + 0xF0), D(c + 0xF4), units);
         if (c && t.Readable(c + 0x1A4, 8, g_queries)) SnapshotList(D(c + 0x1A4), D(c + 0x1A8), units);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ++g_words[ForeignUnreadable]; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     return units;
 }
 
 // ---- B0 guarded reads (same discipline as Observe, which re-proved the table just before).
 struct B0Reading { B0Probe probe; Globals globals; };
 static void ObserveB0(U u, B0Reading& out) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     bool ok = false;
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         ReadGlobals(g_delta, t, g_queries, out.globals);
         ok = ReadB0Probe(u, g_delta, t, g_queries, out.probe);
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; memset(&out.globals, 0, sizeof(out.globals)); }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     if (!ok) out.probe.readable = 0;
 }
 static void ObserveGlobals(Globals& g) {
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try { ReadGlobals(g_delta, g_s->table, g_queries, g); }
     __except (EXCEPTION_EXECUTE_HANDLER) { memset(&g, 0, sizeof(g)); }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
 }
 // First-order own-state copy into module storage: bytes copied, ~0 when a span faulted.
 static U CopyOwn(const B0Probe& p) {
     U n = 0;
     bool ok = true;
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try {
         for (U i = 0; i < p.spans; ++i) {
             memcpy(g_s->own + n, reinterpret_cast<const void*>(static_cast<uintptr_t>(p.span[i].base)), p.span[i].bytes);
             n += p.span[i].bytes;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     return ok ? n : ~0u;
 }
 static bool ReadFsm(U s, U& table, U& state) {
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     bool ok = false;
-    ++ntw2::probeDepth;
+    ++kntwr::probeDepth;
     __try { if (s && t.Readable(s, 0x14, g_queries)) { table = D(s); state = D(s + 4); ok = true; } }
     __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
-    --ntw2::probeDepth;
+    --kntwr::probeDepth;
     return ok;
 }
 static void NoteRecorder(const Globals& g) {
@@ -565,7 +565,7 @@ U Stage(void* container, U model, Native native) {
     if (!g_s || g_inStage || g_inUnit) return native(container);
     g_inStage = 1;
     const LONGLONG s0 = Now();
-    ntw2_region::Table& t = g_s->table;
+    kntwr_region::Table& t = g_s->table;
     t.Clear();
     if (!g_words[Stages]) {
         g_words[Version] = kVersion; g_words[Enabled] = 1; g_words[Workers] = g_workers;
@@ -710,4 +710,4 @@ U Fsm(void* fsm, Native native) {
 void SnapshotB0(U* words) { memcpy(words, g_b0, sizeof(g_b0)); }
 
 void Snapshot(U* words) { memcpy(words, g_words, sizeof(g_words)); }
-} // namespace ntw2_army_unit
+} // namespace kntwr_army_unit

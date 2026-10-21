@@ -1,4 +1,4 @@
-// Oracle for src/brain/ntw2_retarget_jitter.{h,cpp} (--brain-retarget-jitter and the 0x6671A0 host mirror) on a private relocated mapping of the owned image.
+// Oracle for src/brain/kntwr_retarget_jitter.{h,cpp} (--brain-retarget-jitter and the 0x6671A0 host mirror) on a private relocated mapping of the owned image.
 //  * flag OFF: the mirror (TrackerTick) is bit-identical to the ORIGINAL bytes of 0x6671A0 running in the private mapping with its six call sites
 //    (0x6795A0, 0x63CE00, 0x553420, 0x553220, 0x6C6910, 0x662960) redirected to the same scripted fakes: return value, all 0x20 tracker bytes, the
 //    target agents' +0x474 counters (the real 0x63CE00 / 0x662960 bytes run inside the fakes) and the full call trace (callee, every argument incl. the
@@ -22,12 +22,12 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "brain/ntw2_retarget_jitter.h"
+#include "kntwr_runtime.h"
+#include "brain/kntwr_retarget_jitter.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
-namespace rj=ntw2_retarget_jitter;
+namespace rj=kntwr_retarget_jitter;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 static B* image;
 static U delta, checks, imageSize;
@@ -48,7 +48,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;

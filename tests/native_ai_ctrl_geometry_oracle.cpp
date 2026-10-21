@@ -1,4 +1,4 @@
-// Oracle for src/ai/ntw2_ai_ctrl_geometry.{h,cpp} against the real supported image mapped privately (0x76DCD0 center distance,
+// Oracle for src/ai/kntwr_ai_ctrl_geometry.{h,cpp} against the real supported image mapped privately (0x76DCD0 center distance,
 // 0x53FBE0 + 0x80E9D0 pose [both branches], 0x57E910 identity getter).  Bit-exact comparison; the two production naked
 // trampolines are exercised through a harness that reproduces the cloned scorer's register/stack contract.
 #define _CRT_SECURE_NO_WARNINGS
@@ -13,13 +13,13 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_ai_ctrl_batch.h"
-#include "clones/ntw2_clones.h"
-#include "ai/ntw2_ai_ctrl_geometry.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_ai_ctrl_batch.h"
+#include "clones/kntwr_clones.h"
+#include "ai/kntwr_ai_ctrl_geometry.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
-namespace G = ntw2_ai_ctrl_geometry;
+namespace G = kntwr_ai_ctrl_geometry;
 using U = uint32_t;
 using B = unsigned char;
 static_assert(sizeof(void*) == 4, "owned x86 oracle");
@@ -44,7 +44,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg, nullptr, 0, bytes.data(), static_cast<ULONG>(bytes.size()), digest, 32) == 0, "SHA image");
     BCryptCloseAlgorithmProvider(alg, 0);
     char hex[65]; for (U i = 0; i < 32; ++i) std::snprintf(hex + 2 * i, 3, "%02x", digest[i]);
-    Require(!std::strcmp(hex, NTW2_IMAGE_SHA256), "supported image identity");
+    Require(!std::strcmp(hex, KNTWR_IMAGE_SHA256), "supported image identity");
     auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data() + dos->e_lfanew);
     image = static_cast<B*>(VirtualAlloc(nullptr, nt->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
@@ -374,13 +374,13 @@ static void TestCensus() {
 int main(int argc, char** argv) {
     if (argc != 2) { std::fprintf(stderr, "usage: native_ai_ctrl_geometry_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]);
-    U bindings[NTW2_BIND_COUNT] = {};
+    U bindings[KNTWR_BIND_COUNT] = {};
     Require(G::Bind(A(image), bindings), "bind");
-    Require(bindings[NTW2_BIND_AI_CTRL_IDENTITY] == A(G::IdentityBindingAddress()) &&
-            bindings[NTW2_BIND_AI_CTRL_POINT_DISTANCE] == A(G::DistanceBindingAddress()), "binding addresses published");
+    Require(bindings[KNTWR_BIND_AI_CTRL_IDENTITY] == A(G::IdentityBindingAddress()) &&
+            bindings[KNTWR_BIND_AI_CTRL_POINT_DISTANCE] == A(G::DistanceBindingAddress()), "binding addresses published");
     vtableStd[0] = A(At(0x57E910)); vtableAlt[0] = A(reinterpret_cast<void*>(&AltGetter));
     { const B* g = At(0x57E910); Require(g[0] == 0x8b && g[1] == 0x41 && g[2] == 0xf4 && g[3] == 0xc3, "0x57E910 is mov eax,[ecx-0xC]; ret"); }
-    ntw2_ai_ctrl::Reset(NTW2_AI_CTRL_MODE_MASK, delta, 0);
+    kntwr_ai_ctrl::Reset(KNTWR_AI_CTRL_MODE_MASK, delta, 0);
     TestKernel();
     TestPose();
     TestLiveTables();

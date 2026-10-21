@@ -10,7 +10,7 @@
 // payload selection matches as well; x87 FPATAN/FISTP/FABS run as the original instructions under
 // the installed control word. Evidence: analysis/native-contact-response.md.
 #pragma float_control(precise, on, push)
-namespace ntw2_contact {
+namespace kntwr_contact {
 namespace {
 using B = unsigned char;
 U delta, mode;

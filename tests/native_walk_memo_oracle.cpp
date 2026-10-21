@@ -14,9 +14,9 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_walk_memo.h"
+#include "clones/kntwr_clones.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_walk_memo.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;
@@ -50,7 +50,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     image=static_cast<B*>(VirtualAlloc(nullptr,nt->OptionalHeader.SizeOfImage,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));
@@ -128,10 +128,10 @@ static void __fastcall GatherBound(void* owner,void*,Vector* out,const float* bo
 using Walk=B(__fastcall*)(void*,void*,U*);
 struct __declspec(align(16)) Fx { B bytes[512]; };
 static void ResetFp(U csr=0x1f80) { __asm { fninit } _mm_setcsr(csr); }
-static void CheckKernel(ntw2_walk_memo::Kernel native,U csr) {
+static void CheckKernel(kntwr_walk_memo::Kernel native,U csr) {
     Fx expected,actual;
     ResetFp(csr); const B a=native(shape,nullptr,polygon); _fxsave(expected.bytes);
-    ResetFp(csr); const B b=ntw2_walk_memo::kernel(shape,nullptr,polygon); _fxsave(actual.bytes);
+    ResetFp(csr); const B b=kntwr_walk_memo::kernel(shape,nullptr,polygon); _fxsave(actual.bytes);
     Require(a==b,"kernel AL result");
     // Control, status (including TOP and sticky flags), tag and MXCSR are
     // computationally observable. Empty x87 payloads/FIP/FDP and volatile XMM
@@ -142,23 +142,23 @@ static void CheckKernel(ntw2_walk_memo::Kernel native,U csr) {
 int main(int argc,char** argv) {
     if(argc!=2) { std::fprintf(stderr,"usage: native_walk_memo_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]);
-    ntw2_clone_set clones={}; U bindings[NTW2_BIND_COUNT];
+    kntwr_clone_set clones={}; U bindings[KNTWR_BIND_COUNT];
     // Unreached bindings are valid image addresses, never executed by these fixtures.
     for(U& binding:bindings) binding=A(At(0x6dca08));
-    bindings[NTW2_BIND_SITE_CALL_42]=A(At(0x809110));
-    bindings[NTW2_BIND_SITE_CALL_43]=A(At(0x6dc9a0));
-    bindings[NTW2_BIND_SITE_CALL_44]=Fn(&ntw2_walk_memo::kernel);
-    bindings[NTW2_BIND_SITE_CALL_45]=A(At(0x808f90));
-    bindings[NTW2_BIND_SITE_CALL_41]=Fn(&GatherBound);
-    U detail=0; Require(ntw2_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
-    auto nativeKernel=reinterpret_cast<ntw2_walk_memo::Kernel>(At(0x80dcf0));
-    ntw2_walk_memo::configure(nativeKernel,reinterpret_cast<U*>(At(0x1318038)),reinterpret_cast<U*>(At(0x1318048)));
+    bindings[KNTWR_BIND_SITE_CALL_42]=A(At(0x809110));
+    bindings[KNTWR_BIND_SITE_CALL_43]=A(At(0x6dc9a0));
+    bindings[KNTWR_BIND_SITE_CALL_44]=Fn(&kntwr_walk_memo::kernel);
+    bindings[KNTWR_BIND_SITE_CALL_45]=A(At(0x808f90));
+    bindings[KNTWR_BIND_SITE_CALL_41]=Fn(&GatherBound);
+    U detail=0; Require(kntwr_build_clones(A(image),bindings,&clones,&detail)==0,"production clone source pins");
+    auto nativeKernel=reinterpret_cast<kntwr_walk_memo::Kernel>(At(0x80dcf0));
+    kntwr_walk_memo::configure(nativeKernel,reinterpret_cast<U*>(At(0x1318038)),reinterpret_cast<U*>(At(0x1318048)));
     auto gather=reinterpret_cast<Gather>(At(0x804dd0));
-    auto gatherClone=reinterpret_cast<Gather>(clones.entries[NTW2_CLONE_AI_GATHER]);
+    auto gatherClone=reinterpret_cast<Gather>(clones.entries[KNTWR_CLONE_AI_GATHER]);
     gatherUnderTest=gatherClone;
     auto walk=reinterpret_cast<Walk>(At(0x7f1d40));
-    auto walkClone=reinterpret_cast<Walk>(clones.entries[NTW2_CLONE_AI_WALK]);
-    Fixture(); ntw2_walk_memo::begin();
+    auto walkClone=reinterpret_cast<Walk>(clones.entries[KNTWR_CLONE_AI_WALK]);
+    Fixture(); kntwr_walk_memo::begin();
     for(U i=0;i<160;++i) {
         Polygon(4,static_cast<float>(i%7)); Shape(static_cast<float>(i%11)-5,0,1+static_cast<float>(i%5),3,1+i%2);
         owners[i%12].v[3]=A(active+(i%2)); // same pointers/counts, changed filter input
@@ -187,11 +187,11 @@ int main(int argc,char** argv) {
         polygon[0].v[3]^=0x80000000u; CheckKernel(nativeKernel,0x1f80); // value mutation without generation change
     }
     Shape(0,0,2,2); Polygon(65,0); CheckKernel(nativeKernel,0x1f80); // bounded-key fallback
-    ntw2_walk_memo::end(); CheckKernel(nativeKernel,0x1f80); // out-of-scope native path
-    ntw2_walk_memo::begin(); Polygon(4,0); CheckKernel(nativeKernel,0x1f80); CheckKernel(nativeKernel,0x1f80);
-    ntw2_walk_memo::end();
-    Require(ntw2_walk_memo::counters[1]>0 && ntw2_walk_memo::counters[2]>0 && ntw2_walk_memo::counters[3]>0,"hit/miss/fallback coverage");
+    kntwr_walk_memo::end(); CheckKernel(nativeKernel,0x1f80); // out-of-scope native path
+    kntwr_walk_memo::begin(); Polygon(4,0); CheckKernel(nativeKernel,0x1f80); CheckKernel(nativeKernel,0x1f80);
+    kntwr_walk_memo::end();
+    Require(kntwr_walk_memo::counters[1]>0 && kntwr_walk_memo::counters[2]>0 && kntwr_walk_memo::counters[3]>0,"hit/miss/fallback coverage");
     Clear(Scratch()); Clear(Interests());
-    std::printf("walk memo: %u checks; hits=%u misses=%u fallback=%u\n",checks,ntw2_walk_memo::counters[1],ntw2_walk_memo::counters[2],ntw2_walk_memo::counters[3]);
+    std::printf("walk memo: %u checks; hits=%u misses=%u fallback=%u\n",checks,kntwr_walk_memo::counters[1],kntwr_walk_memo::counters[2],kntwr_walk_memo::counters[3]);
     return 0;
 }

@@ -17,7 +17,7 @@
 #include "native_image_relocation.h"
 #include "native_resolve.h"
 #pragma fenv_access(on)
-namespace r = ntw2_resolve;
+namespace r = kntwr_resolve;
 using U = uint32_t;
 using B = uint8_t;
 static_assert(sizeof(void*) == 4, "x86 oracle");
@@ -263,8 +263,8 @@ static void CheckWorkerBudget() {
     grid[0]=A(heads.data()); grid[2]=6; grid[5]=63; Put<float>(grid,0x24,1);
     Put<float>(root,0x10,64); Put<float>(root,0x18,64);
     tree[0x4C/4]=A(root)-0xC; model[0xA8/4]=A(grid); model[0xC0/4]=A(tree);
-    ntw2_sweep::WorkerScene scene;
-    Require(ntw2_sweep::PrepareScene(scene,A(model),delta,90),"capture full sparse native scene");
+    kntwr_sweep::WorkerScene scene;
+    Require(kntwr_sweep::PrepareScene(scene,A(model),delta,90),"capture full sparse native scene");
     r::WorkerCatalog catalog;
     heads.back()=A(nodes);
     Require(!r::PrepareCatalog(catalog,scene),"catalog final verification catches uncaptured cell publication");
@@ -274,12 +274,12 @@ static void CheckWorkerBudget() {
     // only through the cycles and are not outer candidates in this scene.
     auto checkStatic = [&](U address) {
         const auto& tape = scene.verification[3];
-        Require(std::any_of(tape.begin(), tape.end(), [&](const ntw2_sweep::VerificationWord& word) {
+        Require(std::any_of(tape.begin(), tape.end(), [&](const kntwr_sweep::VerificationWord& word) {
             return word.address == address;
         }), "complete canonical geometry verification address coverage");
         void* p = reinterpret_cast<void*>(address);
         const U saved = Get<U>(p, 0); Put<U>(p, 0, saved ^ 1);
-        Require(!ntw2_sweep::VerifyBuild(scene, 3, 1), "each static geometry mutation is detected");
+        Require(!kntwr_sweep::VerifyBuild(scene, 3, 1), "each static geometry mutation is detected");
         Put<U>(p, 0, saved);
     };
     checkStatic(A(ring) + 8);
@@ -295,10 +295,10 @@ static void CheckWorkerBudget() {
     }
     checkStatic(A(f.wall_data));
     for (U offset = 0; offset < sizeof(r::Segment); offset += 4) checkStatic(A(f.segments) + offset);
-    Require(ntw2_sweep::VerifyBuild(scene, 3, 1), "restored complete geometry tape verifies");
+    Require(kntwr_sweep::VerifyBuild(scene, 3, 1), "restored complete geometry tape verifies");
     heads.back()=0;
     Require(!r::PrepareCatalog(catalog,scene),"same-generation failed catalog remains refused");
-    Require(ntw2_sweep::PrepareScene(scene,A(model),delta,91),"new generation rebuilds complete scene");
+    Require(kntwr_sweep::PrepareScene(scene,A(model),delta,91),"new generation rebuilds complete scene");
     Require(r::PrepareCatalog(catalog,scene),"capture and verify immutable resolve geometry");
     for(const auto& tape:scene.verification) Equal(0,static_cast<U>(tape.capacity()),"verification capacity released only after complete check");
     r::WorkerContext worker;
@@ -307,12 +307,12 @@ static void CheckWorkerBudget() {
     Equal(2,static_cast<U>(worker.selected.capsules.capacity()),"capsule bound counts owner identities despite ID aliases");
     Equal(1024,static_cast<U>(worker.selected.walls.capacity()),"wall multiplicity is not replaced by unique geometry count");
     Equal(4112,static_cast<U>(r::HeapBytes(worker)),"actual selected storage uses exact bounds rather than membership-wide reserves");
-    ntw2_sweep::WorkerContext sweep;
-    Require(ntw2_sweep::PrepareWorker(sweep,scene),"prepare source sweep");
+    kntwr_sweep::WorkerContext sweep;
+    Require(kntwr_sweep::PrepareWorker(sweep,scene),"prepare source sweep");
     U headers[3][5]{},scratch[3]={A(headers[0]),A(headers[1]),A(headers[2])};
     Put<float>(f.agent,0x54,1);
-    const ntw2_sweep::Aabb all{0,0,63,63};
-    Require(ntw2_sweep::WorkerSweep(sweep,f.agent,A(f.agent),scratch,all,0x15),"sweep full repeated scene");
+    const kntwr_sweep::Aabb all{0,0,63,63};
+    Require(kntwr_sweep::WorkerSweep(sweep,f.agent,A(f.agent),scratch,all,0x15),"sweep full repeated scene");
     Equal(1,headers[0][3],"grid owners deduplicate");
     Equal(1,headers[1][2],"capsule low-u16 aliases deduplicate");
     Equal(1024,headers[2][2],"every repeated wall remains in native order");
@@ -320,7 +320,7 @@ static void CheckWorkerBudget() {
     for(U split=0;split<2;++split) {
         if(split) {
             Put<U>(f.capsule[1],0x34,8); std::memset(headers,0,sizeof(headers));
-            Require(ntw2_sweep::WorkerSweep(sweep,f.agent,A(f.agent),scratch,all,0x15),"live aliases split inside preallocated bounds");
+            Require(kntwr_sweep::WorkerSweep(sweep,f.agent,A(f.agent),scratch,all,0x15),"live aliases split inside preallocated bounds");
             Equal(2,headers[1][2],"both capsule owners remain selectable");
         }
         alignas(16) B initial[sizeof(f.agent)],copy[sizeof(f.agent)];
@@ -379,8 +379,8 @@ static void CheckCyclicCatalogBudget() {
     grid[0] = A(heads); Put<float>(grid, 0x24, 1);
     Put<float>(root, 0x10, 64); Put<float>(root, 0x18, 64);
     tree[0x4C/4] = A(root) - 0xC; model[0xA8/4] = A(grid); model[0xC0/4] = A(tree);
-    ntw2_sweep::WorkerScene scene;
-    Require(ntw2_sweep::PrepareScene(scene, A(model), delta, 120), "capture rotated-cycle scene");
+    kntwr_sweep::WorkerScene scene;
+    Require(kntwr_sweep::PrepareScene(scene, A(model), delta, 120), "capture rotated-cycle scene");
     r::WorkerCatalog catalog;
     Require(r::PrepareCatalog(catalog, scene), "prepare canonical nested geometry");
     const r::Candidates& geometry = catalog.geometry;

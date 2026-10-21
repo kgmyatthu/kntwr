@@ -1,4 +1,4 @@
 # In-process sampling profiler.
-ntw2_runtime_sources(
-  ntw2_profile.cpp
+kntwr_runtime_sources(
+  kntwr_profile.cpp
 )

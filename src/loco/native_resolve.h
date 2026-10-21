@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define NTW2_RESOLVE_WORD_LABELS \
+#define KNTWR_RESOLVE_WORD_LABELS \
     "version", "enabled", "calls", "compared", "mismatches", "faults", "reentry", "shadow_us", \
     "dx", "dz", "flag_13c", "flag_174", "flag_175", "flag_176", "flag_199", "flag_1a8", \
     "return", "first_entity", "first_call", "first_field", "first_expected", "first_actual", \
@@ -10,13 +10,13 @@
     "target2", "target2_calls", "other_target_calls", "inout"
 
 // Separate append-only status tail: do not enlarge the existing 32-word block.
-#define NTW2_RESOLVE_FRAME_LABELS \
+#define KNTWR_RESOLVE_FRAME_LABELS \
     "owner_handoffs", "nested_calls", "max_depth", "overlapping_thread_calls"
 
 #ifdef __cplusplus
 #include <vector>
 #include "native_sweep.h"
-namespace ntw2_resolve {
+namespace kntwr_resolve {
 struct Agent;
 struct Scratch;
 struct Aabb { float min_x, min_z, max_x, max_z; };
@@ -100,7 +100,7 @@ struct WorkerCatalog {
     uint32_t image_delta = 0, build = 0, generation = 0;
     size_t reserve[3]{}; // distinct-domain R0/R1 bounds; R2 preserves wall multiplicity
     bool attempted = false, prepared = false;
-    const ntw2_sweep::WorkerScene* source = nullptr;
+    const kntwr_sweep::WorkerScene* source = nullptr;
     Candidates geometry; // each list sorted by native address, duplicates removed
 };
 struct WorkerCandidates {
@@ -110,7 +110,7 @@ struct WorkerCandidates {
 };
 struct WorkerContext {
     const WorkerCatalog* catalog = nullptr;
-    ntw2_sweep::FpState fp;
+    kntwr_sweep::FpState fp;
     uint32_t build = 0;
     bool fp_managed = false;
     // Off by default: 0x80E9D0 reads the +0x170 transform parent outside the copy.
@@ -120,7 +120,7 @@ struct WorkerContext {
 };
 // First call verifies the complete static catalog at activation. Same identity
 // is O(1); mismatches refuse without rebuilding until the generation changes.
-bool PrepareCatalog(WorkerCatalog&, const ntw2_sweep::WorkerScene&);
+bool PrepareCatalog(WorkerCatalog&, const kntwr_sweep::WorkerScene&);
 bool PrepareWorker(WorkerContext&, const WorkerCatalog&);
 // Activation-cached diagnostic tail: five allocated byte totals followed by
 // the five logical counts, in ring/capsule/wall/edge/polygon-point order.

@@ -8,7 +8,7 @@
 
 // Approved image SHA256 13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4.
 // Concrete tables, not target addresses alone, identify the three classes.
-namespace ntw2_action_node {
+namespace kntwr_action_node {
 namespace {
 static_assert(sizeof(void*) == 4, "action node ABI is Win32");
 U imageBase, words[kClassCount][kWords], events[kClassCount][kEventWords], sequence;
@@ -49,11 +49,11 @@ struct Frame {
 };
 Frame frame;
 U Token() { sequence = (sequence + 1) & 0x7fffffff; if (!sequence) ++sequence; return sequence; }
-void Refuse(Frame& f, ntw2_move_node::Reason reason) {
+void Refuse(Frame& f, kntwr_move_node::Reason reason) {
     f.refused = true; U* w = words[f.classIndex];
     ++w[Refused]; ++w[NeedsOwnerCount];
-    ++w[reason == ntw2_move_node::NeedsProjection ? ProjectionNeedsOwner :
-        reason == ntw2_move_node::NeedsColdAdjustment ? ColdAdjustmentNeedsOwner : PredicateNeedsOwner];
+    ++w[reason == kntwr_move_node::NeedsProjection ? ProjectionNeedsOwner :
+        reason == kntwr_move_node::NeedsColdAdjustment ? ColdAdjustmentNeedsOwner : PredicateNeedsOwner];
 }
 void Difference(Frame& f, U offset, U expected, U actual) {
     U* w = words[f.classIndex]; w[LastMismatchOffset] = offset;
@@ -113,15 +113,15 @@ void OrderEvent(Frame& f, U order, U special, Pc next, bool byteSpecial = false)
 }
 U AdjustedOrder(const Frame& f, U offset) {
     U order = Get<U>(f.node, offset);
-    return Get<B>(f.node, 0x45) ? ntw2_move_node::AdjustOrder(f.owner, order, Get<U>(f.node, 0x38)) : order;
+    return Get<B>(f.node, 0x45) ? kntwr_move_node::AdjustOrder(f.owner, order, Get<U>(f.node, 0x38)) : order;
 }
 bool Descriptor(Frame& f, U descriptor[5]) {
     memcpy(descriptor, f.node + 0x1c, 20);
     if (!Get<B>(f.node, 0x45)) return true;
     U reference[5]; memcpy(reference, descriptor, 20);
-    auto reason = ntw2_move_node::AdjustDescriptor(f.owner, reference, f.entries, descriptor,
+    auto reason = kntwr_move_node::AdjustDescriptor(f.owner, reference, f.entries, descriptor,
         &words[f.classIndex][PrivateProjectionCalls]);
-    if (reason == ntw2_move_node::Ready) return true;
+    if (reason == kntwr_move_node::Ready) return true;
     Refuse(f, reason); return false;
 }
 void Materialize(const U descriptor[5], float xyz[3]) {
@@ -135,7 +135,7 @@ bool Near(Frame& f, bool& near) {
         ((Read<B>(f.owner + 0x110) & 1) || !Read<B>(f.owner + 0x117))) return true;
     U group = Read<U>(f.owner + 0x1f0); if (!group) return true;
     float scale;
-    if (!ntw2_move_node::AdjustmentScale(group, scale)) { Refuse(f, ntw2_move_node::NeedsColdAdjustment); return false; }
+    if (!kntwr_move_node::AdjustmentScale(group, scale)) { Refuse(f, kntwr_move_node::NeedsColdAdjustment); return false; }
     float square;
     __asm { fld scale }
     __asm { fmul scale }
@@ -205,12 +205,12 @@ void Predict(Frame& f) {
             if ((f.classIndex == RelatedStep && f.operation == Begin) ||
                 (f.classIndex == RelatedBegin && f.operation == Step)) { f.pc = Done; return; }
             U order;
-            if (!RelatedOrder(f, order)) { Refuse(f, ntw2_move_node::NeedsOwner); return; }
+            if (!RelatedOrder(f, order)) { Refuse(f, kntwr_move_node::NeedsOwner); return; }
             OrderEvent(f, order, 0, Done); return;
         }
         B second = 0;
-        bool first = ntw2_move_node::First(f.owner);
-        if (first && !ntw2_move_node::Second(f.owner, second)) { Refuse(f, ntw2_move_node::NeedsOwner); return; }
+        bool first = kntwr_move_node::First(f.owner);
+        if (first && !kntwr_move_node::Second(f.owner, second)) { Refuse(f, kntwr_move_node::NeedsOwner); return; }
         bool special = first && second;
         if (special || f.operation == Begin || Read<U>(f.owner + 0x1d8) == 5) {
             OrderEvent(f, special ? 5 : AdjustedOrder(f, 0x30), special ? 1 : 0,
@@ -257,7 +257,7 @@ void Predict(Frame& f) {
     case StepSeven: Put(f.node, 0x18, U(1)); Put(f.node, 8, B(1)); f.pc = StepTime; break;
     case StepOther: Put(f.node, 8, B(1)); f.pc = StepTime; break;
     case StepTime: {
-        bool ready; if (!TimedAction(f, ready)) { Refuse(f, ntw2_move_node::NeedsOwner); return; }
+        bool ready; if (!TimedAction(f, ready)) { Refuse(f, kntwr_move_node::NeedsOwner); return; }
         if (!ready) { f.pc = Done; return; }
         Emit(f, ResetOrder, f.owner, StepReset); f.event.mask[0] = ~0u; return;
     }
@@ -373,4 +373,4 @@ void After(U token) {
     }
     active = false;
 }
-} // namespace ntw2_action_node
+} // namespace kntwr_action_node

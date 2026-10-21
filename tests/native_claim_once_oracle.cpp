@@ -1,4 +1,4 @@
-// Oracle for src/ai/ntw2_claim_once.{h,cpp} (--ai-claim-once) on a private relocated mapping of the owned image.
+// Oracle for src/ai/kntwr_claim_once.{h,cpp} (--ai-claim-once) on a private relocated mapping of the owned image.
 //  * equivalence: whenever no recompute is masked (valid memo, one tailing entry, refusals) the host loop (Gate) performs exactly the call
 //    sequence of the ORIGINAL 0x7524A0 bytes: claimed units in order, row bytes afterwards, one post-loop 0x84B1D0(ctrl, 0); the loop reloads
 //    [L+8] each iteration (a claim callback that appends a row is visited);
@@ -19,12 +19,12 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_claim_once.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_claim_once.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
-namespace co=ntw2_claim_once;
+namespace co=kntwr_claim_once;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 static B* image;
 static U delta, checks, imageSize;
@@ -46,7 +46,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;

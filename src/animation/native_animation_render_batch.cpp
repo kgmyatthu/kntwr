@@ -1,4 +1,4 @@
-// See native_animation_render_batch.h.  Build: CMake target ntw2_animation_render_batch (x86, /O2 /fp:precise /arch:SSE2).
+// See native_animation_render_batch.h.  Build: CMake target kntwr_animation_render_batch (x86, /O2 /fp:precise /arch:SSE2).
 //
 // Every floating-point expression keeps the instruction order of the original scalar SSE code (mulss/addss/subss, no
 // reassociation, no FMA).  Sources, all in native-animation-render-batch-*.asm:

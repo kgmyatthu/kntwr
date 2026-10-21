@@ -6,7 +6,7 @@
 // the live receiver. Gates forward synchronously, including UNKNOWN: a census
 // refusal is never an inactive result or a second execution of the occurrence.
 // No executable image bytes, vtables, outputs or native return ABI are changed.
-namespace ntw2_brain2 {
+namespace kntwr_brain2 {
 using U = uint32_t;
 constexpr U kVersion = 2, kWords = 48;
 constexpr U kDiagReasonWords = 32, kDiagGateWords = 80;
@@ -18,7 +18,7 @@ enum RouteWord : U {
 // ConfiguredDriver: 0 original observation, 1 BRAIN_W_MOVEORDER. LastDriverClone
 // records actual clone ID+1 (zero original), not an assumed LOCO/shared binding.
 // VirtualBegins/Steps include every dynamic node class at the four holder seams;
-// exact reference-node captures remain in ntw2_node's separate status.
+// exact reference-node captures remain in kntwr_node's separate status.
 constexpr U kNodeTargetWords = 36, kNodeTargetTop = 8;
 // NodeTargetSnapshot: version, distinct targets, overflow calls, reserved;
 // then eight (preferred target VA, calls) pairs for begin, and eight for step.
@@ -114,7 +114,7 @@ constexpr U kCensusWords = ServiceCount * kServiceStride;
 // Full service/first-reason histograms are in CensusSnapshot.
 
 // Bind before clone construction. The image must remain mapped while resident
-// clones exist. Writes only supplied NTW2_BIND_COUNT binding slots, never .text.
+// clones exist. Writes only supplied KNTWR_BIND_COUNT binding slots, never .text.
 bool Bind(U imageBase, U* bindings);
 // Shadow modes imply serial gated clones; none changes worker admission.
 // finalizerShadow: --brain-finalizer-shadow (native_finalizer.h ShadowBefore/After on proved 819770 calls).
@@ -218,7 +218,7 @@ Classification WorkerClassify(U target, U site, U receiver, const U* args, U ent
 bool WorkerSiteForced(U site);
 bool WorkerForwardable(U target, U site, U receiver, const U* args, U entity, WitnessDeps* deps = nullptr);
 bool WorkerWriteFree(U target);
-// NTW2_CLONE id of the BRAIN2 clone for a preferred VA, else ~0u.
+// KNTWR_CLONE id of the BRAIN2 clone for a preferred VA, else ~0u.
 U CloneIdFor(U originalVA);
 // Observe() per-site result for a PUSHAD block exactly as ObserveGate passes.
 Classification WorkerObserveClassify(U site, const U* registers, U entity, WitnessDeps* deps = nullptr);
@@ -266,4 +266,4 @@ StaticVerdict WorkerStaticVerdict(U target, U site);
 void SetWorkerRandomStream(U lcg);
 bool WorkerRandomStream(U target, U receiver);
 const char* ServiceName(Service service);
-} // namespace ntw2_brain2
+} // namespace kntwr_brain2

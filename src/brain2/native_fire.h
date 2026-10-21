@@ -1,10 +1,10 @@
 #pragma once
 #include <stdint.h>
-#define NTW2_FIRE_WORD_LABELS \
+#define KNTWR_FIRE_WORD_LABELS \
  "version", "enabled", "calls", "compared", "mismatches", "faults", "reentry", "needs_owner", \
  "candidate_owner", "request_owner", "gather_owner", "holder_owner", "commit_owner", "gathers_actual", "gathers_predicted", "event_mismatches", \
  "first_entity", "first_offset", "first_expected", "first_actual", "state_before", "state_after", "request_actual", "event_unpredicted"
-#define NTW2_FIRE_COMMIT_LABELS \
+#define KNTWR_FIRE_COMMIT_LABELS \
  "version", "refusals", "primary_observer", "primary_unlink", "primary_other", "multiple_guard_classes", \
  "has_observer_guard", "has_unlink_guard", "has_other_guard", "missing_observer", "missing_speed", \
  "getter_mismatch", "selector_mismatch", "old_remove_mismatch", "new_add_mismatch", \
@@ -12,8 +12,8 @@
  "last_old_observer", "last_old_remove", "last_new_add", "last_list", "last_prev", "last_next", "last_head", \
  "unlink_has_prev", "unlink_has_next", "unlink_is_head", "last_state"
 #ifdef __cplusplus
-namespace ntw2_sweep { struct WorkerScene; }
-namespace ntw2_fire {
+namespace kntwr_sweep { struct WorkerScene; }
+namespace kntwr_fire {
 using U = uint32_t;
 constexpr U SoldierBytes = 0x680;
 enum Word : U { Version, Enabled, Calls, Compared, Mismatches, Faults, Reentry, OwnerRequired,
@@ -44,7 +44,7 @@ struct Snapshot {
  bool descriptor_valid = false;
  U descriptor_target = 0, holder_target = 0;
  // Borrow the mover's generation-frozen environment grid; never recapture it.
- const ntw2_sweep::WorkerScene* environment = nullptr;
+ const kntwr_sweep::WorkerScene* environment = nullptr;
  // Caller retains the same immutable scene generation until Run completes.
  bool terrain_known = false, terrain_blocked = false, candidate_target_valid = false;
  float candidate_time = 0, candidate_target[2]{};
@@ -64,7 +64,7 @@ struct Work {
 // Capture owner-side only. Run uses only the snapshot and participant-private
 // Work, allocates nothing and makes no original calls. On refusal Work is NOT
 // committable: replay the untouched original on the owner instead.
-bool Capture(U soldier, Snapshot&, const ntw2_sweep::WorkerScene* = nullptr);
+bool Capture(U soldier, Snapshot&, const kntwr_sweep::WorkerScene* = nullptr);
 bool Run(const Snapshot&, Work&);
 bool Start(const Binding&);
 void Stop();

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read NTW2 profile ABI 7/8 and resolve runtime RVAs using the matching DLL/PDB.
+"""Read KNTWR profile ABI 7/8 and resolve runtime RVAs using the matching DLL/PDB.
 
 Usage:
-  python profile_symbolize.py receipt.json.profile.bin --dll build/native/bin/Release/ntw2_runtime.dll
+  python profile_symbolize.py receipt.json.profile.bin --dll build/kntwr/bin/Release/kntwr_runtime.dll
   python profile_symbolize.py receipt.json.profile.bin --frame-va 0x585d40
 
 ABI 8 preserves the 15748-byte ABI-7 header, seven bucket_count*u32 image
@@ -335,7 +335,7 @@ def report(profile: Profile, symbols: DbgHelp | None, limit: int = 20, frame_rva
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("profile", type=Path)
-    parser.add_argument("--dll", type=Path, default=Path(__file__).resolve().parents[2] / "build/native/bin/Release/ntw2_runtime.dll")
+    parser.add_argument("--dll", type=Path, default=Path(__file__).resolve().parents[2] / "build/kntwr/bin/Release/kntwr_runtime.dll")
     parser.add_argument("--pdb-dir", type=Path, help="additional local directory containing the matching PDB")
     parser.add_argument("--no-symbols", action="store_true", help="explicitly print raw RVAs without loading DbgHelp")
     parser.add_argument("--top", type=int, default=20)

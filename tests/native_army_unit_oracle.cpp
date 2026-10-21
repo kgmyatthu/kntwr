@@ -9,12 +9,12 @@
 #include <algorithm>
 #include <vector>
 #include "army/native_army_unit.h"
-#include "ntw2_runtime.h"
-static_assert(ntw2_army_unit::kWords == NTW2_ARMY_UNIT_WORDS, "module row matches the status ABI tail");
-static_assert(ntw2_army_unit::kB0Words == NTW2_ARMY_B0_WORDS, "B0 row matches the status ABI tail");
+#include "kntwr_runtime.h"
+static_assert(kntwr_army_unit::kWords == KNTWR_ARMY_UNIT_WORDS, "module row matches the status ABI tail");
+static_assert(kntwr_army_unit::kB0Words == KNTWR_ARMY_B0_WORDS, "B0 row matches the status ABI tail");
 #include "brain2/native_region_table.h"
 
-using namespace ntw2_army_unit;
+using namespace kntwr_army_unit;
 static unsigned checks, failures;
 static void Check(bool ok, const char* what) { ++checks; if (!ok) { ++failures; fprintf(stderr, "FAIL %s\n", what); } }
 static U A(const void* p) { return static_cast<U>(reinterpret_cast<uintptr_t>(p)); }
@@ -105,7 +105,7 @@ static void RngCases() {
 
 static void ProbeCases() {
     uint8_t* u = Page(); uint8_t* f = Page(); uint8_t* att = Page(); uint8_t* m = Page(); uint8_t* r = Page();
-    ntw2_region::Table* t = new ntw2_region::Table(); t->Clear();
+    kntwr_region::Table* t = new kntwr_region::Table(); t->Clear();
     U q = 0;
     Put(u, 0xAA0, 2); u[0xD48] = 7; Put(u, 0xDC8, A(r)); r[0x68] = 1; Put(u, 0xDCC, 0); Put(u, 0xAE8, 0);
     Put(u, 0x930, 1); Put(u, 0x934, 2); Put(u, 0x398 + 2 * 0x90, 0x1324B54u); // preferred command vtable at delta 0
@@ -259,7 +259,7 @@ static void DecommitCases() {
 struct Image { uint8_t* base; U delta; };
 static Image MakeImage() { Image i; i.base = Page(0x1A2000); i.delta = A(i.base) - 0x1459000u; return i; }
 static uint8_t* At(const Image& i, U va) { return i.base + (va - 0x1459000u); }
-static const char* const kB0Labels[] = { NTW2_ARMY_B0_LABELS };
+static const char* const kB0Labels[] = { KNTWR_ARMY_B0_LABELS };
 static_assert(sizeof(kB0Labels) / sizeof(kB0Labels[0]) == kB0Words, "one B0 label per word");
 
 static void B0PureCases() {
@@ -293,7 +293,7 @@ static void B0PureCases() {
 static void B0GlobalsCases() {
     const Image img = MakeImage();
     uint8_t* m = Page();
-    ntw2_region::Table* t = new ntw2_region::Table(); t->Clear();
+    kntwr_region::Table* t = new kntwr_region::Table(); t->Clear();
     U q = 0;
     Put(At(img, 0x14A3EC4), 4, 16); Put(At(img, 0x14A3EC4), 8, 3); Put(At(img, 0x14A3EC4), 0xC, 0xAAAA0000u);
     Put(At(img, 0x14A3ED8), 4, 32); Put(At(img, 0x14A3ED8), 8, 0); Put(At(img, 0x14A3ED8), 0xC, 0xBBBB0000u);
@@ -313,7 +313,7 @@ static void B0GlobalsCases() {
     Check(g.recorderOk && !g.manager && !g.managerOk && !RecorderQualified(g), "null manager is read, not dereferenced");
     delete t;
     VirtualFree(img.base, 0, MEM_RELEASE);
-    t = new ntw2_region::Table(); t->Clear(); // fresh proofs: the released image range must be re-proved unreadable
+    t = new kntwr_region::Table(); t->Clear(); // fresh proofs: the released image range must be re-proved unreadable
     ReadGlobals(img.delta, *t, q, g);
     Check(!g.scratchOk && !g.recorderOk, "released image globals refused without a fault");
     delete t;
@@ -340,7 +340,7 @@ static void B0ProbeCases() {
     Put(other, 0, 0x1321000u);
     Put(u, 0x1F4, A(att)); Put(att, 0x10, 3); Put(att, 0x14, A(att) + 0x80);
     Put(u, 0xACC, 2); Put(u, 0xAD0, A(list)); Put(list, 0, A(f)); Put(list, 4, A(other));
-    ntw2_region::Table* t = new ntw2_region::Table(); t->Clear();
+    kntwr_region::Table* t = new kntwr_region::Table(); t->Clear();
     U q = 0;
     B0Probe p;
     Check(ReadB0Probe(A(u), 0, *t, q, p), "readable unit probed for B0");

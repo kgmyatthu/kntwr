@@ -6,7 +6,7 @@
 
 static_assert(sizeof(void*) == 4, "native relink log is a Win32 x86 adapter");
 
-namespace ntw2_loco {
+namespace kntwr_loco {
 namespace {
 using U = uint32_t;
 inline U D(U address) { return *reinterpret_cast<const U*>(static_cast<uintptr_t>(address)); }
@@ -240,4 +240,4 @@ void MoveLogPublish(MoveLog& log) {
 }
 void MoveLogUnpublish() { g_published = nullptr; }
 
-} // namespace ntw2_loco
+} // namespace kntwr_loco

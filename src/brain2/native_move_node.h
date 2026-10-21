@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-#define NTW2_MOVE_NODE_WORD_LABELS \
+#define KNTWR_MOVE_NODE_WORD_LABELS \
  "version", "enabled", "bound", "captures", "admitted", "refused", "constructors", "begins", \
  "steps", "destructors", "comparisons", "matches", "mismatches", "node_mismatches", \
  "owner_mismatches", "event_mismatches", "predicted_orders", "predicted_setters", \
@@ -8,7 +8,7 @@
  "phase_checkpoints", "needs_owner", "reentrant_refusals", "last_node", \
  "last_operation", "last_mismatch_offset", "last_expected", "last_actual", \
  "workers_blocked", "fake_table_installed"
-#define NTW2_MOVE_NODE_EVENT_WORD_LABELS \
+#define KNTWR_MOVE_NODE_EVENT_WORD_LABELS \
  "order_predicted", "order_observed", "order_mismatch", \
  "setter_predicted", "setter_observed", "setter_mismatch", \
  "request_predicted", "request_observed", "request_mismatch", \
@@ -16,7 +16,7 @@
  "private_projection_calls", "last_projection_refusal_target", "reserved14", "reserved15"
 #ifdef __cplusplus
 #include <string.h>
-namespace ntw2_move_node {
+namespace kntwr_move_node {
 using U = uint32_t;
 using B = unsigned char;
 constexpr U kWords = 32, kEventWords = 16, kNodeBytes = 0x48;
@@ -89,5 +89,5 @@ void EventSnapshot(U* words /*[16]*/);
 U Before(U originalVA, U receiver, const U* args, const U* cloneEntries);
 void After(U token);
 void Observe(U originalVA, U receiver, const U* args);
-} // namespace ntw2_move_node
+} // namespace kntwr_move_node
 #endif

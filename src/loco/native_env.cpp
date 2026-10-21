@@ -10,7 +10,7 @@
 #include <new>
 #include "native_env.h"
 #pragma fenv_access(on)
-namespace ntw2_env {
+namespace kntwr_env {
 namespace {
 using U = uint32_t; using B = uint8_t;
 static_assert(sizeof(void*) == 4, "environment adapter is x86");
@@ -90,7 +90,7 @@ void Enqueue(WorkerScratch& s,U owner) {
  const uint16_t id=Load<uint16_t>(owner,0x2C); const U mask=1u<<(id&31);
  if(s.visited[id>>5]&mask) return;
  if(s.count==s.fifo.size() || s.touched_count==s.touched.size())
-  RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+  RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
  s.visited[id>>5]|=mask; s.touched[s.touched_count++]=id; s.fifo[s.count++]=owner;
 }
 }
@@ -213,30 +213,30 @@ template<class Pol> void RunCore(AgentView& a,Pol& pol,WorkerScratch& work,Resul
 // copy; any other target is refused before the caller can observe a result.
 struct WorkerPolicy {
  U delta, copy, n, list;
- const ntw2_sweep::WorkerScene& scene;
- mutable const ntw2_sweep::WorkerOwner* cachedOwner = nullptr;
- mutable const ntw2_sweep::WorkerEdge* cachedEdge = nullptr;
- const ntw2_sweep::WorkerOwner& Owner(U identity) const {
+ const kntwr_sweep::WorkerScene& scene;
+ mutable const kntwr_sweep::WorkerOwner* cachedOwner = nullptr;
+ mutable const kntwr_sweep::WorkerEdge* cachedEdge = nullptr;
+ const kntwr_sweep::WorkerOwner& Owner(U identity) const {
   if(cachedOwner && cachedOwner->identity==identity) return *cachedOwner;
   const auto it=std::lower_bound(scene.owners.begin(),scene.owners.end(),identity,
-   [](const ntw2_sweep::WorkerOwner& o,U p) { return o.identity<p; });
-  if(it==scene.owners.end() || it->identity!=identity) RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+   [](const kntwr_sweep::WorkerOwner& o,U p) { return o.identity<p; });
+  if(it==scene.owners.end() || it->identity!=identity) RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
   cachedOwner=&*it; return *cachedOwner;
  }
- const ntw2_sweep::WorkerEdge& Edge(U identity) const {
+ const kntwr_sweep::WorkerEdge& Edge(U identity) const {
   if(cachedEdge && cachedEdge->identity==identity) return *cachedEdge;
   const auto it=std::lower_bound(scene.edges.begin(),scene.edges.end(),identity,
-   [](const ntw2_sweep::WorkerEdge& e,U p) { return e.identity<p; });
-  if(it==scene.edges.end() || it->identity!=identity) RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+   [](const kntwr_sweep::WorkerEdge& e,U p) { return e.identity<p; });
+  if(it==scene.edges.end() || it->identity!=identity) RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
   cachedEdge=&*it; return *cachedEdge;
  }
  U First(U o) const { return Owner(o).firstEdge; }
  U Next(U e) const { return Edge(e).next; }
  Point EdgePoint(U e) const { const auto& v=Edge(e); return {v.point[0],v.point[1]}; }
  U Neighbors(U e) const { return static_cast<U>(Edge(e).neighbors.size()); }
- const ntw2_sweep::WorkerEdge* NeighborRecords(U e) const { return &Edge(e); }
- U Neighbor(const ntw2_sweep::WorkerEdge* e,U i) const { return e->neighbors[i]; }
- U NeighborEdge(const ntw2_sweep::WorkerEdge* e,U i) const { return e->neighborEdges[i]; }
+ const kntwr_sweep::WorkerEdge* NeighborRecords(U e) const { return &Edge(e); }
+ U Neighbor(const kntwr_sweep::WorkerEdge* e,U i) const { return e->neighbors[i]; }
+ U NeighborEdge(const kntwr_sweep::WorkerEdge* e,U i) const { return e->neighborEdges[i]; }
  bool Outside(U e,Point p) const {
   const auto& v=Edge(e); return SidePoints({v.point[0],v.point[1]},{v.nextPoint[0],v.nextPoint[1]},p);
  }
@@ -256,7 +256,7 @@ struct WorkerPolicy {
   case 0x54E920: return Load<B>(receiver,4);
   case 0x462CB0: return 0;
   case 0x447880: return 1;
-  default: RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr); return 0;
+  default: RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr); return 0;
   }
  }
  U Eligible(U o) const { return Pure(o,Target(o,0x24)); }
@@ -264,13 +264,13 @@ struct WorkerPolicy {
  // 4470B0 is `mov eax,ecx; ret`: the identity is the original receiver and the
  // position words are the private copy's x/y/z (+0x48..+0x50).
  U Identity(const AgentView& a,U pos[3]) const {
-  if(a.identity_target-delta!=0x4470B0) RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+  if(a.identity_target-delta!=0x4470B0) RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
   for(U i=0;i<3;++i) pos[i]=Load<U>(copy,0x48+i*4);
   return a.entity;
  }
- void Notified(const AgentView&) const { RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr); }
+ void Notified(const AgentView&) const { RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr); }
  U Capable(const AgentView& a) const {
-  if(!ntw2_sweep::PureAgentTarget(copy,a.policy_target,delta)) RaiseException(ntw2_sweep::WorkerRefusal,0,0,nullptr);
+  if(!kntwr_sweep::PureAgentTarget(copy,a.policy_target,delta)) RaiseException(kntwr_sweep::WorkerRefusal,0,0,nullptr);
   return reinterpret_cast<B(__thiscall*)(void*)>(a.policy_target)(Pointer(copy));
  }
 };
@@ -303,7 +303,7 @@ bool WorkerEnvImpl(WorkerContext& c,U p,U identity,U scratch,Result& out) {
   if(!expected || e.target-delta!=expected) return false;
  }
  // A recovered owner is later queried (+0x24, +0xC) by the clone tail outside this port.
- if(a.owner && (!ntw2_sweep::PureByteTarget(Target(a.owner,0x24),delta) || !ntw2_sweep::PureByteTarget(Target(a.owner,0xC),delta))) return false;
+ if(a.owner && (!kntwr_sweep::PureByteTarget(Target(a.owner,0x24),delta) || !kntwr_sweep::PureByteTarget(Target(a.owner,0xC),delta))) return false;
  return true;
 }
 }
@@ -318,8 +318,8 @@ void Capture(Agent* agent,Scratch* input,AgentView& a,Scene& s) {
  s.policies.clear(); s.capture_policies=true;
  AgentView probe=a; Result ignored; Run(probe,s,scratch,ignored); s.capture_policies=false;
 }
-bool PrepareWorker(WorkerContext& c,const ntw2_sweep::WorkerScene& s) {
- c.fp=ntw2_sweep::CaptureFp();
+bool PrepareWorker(WorkerContext& c,const kntwr_sweep::WorkerScene& s) {
+ c.fp=kntwr_sweep::CaptureFp();
  if(!s.built) return false;
  if(c.scene==&s && c.build==s.build) return true;
  c.image_delta=s.image_delta;
@@ -330,13 +330,13 @@ size_t HeapBytes(const WorkerContext& c) {
  return c.scratch.fifo.capacity()*sizeof(U)+c.scratch.touched.capacity()*sizeof(uint16_t);
 }
 bool WorkerEnv(WorkerContext& c,void* agent,U identity,void* scratch,Result& out) {
- ntw2_sweep::FpState saved{}; bool ok=false;
- if(!c.fp_managed) { saved=ntw2_sweep::CaptureFp(); ntw2_sweep::ApplyFp(c.fp); }
+ kntwr_sweep::FpState saved{}; bool ok=false;
+ if(!c.fp_managed) { saved=kntwr_sweep::CaptureFp(); kntwr_sweep::ApplyFp(c.fp); }
  __try {
   __try { ok=WorkerEnvImpl(c,Address(agent),identity,Address(scratch),out); }
-  __finally { if(!ok) c.scratch.Clear(); if(!c.fp_managed) ntw2_sweep::ApplyFp(saved); }
+  __finally { if(!ok) c.scratch.Clear(); if(!c.fp_managed) kntwr_sweep::ApplyFp(saved); }
  }
- __except(ntw2_sweep::RefusalFilter(GetExceptionCode())) { ok=false; }
+ __except(kntwr_sweep::RefusalFilter(GetExceptionCode())) { ok=false; }
  if(ok) {
   const AgentView& a=c.view;
   std::memcpy(static_cast<B*>(agent)+0x10,&a.owner,4); static_cast<B*>(agent)[0xB4]=a.b4; static_cast<B*>(agent)[0xB5]=a.b5;

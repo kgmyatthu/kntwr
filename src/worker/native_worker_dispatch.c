@@ -12,9 +12,9 @@
  * No heap, no globals, no string/jump-table data, no CRT calls (zeroing uses __stosd): the .text section is
  * copied verbatim into the game.  Every Win32 function arrives through the init table.
  *
- * Build (x86 MSVC; CMake target ntw2_worker_dispatch, flags recorded in the top-level CMakeLists.txt):
+ * Build (x86 MSVC; CMake target kntwr_worker_dispatch, flags recorded in the top-level CMakeLists.txt):
  *   cl /nologo /c /TC /O2 /GS- /Gy /Zl /W4 native_worker_dispatch.c
- *   standalone payload DLL: CMake target ntw2_payload_worker_dispatch (/DLL /NOENTRY /NODEFAULTLIB /MACHINE:X86 /OPT:REF)
+ *   standalone payload DLL: CMake target kntwr_payload_worker_dispatch (/DLL /NOENTRY /NODEFAULTLIB /MACHINE:X86 /OPT:REF)
  */
 #include <intrin.h>
 #include <xmmintrin.h>

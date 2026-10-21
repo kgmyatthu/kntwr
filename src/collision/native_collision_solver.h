@@ -3,9 +3,9 @@
 #include "core/native_workload.h"
 
 // Owner-owned lifetime. No original executable instructions are patched.
-namespace ntw2_loco { struct GridView; }
-namespace ntw2_contact { struct Plan; }
-namespace ntw2_collide {
+namespace kntwr_loco { struct GridView; }
+namespace kntwr_contact { struct Plan; }
+namespace kntwr_collide {
 enum Word : uint32_t {
     Calls, SolverTicks, FallbackTicks, CapacityFallbacks, LayoutFallbacks,
     StickyFallbacks, Records, Cells, Pairs, Contacts, Callbacks,
@@ -36,8 +36,8 @@ struct Binding {
     // Non-null requests owned mode: the stage consumes the returned CSR directly. A null
     // view, or any identity/geometry mismatch against live state, runs the untouched
     // original stage before the first game write; the grid is never rebuilt or audited here.
-    const ntw2_loco::GridView* (*read_grid)(void* manager);
-    // ntw2_contact::Mode (0 off): ModeShadow plans every callback on the pool and compares it with
+    const kntwr_loco::GridView* (*read_grid)(void* manager);
+    // kntwr_contact::Mode (0 off): ModeShadow plans every callback on the pool and compares it with
     // the original the owner still runs; ModeWorkers replays planned same-team effects on the owner.
     uint32_t contact_mode;
 };
@@ -54,9 +54,9 @@ enum SourceWord : uint32_t {
 // Resets counters and binds callbacks; no workload storage is reserved.
 bool Start(const Binding& binding);
 // Exact planned reservation after Start, without allocation; UINT32_MAX for invalid capacity.
-uint32_t EstimateActivationBytes(const ntw2_workload::Capacity& capacity);
+uint32_t EstimateActivationBytes(const kntwr_workload::Capacity& capacity);
 // Owner-boundary allocation/prefault only. Capacity exhaustion later refuses the whole stage.
-bool Activate(void* manager,const ntw2_workload::Capacity& capacity);
+bool Activate(void* manager,const kntwr_workload::Capacity& capacity);
 uint32_t StorageBytes();
 // Called only after the routed tick/pool has drained. Retains counters.
 void Stop();
@@ -67,5 +67,5 @@ void SampleSource(uint32_t words[SourceWordCount]);
 // Oracle seam, owner only, between stages: the most recent stage's contact plan rows
 // (plans[0, rows) in contact order; null without a contact mode) and the number of Predict
 // calls its plan phase made (counted at prediction, per chunk). Zero rows when no plan phase ran.
-const ntw2_contact::Plan* ContactPlans(uint32_t& rows, uint32_t& predicted);
+const kntwr_contact::Plan* ContactPlans(uint32_t& rows, uint32_t& predicted);
 }

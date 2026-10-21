@@ -1,5 +1,5 @@
 # Brain v2 module.
-ntw2_runtime_sources(
+kntwr_runtime_sources(
   native_action_node.cpp
   native_brain2.cpp
   native_brain_locality.cpp

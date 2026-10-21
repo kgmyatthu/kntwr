@@ -1,4 +1,4 @@
-// Oracle for src/army/ntw2_mounted_officer.{h,cpp} (--mounted-officer) on a private relocated mapping of the owned image.
+// Oracle for src/army/kntwr_mounted_officer.{h,cpp} (--mounted-officer) on a private relocated mapping of the owned image.
 //  * The ORIGINAL bytes of the unit constructor's mount loop (0x51C22E..0x51C462: gate, loop body, both vector appends, radius MAXSS) run in the private mapping from a
 //    hand-built frame, their engine callees (0x10D3140, 0xF548D0, 0x80B670, 0x531E30, 0x59EED0, 0x655B20, 0x444B40, 0xFF7EF0) redirected to scripted fakes.  They run on
 //    a one-man unit copy with [unit+0x34] = 1 and [unit+0x30] = 1, the path the engine itself takes for a general's horse (one rider, one mount).  The host Gate runs
@@ -21,12 +21,12 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "army/ntw2_mounted_officer.h"
+#include "kntwr_runtime.h"
+#include "army/kntwr_mounted_officer.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
-namespace mo=ntw2_mounted_officer;
+namespace mo=kntwr_mounted_officer;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 static B* image;
 static U delta, checks, imageSize;
@@ -49,7 +49,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;

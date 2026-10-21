@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-namespace ntw2_loco {
+namespace kntwr_loco {
 
 enum MoveOpKind : uint8_t { MoveUnlinkGrid = 0, MoveInsertGrid = 1 };
 enum MoveOpSource : uint8_t { MoveFromWorker = 0, MoveFromClone = 1 };
@@ -107,4 +107,4 @@ bool MoveLogExpectedCount(const MoveLog& log, uint32_t record, uint32_t& nodes);
 void MoveLogPublish(MoveLog& log);   // makes ReadMoveDelta() return this log's view
 void MoveLogUnpublish();
 
-} // namespace ntw2_loco
+} // namespace kntwr_loco

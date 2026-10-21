@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Apply / revert / inspect / embed an NTWPATCH binary patch (data/napoleon.ntwpatch, data/mss32.ntwpatch).
 
-Build- and test-time tool.  The game files on disk stay STOCK: ntw2.exe applies the same patch in memory
-(src/core/ntw2_gameplay_patch.c).  This script is the independent file-level implementation of the same format and is what
+Build- and test-time tool.  The game files on disk stay STOCK: kntwr.exe applies the same patch in memory
+(src/core/kntwr_gameplay_patch.c).  This script is the independent file-level implementation of the same format and is what
 produces the pinned image every clone spec, oracle and Ghidra snapshot is built against.
 
 NTWPATCH layout (little endian; documented in F:/NTW2/patcher/src/lib.rs):
@@ -18,7 +18,7 @@ Commands (default: generate):
     apply     --patch P --input STOCK --output OUT       verify stock sha, apply, verify patched sha, write OUT
     revert    --patch P --input PATCHED --output OUT     the inverse
     info      --patch P                                  header, hashes, run census, appended sections
-    embed     [--check]   write (or compare) src/core/ntw2_gameplay_patch_data.inc from data/*.ntwpatch
+    embed     [--check]   write (or compare) src/core/kntwr_gameplay_patch_data.inc from data/*.ntwpatch
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ REPO = HERE.parent
 DATA = REPO / 'data'
 DEFAULT_GAME_DIR = Path('E:/steam/steamapps/common/Napoleon Total War')
 DEFAULT_OUT_DIR = Path('F:/NTW2/translated_code/analysis')
-EMBED_PATH = REPO / 'src' / 'core' / 'ntw2_gameplay_patch_data.inc'
+EMBED_PATH = REPO / 'src' / 'core' / 'kntwr_gameplay_patch_data.inc'
 
 MAGIC = b'NTWPATCH'
 VERSION = 1
@@ -204,8 +204,8 @@ def embed_text() -> str:
            f' * napoleon: stock {nap.stock_sha.hex()} -> patched {nap.patched_sha.hex()}',
            f' * mss32   : stock {mss.stock_sha.hex()} -> patched {mss.patched_sha.hex()}',
            ' * Verbatim NTWPATCH files (see tools/apply_ntwpatch.py for the layout). */',
-           _c_array('ntw2_gameplay_patch_napoleon', nap.raw),
-           _c_array('ntw2_gameplay_patch_mss32', mss.raw), '']
+           _c_array('kntwr_gameplay_patch_napoleon', nap.raw),
+           _c_array('kntwr_gameplay_patch_mss32', mss.raw), '']
     return '\n'.join(out)
 
 

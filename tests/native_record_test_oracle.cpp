@@ -1,6 +1,6 @@
-// Differential oracle for --ai-record-test-shadow / --ai-record-test (src/ai/ntw2_record_test.{h,cpp} + the alt-scope branch of
-// ntw2_poly::Gate). The real 0x80DCF0 -> 0x10EC150 closure of a private relocated copy of the supported image answers the reference; the
-// alternate-delegate route is modelled by a fastcall stand-in for the PS_6A99E0 clone chain that forwards to ntw2_poly::Gate exactly the way
+// Differential oracle for --ai-record-test-shadow / --ai-record-test (src/ai/kntwr_record_test.{h,cpp} + the alt-scope branch of
+// kntwr_poly::Gate). The real 0x80DCF0 -> 0x10EC150 closure of a private relocated copy of the supported image answers the reference; the
+// alternate-delegate route is modelled by a fastcall stand-in for the PS_6A99E0 clone chain that forwards to kntwr_poly::Gate exactly the way
 // the clone chain's 0x7F1E5A call does (ECX = shape, stack = polygon). Asserts:
 //  * Entry forwards the three stack arguments and ECX untouched, returns the callee's EAX, closes the scope, leaves FP control/status/MXCSR to the
 //    callee (integer-only forwarder), and an unarmed Entry calls the ORIGINAL;
@@ -24,9 +24,9 @@
 #include <random>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "ai/ntw2_planner_search.h"
-#include "ai/ntw2_record_test.h"
+#include "kntwr_runtime.h"
+#include "ai/kntwr_planner_search.h"
+#include "ai/kntwr_record_test.h"
 #pragma comment(lib,"bcrypt.lib")
 #pragma fenv_access(on)
 using U=uint32_t;
@@ -48,7 +48,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     image=static_cast<B*>(VirtualAlloc(nullptr,nt->OptionalHeader.SizeOfImage,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE));
@@ -102,31 +102,31 @@ static void RandomShape(float cx,float cz,bool orthonormal,bool integers) {
 static U seenSelf, seenA1, seenA2, seenA3, originalCalls, cloneCalls; static bool seenInScope;
 static void* curShape; static void* curPolygon; static B curAl; static bool runGate;
 static U __fastcall FakeClone(U self,U,U a1,U a2,U a3) {   // PS_6A99E0 chain stand-in: ends in the Gate exactly like the PS_WALK 7F1E5A call
-    seenSelf=self; seenA1=a1; seenA2=a2; seenA3=a3; ++cloneCalls; seenInScope=ntw2_record_test::InScope();
-    if(runGate) curAl=ntw2_poly::Gate(curShape,nullptr,curPolygon);
+    seenSelf=self; seenA1=a1; seenA2=a2; seenA3=a3; ++cloneCalls; seenInScope=kntwr_record_test::InScope();
+    if(runGate) curAl=kntwr_poly::Gate(curShape,nullptr,curPolygon);
     return 0xC0DE0000u|a3;
 }
-static U __fastcall FakeOriginal(U self,U,U a1,U a2,U a3) { seenSelf=self; seenA1=a1; seenA2=a2; seenA3=a3; ++originalCalls; seenInScope=ntw2_record_test::InScope(); return 0x0F1Fu; }
+static U __fastcall FakeOriginal(U self,U,U a1,U a2,U a3) { seenSelf=self; seenA1=a1; seenA2=a2; seenA3=a3; ++originalCalls; seenInScope=kntwr_record_test::InScope(); return 0x0F1Fu; }
 static U Addr(void* f) { return static_cast<U>(reinterpret_cast<uintptr_t>(f)); }
 
 // One call of the modelled alt route: native reference, then Entry -> FakeClone -> Gate from the identical FP state.
 static void AltCall(const char* what) {
     B n; ResetFp(); n=native(shape,nullptr,verts.data());
     curShape=shape; curPolygon=verts.data(); runGate=true; curAl=0xEE;
-    ResetFp(); const U r=ntw2_record_test::Entry(0x13376ACu,0,0xA1A1A1A1u,0xB2B2B2B2u,0x000000C3u);
+    ResetFp(); const U r=kntwr_record_test::Entry(0x13376ACu,0,0xA1A1A1A1u,0xB2B2B2B2u,0x000000C3u);
     Require(r==(0xC0DE0000u|0xC3u),what);
-    Require(!ntw2_record_test::InScope(),"scope closed after Entry");
+    Require(!kntwr_record_test::InScope(),"scope closed after Entry");
     Require(seenSelf==0x13376ACu && seenA1==0xA1A1A1A1u && seenA2==0xB2B2B2B2u && seenA3==0xC3u && seenInScope,"Entry forwards ECX and the three arguments inside the scope");
     Require(curAl==n,what);
 }
 static void PolyCall(const char* what) { // the default route / R2 sites: Gate outside the alt scope
-    B n; ResetFp(); n=native(shape,nullptr,verts.data()); ResetFp(); const B g=ntw2_poly::Gate(shape,nullptr,verts.data()); Require(n==g,what);
+    B n; ResetFp(); n=native(shape,nullptr,verts.data()); ResetFp(); const B g=kntwr_poly::Gate(shape,nullptr,verts.data()); Require(n==g,what);
 }
-static void Refusal(const char* what,ntw2_record_test::Word word,U csr=kCsr) {
-    const volatile U* w=ntw2_record_test::words; const U before=w[word];
+static void Refusal(const char* what,kntwr_record_test::Word word,U csr=kCsr) {
+    const volatile U* w=kntwr_record_test::words; const U before=w[word];
     ResetFp(csr); const B n=native(shape,nullptr,verts.data());
     curShape=shape; curPolygon=verts.data(); runGate=true; curAl=0xEE;
-    ResetFp(csr); ntw2_record_test::Entry(1,0,2,3,4);
+    ResetFp(csr); kntwr_record_test::Entry(1,0,2,3,4);
     Require(curAl==n,what); Require(w[word]==before+1,what);
 }
 static void Fill(void (*call)(const char*),U rounds) {
@@ -138,7 +138,7 @@ static void Fill(void (*call)(const char*),U rounds) {
 int main(int argc,char** argv) {
     if(argc<2) { std::fprintf(stderr,"usage: native_record_test_oracle Napoleon.exe\n"); return 2; }
     Map(argv[1]); native=reinterpret_cast<Native>(At(0x80dcf0));
-    namespace RT=ntw2_record_test;
+    namespace RT=kntwr_record_test;
     using volatile_row=const volatile U*;
     // 0. Disarmed (never configured / ModeOff): Entry calls the original, no scope, row zero.
     RT::Configure(RT::ModeOff,Addr(&FakeClone),Addr(&FakeOriginal),2000);
@@ -146,29 +146,29 @@ int main(int argc,char** argv) {
       bool zero=true; for(U i=0;i<RT::kWords;++i) zero=zero && !RT::words[i]; Require(zero,"row zero when off"); }
     // 1. Shadow record-test next to a LIVE poly route: the alt route answers natively and compares every served call; the poly row is untouched by
     //    alt calls and keeps its live behaviour on direct Gate calls.
-    ntw2_poly::Configure(native,ntw2_poly::ModeLive);
-    RT::Configure(RT::ModeShadow,Addr(&FakeClone),Addr(&FakeOriginal),ntw2_poly::words[31]);
+    kntwr_poly::Configure(native,kntwr_poly::ModeLive);
+    RT::Configure(RT::ModeShadow,Addr(&FakeClone),Addr(&FakeOriginal),kntwr_poly::words[31]);
     Fill(AltCall,40);
     {
         volatile_row w=RT::words;
-        Require(w[RT::WVersion]==1 && w[RT::WMode]==RT::ModeShadow && w[RT::WTscPerUs]==ntw2_poly::words[31] && w[RT::WTscPerUs]>=100,"record row: version, mode, tsc");
+        Require(w[RT::WVersion]==1 && w[RT::WMode]==RT::ModeShadow && w[RT::WTscPerUs]==kntwr_poly::words[31] && w[RT::WTscPerUs]>=100,"record row: version, mode, tsc");
         Require(w[RT::WCalls]==40*12 && w[RT::WServed]>400 && w[RT::WCalls]==w[RT::WServed]+w[RT::WFallKind]+w[RT::WFallFp]+w[RT::WFallDomain]+w[RT::WFallWalkCap]+w[RT::WFallBusy],
                 "record calls == served + fallbacks");
         Require(w[RT::WShadowCompares]==w[RT::WServed] && !w[RT::WMismatchAl] && !w[RT::WMismatchX87] && !w[RT::WMismatchMxcsr],"shadow compares every served call, 0 mismatches");
         Require(w[RT::WSampledCalls]==w[RT::WServed] && w[RT::WServedFastKc]==w[RT::WSampledFastKc] && w[RT::WSampledNativeKc]>0 && w[RT::WSampledFastKc]>0,"shadow samples every served call");
         Require(w[RT::WVerticesSum]>0 && w[RT::WVerticesMax]==1000 && w[RT::WVerticesOver256]>0 && w[RT::WTrue]>0 && w[RT::WTrue]<w[RT::WServed],"vertices, hit/miss mix");
         Require(w[RT::WEntryKc]>0,"entry timing accumulates");
-        for(U i=2;i<=30;++i) Require(!ntw2_poly::words[i],"alt calls leave the poly row untouched");
+        for(U i=2;i<=30;++i) Require(!kntwr_poly::words[i],"alt calls leave the poly row untouched");
     }
     Fill(PolyCall,6);
     {
-        const volatile U* p=ntw2_poly::words;
-        Require(p[0]==1 && p[1]==ntw2_poly::ModeLive && p[2]==6*12 && p[3]>50 && p[29]==p[3]/32 && p[8]==p[29] && !p[9] && !p[10] && !p[11],"direct Gate calls keep the live poly mode and row");
+        const volatile U* p=kntwr_poly::words;
+        Require(p[0]==1 && p[1]==kntwr_poly::ModeLive && p[2]==6*12 && p[3]>50 && p[29]==p[3]/32 && p[8]==p[29] && !p[9] && !p[10] && !p[11],"direct Gate calls keep the live poly mode and row");
         Require(RT::words[RT::WCalls]==40*12,"direct Gate calls leave the record row untouched");
     }
     // 2. Live record-test next to a SHADOW poly route (independent modes), refusals by reason, 1-in-32 sample by count.
-    ntw2_poly::Configure(native,ntw2_poly::ModeShadow);
-    RT::Configure(RT::ModeLive,Addr(&FakeClone),Addr(&FakeOriginal),ntw2_poly::words[31]);
+    kntwr_poly::Configure(native,kntwr_poly::ModeShadow);
+    RT::Configure(RT::ModeLive,Addr(&FakeClone),Addr(&FakeOriginal),kntwr_poly::words[31]);
     Fill(AltCall,64);
     {
         volatile_row w=RT::words; const U served=w[RT::WServed];
@@ -181,7 +181,7 @@ int main(int argc,char** argv) {
         { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{9,9},{10,9},{10,10}}); Refusal("FP-state refusal",RT::WFallFp,0x1f80u); }
         { float s[9]={0,0,0,2,2,1,0,0,1}; SetShape(s); SetPolygon({{1e9f,0},{2,2},{3,1}}); Refusal("domain refusal",RT::WFallDomain); }
         { Star(65537,0,0,10,20,false); float s[9]={100,100,0,2,2,1,0,0,1}; SetShape(s); Refusal("walk-cap refusal",RT::WFallWalkCap); }
-        const volatile U* p=ntw2_poly::words;
+        const volatile U* p=kntwr_poly::words;
         for(U i=2;i<=30;++i) Require(!p[i],"alt calls leave the (shadow) poly row untouched");
     }
     // 3. Slot routing counters and the row after a reconfigure (a second Configure resets it).
@@ -191,7 +191,7 @@ int main(int argc,char** argv) {
     { bool zero=true; for(U i=0;i<RT::kWords;++i) zero=zero && (i==RT::WVersion?RT::words[i]==1:i==RT::WMode?RT::words[i]==RT::ModeShadow:i==RT::WTscPerUs?RT::words[i]==2000:!RT::words[i]); Require(zero,"Configure resets the row"); }
     RT::Reset();
     { bool zero=true; for(U i=0;i<RT::kWords;++i) zero=zero && !RT::words[i]; Require(zero,"Reset zeroes the row"); }
-    ntw2_poly::Configure(native,ntw2_poly::ModeOff);
+    kntwr_poly::Configure(native,kntwr_poly::ModeOff);
     std::printf("record test oracle: %u checks, 0 mismatches\n",checks);
     return 0;
 }

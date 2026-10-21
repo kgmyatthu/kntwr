@@ -1,7 +1,7 @@
-#ifndef NTW2_NATIVE_NODE_PROJECTION_H
-#define NTW2_NATIVE_NODE_PROJECTION_H
+#ifndef KNTWR_NATIVE_NODE_PROJECTION_H
+#define KNTWR_NATIVE_NODE_PROJECTION_H
 #include <stdint.h>
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 
 // Participant-private reference-node path projection (original 0x7FD070 -> 0x81C080 -> 0x81C050 -> 0x67A790).
 //
@@ -16,13 +16,13 @@
 // surfaces, transforms) are shared and are NOT protected by this scratch. The cell, edge and selected-surface
 // dispatches use forwarding gates: ProjectCertified checks their reached closures; Entry alone preserves the old
 // unrestricted owner behavior and is not a certificate for worker admission.
-namespace ntw2_node {
+namespace kntwr_node {
 namespace projection {
 
-constexpr unsigned kParticipants = NTW2_NODE_PROJ_PARTICIPANTS;
+constexpr unsigned kParticipants = KNTWR_NODE_PROJ_PARTICIPANTS;
 
 // Allocates and zero-constructs the private storage on the first call and writes the NODE_PROJ_VISIT_p and
-// NODE_PROJ_LOOKUP_p entries of `bindings` (a table of NTW2_BIND_COUNT entries) -- call before building clones.
+// NODE_PROJ_LOOKUP_p entries of `bindings` (a table of KNTWR_BIND_COUNT entries) -- call before building clones.
 // Idempotent while live: later calls with the same imageBase only rewrite the same binding values. A different
 // imageBase while live, a null table or a null base returns false. imageBase locates the game allocator for Release.
 bool Initialize(uint32_t imageBase, uint32_t* bindings);
@@ -55,6 +55,6 @@ bool ProjectCertified(const uint32_t* cloneEntries, uint32_t query,
 uint32_t DescriptorEntry(uint32_t imageBase);
 
 } // namespace projection
-} // namespace ntw2_node
+} // namespace kntwr_node
 
 #endif

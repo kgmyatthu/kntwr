@@ -3,7 +3,7 @@
 #include <xmmintrin.h>
 #include <stdint.h>
 #include <string.h>
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_node.h"
 #include "native_move_node.h"
@@ -15,7 +15,7 @@
 #include "native_region_table.h"
 
 static_assert(sizeof(void*) == 4, "BRAIN_W is the pinned Win32 x86 native closure");
-namespace ntw2_brain2 {
+namespace kntwr_brain2 {
 namespace {
 U g_delta, g_words[kWords], g_census[kCensusWords], g_route[kRouteWords];
 constexpr U kNodeTargetCapacity = 512;
@@ -169,7 +169,7 @@ enum Note : U {
 // unit and slot heaps; every derived pointer is probed before it is dereferenced.
 // Per-call equality (UnitStatic/SlotStatic) only compares pointer identities and
 // already-snapshotted objects, so it needs no probe.
-ntw2_region::Table g_probe;
+kntwr_region::Table g_probe;
 U g_probeQueries;
 bool ProbeRegionContains(U address, U size) { return g_probe.Readable(address, size, g_probeQueries); }
 U HashBytes(U address, U count) {
@@ -654,62 +654,62 @@ Service Identify(U target, U site) {
 U CloneIdForVA(U originalVA) {
     U id;
     switch (originalVA) {
-    case 0x66CE00: case 0x6F50F0: id = NTW2_CLONE_BRAIN_W; break;
-    case 0x63C440: id = NTW2_CLONE_BRAIN_W_TRIGGER; break;
-    case 0x658C50: id = NTW2_CLONE_BRAIN_W_MOVEORDER; break;
-    case 0x64DE80: id = NTW2_CLONE_BRAIN_W_DRIVER; break;
-    case 0x66E780: id = NTW2_CLONE_BRAIN_W_WATCHER; break;
-    case 0x6543D0: id = NTW2_CLONE_BRAIN_W_FINALIZE; break;
-    case 0x659600: id = NTW2_CLONE_BRAIN_W_FIRE; break;
-    case 0x6758D0: id = NTW2_CLONE_BRAIN_W_REFERENCE; break;
-    case 0x6666B0: id = NTW2_CLONE_BRAIN_W_BEGIN; break;
-    case 0x66E670: id = NTW2_CLONE_BRAIN_W_STEP; break;
-    case 0x670EB0: id = NTW2_CLONE_BRAIN_W_COMMON_STEP; break;
-    case 0x66C160: id = NTW2_CLONE_BRAIN_W_HOLDER_STEP; break;
-    case 0x7E2C80: id = NTW2_CLONE_BRAIN_W_HOT_CTOR; break;
-    case 0x816900: id = NTW2_CLONE_BRAIN_W_HOT_BEGIN; break;
-    case 0x819310: id = NTW2_CLONE_BRAIN_W_HOT_STEP; break;
-    case 0x7EDD00: id = NTW2_CLONE_BRAIN_W_HOT_DTOR; break;
-    case 0x650DC0: id = NTW2_CLONE_BRAIN_W_HOT_INSTALL; break;
-    case 0x61D910: id = NTW2_CLONE_BRAIN_W_IDLE_CTOR; break;
-    case 0x665E60: id = NTW2_CLONE_BRAIN_W_IDLE_BEGIN; break;
-    case 0x66DD10: id = NTW2_CLONE_BRAIN_W_IDLE_STEP; break;
-    case 0x624EF0: id = NTW2_CLONE_BRAIN_W_IDLE_DTOR; break;
-    case 0x650650: id = NTW2_CLONE_BRAIN_W_IDLE_INSTALL; break;
-    case 0x61D8F0: id = NTW2_CLONE_BRAIN_W_WAIT_CTOR; break;
-    case 0x665E30: id = NTW2_CLONE_BRAIN_W_WAIT_BEGIN; break;
-    case 0x66DCF0: id = NTW2_CLONE_BRAIN_W_WAIT_STEP; break;
-    case 0x5AC9D0: id = NTW2_CLONE_BRAIN_W_WAIT_DTOR; break;
-    case 0x650600: id = NTW2_CLONE_BRAIN_W_WAIT_INSTALL; break;
-    case 0x6669B0: id = NTW2_CLONE_BRAIN_W_STOP; break;
-    case 0x816080: id = NTW2_CLONE_BRAIN_ACTION_BEGIN; break;
-    case 0x818500: id = NTW2_CLONE_BRAIN_ACTION_STEP; break;
-    case 0x818330: id = NTW2_CLONE_BRAIN_ACTION_RELATED_STEP; break;
-    case 0x815FF0: id = NTW2_CLONE_BRAIN_ACTION_RELATED_BEGIN; break;
-    case 0x444B60: id = NTW2_CLONE_BRAIN_ACTION_EMPTY; break;
-    case 0x659520: id = NTW2_CLONE_BRAIN_W_REQUEST; break;
-    case 0x63C4F0: id = NTW2_CLONE_BRAIN_W_CANDIDATES; break;
-    case 0x62E910: id = NTW2_CLONE_BRAIN_W_CANDIDATE_BODY; break;
-    case 0x80BF70: id = NTW2_CLONE_BRAIN_W_GATHER; break;
-    case 0x6718F0: id = NTW2_CLONE_BRAIN_W_TARGET; break;
-    case 0x5B7B20: id = NTW2_CLONE_BRAIN_W_WRAPPER_SERVICE; break;
-    case 0x63CDD0: id = NTW2_CLONE_BRAIN_W_FINISH; break;
-    case 0x5AA400: id = NTW2_CLONE_BRAIN_W_RECYCLE; break;
-    case 0x658BA0: id = NTW2_CLONE_BRAIN_W_BACKLINK; break;
-    case 0x66BF80: id = NTW2_CLONE_BRAIN_W_BACKUNLINK; break;
-    case 0x602E00: id = NTW2_CLONE_BRAIN_W_TIMER; break;
-    case 0x670F40: id = NTW2_CLONE_BRAIN_W_ANIMATION; break;
-    case 0x6666E0: id = NTW2_CLONE_BRAIN_W_SLOT; break;
-    case 0x6595A0: id = NTW2_CLONE_BRAIN_W_RESET_REQUEST; break;
-    case 0x67A050: id = NTW2_CLONE_BRAIN_W_PARKED; break;
-    case 0x6631A0: id = NTW2_CLONE_BRAIN_W_ORDER; break;
-    case 0x662E70: id = NTW2_CLONE_BRAIN_W_NODE_ORDER; break;
-    case 0x655B20: id = NTW2_CLONE_BRAIN_W_ARRIVAL; break;
-    case 0x643C90: id = NTW2_CLONE_BRAIN_W_UNLINK; break;
-    case 0x7FF9E0: id = NTW2_CLONE_BRAIN_W_NODE_BEGIN_7FF9E0; break;
-    case 0x80A190: id = NTW2_CLONE_BRAIN_W_NODE_DISPATCH_80A190; break;
-    case 0x7FF5C0: id = NTW2_CLONE_BRAIN_W_NODE_BEGIN_7FF5C0; break;
-    case 0x809D80: id = NTW2_CLONE_BRAIN_W_NODE_DISPATCH_809D80; break;
+    case 0x66CE00: case 0x6F50F0: id = KNTWR_CLONE_BRAIN_W; break;
+    case 0x63C440: id = KNTWR_CLONE_BRAIN_W_TRIGGER; break;
+    case 0x658C50: id = KNTWR_CLONE_BRAIN_W_MOVEORDER; break;
+    case 0x64DE80: id = KNTWR_CLONE_BRAIN_W_DRIVER; break;
+    case 0x66E780: id = KNTWR_CLONE_BRAIN_W_WATCHER; break;
+    case 0x6543D0: id = KNTWR_CLONE_BRAIN_W_FINALIZE; break;
+    case 0x659600: id = KNTWR_CLONE_BRAIN_W_FIRE; break;
+    case 0x6758D0: id = KNTWR_CLONE_BRAIN_W_REFERENCE; break;
+    case 0x6666B0: id = KNTWR_CLONE_BRAIN_W_BEGIN; break;
+    case 0x66E670: id = KNTWR_CLONE_BRAIN_W_STEP; break;
+    case 0x670EB0: id = KNTWR_CLONE_BRAIN_W_COMMON_STEP; break;
+    case 0x66C160: id = KNTWR_CLONE_BRAIN_W_HOLDER_STEP; break;
+    case 0x7E2C80: id = KNTWR_CLONE_BRAIN_W_HOT_CTOR; break;
+    case 0x816900: id = KNTWR_CLONE_BRAIN_W_HOT_BEGIN; break;
+    case 0x819310: id = KNTWR_CLONE_BRAIN_W_HOT_STEP; break;
+    case 0x7EDD00: id = KNTWR_CLONE_BRAIN_W_HOT_DTOR; break;
+    case 0x650DC0: id = KNTWR_CLONE_BRAIN_W_HOT_INSTALL; break;
+    case 0x61D910: id = KNTWR_CLONE_BRAIN_W_IDLE_CTOR; break;
+    case 0x665E60: id = KNTWR_CLONE_BRAIN_W_IDLE_BEGIN; break;
+    case 0x66DD10: id = KNTWR_CLONE_BRAIN_W_IDLE_STEP; break;
+    case 0x624EF0: id = KNTWR_CLONE_BRAIN_W_IDLE_DTOR; break;
+    case 0x650650: id = KNTWR_CLONE_BRAIN_W_IDLE_INSTALL; break;
+    case 0x61D8F0: id = KNTWR_CLONE_BRAIN_W_WAIT_CTOR; break;
+    case 0x665E30: id = KNTWR_CLONE_BRAIN_W_WAIT_BEGIN; break;
+    case 0x66DCF0: id = KNTWR_CLONE_BRAIN_W_WAIT_STEP; break;
+    case 0x5AC9D0: id = KNTWR_CLONE_BRAIN_W_WAIT_DTOR; break;
+    case 0x650600: id = KNTWR_CLONE_BRAIN_W_WAIT_INSTALL; break;
+    case 0x6669B0: id = KNTWR_CLONE_BRAIN_W_STOP; break;
+    case 0x816080: id = KNTWR_CLONE_BRAIN_ACTION_BEGIN; break;
+    case 0x818500: id = KNTWR_CLONE_BRAIN_ACTION_STEP; break;
+    case 0x818330: id = KNTWR_CLONE_BRAIN_ACTION_RELATED_STEP; break;
+    case 0x815FF0: id = KNTWR_CLONE_BRAIN_ACTION_RELATED_BEGIN; break;
+    case 0x444B60: id = KNTWR_CLONE_BRAIN_ACTION_EMPTY; break;
+    case 0x659520: id = KNTWR_CLONE_BRAIN_W_REQUEST; break;
+    case 0x63C4F0: id = KNTWR_CLONE_BRAIN_W_CANDIDATES; break;
+    case 0x62E910: id = KNTWR_CLONE_BRAIN_W_CANDIDATE_BODY; break;
+    case 0x80BF70: id = KNTWR_CLONE_BRAIN_W_GATHER; break;
+    case 0x6718F0: id = KNTWR_CLONE_BRAIN_W_TARGET; break;
+    case 0x5B7B20: id = KNTWR_CLONE_BRAIN_W_WRAPPER_SERVICE; break;
+    case 0x63CDD0: id = KNTWR_CLONE_BRAIN_W_FINISH; break;
+    case 0x5AA400: id = KNTWR_CLONE_BRAIN_W_RECYCLE; break;
+    case 0x658BA0: id = KNTWR_CLONE_BRAIN_W_BACKLINK; break;
+    case 0x66BF80: id = KNTWR_CLONE_BRAIN_W_BACKUNLINK; break;
+    case 0x602E00: id = KNTWR_CLONE_BRAIN_W_TIMER; break;
+    case 0x670F40: id = KNTWR_CLONE_BRAIN_W_ANIMATION; break;
+    case 0x6666E0: id = KNTWR_CLONE_BRAIN_W_SLOT; break;
+    case 0x6595A0: id = KNTWR_CLONE_BRAIN_W_RESET_REQUEST; break;
+    case 0x67A050: id = KNTWR_CLONE_BRAIN_W_PARKED; break;
+    case 0x6631A0: id = KNTWR_CLONE_BRAIN_W_ORDER; break;
+    case 0x662E70: id = KNTWR_CLONE_BRAIN_W_NODE_ORDER; break;
+    case 0x655B20: id = KNTWR_CLONE_BRAIN_W_ARRIVAL; break;
+    case 0x643C90: id = KNTWR_CLONE_BRAIN_W_UNLINK; break;
+    case 0x7FF9E0: id = KNTWR_CLONE_BRAIN_W_NODE_BEGIN_7FF9E0; break;
+    case 0x80A190: id = KNTWR_CLONE_BRAIN_W_NODE_DISPATCH_80A190; break;
+    case 0x7FF5C0: id = KNTWR_CLONE_BRAIN_W_NODE_BEGIN_7FF5C0; break;
+    case 0x809D80: id = KNTWR_CLONE_BRAIN_W_NODE_DISPATCH_809D80; break;
     default: return ~0u;
     }
     return id;
@@ -777,15 +777,15 @@ template <class Compute> bool MemoHash(U kind, U key, U aux, U& hash, Compute co
     return true;
 }
 bool TerrainHashMemo(U root, U& hash) {
-    return MemoHash(MemoTerrain, root, 0, hash, [&](U& h) { return ntw2_finalizer::TerrainHash(root, h); });
+    return MemoHash(MemoTerrain, root, 0, hash, [&](U& h) { return kntwr_finalizer::TerrainHash(root, h); });
 }
 bool AnimHashMemo(U set, U key, U& hash) {
-    return MemoHash(MemoAnim, set, key, hash, [&](U& h) { return ntw2_finalizer::AnimHash(set, key, h); });
+    return MemoHash(MemoAnim, set, key, hash, [&](U& h) { return kntwr_finalizer::AnimHash(set, key, h); });
 }
 U FrameHashMemo(U frame, bool transform) {
     U hash = 0;
     MemoHash(transform ? MemoTransform : MemoFrame, frame, 0, hash, [&](U& h) {
-        h = transform ? ntw2_finalizer::TransformHash(frame) : ntw2_finalizer::FrameHash(frame); return true; });
+        h = transform ? kntwr_finalizer::TransformHash(frame) : kntwr_finalizer::FrameHash(frame); return true; });
     return hash;
 }
 U TargetHashMemo(U target) {
@@ -1031,15 +1031,15 @@ Classification ClassifyTarget(Service service, U receiver, U target, U site, con
         if (B(receiver + 0x18C) == 1) return Inactive;
         if (!own || !g_witnessOpen) return Unresolved;
         U why = 0, hash = 0, animHash = 0;
-        if (ntw2_finalizer::FinalizeClosure(receiver, &why)) { if (detail) *detail = why; return Unresolved; }
+        if (kntwr_finalizer::FinalizeClosure(receiver, &why)) { if (detail) *detail = why; return Unresolved; }
         const U root = D(receiver + 0x28), frame = D(receiver + 0x170);
         if (!TerrainHashMemo(root, hash)) {
-            if (detail) *detail = ntw2_finalizer::kDetailBase + ntw2_finalizer::World; return Unresolved;
+            if (detail) *detail = kntwr_finalizer::kDetailBase + kntwr_finalizer::World; return Unresolved;
         }
-        const bool animates = ntw2_finalizer::PostureAnimates(receiver);
-        const U set = D(receiver + 0x218), index = ntw2_finalizer::AnimKey(receiver);
+        const bool animates = kntwr_finalizer::PostureAnimates(receiver);
+        const U set = D(receiver + 0x218), index = kntwr_finalizer::AnimKey(receiver);
         if (animates && (OwnPart(set, entity) || !AnimHashMemo(set, index, animHash))) {
-            if (detail) *detail = ntw2_finalizer::kDetailBase + ntw2_finalizer::Animation; return Unresolved;
+            if (detail) *detail = kntwr_finalizer::kDetailBase + kntwr_finalizer::Animation; return Unresolved;
         }
         if (frame && !OwnPart(frame, entity)) RecordDep(WitnessDepFrame, frame, FrameHashMemo(frame, false));
         RecordDep(WitnessDepTerrain, root, hash);
@@ -1086,7 +1086,7 @@ Classification ClassifyTarget(Service service, U receiver, U target, U site, con
         const bool unlinks = D(receiver + 0x178) && (reset || !(flags & 4));
         if (unlinks) { if (detail) *detail = V(0x811C60); return Unresolved; }
         U why = 0;
-        if (ntw2_finalizer::PostureClosure(receiver, &why)) { if (detail) *detail = why; return Unresolved; }
+        if (kntwr_finalizer::PostureClosure(receiver, &why)) { if (detail) *detail = why; return Unresolved; }
         return Inactive;
     }
     // 7F14C0 (fire candidates, 62E946): store-free terrain lookahead on the own soldier's +48/+50/+64; the
@@ -1132,7 +1132,7 @@ void __stdcall EnterService(U* stack, const U* registers) {
     const U originalVA = target - g_delta;
     if (originalVA == 0x658C50) {
         ++g_route[DriverCalls];
-        g_route[LastDriverClone] = clone ? NTW2_CLONE_BRAIN_W_MOVEORDER + 1u : 0;
+        g_route[LastDriverClone] = clone ? KNTWR_CLONE_BRAIN_W_MOVEORDER + 1u : 0;
     }
     if (originalVA == 0x61DA90) ++g_route[ReferenceCtors];
     // Count reached virtual slots independently of their concrete class. Generic
@@ -1145,17 +1145,17 @@ void __stdcall EnterService(U* stack, const U* registers) {
         ++g_route[VirtualSteps]; g_route[LastNodeTarget] = originalVA;
         CountNodeTarget(originalVA, false);
     }
-    if (g_nodeShadow) ntw2_move_node::Observe(originalVA, receiver, stack + 3);
+    if (g_nodeShadow) kntwr_move_node::Observe(originalVA, receiver, stack + 3);
     if (g_nodeShadow) {
-        ntw2_idle_node::Observe(originalVA, receiver, stack + 3);
-        ntw2_action_node::Observe(originalVA, receiver, stack + 3);
+        kntwr_idle_node::Observe(originalVA, receiver, stack + 3);
+        kntwr_action_node::Observe(originalVA, receiver, stack + 3);
     }
     if (g_nodeShadow && (site == 0x6759DE || site == 0x675B36))
-        ntw2_node::Observe(originalVA, receiver, stack + 3);
+        kntwr_node::Observe(originalVA, receiver, stack + 3);
     if (g_nodeShadow && site == 0x6759EB)
-        ntw2_node::Observe(0x6631A0, D(receiver + 4), stack + 3);
-    if (g_fireShadow && target == V(0x80BF70)) ntw2_fire::ObserveGather(receiver, stack + 3);
-    if (g_fireShadow && target == V(0x8021E0)) ntw2_fire::ObserveRequest(receiver);
+        kntwr_node::Observe(0x6631A0, D(receiver + 4), stack + 3);
+    if (g_fireShadow && target == V(0x80BF70)) kntwr_fire::ObserveGather(receiver, stack + 3);
+    if (g_fireShadow && target == V(0x8021E0)) kntwr_fire::ObserveRequest(receiver);
     ++Row(service)[Calls]; ++g_words[ServiceCalls];
     if (service == PosePosition) ReadPose(stack[4], receiver); // native second argument is the reader
     if (service == PoseHeading)
@@ -1168,7 +1168,7 @@ void __stdcall EnterService(U* stack, const U* registers) {
         Result(service, result, detail, site);
         if (result == Inactive && ((originalVA == 0x819770 && B(receiver + 0x18C) != 1) || originalVA == 0x7F14C0)) {
             ++g_witness[WitnessFinalizerInactiveCalls];
-            finalizerShadow = originalVA == 0x819770 && ntw2_finalizer::ShadowEnabled();
+            finalizerShadow = originalVA == 0x819770 && kntwr_finalizer::ShadowEnabled();
         }
         CountNote(note);
     }
@@ -1195,25 +1195,25 @@ void __stdcall EnterService(U* stack, const U* registers) {
     frame.activeBefore = g_activeSequence; frame.unknownBefore = g_unknownSequence;
     frame.container = container;
     frame.timed = g_timingEnabled && Clock(frame.start);
-    frame.nodeToken = g_nodeShadow ? ntw2_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
-    frame.moveNodeToken = g_nodeShadow ? ntw2_move_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
-    frame.idleNodeToken = g_nodeShadow ? ntw2_idle_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
-    frame.actionNodeToken = g_nodeShadow ? ntw2_action_node::BeforeSite(originalVA, site, receiver, stack + 3, g_clones) : 0;
+    frame.nodeToken = g_nodeShadow ? kntwr_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
+    frame.moveNodeToken = g_nodeShadow ? kntwr_move_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
+    frame.idleNodeToken = g_nodeShadow ? kntwr_idle_node::Before(originalVA, receiver, stack + 3, g_clones) : 0;
+    frame.actionNodeToken = g_nodeShadow ? kntwr_action_node::BeforeSite(originalVA, site, receiver, stack + 3, g_clones) : 0;
     frame.fireShadow = g_fireShadow && originalVA == 0x659600;
-    if (frame.fireShadow) ntw2_fire::ShadowBefore(receiver);
+    if (frame.fireShadow) kntwr_fire::ShadowBefore(receiver);
     frame.finalizerShadow = finalizerShadow;
-    if (finalizerShadow) ntw2_finalizer::ShadowBefore(receiver);
+    if (finalizerShadow) kntwr_finalizer::ShadowBefore(receiver);
     stack[2] = Address(reinterpret_cast<const void*>(&ServiceExit));
 }
 U __stdcall LeaveService() {
     const Frame& frame = g_frames[--g_depth];
     const Service service = static_cast<Service>(frame.service);
-    if (frame.nodeToken) ntw2_node::After(frame.nodeToken);
-    if (frame.moveNodeToken) ntw2_move_node::After(frame.moveNodeToken);
-    if (frame.idleNodeToken) ntw2_idle_node::After(frame.idleNodeToken);
-    if (frame.actionNodeToken) ntw2_action_node::After(frame.actionNodeToken);
-    if (frame.fireShadow) ntw2_fire::ShadowAfter();
-    if (frame.finalizerShadow) ntw2_finalizer::ShadowAfter();
+    if (frame.nodeToken) kntwr_node::After(frame.nodeToken);
+    if (frame.moveNodeToken) kntwr_move_node::After(frame.moveNodeToken);
+    if (frame.idleNodeToken) kntwr_idle_node::After(frame.idleNodeToken);
+    if (frame.actionNodeToken) kntwr_action_node::After(frame.actionNodeToken);
+    if (frame.fireShadow) kntwr_fire::ShadowAfter();
+    if (frame.finalizerShadow) kntwr_finalizer::ShadowAfter();
     if (frame.timed) {
         LARGE_INTEGER end;
         if (Clock(end)) {
@@ -1420,15 +1420,15 @@ bool ClonesReady(const U* clones) {
     if (clones == g_readyClones) return true;
     // Every dynamic destination is ready before native execution starts. No
     // mid-occurrence failure ever requests replay or re-executes prior writes.
-    for (U id = NTW2_CLONE_BRAIN_W; id <= NTW2_CLONE_BRAIN_W_UNLINK; ++id)
+    for (U id = KNTWR_CLONE_BRAIN_W; id <= KNTWR_CLONE_BRAIN_W_UNLINK; ++id)
         if (!clones[id]) return false;
-    if (!clones[NTW2_CLONE_BRAIN_W_COMMON_STEP] || !clones[NTW2_CLONE_BRAIN_W_HOLDER_STEP]) return false;
-    if (!clones[NTW2_CLONE_BRAIN_W_HOT_CTOR] || !clones[NTW2_CLONE_BRAIN_W_HOT_BEGIN] ||
-        !clones[NTW2_CLONE_BRAIN_W_HOT_STEP] || !clones[NTW2_CLONE_BRAIN_W_HOT_DTOR] ||
-        !clones[NTW2_CLONE_BRAIN_W_HOT_INSTALL]) return false;
-    for (U id = NTW2_CLONE_BRAIN_W_IDLE_CTOR; id <= NTW2_CLONE_BRAIN_ACTION_EMPTY; ++id)
+    if (!clones[KNTWR_CLONE_BRAIN_W_COMMON_STEP] || !clones[KNTWR_CLONE_BRAIN_W_HOLDER_STEP]) return false;
+    if (!clones[KNTWR_CLONE_BRAIN_W_HOT_CTOR] || !clones[KNTWR_CLONE_BRAIN_W_HOT_BEGIN] ||
+        !clones[KNTWR_CLONE_BRAIN_W_HOT_STEP] || !clones[KNTWR_CLONE_BRAIN_W_HOT_DTOR] ||
+        !clones[KNTWR_CLONE_BRAIN_W_HOT_INSTALL]) return false;
+    for (U id = KNTWR_CLONE_BRAIN_W_IDLE_CTOR; id <= KNTWR_CLONE_BRAIN_ACTION_EMPTY; ++id)
         if (!clones[id]) return false;
-    for (U id = NTW2_CLONE_BRAIN_W_NODE_BEGIN_7FF9E0; id <= NTW2_CLONE_BRAIN_W_NODE_DISPATCH_809D80; ++id)
+    for (U id = KNTWR_CLONE_BRAIN_W_NODE_BEGIN_7FF9E0; id <= KNTWR_CLONE_BRAIN_W_NODE_DISPATCH_809D80; ++id)
         if (!clones[id]) return false;
     g_readyClones = clones;
     return true;
@@ -1473,24 +1473,24 @@ Classification ClassifyService(Service service, U receiver) {
 }
 bool Bind(U imageBase, U* bindings) {
     g_delta = imageBase - 0x400000; g_bound = imageBase != 0;
-    ntw2_node::Bind(imageBase);
-    ntw2_move_node::Bind(imageBase);
-    ntw2_finalizer::Bind(imageBase);
-    ntw2_idle_node::Bind(imageBase); ntw2_action_node::Bind(imageBase);
-    if (!ntw2_node::projection::Initialize(imageBase, bindings)) { g_bound = false; return false; }
+    kntwr_node::Bind(imageBase);
+    kntwr_move_node::Bind(imageBase);
+    kntwr_finalizer::Bind(imageBase);
+    kntwr_idle_node::Bind(imageBase); kntwr_action_node::Bind(imageBase);
+    if (!kntwr_node::projection::Initialize(imageBase, bindings)) { g_bound = false; return false; }
     for (U i = 0; i < ServiceCount; ++i) g_targets[i] = kEntries[i].va ? V(kEntries[i].va) : 0;
-    bindings[NTW2_BIND_B2_SERVICE_GATE] = Address(reinterpret_cast<const void*>(&ServiceGate));
-    bindings[NTW2_BIND_B2_OBSERVE] = Address(reinterpret_cast<const void*>(&ObserveGate));
+    bindings[KNTWR_BIND_B2_SERVICE_GATE] = Address(reinterpret_cast<const void*>(&ServiceGate));
+    bindings[KNTWR_BIND_B2_OBSERVE] = Address(reinterpret_cast<const void*>(&ObserveGate));
     return true;
 }
 void Configure(bool census, bool timing, bool nodeShadow, bool fireShadow, bool finalizerShadow) {
     g_nodeShadow = nodeShadow; g_fireShadow = fireShadow; g_finalizerShadow = finalizerShadow;
     g_censusEnabled = census || nodeShadow || fireShadow || finalizerShadow; g_timingEnabled = timing;
-    ntw2_finalizer::Configure(finalizerShadow);
-    ntw2_node::Configure(nodeShadow);
-    ntw2_move_node::Configure(nodeShadow);
-    ntw2_idle_node::Configure(nodeShadow); ntw2_action_node::Configure(nodeShadow);
-    ntw2_fire::Start({g_delta, fireShadow});
+    kntwr_finalizer::Configure(finalizerShadow);
+    kntwr_node::Configure(nodeShadow);
+    kntwr_move_node::Configure(nodeShadow);
+    kntwr_idle_node::Configure(nodeShadow); kntwr_action_node::Configure(nodeShadow);
+    kntwr_fire::Start({g_delta, fireShadow});
     g_route[RouteVersion] = 1;
     g_route[ConfiguredDriver] = g_censusEnabled ? 1u : 0u;
 }
@@ -1506,8 +1506,8 @@ void RunOccurrence(U entity, const U* cloneEntries) {
     const bool ready = g_bound && g_censusEnabled && supported && ClonesReady(cloneEntries);
     U entry = original;
     if (ready) {
-        const U id = cls == Wrapper602EB0 ? NTW2_CLONE_BRAIN_W_602EB0 :
-                     cls == Wrapper5FCEB0 ? NTW2_CLONE_BRAIN_W_5FCEB0 : NTW2_CLONE_BRAIN_W;
+        const U id = cls == Wrapper602EB0 ? KNTWR_CLONE_BRAIN_W_602EB0 :
+                     cls == Wrapper5FCEB0 ? KNTWR_CLONE_BRAIN_W_5FCEB0 : KNTWR_CLONE_BRAIN_W;
         entry = cloneEntries[id]; ++g_words[CloneOccurrences];
     } else {
         ++g_words[OriginalOccurrences];
@@ -1541,8 +1541,8 @@ void RunOccurrence(U entity, const U* cloneEntries) {
         }
         if (g_depth > depth) { g_words[AbandonedTiming] += g_depth - depth; g_depth = depth; }
         if (!completed) {
-            ntw2_node::Abandon(); ntw2_move_node::Abandon(); ntw2_fire::Abandon();
-            ntw2_idle_node::Abandon(); ntw2_action_node::Abandon();
+            kntwr_node::Abandon(); kntwr_move_node::Abandon(); kntwr_fire::Abandon();
+            kntwr_idle_node::Abandon(); kntwr_action_node::Abandon();
         }
         if (ready && completed) {
             if (g_firstActive) ++g_words[AnyActive];
@@ -1727,27 +1727,27 @@ void Reset() {
     g_route[RouteVersion] = 1; g_route[ConfiguredDriver] = g_censusEnabled ? 1u : 0u;
     g_clones = g_readyClones = nullptr; g_entity = g_firstActive = g_firstUnknown = g_poseMask = 0;
     g_depth = g_activeSequence = g_unknownSequence = 0;
-    ntw2_node::Reset();
-    ntw2_move_node::Reset();
-    ntw2_idle_node::Reset(); ntw2_action_node::Reset();
-    ntw2_fire::Start({g_delta, g_fireShadow});
-    ntw2_finalizer::Reset();
+    kntwr_node::Reset();
+    kntwr_move_node::Reset();
+    kntwr_idle_node::Reset(); kntwr_action_node::Reset();
+    kntwr_fire::Start({g_delta, g_fireShadow});
+    kntwr_finalizer::Reset();
 }
 void Release() {
     g_clones = g_readyClones = nullptr; g_entity = g_firstActive = g_firstUnknown = g_poseMask = 0;
     g_depth = 0; g_censusEnabled = g_timingEnabled = false;
     g_nodeShadow = g_fireShadow = g_finalizerShadow = false; g_witnessOpen = false; g_observer = nullptr; g_runner = nullptr;
-    ntw2_finalizer::Configure(false);
-    ntw2_node::Release(); ntw2_move_node::Release(); ntw2_fire::Stop();
-    ntw2_idle_node::Release(); ntw2_action_node::Release();
+    kntwr_finalizer::Configure(false);
+    kntwr_node::Release(); kntwr_move_node::Release(); kntwr_fire::Stop();
+    kntwr_idle_node::Release(); kntwr_action_node::Release();
 }
 void UnknownSiteSnapshot(U* words) {
     memset(words, 0, kUnknownSiteWords * sizeof(U));
     SiteTop(g_unknownSites, words);
     SiteTop(g_firstSites, words + kSiteTableWords);
-    g_witness[WitnessFinalizerShadowCalls] = ntw2_finalizer::Counter(ntw2_finalizer::ShadowCalls);
-    g_witness[WitnessFinalizerShadowMismatches] = ntw2_finalizer::Counter(ntw2_finalizer::ShadowMismatches) +
-                                                  ntw2_finalizer::Counter(ntw2_finalizer::ShadowFaults);
+    g_witness[WitnessFinalizerShadowCalls] = kntwr_finalizer::Counter(kntwr_finalizer::ShadowCalls);
+    g_witness[WitnessFinalizerShadowMismatches] = kntwr_finalizer::Counter(kntwr_finalizer::ShadowMismatches) +
+                                                  kntwr_finalizer::Counter(kntwr_finalizer::ShadowFaults);
     memcpy(words + 2 * kSiteTableWords, g_witness, sizeof(g_witness));
 }
 struct DepScope {
@@ -1921,4 +1921,4 @@ const char* ServiceName(Service service) {
     };
     return service < ServiceCount ? names[service] : "invalid";
 }
-} // namespace ntw2_brain2
+} // namespace kntwr_brain2

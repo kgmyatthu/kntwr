@@ -6,7 +6,7 @@
 #include <limits>
 #include <memory>
 #include "native_sweep.h"
-using namespace ntw2_sweep;
+using namespace kntwr_sweep;
 namespace {
 U Addr(const void* p) { return static_cast<U>(reinterpret_cast<uintptr_t>(p)); }
 U predicateCalls;

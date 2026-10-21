@@ -1,4 +1,4 @@
-// BRAIN2 Stage 2 oracle: the untouched mapped original loop 0x585D10 against ntw2_brain_workers on synthetic
+// BRAIN2 Stage 2 oracle: the untouched mapped original loop 0x585D10 against kntwr_brain_workers on synthetic
 // populations, with 1/4/8 participants. Whatever mix of committed, refused, invalidated and owner-run occurrences
 // a population produces, the final soldier/world/staging bytes and the ordered callback sequence must equal the
 // serial reference exactly. Real clones, real originals, real gates: nothing is mocked and no image byte is patched.
@@ -19,23 +19,23 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_brain_workers.h"
 #include "native_region_table.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace brain = ntw2_brain2;
-namespace bw = ntw2_brain_workers;
+namespace brain = kntwr_brain2;
+namespace bw = kntwr_brain_workers;
 static_assert(sizeof(void*) == 4, "x86 native ABI");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
 static B* image;
 static U delta, checks, cases, ownerThread;
 static const char* currentCase = "mapping";
-static ntw2_clone_set clones{};
-static U bindings[NTW2_BIND_COUNT];
+static kntwr_clone_set clones{};
+static U bindings[KNTWR_BIND_COUNT];
 [[noreturn]] static void Fail(const char* fmt, ...) {
     std::fprintf(stderr, "FAIL [%s]: ", currentCase);
     va_list ap; va_start(ap, fmt); std::vfprintf(stderr, fmt, ap); va_end(ap);
@@ -98,7 +98,7 @@ static void Map(const char* path) {
     std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
     brain::Bind(A(image), bindings);
     U detail = 0;
-    const U error = ntw2_build_clones(A(image), bindings, &clones, &detail);
+    const U error = kntwr_build_clones(A(image), bindings, &clones, &detail);
     if (error) Fail("clone construction error=%u detail=%u", error, detail);
 }
 
@@ -436,7 +436,7 @@ static void CallStep(U step, void* entity) {
 // The RNG stream contract executed with the ORIGINAL per-soldier steps: the 585D10 loop (live cursor, ==1
 // filter, end reloaded after every entry) where walk ordinal k's model LCG word is seeded with
 // StreamSeed(S, generation, k) before its step, and the word ends at LcgAdvance(S, walked). Independent of
-// ntw2_brain_workers except for the two pure contract functions.
+// kntwr_brain_workers except for the two pure contract functions.
 struct RefStats { U occurrences, draws, unmatched; };
 static RefStats RunStreamReference(U generation) {
     RefStats r{};
@@ -491,7 +491,7 @@ using Words = std::array<U, bw::kWords>;
 using PhaseWords = std::array<U, bw::kPhaseWords>;
 static Words WorkerWords() { Words w{}; bw::Snapshot(w.data()); return w; }
 static PhaseWords WorkerPhases() { PhaseWords p{}; bw::PhaseSnapshot(p.data()); return p; }
-// --brain-quiet configuration of the next StartWorkers (the quiet sections also configure ntw2_brain2 without census).
+// --brain-quiet configuration of the next StartWorkers (the quiet sections also configure kntwr_brain2 without census).
 static bool g_quiet;
 static void StartWorkers(U participants, U deferMask = 0, U minEntities = 1) {
     g_threads = participants;
@@ -645,7 +645,7 @@ static Totals EquivalenceCase(const Shape& shape, U participants, const FpMode& 
         for (U t = 0; t < 2 * bw::kGuardTop; ++t) topSum += w[bw::GuardMissTop + t];
         Require(!w[bw::GuardMissUnlocated] && !w[bw::GuardMissDuplicate] && !w[bw::GuardMissLastOffset] &&
                 !w[bw::GuardMissLastBlocks] && !topSum, "quiet mode takes no guard-miss block attribution");
-        // Owner-run occurrences execute the ORIGINAL step: ntw2_brain2 is configured without census.
+        // Owner-run occurrences execute the ORIGINAL step: kntwr_brain2 is configured without census.
         Require(brainAfter[brain::CloneOccurrences] == brainBefore[brain::CloneOccurrences] &&
                 brainAfter[brain::OriginalOccurrences] - brainBefore[brain::OriginalOccurrences] == w[bw::OwnerRan],
                 "quiet owner-run occurrences run the original step, never the gated census clone");
@@ -988,7 +988,7 @@ static void Lifecycle() {
     bw::Stop();
     ++cases;
 }
-// --brain-quiet: ntw2_brain2 without census (owner-run soldiers execute the original step), workers without
+// --brain-quiet: kntwr_brain2 without census (owner-run soldiers execute the original step), workers without
 // guard-miss block checksums. Every shape, RNG shape, participant count and FP mode must still equal the reference.
 static void QuietEquivalence() {
     g_quiet = true;
@@ -1040,7 +1040,7 @@ static void ProfileRegions() {
         lru.base[lru.next] = A(m.BaseAddress); lru.end[lru.next] = A(m.BaseAddress) + static_cast<U>(m.RegionSize); lru.next = (lru.next + 1) & 7;
     }
     const double lruMs = Ms(Qpc() - t);
-    static ntw2_region::Table table;
+    static kntwr_region::Table table;
     table.Clear();
     U tableQueries = 0, proven = 0;
     t = Qpc();

@@ -1,10 +1,10 @@
-// NTW2_LOCO Stage 1 oracle. Three independent executions of the same mapped-real-image synthetic graph:
+// KNTWR_LOCO Stage 1 oracle. Three independent executions of the same mapped-real-image synthetic graph:
 //   A  untouched original bytes of the private image copy (0x7F0260 / 0x7F08F0, selector 0x62A290, class wrapper 0x5B2CA0,
 //      or the 0x531AF0 stage loop);
 //   B  the emitted LOCO clone family rebound to the ORIGINAL scratch globals, calling the module's service taps
 //      (an "original-equivalent clone with only service taps": the only way to observe the original-side service
 //      sequence without editing a single original instruction);
-//   C  the module-owned family (private scratch, ntw2_loco::Run / ntw2_loco::Stage / the emitted selector + class wrapper).
+//   C  the module-owned family (private scratch, kntwr_loco::Run / kntwr_loco::Stage / the emitted selector + class wrapper).
 // The fixture is real engine data: genuine candidate vtables 0x1333714 and 0x132BA04, real soft-grid cells + 0x7EFA80 nodes, a
 // real (populated) obstacle grid, real terrain sampler 0x64C5F0 / 0x679C50 table, real owner/pending list helpers, and the
 // real native allocator FF7F20/FF7EF0 reached through its tag object (data seam). Only data slots (vtable copies, plane,
@@ -28,7 +28,7 @@
 #include <initializer_list>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_loco.h"
 #include "native_move_delta.h"
 #include "native_sweep.h"
@@ -38,7 +38,7 @@
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace loco = ntw2_loco;
+namespace loco = kntwr_loco;
 static_assert(sizeof(void*) == 4, "x86 oracle");
 static_assert(loco::WordCount == 48, "Stage 1 status is 48 words");
 static_assert(loco::GateWordCount == 48, "independent gate status is 48 words");
@@ -55,8 +55,8 @@ __declspec(thread) static volatile U tlsPad[32];
 static B* image;
 static U delta, checks, cases;
 static const char* currentCase = "mapping";
-static ntw2_clone_set privateClones{}, globalClones{};
-static U privateBindings[NTW2_BIND_COUNT];
+static kntwr_clone_set privateClones{}, globalClones{};
+static U privateBindings[KNTWR_BIND_COUNT];
 
 [[noreturn]] static void Fail(const char* fmt, ...) {
     std::fprintf(stderr, "FAIL [%s]: ", currentCase);
@@ -95,9 +95,9 @@ static void __fastcall HostFree(void*, void*, void* ptr) { g_frees.push_back(A(p
 // ---------------------------------------------------------------------------------------------------------------------
 // Private image
 // ---------------------------------------------------------------------------------------------------------------------
-static void BuildClones(const U* bindings, ntw2_clone_set* out, const char* what) {
+static void BuildClones(const U* bindings, kntwr_clone_set* out, const char* what) {
     U detail = 0;
-    const U error = ntw2_build_clones(A(image), bindings, out, &detail);
+    const U error = kntwr_build_clones(A(image), bindings, out, &detail);
     if (error) Fail("%s clone construction error=%u detail=%u", what, error, detail);
 }
 static void Map(const char* path) {
@@ -139,17 +139,17 @@ static void Map(const char* path) {
         Put<float>(At(0x176cff8), 8 * h, std::sin(angle)); Put<float>(At(0x176cff8), 8 * h + 4, std::cos(angle));
     }
     Require(FlushInstructionCache(GetCurrentProcess(), image, nt->OptionalHeader.SizeOfImage) != 0, "flush private image");
-    U bindings[NTW2_BIND_COUNT]; std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
-    loco::Bind(delta, bindings); // the module takes the image DELTA; ntw2_build_clones below takes the image BASE
+    U bindings[KNTWR_BIND_COUNT]; std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
+    loco::Bind(delta, bindings); // the module takes the image DELTA; kntwr_build_clones below takes the image BASE
     std::memcpy(privateBindings, bindings, sizeof(bindings));
     BuildClones(bindings, &privateClones, "private");
     // Tapped-original-global family: identical specs, but scratch/guards bound to the original image globals.
     const U originalScratch[] = {0x14543b4, 0x15a1888, 0x15a189c, 0x15a1884, 0x15a1898, 0x15a18ac};
-    const U ids[] = {NTW2_BIND_LOCO_SCRATCH_14543B4, NTW2_BIND_LOCO_SCRATCH_15A1888, NTW2_BIND_LOCO_SCRATCH_15A189C,
-                     NTW2_BIND_LOCO_GUARD_15A1884, NTW2_BIND_LOCO_GUARD_15A1898, NTW2_BIND_LOCO_GUARD_15A18AC};
+    const U ids[] = {KNTWR_BIND_LOCO_SCRATCH_14543B4, KNTWR_BIND_LOCO_SCRATCH_15A1888, KNTWR_BIND_LOCO_SCRATCH_15A189C,
+                     KNTWR_BIND_LOCO_GUARD_15A1884, KNTWR_BIND_LOCO_GUARD_15A1898, KNTWR_BIND_LOCO_GUARD_15A18AC};
     for (U i = 0; i < 6; ++i) bindings[ids[i]] = A(At(originalScratch[i]));
     BuildClones(bindings, &globalClones, "original-global");
-    for (U id : {NTW2_CLONE_LOCO_WRAP, NTW2_CLONE_LOCO_MOVE, NTW2_CLONE_LOCO_SELECT, NTW2_CLONE_LOCO_CLASS_WRAP})
+    for (U id : {KNTWR_CLONE_LOCO_WRAP, KNTWR_CLONE_LOCO_MOVE, KNTWR_CLONE_LOCO_SELECT, KNTWR_CLONE_LOCO_CLASS_WRAP})
         Require(privateClones.entries[id] != globalClones.entries[id] && privateClones.entries[id] && globalClones.entries[id],
             "two distinct clone families");
 }
@@ -843,11 +843,11 @@ static void Exec(World& w, int mode, bool wrapper) {
     const B sel = w.sc.agents[0].sel;
     if (sel == 0) {
         if (mode == 0) CallEntry(A(At(wrapper ? 0x7f0260 : 0x7f08f0)), agent, "original mover");
-        else if (mode == 1) CallEntry(globalClones.entries[wrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], agent, "tapped-global clone");
+        else if (mode == 1) CallEntry(globalClones.entries[wrapper ? KNTWR_CLONE_LOCO_WRAP : KNTWR_CLONE_LOCO_MOVE], agent, "tapped-global clone");
         else CallRun(agent, wrapper);
     } else {
         const U original = sel == 1 ? 0x62a290 : 0x5b2ca0;
-        const U clone = sel == 1 ? NTW2_CLONE_LOCO_SELECT : NTW2_CLONE_LOCO_CLASS_WRAP;
+        const U clone = sel == 1 ? KNTWR_CLONE_LOCO_SELECT : KNTWR_CLONE_LOCO_CLASS_WRAP;
         if (mode == 0) CallEntry(A(At(original)), agent, sel == 1 ? "original selector 62A290" : "original class wrapper 5B2CA0");
         else if (mode == 1) CallEntry(globalClones.entries[clone], agent, "tapped-global selector/class clone");
         else CallEntry(privateClones.entries[clone], agent, "private selector/class clone");
@@ -915,16 +915,16 @@ static void RunMove(const Scenario& sc, bool wrapperArg) {
     if (!s.sel) CheckServiceDelta(timingBefore, timingAfter, censusBefore, censusAfter);
     Require(ImageScratch() == scratchBefore, "module run never touches the original scratch globals or guards");
     if (s.a1) {
-        EqU("private count 14543B4+C reset", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 3), 0);
-        EqU("private count 15A1888+8 reset", PrivateWord(NTW2_BIND_LOCO_SCRATCH_15A1888, 2), 0);
-        EqU("private count 15A189C+8 reset", PrivateWord(NTW2_BIND_LOCO_SCRATCH_15A189C, 2), 0);
+        EqU("private count 14543B4+C reset", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 3), 0);
+        EqU("private count 15A1888+8 reset", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_15A1888, 2), 0);
+        EqU("private count 15A189C+8 reset", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_15A189C, 2), 0);
     }
     if (s.owner == 2 && s.a1) {
-        Require(PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 2) >= 1 && PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4) != 0,
+        Require(PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 2) >= 1 && PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4) != 0,
             "private scratch grew its backing store through the native allocator");
-        Require(std::find(g_allocs.begin(), g_allocs.end(), PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4)) != g_allocs.end(),
+        Require(std::find(g_allocs.begin(), g_allocs.end(), PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4)) != g_allocs.end(),
             "private scratch backing came from the allocator seam");
-        Require(PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4) != Get<U>(At(0x14543b4), 16), "private and original backing stores are distinct");
+        Require(PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4) != Get<U>(At(0x14543b4), 16), "private and original backing stores are distinct");
     }
     const auto services = ExpectedServices(s, pr, branch);
     CheckTrace(b, services, "tapped original-global clone"); CheckTrace(c, services, "module-owned clone");
@@ -1353,9 +1353,9 @@ static void GateStageCases() {
 static loco::Binding MakeBinding() {
     loco::Binding binding{};
     binding.image_delta = delta; binding.use_clone = true;
-    binding.wrap_clone = privateClones.entries[NTW2_CLONE_LOCO_WRAP]; binding.move_clone = privateClones.entries[NTW2_CLONE_LOCO_MOVE];
-    binding.selector_clone = privateClones.entries[NTW2_CLONE_LOCO_SELECT];
-    binding.class_wrap_clone = privateClones.entries[NTW2_CLONE_LOCO_CLASS_WRAP];
+    binding.wrap_clone = privateClones.entries[KNTWR_CLONE_LOCO_WRAP]; binding.move_clone = privateClones.entries[KNTWR_CLONE_LOCO_MOVE];
+    binding.selector_clone = privateClones.entries[KNTWR_CLONE_LOCO_SELECT];
+    binding.class_wrap_clone = privateClones.entries[KNTWR_CLONE_LOCO_CLASS_WRAP];
     binding.clone_bytes = privateClones.allocation_bytes;
     return binding;
 }
@@ -1412,9 +1412,9 @@ static std::array<U, loco::ParallelWordCount> ParallelStatus() {
 // Capacities for one fixture world, derived from its own native structures instead of constants: cells from the real
 // soft-grid header, records from the two fixed registry arrays, memberships from the per-agent node arrays.
 // `primary` is the movement-slot capacity under test (primary registry only, never primary+secondary).
-static ntw2_workload::Capacity FixtureCapacity(World& w, U primary) {
+static kntwr_workload::Capacity FixtureCapacity(World& w, U primary) {
     const U shift = Get<U>(w.soft.p(), 8), maximum = Get<U>(w.soft.p(), 0x14);
-    ntw2_workload::Capacity c{};
+    kntwr_workload::Capacity c{};
     c.primary = primary;
     c.records = std::max<U>(primary, 2 * kFixtureSlots);
     c.cells = (maximum << shift) + maximum + 1;
@@ -1731,9 +1731,9 @@ static std::vector<U> ScratchSnapshot() {
     append(At(0x14543b4), 20);
     append(At(0x15a1880), 0x8120); // Native query headers, visited bitsets and touched-ID/owner queues.
     append(At(0x14dcb30), 0x70);   // Shared selector staging object.
-    for (U id : {NTW2_BIND_LOCO_SCRATCH_14543B4, NTW2_BIND_LOCO_SCRATCH_15A1888, NTW2_BIND_LOCO_SCRATCH_15A189C})
+    for (U id : {KNTWR_BIND_LOCO_SCRATCH_14543B4, KNTWR_BIND_LOCO_SCRATCH_15A1888, KNTWR_BIND_LOCO_SCRATCH_15A189C})
         append(reinterpret_cast<const void*>(static_cast<uintptr_t>(privateBindings[id])),
-            id == NTW2_BIND_LOCO_SCRATCH_14543B4 ? 20u : 16u);
+            id == KNTWR_BIND_LOCO_SCRATCH_14543B4 ? 20u : 16u);
     return words;
 }
 static void __stdcall OracleDispatch(U pool, U body, U chunks, void* context) {
@@ -1935,7 +1935,7 @@ static void GridSpreadCases() {
 }
 // Exact byte formula of the single grid block (each array padded to 64 bytes), recomputed independently of the module.
 static unsigned long long GridPad(unsigned long long words) { return (words * 4 + 63) & ~63ull; }
-static unsigned long long ExpectedGridBytes(const ntw2_workload::Capacity& c, U participants) {
+static unsigned long long ExpectedGridBytes(const kntwr_workload::Capacity& c, U participants) {
     const U chunks = std::min<U>(32, 3 * participants); // the grid carves three record chunks per participant
     U hash = 16; while (hash < c.records + c.records / 2 + 1) hash <<= 1;
     const U rows = std::min(c.cells, c.memberships);
@@ -1955,7 +1955,7 @@ static void GridCapacityCases() {
     registry.Set(primary, secondary);
     U live = 0;
     for (auto& agent : w.agents) live += Get<U>(agent->b.p(), 0xac);
-    ntw2_workload::Capacity base = {40, 80, 1024, live + 8, 0}; // 33 primary entries, 49 unique records
+    kntwr_workload::Capacity base = {40, 80, 1024, live + 8, 0}; // 33 primary entries, 49 unique records
     auto begin = [&](U lanes) {
         auto binding = MakeBinding(); binding.use_grid = true;
         binding.dispatch = &OracleDispatch; binding.pool = 0xc0111deu; binding.workers = lanes - 1;
@@ -1971,7 +1971,7 @@ static void GridCapacityCases() {
         EqU("Start alone reserves no grid storage", loco::StorageBytes(), 0);
         const unsigned long long expected = ExpectedGridBytes(base, lanes), allocation = (expected + 4095) & ~4095ull;
         EqU("estimate before activation is exactly the page-rounded grid block", loco::EstimateActivationBytes(base), U(allocation));
-        Require(loco::EstimateActivationBytes(ntw2_workload::Capacity{}) == UINT32_MAX, "incoherent capacity has no estimate");
+        Require(loco::EstimateActivationBytes(kntwr_workload::Capacity{}) == UINT32_MAX, "incoherent capacity has no estimate");
         Require(loco::ActivateOwned(w.model.p(), base), "capacity grid activates");
         EqU("grid bytes status equals the byte formula", GridStatus()[loco::GridBytes], U(expected));
         EqU("module storage is exactly the page-rounded grid block", loco::StorageBytes(), U(allocation));
@@ -1995,7 +1995,7 @@ static void GridCapacityCases() {
     }
     // Fixed capacities refuse before publication or any game write, and never grow.
     currentCase = "grid fixed-capacity refusal";
-    struct Case { const char* name; ntw2_workload::Capacity capacity; U dispatches; };
+    struct Case { const char* name; kntwr_workload::Capacity capacity; U dispatches; };
     auto small = [&](auto edit) { auto c = base; edit(c); return c; };
     const Case refusals[] = {
         {"records", small([](auto& c) { c.records = 40; }), 0},
@@ -2350,14 +2350,14 @@ static void CheckOwnedPhase(U count, U lanes, U refused, U validation = 0, bool 
     EqU("phase reserved word 31", phase[loco::OwnedPhaseReserved31], 0);
 }
 struct ShadowSnapshot {
-    std::array<U, ntw2_sweep::WordCount> sweep{};
-    std::array<U, ntw2_resolve::WordCount> resolve{};
-    std::array<U, ntw2_env::WordCount> env{};
+    std::array<U, kntwr_sweep::WordCount> sweep{};
+    std::array<U, kntwr_resolve::WordCount> resolve{};
+    std::array<U, kntwr_env::WordCount> env{};
     std::array<U, 64> targets{};
 };
 static ShadowSnapshot Shadows() {
     ShadowSnapshot s;
-    ntw2_sweep::Sample(s.sweep.data()); ntw2_resolve::Sample(s.resolve.data()); ntw2_env::Sample(s.env.data(), s.targets.data());
+    kntwr_sweep::Sample(s.sweep.data()); kntwr_resolve::Sample(s.resolve.data()); kntwr_env::Sample(s.env.data(), s.targets.data());
     return s;
 }
 static void OwnedClear() {
@@ -2599,7 +2599,7 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
         }
     }
     const auto detail = OwnedDetails();
-    static const char* const detailLabels[] = {NTW2_LOCO_OWNED_DETAIL_LABELS};
+    static const char* const detailLabels[] = {KNTWR_LOCO_OWNED_DETAIL_LABELS};
     static_assert(sizeof(detailLabels) / sizeof(detailLabels[0]) == loco::OwnedDetailWordCount, "detail labels cover status");
     for (U i = 0; i < loco::OwnedDetailWordCount; ++i) EqU(detailLabels[i], detail[i], expectedDetails[i]);
     if (plan.quiet) {
@@ -2612,8 +2612,8 @@ static std::vector<U> OwnedStageOnce(const Scenario& sc, const OwnedPlan& plan) 
         const auto shadowAfter = Shadows();
         // Owned services still initialize the ports (Enabled==1); quiet means no shadow comparison ever ran.
         EqU("quiet runs no sweep shadow calls", shadowAfter.sweep[3], 0);
-        EqU("quiet runs no resolve shadow calls", shadowAfter.resolve[ntw2_resolve::Calls], 0);
-        EqU("quiet runs no environment shadow calls", shadowAfter.env[ntw2_env::Calls], 0);
+        EqU("quiet runs no resolve shadow calls", shadowAfter.resolve[kntwr_resolve::Calls], 0);
+        EqU("quiet runs no environment shadow calls", shadowAfter.env[kntwr_env::Calls], 0);
         Require(shadowAfter.sweep == shadowBefore.sweep && shadowAfter.resolve == shadowBefore.resolve &&
             shadowAfter.env == shadowBefore.env && shadowAfter.targets == shadowBefore.targets,
             "quiet performs no shadow comparisons or callback histogram observation");
@@ -3367,9 +3367,9 @@ static void OwnedCombinedRestartCase() {
         Put(world->model.p(), 0xA8, U(0)); Put(world->model.p(), 0xC0, U(0));
         dispatchLanes = 4; reverseChunks = concurrentChunks = false;
         dispatchCalls = dispatchedChunks = dispatchMaxChunks = 0;
-        ntw2_collide::Binding collision{delta, &OracleDispatch, binding.pool, binding.workers, &loco::ReadGridForCollision};
-        Require(ntw2_collide::Start(collision), "combined generation collision starts");
-        Require(ntw2_collide::Activate(world->mgr.p(), FixtureCapacity(*world, kFixtureSlots)), "combined generation collision storage activates");
+        kntwr_collide::Binding collision{delta, &OracleDispatch, binding.pool, binding.workers, &loco::ReadGridForCollision};
+        Require(kntwr_collide::Start(collision), "combined generation collision starts");
+        Require(kntwr_collide::Activate(world->mgr.p(), FixtureCapacity(*world, kFixtureSlots)), "combined generation collision storage activates");
         Require(loco::Start(binding), "combined generation movement starts");
         Require(loco::ActivateOwned(world->model.p(), FixtureCapacity(*world, kFixtureSlots)), "combined generation activates");
         Put(world->model.p(), 0xA8, boundary.grid); Put(world->model.p(), 0xC0, boundary.tree);
@@ -3391,12 +3391,12 @@ static void OwnedCombinedRestartCase() {
         // Exercise the real collision pipeline without unrelated native combat
         // virtuals, which are outside the mover fixture's native graph.
         for (auto& agent : world->agents) Put(agent->b.p(), 0x38, U(0));
-        ntw2_collide::Stage(world->mgr.p());
-        U source[ntw2_collide::SourceWordCount]{};
-        ntw2_collide::SampleSource(source);
-        EqU("combined stage uses published owned CSR", source[ntw2_collide::Source], ntw2_collide::SourceOwned);
-        EqU("combined stage has no owned input refusal", source[ntw2_collide::OwnedRefusals], 0);
-        ntw2_collide::Stop(); CallStop();
+        kntwr_collide::Stage(world->mgr.p());
+        U source[kntwr_collide::SourceWordCount]{};
+        kntwr_collide::SampleSource(source);
+        EqU("combined stage uses published owned CSR", source[kntwr_collide::Source], kntwr_collide::SourceOwned);
+        EqU("combined stage has no owned input refusal", source[kntwr_collide::OwnedRefusals], 0);
+        kntwr_collide::Stop(); CallStop();
         Require(loco::ReadGrid() == nullptr, "stop invalidates published grid");
         MEMORY_BASIC_INFORMATION released{};
         Require(VirtualQuery(gridBase, &released, sizeof(released)) == sizeof(released) && released.State == MEM_FREE,
@@ -3458,13 +3458,13 @@ static void OwnedCapacityStorageCases() {
         auto b = MakeBinding(); b.use_parallel = b.use_owned_services = b.use_grid = true;
         b.dispatch = &OracleDispatch; b.pool = 0xc0111deu; b.workers = 8;
         dispatchLanes = 9; reverseChunks = concurrentChunks = false;
-        const ntw2_workload::Capacity capacity{48128,74752,1048576,160256,770048};
-        ntw2_collide::Binding collision{delta,&OracleDispatch,b.pool,b.workers,&loco::ReadGridForCollision};
-        Require(ntw2_collide::Start(collision), "replay-sized collision binding starts");
-        Require(ntw2_collide::Activate(w.mgr.p(),capacity), "replay-sized collision arena activates");
+        const kntwr_workload::Capacity capacity{48128,74752,1048576,160256,770048};
+        kntwr_collide::Binding collision{delta,&OracleDispatch,b.pool,b.workers,&loco::ReadGridForCollision};
+        Require(kntwr_collide::Start(collision), "replay-sized collision binding starts");
+        Require(kntwr_collide::Activate(w.mgr.p(),capacity), "replay-sized collision arena activates");
         Require(loco::Start(b), "replay-sized owned binding starts");
         Require(loco::ActivateOwned(w.model.p(),capacity), "replay-sized owned arena activates");
-        const U locoBytes=loco::StorageBytes(), collisionBytes=ntw2_collide::StorageBytes();
+        const U locoBytes=loco::StorageBytes(), collisionBytes=kntwr_collide::StorageBytes();
         Require(locoBytes+collisionBytes<96u*1024*1024, "combined arenas alone fit below the aggregate memory target");
         std::array<U, loco::StorageWordCount> storage{}; loco::SampleStorage(storage.data());
         U byteSum = 0; for (U i = 0; i < loco::StorageSceneNodes; ++i) byteSum += storage[i];
@@ -3478,8 +3478,8 @@ static void OwnedCapacityStorageCases() {
                 "movement + grid leave at least 8 MiB of the 48 MiB budget for scene, catalog and participants");
         std::printf("replay-capacity fixture bytes: loco=%u collision=%u combined=%u (small captured scene; excludes image/profile/stacks)\n",
                     locoBytes,collisionBytes,locoBytes+collisionBytes);
-        ntw2_collide::Stop(); CallStop();
-        EqU("combined collision arena releases",ntw2_collide::StorageBytes(),0);
+        kntwr_collide::Stop(); CallStop();
+        EqU("combined collision arena releases",kntwr_collide::StorageBytes(),0);
         EqU("combined owned arena releases",loco::StorageBytes(),0);
         ++cases;
     }
@@ -3491,7 +3491,7 @@ static void OwnedActivationCases() {
       auto b = MakeBinding(); b.use_parallel = b.use_owned_services = true; b.dispatch = &OracleDispatch; b.pool = 0xc0111deu; b.workers = 1;
       Require(loco::Start(b), "activation validation oracle starts");
       Require(!loco::ActivateOwned(nullptr, FixtureCapacity(w, 4)), "null model is refused");
-      Require(!loco::ActivateOwned(w.model.p(), ntw2_workload::Capacity{}), "zero capacity is refused");
+      Require(!loco::ActivateOwned(w.model.p(), kntwr_workload::Capacity{}), "zero capacity is refused");
       for (int field = 0; field < 4; ++field) {
           auto c = FixtureCapacity(w, 4);
           if (field == 0) c.primary = 0; else if (field == 1) c.records = 3; else if (field == 2) c.cells = 0; else c.memberships = 0;
@@ -3575,8 +3575,8 @@ static void ParallelStageCases() {
 
 static void ScratchLifecycle() {
     currentCase = "private scratch lifecycle";
-    const U backing = PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4);
-    Require(backing != 0 && PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 2) >= 1, "plane candidate runs left a grown private backing store");
+    const U backing = PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4);
+    Require(backing != 0 && PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 2) >= 1, "plane candidate runs left a grown private backing store");
     Require(std::find(g_allocs.begin(), g_allocs.end(), backing) != g_allocs.end(), "backing store was allocated by the native allocator");
     const size_t freesBefore = g_frees.size();
     const auto retained = Services();
@@ -3586,17 +3586,17 @@ static void ScratchLifecycle() {
     CallStop();
     Require(Services() == retained, "Stop retains the complete service timing snapshot");
     Require(g_frees.size() == freesBefore + 1 && g_frees.back() == backing, "Stop frees exactly the private backing store through native FF7EF0");
-    EqU("scratch header tag restored", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
-    for (U i = 1; i < 5; ++i) EqU("scratch header empty after Stop", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, i), 0);
+    EqU("scratch header tag restored", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
+    for (U i = 1; i < 5; ++i) EqU("scratch header empty after Stop", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, i), 0);
     for (U i = 0; i < 4; ++i) {
-        EqU("second scratch empty after Stop", PrivateWord(NTW2_BIND_LOCO_SCRATCH_15A1888, i), 0);
-        EqU("third scratch empty after Stop", PrivateWord(NTW2_BIND_LOCO_SCRATCH_15A189C, i), 0);
+        EqU("second scratch empty after Stop", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_15A1888, i), 0);
+        EqU("third scratch empty after Stop", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_15A189C, i), 0);
     }
     Require(loco::Start(MakeBinding()), "module restarts after Stop");
     CheckServiceReset(true);
-    EqU("restart reconstructs the scratch header", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
+    EqU("restart reconstructs the scratch header", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
     Spec s; s.name = "owner transition after restart"; s.owner = 2; Run(Move(s));
-    Require(PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4) != 0, "restarted scratch grows again");
+    Require(PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4) != 0, "restarted scratch grows again");
     CallStop();
 }
 static void ObserveOnlyServices() {
@@ -3744,10 +3744,10 @@ static void ServiceAbiCases() {
     Require(loco::Start(binding), "ABI oracle starts with controlled private-family entry");
     CheckServiceReset(true);
     const U ids[loco::ServiceCount] = {
-        NTW2_BIND_LOCO_SERVICE_811ED0, NTW2_BIND_LOCO_SERVICE_811D50,
-        NTW2_BIND_LOCO_SERVICE_7EFDD0, NTW2_BIND_LOCO_SERVICE_7EFA80,
-        NTW2_BIND_LOCO_SERVICE_801140, NTW2_BIND_LOCO_SERVICE_80F290,
-        NTW2_BIND_LOCO_SERVICE_81AE40, NTW2_BIND_LOCO_SERVICE_814AA0
+        KNTWR_BIND_LOCO_SERVICE_811ED0, KNTWR_BIND_LOCO_SERVICE_811D50,
+        KNTWR_BIND_LOCO_SERVICE_7EFDD0, KNTWR_BIND_LOCO_SERVICE_7EFA80,
+        KNTWR_BIND_LOCO_SERVICE_801140, KNTWR_BIND_LOCO_SERVICE_80F290,
+        KNTWR_BIND_LOCO_SERVICE_81AE40, KNTWR_BIND_LOCO_SERVICE_814AA0
     };
     for (U probe = 0; probe < 2 * loco::ServiceCount; ++probe) {
         const U i = probe / 2;
@@ -3793,7 +3793,7 @@ static void ServiceAbiCases() {
 #include "native_loco_relink_cases.h"
 #include "native_loco_classwrap_cases.h"
 
-namespace ntw2_loco { void DebugGrid(long long*); } // per-phase chunk CPU accumulators, compiled only into this oracle
+namespace kntwr_loco { void DebugGrid(long long*); } // per-phase chunk CPU accumulators, compiled only into this oracle
 static U gBenchMoving = 100;
 static void __fastcall NullChunk(void*, U) {}
 static void GridBench(U lanes, U stages) {
@@ -3820,9 +3820,9 @@ static void GridBench(U lanes, U stages) {
     for (const bool cold : {false, true}) for (const bool incremental : {false, true}) {
         bulk::Config cfg;
         bulk::World world(cfg);
-        long long dbg[8]; ntw2_loco::DebugGrid(dbg);
+        long long dbg[8]; kntwr_loco::DebugGrid(dbg);
         const bulk::PhaseRow r = bulk::Bench(world, lanes, incremental, stages, 8, gBenchMoving, cold);
-        ntw2_loco::DebugGrid(dbg);
+        kntwr_loco::DebugGrid(dbg);
         LARGE_INTEGER f; QueryPerformanceFrequency(&f);
         std::printf("  %-4s %-11s registry %7.1f  capture %7.1f  plan %7.1f  build %7.1f  total %7.1f us  (call %7.1f)  full=%u inc=%u changed=%u reuse=%u\n",
             cold ? "cold" : "warm", incremental ? "incremental" : "full", r.registry, r.capture, r.plan, r.build, r.total, r.call,
@@ -3873,8 +3873,8 @@ int main(int argc, char** argv) {
     EqU("Start initializes enforced mask synchronously", initialGates[loco::GateEnforcedMask], 0x233);
     for (U i = 1; i < loco::GateWordCount; ++i)
         if (i != loco::GateEnforcedMask) EqU("Start clears gate counters and reserved words", initialGates[i], 0);
-    EqU("private scratch header constructed", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
-    EqU("private scratch capacity empty", PrivateWord(NTW2_BIND_LOCO_SCRATCH_14543B4, 4), 0);
+    EqU("private scratch header constructed", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 0), A(At(0x1312358)));
+    EqU("private scratch capacity empty", PrivateWord(KNTWR_BIND_LOCO_SCRATCH_14543B4, 4), 0);
     CanonicalScalarCase(); ClassifyCases(); MoveCases(); StageCases(); GateStageCases(); OwnerHandoffCases();
     ScratchLifecycle();
     ObserveOnlyServices();

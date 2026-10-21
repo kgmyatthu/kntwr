@@ -11,7 +11,7 @@
 #include <vector>
 #include <array>
 #include <utility>
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_loco.h"
 #include "native_sweep.h"
 #include "native_resolve.h"
@@ -21,7 +21,7 @@
 
 static_assert(sizeof(void*) == 4, "native locomotion is a Win32 x86 adapter");
 
-namespace ntw2_loco {
+namespace kntwr_loco {
 namespace {
 using U = uint32_t;
 using TC0 = void (__thiscall*)(void*);
@@ -87,7 +87,7 @@ struct alignas(64) GridChunkStat {
 // incremental build requires it to equal the previous publication's, rounding control included.
 struct GridGeometry { U shift, origin, maximum, nativeCells, model, scaleBits, bumpBits, mxcsr, cw; };
 struct GridStore {
-    ntw2_workload::Capacity cap;
+    kntwr_workload::Capacity cap;
     U chunks, hashSize, rowCap, slotMask;
     unsigned char* base;
     size_t bytes, allocBytes;
@@ -131,7 +131,7 @@ U g_gridModel;
 U g_incarnation, g_storageBytes;
 U g_storageWords[StorageWordCount]; // cached allocation breakdown; first eight words sum to g_storageBytes
 U g_catalogStorage[CatalogStorageWordCount]; // cached catalog geometry breakdown; first five sum to StorageCatalog
-static_assert(CatalogStorageWordCount == ntw2_resolve::CatalogStorageWordCount, "catalog breakdown width");
+static_assert(CatalogStorageWordCount == kntwr_resolve::CatalogStorageWordCount, "catalog breakdown width");
 bool g_gridValid, g_gridCommittedReady;
 GridView g_gridView;
 struct PublicationEvent { U entity, which, receiver; }; // all four native link services are thiscall/no stack args
@@ -168,7 +168,7 @@ template <class T> inline T Raw(const unsigned char* p) { T v; memcpy(&v, p, siz
 //    they are stored in their own group and committed only for wrapper slots.
 //  * Other padding and unread fields are untouched; the separately handled latch at +5EC and predicate at +67C
 //    are described below. The +1D8 receiver is included despite lying beyond the bulk movement fields.
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
 using Span = OwnedSpanForTest;
 #else
 struct Span { U offset, bytes; };
@@ -309,13 +309,13 @@ inline void CommitOwnedFields(const OwnedSlot& slot) {
 struct OwnedCurrent {
     U entity, ordinal, serial, services;
     unsigned char reason, detail, serviceCount;
-    ntw2_env::Result environment;
+    kntwr_env::Result environment;
 };
 // Heavy per-participant worker contexts. Created by ActivateOwned only, one per ACTUAL participant.
 struct OwnedContexts {
-    ntw2_sweep::WorkerContext sweep;
-    ntw2_resolve::WorkerContext resolve;
-    ntw2_env::WorkerContext env;
+    kntwr_sweep::WorkerContext sweep;
+    kntwr_resolve::WorkerContext resolve;
+    kntwr_env::WorkerContext env;
 };
 // Class-wrapper phase 2: one entry per real child of a worker-computed 0x132BA04 wrapper (pooled per stage, ordinal order
 // via OwnedArena::cwInfo). Prefilled at gather (child, vtable, list, state); the proxy child's slot 0x36 records the
@@ -329,7 +329,7 @@ struct CwEvent {
     unsigned char submitted, served;
 };
 struct OwnedParticipant {
-    ntw2_clone_set clones{};
+    kntwr_clone_set clones{};
     U first[5]{}, second[4]{}, third[4]{};
     OwnedContexts* ctx = nullptr;
     OwnedCurrent current{};
@@ -350,8 +350,8 @@ struct OwnedParticipant {
     alignas(64) unsigned char work[kOwnedBytes]{};
 };
 struct OwnedArena {
-    ntw2_sweep::WorkerScene scene;
-    ntw2_resolve::WorkerCatalog catalog;
+    kntwr_sweep::WorkerScene scene;
+    kntwr_resolve::WorkerCatalog catalog;
     OwnedParticipant* participants[kParallelChunks]{}; // only participantsCount entries are ever allocated
     U virtualTables[kOwnedClasses][kOwnedVirtualWords];
     bool classRoute[kOwnedClasses]{}, predicate67C[kOwnedClasses]{}, predicateLinkByte[kOwnedClasses]{};
@@ -374,7 +374,7 @@ struct OwnedArena {
 };
 static_assert(sizeof(OwnedSlot) == kOwnedSlotBytes, "published movement slot width");
 OwnedArena* g_owned;
-U g_ownedWords[OwnedWordCount], g_locoBindings[NTW2_BIND_COUNT];
+U g_ownedWords[OwnedWordCount], g_locoBindings[KNTWR_BIND_COUNT];
 U g_ownedDetails[OwnedDetailWordCount], g_ownedPhase[OwnedPhaseWordCount];
 U g_ownedLoad[OwnedLoadWordCount];
 LONGLONG g_replayCommitTicks, g_replayFallbackTicks;
@@ -389,7 +389,7 @@ U g_stageEntity, g_stageOrdinal;
 __declspec(thread) OwnedCurrent* g_ownedOccurrence;
 __declspec(thread) OwnedParticipant* g_ownedParticipant;
 __declspec(thread) LONG g_ownedEpoch;
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
 OwnedServiceObserverForTest g_ownedObserver;
 void ObserveOwned(U entity, U service, U ordinal, OwnedTestPhase phase) {
     if (g_ownedObserver) g_ownedObserver(entity, static_cast<Service>(service), ordinal, phase);
@@ -450,7 +450,7 @@ void Prefault(void* base, size_t bytes);
 U HashSizeFor(U records) { U size = 16; while (size < records + records / 2 + 1) size <<= 1; return size; }
 // Smallest b >= 1 with 2^b >= values.
 U BitsFor(U values) { U bits = 1; while (bits < 31 && (1u << bits) < values) ++bits; return bits; }
-bool ValidCapacity(const ntw2_workload::Capacity& c) {
+bool ValidCapacity(const kntwr_workload::Capacity& c) {
     return c.primary && c.records >= c.primary && c.cells && c.memberships &&
         c.records <= kMaxRecords && c.cells <= kMaxCells && c.memberships <= kMaxMembers;
 }
@@ -467,7 +467,7 @@ struct GridCarve {
         return p;
     }
 };
-unsigned long long CarveGrid(const ntw2_workload::Capacity& c, U chunks, GridStore& s, unsigned char* base, bool incremental) {
+unsigned long long CarveGrid(const kntwr_workload::Capacity& c, U chunks, GridStore& s, unsigned char* base, bool incremental) {
     GridCarve m = {base, 0};
     const U R = c.records, H = HashSizeFor(R), C = c.cells, M = c.memberships, Q = (std::min)(C, M);
     s.cap = c; s.chunks = chunks; s.hashSize = H; s.rowCap = Q;
@@ -496,7 +496,7 @@ unsigned long long CarveGrid(const ntw2_workload::Capacity& c, U chunks, GridSto
     return m.offset;
 }
 // Reserves, carves and prefaults one store (page-rounded single block).
-bool AllocateStore(GridStore& store, const ntw2_workload::Capacity& c, U chunks, bool incremental) {
+bool AllocateStore(GridStore& store, const kntwr_workload::Capacity& c, U chunks, bool incremental) {
     GridStore plan = {};
     const unsigned long long bytes = CarveGrid(c, chunks, plan, nullptr, incremental);
     if (bytes > 0x7FFFFFFFull) return false;
@@ -521,7 +521,7 @@ void ReleaseGrid() {
 // core, descheduled, cold lines) does not decide the wall time of the whole dispatch.
 constexpr U kGridChunksPerParticipant = 3;
 U GridChunkCount() { return (std::min)(kParallelChunks, (std::max)(1u, g_binding.workers + 1) * kGridChunksPerParticipant); }
-bool AllocateGrid(const ntw2_workload::Capacity& c) {
+bool AllocateGrid(const kntwr_workload::Capacity& c) {
     const U chunks = GridChunkCount();
     if (!AllocateStore(g_gridStore, c, chunks, g_binding.grid_incremental)) return false;
     // --loco-grid-incremental with verification keeps a second, non-incremental store that every stage rebuilds in full.
@@ -532,8 +532,8 @@ bool AllocateGrid(const ntw2_workload::Capacity& c) {
     g_gridWords[GridBytes] = static_cast<U>(g_gridStore.bytes);
     return true;
 }
-bool GridCovers(const ntw2_workload::Capacity& c) {
-    const ntw2_workload::Capacity& a = g_gridStore.cap;
+bool GridCovers(const kntwr_workload::Capacity& c) {
+    const kntwr_workload::Capacity& a = g_gridStore.cap;
     return c.primary <= a.primary && c.records <= a.records && c.cells <= a.cells && c.memberships <= a.memberships;
 }
 U SaturatedWord(unsigned long long value) { return value > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<U>(value); }
@@ -550,20 +550,20 @@ U ComputeStorage() {
         const OwnedArena& arena = *g_owned;
         participants += sizeof(OwnedArena);
         movement = arena.movementBytes;
-        scene = ntw2_sweep::HeapBytes(arena.scene); catalog = ntw2_resolve::HeapBytes(arena.catalog);
-        ntw2_resolve::SampleCatalogStorage(arena.catalog, g_catalogStorage);
+        scene = kntwr_sweep::HeapBytes(arena.scene); catalog = kntwr_resolve::HeapBytes(arena.catalog);
+        kntwr_resolve::SampleCatalogStorage(arena.catalog, g_catalogStorage);
         for (U i = 0; i < arena.participantsCount; ++i) {
             const OwnedParticipant* participant = arena.participants[i];
             if (!participant) continue;
             participants += sizeof(OwnedParticipant) + participant->clones.allocation_bytes;
             if (participant->ctx) {
                 participants += sizeof(OwnedContexts);
-                sweep += ntw2_sweep::HeapBytes(participant->ctx->sweep);
-                resolve += ntw2_resolve::HeapBytes(participant->ctx->resolve);
-                env += ntw2_env::HeapBytes(participant->ctx->env);
+                sweep += kntwr_sweep::HeapBytes(participant->ctx->sweep);
+                resolve += kntwr_resolve::HeapBytes(participant->ctx->resolve);
+                env += kntwr_env::HeapBytes(participant->ctx->env);
             }
         }
-        ntw2_sweep::SampleCounts(arena.scene, g_storageWords + StorageSceneNodes);
+        kntwr_sweep::SampleCounts(arena.scene, g_storageWords + StorageSceneNodes);
     }
     g_storageWords[StorageMovement] = SaturatedWord(movement); g_storageWords[StorageGrid] = SaturatedWord(grid);
     g_storageWords[StorageScene] = SaturatedWord(scene); g_storageWords[StorageCatalog] = SaturatedWord(catalog);
@@ -800,7 +800,7 @@ void GridBucketChunk(GridJob& job, U chunk, U begin, U end) {
     }
     s.stats[chunk].multis = multiCount;
 }
-#ifdef NTW2_LOCO_ORACLE // bench-only per-chunk CPU accounting for the oracle's --grid-bench; compiled out of the runtime
+#ifdef KNTWR_LOCO_ORACLE // bench-only per-chunk CPU accounting for the oracle's --grid-bench; compiled out of the runtime
 LONGLONG g_dbg[8];
 #define GRID_PROF_MARK(v) const LONGLONG v = Now()
 #define GRID_PROF_ADD(slot, since) InterlockedExchangeAdd64(&g_dbg[slot], Now() - (since))
@@ -1304,7 +1304,7 @@ __declspec(naked) void __stdcall RecordService(U, U) {
 
 void ServiceExit(); // defined below as a naked function (the attribute belongs on the definition only)
 __declspec(noinline) void __stdcall BeginService(U service, U* returnSlot, U receiver) {
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
     ObserveOwned(g_stageEntity ? g_stageEntity : receiver - (service == WrapperQuery ? 0xF4 : 0),
         service, g_stageOrdinal, OwnedTestSerial);
 #endif
@@ -1324,16 +1324,16 @@ __declspec(noinline) void __stdcall BeginService(U service, U* returnSlot, U rec
     *returnSlot = Address(reinterpret_cast<void*>(&ServiceExit));
     if (g_shadowEnabled) {
         if (service == Sweep)
-            ntw2_sweep::ShadowBefore(reinterpret_cast<ntw2_sweep::Agent*>(receiver),
-                reinterpret_cast<ntw2_sweep::Scratch*>(returnSlot[1]),
-                reinterpret_cast<const ntw2_sweep::Aabb*>(returnSlot[2]), returnSlot[3]);
+            kntwr_sweep::ShadowBefore(reinterpret_cast<kntwr_sweep::Agent*>(receiver),
+                reinterpret_cast<kntwr_sweep::Scratch*>(returnSlot[1]),
+                reinterpret_cast<const kntwr_sweep::Aabb*>(returnSlot[2]), returnSlot[3]);
         else if (service == Resolve)
-            ntw2_resolve::ShadowBefore(reinterpret_cast<ntw2_resolve::Agent*>(receiver),
-                reinterpret_cast<ntw2_resolve::Scratch*>(returnSlot[1]),
-                reinterpret_cast<const ntw2_resolve::Aabb*>(returnSlot[2]));
+            kntwr_resolve::ShadowBefore(reinterpret_cast<kntwr_resolve::Agent*>(receiver),
+                reinterpret_cast<kntwr_resolve::Scratch*>(returnSlot[1]),
+                reinterpret_cast<const kntwr_resolve::Aabb*>(returnSlot[2]));
         else if (service == HeightOwner)
-            ntw2_env::ShadowBefore(reinterpret_cast<ntw2_env::Agent*>(receiver),
-                reinterpret_cast<ntw2_env::Scratch*>(returnSlot[1]));
+            kntwr_env::ShadowBefore(reinterpret_cast<kntwr_env::Agent*>(receiver),
+                reinterpret_cast<kntwr_env::Scratch*>(returnSlot[1]));
     }
 }
 __declspec(noinline) U __stdcall EndService(U originalReturn) {
@@ -1351,12 +1351,12 @@ __declspec(noinline) U __stdcall EndService(U originalReturn) {
         _InterlockedIncrement(&g_timingSequence);
     } else ++g_timingWords[TimingQpcFailures];
     if (g_shadowEnabled) {
-        if (frame.service == Sweep) ntw2_sweep::ShadowAfter();
+        if (frame.service == Sweep) kntwr_sweep::ShadowAfter();
         else if (frame.service == Resolve) {
-            ntw2_resolve::ObserveOriginalInout(g_originalInout);
-            ntw2_resolve::ShadowAfter(static_cast<uint8_t>(originalReturn));
+            kntwr_resolve::ObserveOriginalInout(g_originalInout);
+            kntwr_resolve::ShadowAfter(static_cast<uint8_t>(originalReturn));
         }
-        else if (frame.service == HeightOwner) ntw2_env::ShadowAfter();
+        else if (frame.service == HeightOwner) kntwr_env::ShadowAfter();
     }
     return frame.returnAddress;
 }
@@ -1391,7 +1391,7 @@ void AbandonServiceFrames(U base) {
     if (g_serviceDepth > base) {
         g_timingWords[TimingAbandoned] += g_serviceDepth - base;
         g_serviceDepth = base;
-        ntw2_sweep::Abandon(); ntw2_resolve::Abandon(); ntw2_env::Abandon();
+        kntwr_sweep::Abandon(); kntwr_resolve::Abandon(); kntwr_env::Abandon();
     }
 }
 void RecordCloneTime(LONGLONG ticks) {
@@ -1453,7 +1453,7 @@ void __fastcall OwnedClamp(void*, void*) {
 // MOVE/WRAP clone, then the selector's post-move A3 test (zero would stage: refused before the child loop).
 void __fastcall OwnedSelect(void* receiver, void*) {
     OwnedParticipant& participant = *g_ownedParticipant;
-    Call(participant.clones.entries[participant.cwWrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], Address(receiver));
+    Call(participant.clones.entries[participant.cwWrapper ? KNTWR_CLONE_LOCO_WRAP : KNTWR_CLONE_LOCO_MOVE], Address(receiver));
     if (!static_cast<const unsigned char*>(receiver)[0xA3])
         RefuseOwned(OwnedNeedsStaging, participant.cwInitialA3 ? OwnedDetailResultA3 : OwnedDetailInitialA3);
 }
@@ -1483,7 +1483,7 @@ __forceinline void OwnedService(Service service, void* receiver) {
         Address(receiver) != Address(g_ownedParticipant->work) + (service == WrapperQuery ? 0xF4 : 0))
         RefuseOwned(OwnedNeedsCapacity);
     occurrence.services |= service << (4 * occurrence.serviceCount++);
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
     ObserveOwned(occurrence.entity, service, occurrence.ordinal, OwnedTestPort);
 #endif
 }
@@ -1495,22 +1495,22 @@ U __fastcall OwnedQuery(void* descriptor, void*) {
     OwnedService(WrapperQuery, descriptor);
     return reinterpret_cast<U (__thiscall*)(void*)>(g_serviceTargets[WrapperQuery])(descriptor);
 }
-void __fastcall OwnedSweep(void* agent, void*, void* scratch, const ntw2_sweep::Aabb* box, U mode) {
+void __fastcall OwnedSweep(void* agent, void*, void* scratch, const kntwr_sweep::Aabb* box, U mode) {
     OwnedService(Sweep, agent);
     if (mode & 8) RefuseOwned(OwnedNeedsEnv);
-    if (!ntw2_sweep::WorkerSweep(g_ownedParticipant->ctx->sweep, agent,
+    if (!kntwr_sweep::WorkerSweep(g_ownedParticipant->ctx->sweep, agent,
         g_ownedOccurrence->entity, scratch, *box, mode)) RefuseOwned(OwnedNeedsSweep);
 }
-uint8_t __fastcall OwnedResolve(void* agent, void*, void* scratch, const ntw2_resolve::Aabb* box) {
+uint8_t __fastcall OwnedResolve(void* agent, void*, void* scratch, const kntwr_resolve::Aabb* box) {
     OwnedService(Resolve, agent);
     uint8_t result = 0;
-    if (!ntw2_resolve::WorkerResolve(g_ownedParticipant->ctx->resolve, agent,
+    if (!kntwr_resolve::WorkerResolve(g_ownedParticipant->ctx->resolve, agent,
         g_ownedOccurrence->entity, scratch, *box, result)) RefuseOwned(OwnedNeedsResolve);
     return result;
 }
 void __fastcall OwnedEnvironment(void* agent, void*, void* scratch) {
     OwnedService(HeightOwner, agent);
-    if (!ntw2_env::WorkerEnv(g_ownedParticipant->ctx->env, agent,
+    if (!kntwr_env::WorkerEnv(g_ownedParticipant->ctx->env, agent,
         g_ownedOccurrence->entity, scratch, g_ownedOccurrence->environment)) RefuseOwned(OwnedNeedsEnv);
     // Buildings/owner graph and transition callbacks have not had a live oracle
     // replay. Preserve owner execution rather than extrapolate the flat-terrain proof.
@@ -1596,14 +1596,14 @@ U g_relinkWords[RelinkWordCount];
 U g_relinkMode, g_relinkNative[2], g_relinkSeq, g_relinkMinCells = kRelinkParallelMinCells;
 bool g_relinkWindow;  // the stage replay loop is open for logging
 bool g_relinkLogging; // the code running right now is a logged occurrence (tapped selector/move clone fallback)
-unsigned long long RelinkPlanBytes(const ntw2_workload::Capacity& c, U mode) {
+unsigned long long RelinkPlanBytes(const kntwr_workload::Capacity& c, U mode) {
     if (!mode) return 0;
     unsigned long long bytes = 3ull * c.records * sizeof(MoveOp) + 8ull * c.memberships + (2ull * kRelinkBatchRecords + 1024) * sizeof(MoveRecordState);
     if (mode == 1) bytes += 24ull * kRelinkMirrorWords;
     return bytes;
 }
 size_t RelinkStorageBytes() { return g_moveLog.blockBytes + g_relinkMirror.blockBytes; }
-bool AllocateRelink(const ntw2_workload::Capacity& c) {
+bool AllocateRelink(const kntwr_workload::Capacity& c) {
     if (g_moveLog.block) return true;
     if (!MoveLogInit(g_moveLog, c.records, c.memberships, kRelinkBatchRecords, V(0x1318038))) return false;
     if (g_relinkMode == 1 && !RelinkMirrorInit(g_relinkMirror, kRelinkMirrorWords)) { MoveLogFree(g_moveLog); return false; }
@@ -2160,25 +2160,25 @@ bool CreateOwned() {
         if (!memory) { DestroyOwned(); return false; }
         OwnedParticipant& participant = *new (memory) OwnedParticipant;
         g_owned->participants[i] = &participant;
-        U bindings[NTW2_BIND_COUNT];
+        U bindings[KNTWR_BIND_COUNT];
         memcpy(bindings, g_locoBindings, sizeof(bindings));
         participant.first[0] = V(0x1312358);
-        bindings[NTW2_BIND_LOCO_SCRATCH_14543B4] = Address(participant.first);
-        bindings[NTW2_BIND_LOCO_SCRATCH_15A1888] = Address(participant.second);
-        bindings[NTW2_BIND_LOCO_SCRATCH_15A189C] = Address(participant.third);
-        bindings[NTW2_BIND_LOCO_SERVICE_811ED0] = Address(reinterpret_cast<void*>(&OwnedLink<UnlinkGrid>));
-        bindings[NTW2_BIND_LOCO_SERVICE_811D50] = Address(reinterpret_cast<void*>(&OwnedLink<UnlinkOwner>));
-        bindings[NTW2_BIND_LOCO_SERVICE_7EFDD0] = Address(reinterpret_cast<void*>(&OwnedLink<InsertOwner>));
-        bindings[NTW2_BIND_LOCO_SERVICE_7EFA80] = Address(reinterpret_cast<void*>(&OwnedLink<InsertGrid>));
-        bindings[NTW2_BIND_LOCO_SERVICE_801140] = Address(reinterpret_cast<void*>(&OwnedSweep));
-        bindings[NTW2_BIND_LOCO_SERVICE_80F290] = Address(reinterpret_cast<void*>(&OwnedResolve));
-        bindings[NTW2_BIND_LOCO_SERVICE_81AE40] = Address(reinterpret_cast<void*>(&OwnedEnvironment));
-        bindings[NTW2_BIND_LOCO_SERVICE_814AA0] = Address(reinterpret_cast<void*>(&OwnedQuery));
+        bindings[KNTWR_BIND_LOCO_SCRATCH_14543B4] = Address(participant.first);
+        bindings[KNTWR_BIND_LOCO_SCRATCH_15A1888] = Address(participant.second);
+        bindings[KNTWR_BIND_LOCO_SCRATCH_15A189C] = Address(participant.third);
+        bindings[KNTWR_BIND_LOCO_SERVICE_811ED0] = Address(reinterpret_cast<void*>(&OwnedLink<UnlinkGrid>));
+        bindings[KNTWR_BIND_LOCO_SERVICE_811D50] = Address(reinterpret_cast<void*>(&OwnedLink<UnlinkOwner>));
+        bindings[KNTWR_BIND_LOCO_SERVICE_7EFDD0] = Address(reinterpret_cast<void*>(&OwnedLink<InsertOwner>));
+        bindings[KNTWR_BIND_LOCO_SERVICE_7EFA80] = Address(reinterpret_cast<void*>(&OwnedLink<InsertGrid>));
+        bindings[KNTWR_BIND_LOCO_SERVICE_801140] = Address(reinterpret_cast<void*>(&OwnedSweep));
+        bindings[KNTWR_BIND_LOCO_SERVICE_80F290] = Address(reinterpret_cast<void*>(&OwnedResolve));
+        bindings[KNTWR_BIND_LOCO_SERVICE_81AE40] = Address(reinterpret_cast<void*>(&OwnedEnvironment));
+        bindings[KNTWR_BIND_LOCO_SERVICE_814AA0] = Address(reinterpret_cast<void*>(&OwnedQuery));
         for (U k = 0; k < kCwMaxChildren; ++k) {
             participant.cwProxy[k][0] = Address(g_cwChildTable); participant.cwProxy[k][1] = k;
             participant.cwList[k] = Address(participant.cwProxy[k]);
         }
-        if (ntw2_build_loco_participant(g_binding.wrap_clone, g_binding.move_clone, g_cwMode ? g_binding.class_wrap_clone : 0,
+        if (kntwr_build_loco_participant(g_binding.wrap_clone, g_binding.move_clone, g_cwMode ? g_binding.class_wrap_clone : 0,
                 g_cwMode ? Address(reinterpret_cast<void*>(&OwnedSelect)) : 0, bindings, &participant.clones)) {
             DestroyOwned(); return false;
         }
@@ -2290,8 +2290,8 @@ bool OwnedRunEntity(OwnedArena& arena, OwnedParticipant& participant, U index) {
     }
     bool ok = false;
     __try {
-        Call(children ? participant.clones.entries[NTW2_CLONE_LOCO_CLASS_WRAP] :
-            participant.clones.entries[slot.wrapper ? NTW2_CLONE_LOCO_WRAP : NTW2_CLONE_LOCO_MOVE], Address(work));
+        Call(children ? participant.clones.entries[KNTWR_CLONE_LOCO_CLASS_WRAP] :
+            participant.clones.entries[slot.wrapper ? KNTWR_CLONE_LOCO_WRAP : KNTWR_CLONE_LOCO_MOVE], Address(work));
         // 62A290 tests the POST-MOVE A3 byte: zero really does stage. Never inverted.
         if (!work[0xA3])
             RefuseOwned(OwnedNeedsStaging, initialA3 ? OwnedDetailResultA3 : OwnedDetailInitialA3);
@@ -2417,17 +2417,17 @@ void CaptureOwnedPorts(OwnedCapture& capture) {
     OwnedArena& arena = *g_owned;
     LONGLONG t = Now();
     g_ownedLoad[OwnedLoadFailureReason] = ActivationSceneCapture;
-    bool ok = ntw2_sweep::PrepareScene(arena.scene, capture.model, g_delta, g_generation);
+    bool ok = kntwr_sweep::PrepareScene(arena.scene, capture.model, g_delta, g_generation);
     LONGLONG next = Now(); capture.sceneUs = Microseconds(next - t); t = next;
     if (ok) {
         g_ownedLoad[OwnedLoadFailureReason] = ActivationCatalog;
-        ok = ntw2_resolve::PrepareCatalog(arena.catalog, arena.scene);
+        ok = kntwr_resolve::PrepareCatalog(arena.catalog, arena.scene);
         capture.catalogUs = Microseconds(Now() - t);
     }
     if (!ok) {
-        if (arena.scene.failure == ntw2_sweep::SceneVerificationFailure)
+        if (arena.scene.failure == kntwr_sweep::SceneVerificationFailure)
             g_ownedLoad[OwnedLoadFailureReason] = ActivationSceneVerification;
-        else if (arena.scene.failure == ntw2_sweep::SceneIdentityFailure)
+        else if (arena.scene.failure == kntwr_sweep::SceneIdentityFailure)
             g_ownedLoad[OwnedLoadFailureReason] = ActivationSceneIdentity;
         g_ownedLoad[OwnedLoadDetail] = arena.scene.failureAddress;
         g_ownedLoad[OwnedLoadActual] = arena.scene.failureActual;
@@ -2453,11 +2453,11 @@ bool PrepareOwnedWorkers() {
             if (!participant.ctx) { g_ownedLoad[OwnedLoadException] = ERROR_NOT_ENOUGH_MEMORY; return false; }
         }
         OwnedContexts& context = *participant.ctx;
-        if (!ntw2_sweep::PrepareWorker(context.sweep, arena.scene)) return false;
+        if (!kntwr_sweep::PrepareWorker(context.sweep, arena.scene)) return false;
         g_ownedLoad[OwnedLoadFailureReason] = ActivationResolveWorker;
-        if (!ntw2_resolve::PrepareWorker(context.resolve, arena.catalog)) return false;
+        if (!kntwr_resolve::PrepareWorker(context.resolve, arena.catalog)) return false;
         g_ownedLoad[OwnedLoadFailureReason] = ActivationEnvWorker;
-        if (!ntw2_env::PrepareWorker(context.env, arena.scene)) return false;
+        if (!kntwr_env::PrepareWorker(context.env, arena.scene)) return false;
         context.sweep.fp = context.resolve.fp = context.env.fp = {arena.mxcsr, arena.cw};
         context.sweep.fp_managed = context.resolve.fp_managed = context.env.fp_managed = true;
     }
@@ -2507,7 +2507,7 @@ void WarmOwnedClones(U model) {
             *reinterpret_cast<U*>(p.work + 0x28) = Address(context);
             p.work[0xA3] = p.work[0xEC] = p.work[0x13D] = 1;
             // A1==0: private arithmetic only; +13D bypasses descriptor queries in the wrapper.
-            Call(p.clones.entries[NTW2_CLONE_LOCO_WRAP], Address(p.work));
+            Call(p.clones.entries[KNTWR_CLONE_LOCO_WRAP], Address(p.work));
             memset(p.work, 0, sizeof(p.work));
         }
     } __finally {
@@ -2541,7 +2541,7 @@ void PrepareOwned(U manager) {
     arena.epoch = ++g_ownedEpochCounter; arena.nextParticipant = 0; arena.overflow = 0; arena.cwNext = 0;
     const LONGLONG identityStart = Now();
     // Already activated: PrepareScene performs only fixed-size identity/header checks.
-    const bool ready = ntw2_sweep::PrepareScene(arena.scene, model, g_delta, g_generation);
+    const bool ready = kntwr_sweep::PrepareScene(arena.scene, model, g_delta, g_generation);
     const U sceneUs = Microseconds(Now() - identityStart), catalogUs = 0;
     const LONGLONG fpStart = Now();
     for (U i = 0; i < participants; ++i) {
@@ -2767,7 +2767,7 @@ bool CommitOwned(U manager, U cursor) {
         if (service == InsertOwner || service == InsertGrid) {
             if (!committed) { CommitOwnedFields(slot); committed = true; }
         }
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
         ObserveOwned(slot.entity, service, index, OwnedTestReplay);
 #endif
         if (!g_quiet) RecordService(service, slot.entity + (service == WrapperQuery ? 0xF4 : 0));
@@ -2813,22 +2813,22 @@ void FreeScratch(U* header, bool polymorphic) {
 void Bind(U image_delta, U* bindings) {
     g_delta = image_delta;
     g_stageGatherTarget = V(0x7FC120); g_stageResetTarget = V(0x7F7140);
-    bindings[NTW2_BIND_LOCO_STAGE_GATHER] = Address(reinterpret_cast<void*>(&StageGatherGate));
-    bindings[NTW2_BIND_LOCO_STAGE_RESET] = Address(reinterpret_cast<void*>(&StageResetGate));
-    bindings[NTW2_BIND_LOCO_SCRATCH_14543B4] = Address(g_scratchFirst);
-    bindings[NTW2_BIND_LOCO_SCRATCH_15A1888] = Address(g_scratchSecond);
-    bindings[NTW2_BIND_LOCO_SCRATCH_15A189C] = Address(g_scratchThird);
-    bindings[NTW2_BIND_LOCO_GUARD_15A1884] = Address(&g_guards[0]);
-    bindings[NTW2_BIND_LOCO_GUARD_15A1898] = Address(&g_guards[1]);
-    bindings[NTW2_BIND_LOCO_GUARD_15A18AC] = Address(&g_guards[2]);
-    bindings[NTW2_BIND_LOCO_SERVICE_811ED0] = Address(reinterpret_cast<void*>(&RecordUnlinkGridGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_811D50] = Address(reinterpret_cast<void*>(&RecordUnlinkOwnerGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_7EFDD0] = Address(reinterpret_cast<void*>(&RecordInsertOwnerGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_7EFA80] = Address(reinterpret_cast<void*>(&RecordInsertGridGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_801140] = Address(reinterpret_cast<void*>(&RecordSweepGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_80F290] = Address(reinterpret_cast<void*>(&RecordResolveGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_81AE40] = Address(reinterpret_cast<void*>(&RecordHeightOwnerGate));
-    bindings[NTW2_BIND_LOCO_SERVICE_814AA0] = Address(reinterpret_cast<void*>(&RecordWrapperQueryGate));
+    bindings[KNTWR_BIND_LOCO_STAGE_GATHER] = Address(reinterpret_cast<void*>(&StageGatherGate));
+    bindings[KNTWR_BIND_LOCO_STAGE_RESET] = Address(reinterpret_cast<void*>(&StageResetGate));
+    bindings[KNTWR_BIND_LOCO_SCRATCH_14543B4] = Address(g_scratchFirst);
+    bindings[KNTWR_BIND_LOCO_SCRATCH_15A1888] = Address(g_scratchSecond);
+    bindings[KNTWR_BIND_LOCO_SCRATCH_15A189C] = Address(g_scratchThird);
+    bindings[KNTWR_BIND_LOCO_GUARD_15A1884] = Address(&g_guards[0]);
+    bindings[KNTWR_BIND_LOCO_GUARD_15A1898] = Address(&g_guards[1]);
+    bindings[KNTWR_BIND_LOCO_GUARD_15A18AC] = Address(&g_guards[2]);
+    bindings[KNTWR_BIND_LOCO_SERVICE_811ED0] = Address(reinterpret_cast<void*>(&RecordUnlinkGridGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_811D50] = Address(reinterpret_cast<void*>(&RecordUnlinkOwnerGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_7EFDD0] = Address(reinterpret_cast<void*>(&RecordInsertOwnerGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_7EFA80] = Address(reinterpret_cast<void*>(&RecordInsertGridGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_801140] = Address(reinterpret_cast<void*>(&RecordSweepGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_80F290] = Address(reinterpret_cast<void*>(&RecordResolveGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_81AE40] = Address(reinterpret_cast<void*>(&RecordHeightOwnerGate));
+    bindings[KNTWR_BIND_LOCO_SERVICE_814AA0] = Address(reinterpret_cast<void*>(&RecordWrapperQueryGate));
     const U targets[ServiceCount] = {0x811ED0, 0x811D50, 0x7EFDD0, 0x7EFA80, 0x801140, 0x80F290, 0x81AE40, 0x814AA0};
     for (U i = 0; i < ServiceCount; ++i) g_serviceTargets[i] = V(targets[i]);
     memcpy(g_locoBindings, bindings, sizeof(g_locoBindings));
@@ -2923,10 +2923,10 @@ bool Start(const Binding& binding) {
     g_parallelInFlight = 0; g_stagingActive = false;
     g_shadowEnabled = binding.use_shadow && !g_quiet;
     const bool portsEnabled = g_shadowEnabled || binding.use_owned_services;
-    if (!ntw2_sweep::Start({g_delta, g_generation, portsEnabled}) ||
-        !ntw2_resolve::Start({g_delta, g_generation, portsEnabled}) ||
-        !ntw2_env::Start({g_delta, g_generation, portsEnabled, g_shadowEnabled}) || !CreateOwned()) {
-        ntw2_sweep::Stop(); ntw2_resolve::Stop(); ntw2_env::Stop();
+    if (!kntwr_sweep::Start({g_delta, g_generation, portsEnabled}) ||
+        !kntwr_resolve::Start({g_delta, g_generation, portsEnabled}) ||
+        !kntwr_env::Start({g_delta, g_generation, portsEnabled, g_shadowEnabled}) || !CreateOwned()) {
+        kntwr_sweep::Stop(); kntwr_resolve::Stop(); kntwr_env::Stop();
         DestroyOwned();
         ReleaseGrid();
         ReleaseRelink();
@@ -2942,7 +2942,7 @@ bool Start(const Binding& binding) {
     g_storageBytes = ComputeStorage();
     return true;
 }
-bool ActivateOwned(void* model, const ntw2_workload::Capacity& capacity) {
+bool ActivateOwned(void* model, const kntwr_workload::Capacity& capacity) {
     if (!g_started) { g_ownedLoad[OwnedLoadFailureReason] = ActivationNotStarted; return false; }
     if (!g_owned && !g_binding.use_grid) { g_ownedLoad[OwnedLoadFailureReason] = ActivationDisabled; return false; }
     if (g_stage || g_runDepth) { g_ownedLoad[OwnedLoadFailureReason] = ActivationBusy; return false; }
@@ -3026,7 +3026,7 @@ void Stop() {
     FreeScratch(g_scratchFirst, true);
     FreeScratch(g_scratchSecond, false);
     FreeScratch(g_scratchThird, false);
-    ntw2_sweep::Stop(); ntw2_resolve::Stop(); ntw2_env::Stop(); g_shadowEnabled = false;
+    kntwr_sweep::Stop(); kntwr_resolve::Stop(); kntwr_env::Stop(); g_shadowEnabled = false;
     DestroyOwned();
     g_gridValid = false; g_gridModel = 0;
     ReleaseGrid();
@@ -3074,7 +3074,7 @@ U __fastcall Stage(void* manager) {
     const LONGLONG dispatchStart = Now();
     g_gridValid = false; g_gridCommittedReady = false; // publication occurs only after replay
     if (g_shadowEnabled) {
-        __try { ntw2_sweep::Activate(D(D(m)+8)); }
+        __try { kntwr_sweep::Activate(D(D(m)+8)); }
         __except(EXCEPTION_EXECUTE_HANDLER) { /* Before records a failed capture without changing gameplay. */ }
     }
     U entities = 0;
@@ -3189,7 +3189,7 @@ void SampleGridBuild(U words[GridBuildWordCount]) {
     memcpy(words, g_gridBuildWords, sizeof(g_gridBuildWords));
     for (U phase = 0; phase < 4; ++phase) words[GridBuildRegistryUs + phase] = Microseconds(g_gridBuildTicks[phase]);
 }
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
 void DebugGrid(long long* out) { for (int i = 0; i < 8; ++i) { out[i] = g_dbg[i]; g_dbg[i] = 0; } }
 #endif
 void SampleParallel(U words[ParallelWordCount]) { memcpy(words, g_parallelWords, sizeof(g_parallelWords)); }
@@ -3202,7 +3202,7 @@ void SampleOwnedLoad(U words[OwnedLoadWordCount]) { memcpy(words, g_ownedLoad, s
 U StorageBytes() { return g_storageBytes; }
 void SampleStorage(U words[StorageWordCount]) { memcpy(words, g_storageWords, sizeof(g_storageWords)); }
 void SampleCatalogStorage(U words[CatalogStorageWordCount]) { memcpy(words, g_catalogStorage, sizeof(g_catalogStorage)); }
-U EstimateActivationBytes(const ntw2_workload::Capacity& capacity) {
+U EstimateActivationBytes(const kntwr_workload::Capacity& capacity) {
     if (!g_started || !ValidCapacity(capacity)) return 0xFFFFFFFFu;
     unsigned long long total = 0;
     if (g_binding.use_grid && !g_grid) {
@@ -3272,7 +3272,7 @@ void SampleServices(U words[ServiceWordCount]) {
         words[TimingServiceMaxUs + i] = us(totals.maximum[i]);
     }
 }
-#ifdef NTW2_LOCO_ORACLE
+#ifdef KNTWR_LOCO_ORACLE
 U SetServiceTargetForTest(Service service, U address) {
     if (service >= ServiceCount || !address || g_runDepth || g_serviceDepth) return 0;
     const U old = g_serviceTargets[service];
@@ -3294,4 +3294,4 @@ OwnedServiceObserverForTest SetOwnedServiceObserverForTest(OwnedServiceObserverF
     const auto previous = g_ownedObserver; g_ownedObserver = observer; return previous;
 }
 #endif
-} // namespace ntw2_loco
+} // namespace kntwr_loco

@@ -16,7 +16,7 @@
 //           [entry 0x850, entry 0xA90]. Stat entries are dwords at [S + offset + 0x5C] (0x586430 is `lea eax,[ecx+5Ch]`).
 // With the unit slice this body is switched OFF for admitted units: the unit decision (acc, level) is computed once per
 // stage from the unit's activity, the same arithmetic (Step below, byte-equal to the native pair for a homogeneous unit)
-// and written into every member by the NTW2_BIND_U_FATIGUE gate. Approved deviation (plan section 7): a tired straggler
+// and written into every member by the KNTWR_BIND_U_FATIGUE gate. Approved deviation (plan section 7): a tired straggler
 // and a rested stationary man no longer have separate effort histories.
 //
 // Unit state: (acc:int32, level:uint32) per unit generation, initialised at the stage seam from the native published means
@@ -42,9 +42,9 @@
 // Documented deviation: a stance change during a generation (the init scan is the only read of a man) is not followed; shadow
 // class tables quantify native classes vs the unit decision.
 //
-// Status half (ntw2_status::brain_unit_policy_words[32..127], NTW2_UNIT_FATIGUE_LABELS): mode, admitted/refused units by
+// Status half (kntwr_status::brain_unit_policy_words[32..127], KNTWR_UNIT_FATIGUE_LABELS): mode, admitted/refused units by
 // reason, advances/applies/out-of-worklist writes, inits/resets/drains, decide microseconds and the shadow divergence tables.
-#define NTW2_UNIT_FATIGUE_LABELS \
+#define KNTWR_UNIT_FATIGUE_LABELS \
  "version", "mode", "units_admitted_last", "unit_stages", "units_refused_last", \
 "refuse_inactive", "refuse_engaged", "refuse_fsm_unknown", "refuse_cold_records", "refuse_root_mismatch", \
  "refuse_stat_mismatch", "refuse_level_contract", "refuse_threshold_order", "refuse_fault", "refuse_no_row", \
@@ -63,10 +63,10 @@
  "last_unit_acc", "last_unit_level", "last_unit_class", "last_unit_rate", "last_units_stage", "last_unit_index", \
  "reserved95"
 #ifdef __cplusplus
-namespace ntw2_unit_fatigue {
+namespace kntwr_unit_fatigue {
 using U = uint32_t;
 constexpr U kVersion = 1, kWords = 96;
-static_assert(kWords == ntw2_unit_policy::kFatigueWords, "fatigue status half");
+static_assert(kWords == kntwr_unit_policy::kFatigueWords, "fatigue status half");
 
 // ---- the native arithmetic, as a pure function of an explicit input record -------------------------------------------------
 // Stat record entries, in this order: value = *(int32*)(S + kEntryOffset[e] + 0x5C).
@@ -127,16 +127,16 @@ enum Word : U {
 };
 static_assert(Advances == 21 && ShadowMen == 40 && DAccBase == 46 && DLevelBase == 54 && ClassBase == 65 &&
               LastUnitAcc == 89 && Reserved95 == 95, "fatigue status geometry");
-// Slot words of the unit's fatigue decision (ntw2_unit_policy slot[Fatigue]).
+// Slot words of the unit's fatigue decision (kntwr_unit_policy slot[Fatigue]).
 enum Slot : U { SlotAcc, SlotLevel, SlotClass, SlotRate, SlotGeneration, SlotStage, SlotWords };
 
-bool Bind(U imageBase, U* bindings);                 // writes NTW2_BIND_U_FATIGUE (the gate)
-// Owner, before the first stage: pins the image tables this port embeds. mode: ntw2_unit_policy::Shadow or Live.
+bool Bind(U imageBase, U* bindings);                 // writes KNTWR_BIND_U_FATIGUE (the gate)
+// Owner, before the first stage: pins the image tables this port embeds. mode: kntwr_unit_policy::Shadow or Live.
 bool Start(U imageBase, U mode);
 void Stop();
 void Reset();
 void Snapshot(U* words /*[kWords]*/);
-const ntw2_unit_policy::Provider* Provider();       // null when mode Off / not started
+const kntwr_unit_policy::Provider* Provider();       // null when mode Off / not started
 
 // ---- oracle surface -------------------------------------------------------------------------------------------------------
 // One unit's Inputs resolved from native memory exactly like decide() does, for `activity`/band chosen by the caller.
@@ -145,6 +145,6 @@ bool ResolveInputs(U unit, U activity, bool speedGate, float speed, Inputs& out,
 // decide()'s unit-side admission for one unit (no member scan, no state): the unit chain + unit activity model. On success
 // `out` holds the unit's Inputs (activity = the first code of the model) and `model` its UnitActivity.
 U ResolveUnit(U unit, Inputs& out, U& model);        // returns Reason
-U GateAddress();                                     // the NTW2_BIND_U_FATIGUE gate entry
-} // namespace ntw2_unit_fatigue
+U GateAddress();                                     // the KNTWR_BIND_U_FATIGUE gate entry
+} // namespace kntwr_unit_fatigue
 #endif

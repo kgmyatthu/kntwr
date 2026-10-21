@@ -15,7 +15,7 @@
 //
 // Single-threaded per table. Clear() at every stage start: region attributes only shrink through a native
 // free/decommit, and a stale proof inside one stage is still backed by SEH where the callers read.
-namespace ntw2_region {
+namespace kntwr_region {
 using U = uint32_t;
 constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                             PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
@@ -86,4 +86,4 @@ struct Table {
         return true;
     }
 };
-} // namespace ntw2_region
+} // namespace kntwr_region

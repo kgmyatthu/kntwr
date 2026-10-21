@@ -1,4 +1,4 @@
-// Oracle for src/brain/ntw2_target_cull.{h,cpp} (--brain-target-cull[-shadow]) on a private relocated mapping of the owned image.
+// Oracle for src/brain/kntwr_target_cull.{h,cpp} (--brain-target-cull[-shadow]) on a private relocated mapping of the owned image.
 //  * Loop: the reordered mirror of 0x553590 against the ORIGINAL 0x553590 bytes on random synthetic units: same candidate pointer, same
 //    *outScore bits, scratch count 0, identical static-guard call sequence; maxDist in {FLT_MAX, 100, 15, 3, 0, NaN}, flag on/off (the real
 //    0x659480 cached branch), empty units / men with no candidates, duplicated candidates (first-index tie-break), equal scores, huge u32
@@ -9,7 +9,7 @@
 //    0 mismatches and answers natively; off forwards;
 //  * culling: the mirror never evaluates a predicate natively skipped candidates did not need; predicate calls are <= native and are counted.
 // Image-internal callees 0x53E410, 0x5359E0, 0x659480 and 0x553590/0x553420 are original bytes.  The predicates 0x679750/0x679700, the id getters,
-// the man vt+0xB4 push, 0x6ABC80 and the init-thread helpers are scripted host fakes (their purity is the proof in ntw2_target_cull.h).
+// the man vt+0xB4 push, 0x6ABC80 and the init-thread helpers are scripted host fakes (their purity is the proof in kntwr_target_cull.h).
 // No running game or installed file is modified.
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
@@ -25,12 +25,12 @@
 #include <limits>
 #include <vector>
 #include "native_image_relocation.h"
-#include "ntw2_runtime.h"
-#include "brain/ntw2_target_cull.h"
+#include "kntwr_runtime.h"
+#include "brain/kntwr_target_cull.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
-namespace tc=ntw2_target_cull;
+namespace tc=kntwr_target_cull;
 static_assert(sizeof(void*)==4,"owned x86 oracle");
 extern "C" unsigned long _tls_index;
 static __declspec(thread) U tlsPad[16];
@@ -57,7 +57,7 @@ static void Map(const char* path) {
     Require(BCryptHash(alg,nullptr,0,bytes.data(),static_cast<ULONG>(bytes.size()),digest,32)==0,"SHA image");
     BCryptCloseAlgorithmProvider(alg,0);
     char hex[65]; for(U i=0;i<32;++i) std::snprintf(hex+2*i,3,"%02x",digest[i]);
-    Require(!std::strcmp(hex,NTW2_IMAGE_SHA256),"supported image identity");
+    Require(!std::strcmp(hex,KNTWR_IMAGE_SHA256),"supported image identity");
     auto dos=reinterpret_cast<const IMAGE_DOS_HEADER*>(bytes.data());
     auto nt=reinterpret_cast<const IMAGE_NT_HEADERS32*>(bytes.data()+dos->e_lfanew);
     imageSize=nt->OptionalHeader.SizeOfImage;

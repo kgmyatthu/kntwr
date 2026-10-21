@@ -121,8 +121,8 @@ struct World {
         Put(gridHeader.data(), 0x14, maximum); Put(gridHeader.data(), 0x24, cfg.scale);
     }
     // Activation capacities of the fixture: registry room for every spare birth, memberships for 6 cells per record.
-    ntw2_workload::Capacity Capacity() const {
-        ntw2_workload::Capacity c{};
+    kntwr_workload::Capacity Capacity() const {
+        kntwr_workload::Capacity c{};
         c.primary = cfg.primary + cfg.spare; c.records = c.primary + cfg.secondary + cfg.spare;
         c.cells = cellCount; c.memberships = c.records * 6; c.pairs = c.primary * 16u;
         return c;
@@ -314,13 +314,13 @@ struct Published {
         if (count != o.count) return "count";
         if (cells != o.cells) return "cells";
         if (memberships != o.memberships) return "memberships";
-#define NTW2_BULK_CMP(f) if (f != o.f) return #f
-        NTW2_BULK_CMP(record); NTW2_BULK_CMP(serial); NTW2_BULK_CMP(incarnation); NTW2_BULK_CMP(team); NTW2_BULK_CMP(flags);
-        NTW2_BULK_CMP(active); NTW2_BULK_CMP(inserted); NTW2_BULK_CMP(left); NTW2_BULK_CMP(right); NTW2_BULK_CMP(top);
-        NTW2_BULK_CMP(bottom); NTW2_BULK_CMP(nodeType); NTW2_BULK_CMP(x); NTW2_BULK_CMP(z); NTW2_BULK_CMP(y);
-        NTW2_BULK_CMP(extent); NTW2_BULK_CMP(radius); NTW2_BULK_CMP(cellIds); NTW2_BULK_CMP(offsets); NTW2_BULK_CMP(occupants);
-        NTW2_BULK_CMP(dense);
-#undef NTW2_BULK_CMP
+#define KNTWR_BULK_CMP(f) if (f != o.f) return #f
+        KNTWR_BULK_CMP(record); KNTWR_BULK_CMP(serial); KNTWR_BULK_CMP(incarnation); KNTWR_BULK_CMP(team); KNTWR_BULK_CMP(flags);
+        KNTWR_BULK_CMP(active); KNTWR_BULK_CMP(inserted); KNTWR_BULK_CMP(left); KNTWR_BULK_CMP(right); KNTWR_BULK_CMP(top);
+        KNTWR_BULK_CMP(bottom); KNTWR_BULK_CMP(nodeType); KNTWR_BULK_CMP(x); KNTWR_BULK_CMP(z); KNTWR_BULK_CMP(y);
+        KNTWR_BULK_CMP(extent); KNTWR_BULK_CMP(radius); KNTWR_BULK_CMP(cellIds); KNTWR_BULK_CMP(offsets); KNTWR_BULK_CMP(occupants);
+        KNTWR_BULK_CMP(dense);
+#undef KNTWR_BULK_CMP
         return nullptr;
     }
 };

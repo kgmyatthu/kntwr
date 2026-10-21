@@ -6,7 +6,7 @@
 // Question measured: how much of what each soldier's site-6 brain step decides is already a function of its unit?
 // Stage B (not implemented) would decide once per unit and let non-exception soldiers follow; Stage A only counts.
 //
-// Per site-6 stage (ntw2_brain2::RunWorklist, owner thread):
+// Per site-6 stage (kntwr_brain2::RunWorklist, owner thread):
 //  1. BeginStage, BEFORE the native loop: one pool dispatch over the known units (units are independent). Each unit
 //     reads ONLY unit-level inputs (UnitInput: the unit's command record U+930/U+934/[U+398+U+934*90] vtable, state
 //     U+AA0, descriptor U+2C and type D+1C, flag bytes U+DA4/D9E/D9D, U+DA8, U+C2C, the ability table 0x55C9A0 reads
@@ -43,23 +43,23 @@
 // count +66C!=0); cavalry charge [INFERENCE] class 0x602EB0 with charge callback +4E8!=0; no unit +1F0==0; other
 // class (soldier fields not read). Officer/ensign/musician roles are not recovered: they are excluded by class (see 3/4),
 // and the vtable census below gives occurrences, disagreements and unit appearances per class vtable.
-#define NTW2_BRAIN_UNIT_FIELD_LABELS "activity", "order", "holder", "posture_state", "stance", "target_unit", \
+#define KNTWR_BRAIN_UNIT_FIELD_LABELS "activity", "order", "holder", "posture_state", "stance", "target_unit", \
  "engage_phase", "anim_id", "fire_flags"
-#define NTW2_BRAIN_UNIT_FIELD_WORD_LABELS "held_agree", "held_disagree", "held_none", "tick_agree", "tick_disagree", \
+#define KNTWR_BRAIN_UNIT_FIELD_WORD_LABELS "held_agree", "held_disagree", "held_none", "tick_agree", "tick_disagree", \
  "exception_agree", "exception_disagree", "worst_stage_permille"
-#define NTW2_BRAIN_UNIT_HEADER_LABELS "version", "enabled", "stages", "occurrences", "observed", "units_last", \
+#define KNTWR_BRAIN_UNIT_HEADER_LABELS "version", "enabled", "stages", "occurrences", "observed", "units_last", \
  "unit_overflow", "decisions_last", "signature_changes", "new_units", "unit_unreadable", "soldier_unreadable", \
  "target_unreadable", "decide_us", "finalize_us", "buffer_overflow"
-#define NTW2_BRAIN_UNIT_EXCEPTION_LABELS "engage9", "melee", "routing", "parked", "deactivated", "far_from_slot", \
+#define KNTWR_BRAIN_UNIT_EXCEPTION_LABELS "engage9", "melee", "routing", "parked", "deactivated", "far_from_slot", \
  "pending_request", "artillery", "crew", "cavalry_charge", "no_unit", "other_class", "any_exception", \
  "far_measured", "far_unmeasured", "chunks"
-#define NTW2_BRAIN_UNIT_CENSUS_LABELS "vtables_distinct", "vtable_overflow", "held_disagree_any", "held_agree_all"
-#define NTW2_BRAIN_UNIT_TICK_NONE_LABEL "tick_none" /* per field, words 160..168 in field order */
-#define NTW2_BRAIN_UNIT_ROLE_LABELS "unresolved_role", "vote_excluded", "observe_us"
-#define NTW2_BRAIN_UNIT_TAIL_LABELS "last_stage_compared", "last_stage_agree_all", "units_decided", "reserved175"
+#define KNTWR_BRAIN_UNIT_CENSUS_LABELS "vtables_distinct", "vtable_overflow", "held_disagree_any", "held_agree_all"
+#define KNTWR_BRAIN_UNIT_TICK_NONE_LABEL "tick_none" /* per field, words 160..168 in field order */
+#define KNTWR_BRAIN_UNIT_ROLE_LABELS "unresolved_role", "vote_excluded", "observe_us"
+#define KNTWR_BRAIN_UNIT_TAIL_LABELS "last_stage_compared", "last_stage_agree_all", "units_decided", "reserved175"
 #ifdef __cplusplus
-namespace ntw2_region { struct Table; }
-namespace ntw2_unit_brain {
+namespace kntwr_region { struct Table; }
+namespace kntwr_unit_brain {
 using U = uint32_t;
 constexpr U kVersion = 2;
 constexpr U kFields = 9, kFieldStride = 8, kExceptionBits = 12, kVtables = 13, kInputs = 15;
@@ -69,7 +69,7 @@ enum FieldWord : U { HeldAgree, HeldDisagree, HeldNone, TickAgree, TickDisagree,
                      WorstStagePermille };
 enum Exception : U { ExEngage9, ExMelee, ExRouting, ExParked, ExDeactivated, ExFarFromSlot, ExPendingRequest,
                      ExArtillery, ExCrew, ExCavalryCharge, ExNoUnit, ExOtherClass };
-// Status row (ntw2_status::brain_unit_words). Counters wrap modulo 2^32. WorstStagePermille is the minimum over
+// Status row (kntwr_status::brain_unit_words). Counters wrap modulo 2^32. WorstStagePermille is the minimum over
 // stages of held_agree*1000/(held_agree+held_disagree) for that field's non-exception comparisons (0xFFFFFFFF: no
 // stage compared it). Tick words count voters (main-class non-exception soldiers): tick_agree/tick_disagree only in
 // unit-stages with a strict majority, tick_none (words 160..168) the voters of unit-stages without one. Units: rows
@@ -90,7 +90,7 @@ enum Word : U {
     WordCount
 };
 static_assert(ExceptionWords == 88 && Chunks == 103 && TickNoneWords == 160 && UnresolvedRole == 169 &&
-              LastStageCompared == 172 && WordCount == 176, "brain unit status row geometry (NTW2_BRAIN_UNIT_WORDS)");
+              LastStageCompared == 172 && WordCount == 176, "brain unit status row geometry (KNTWR_BRAIN_UNIT_WORDS)");
 constexpr U kWords = WordCount;
 
 struct Binding {
@@ -114,10 +114,10 @@ void Snapshot(U* words /*[kWords]*/); // all zero until the first stage
 struct Soldier { U values[kFields]; U exceptions; U vtable; U unit; U farMeasured; U targetUnreadable; };
 // False when the soldier footprint (0x700 bytes) or its class table cannot be proven readable. Other-class
 // occurrences return true with only ExOtherClass set and no field values.
-bool ExtractSoldier(U entity, ntw2_region::Table& table, U& queries, Soldier& out);
+bool ExtractSoldier(U entity, kntwr_region::Table& table, U& queries, Soldier& out);
 // Unit-level inputs in UnitInput order (kInputs words); false when the unit itself is unreadable. Unreadable
 // dependents read as 0xFFFFFFFF.
-bool ReadUnitInputs(U unit, ntw2_region::Table& table, U& queries, U* inputs);
+bool ReadUnitInputs(U unit, kntwr_region::Table& table, U& queries, U* inputs);
 U Signature(const U* inputs);
-} // namespace ntw2_unit_brain
+} // namespace kntwr_unit_brain
 #endif

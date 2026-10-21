@@ -13,7 +13,7 @@
 #include <chrono>
 
 namespace relinkcase {
-using ntw2_loco::MoveLog; using ntw2_loco::MoveOpKind; using ntw2_loco::ExtractResult;
+using kntwr_loco::MoveLog; using kntwr_loco::MoveOpKind; using kntwr_loco::ExtractResult;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Fixture
@@ -94,7 +94,7 @@ struct Cfg {
 struct Counts {
     U logged = 0, noop = 0, batchFull = 0, serial = 0, flushes = 0, dispatches = 0, partitions = 0, anomalies = 0, faults = 0, collapsed = 0;
     U parallelBatches = 0;
-    ntw2_loco::RelinkShadowResult shadow{};
+    kntwr_loco::RelinkShadowResult shadow{};
 };
 static bool tdReverse, tdConcurrent; static U tdLanes = 1, tdDispatches;
 struct TdJob { U body; void* context; U chunks; volatile LONG next; bool reversed; };
@@ -135,7 +135,7 @@ static void RunNative(Fixture& f, const Script& s, U rounding) {
 }
 // The log side. Returns the batch statistics; `mirrorCapacity` is the shadow mirror's word capacity.
 static Counts RunLog(Fixture& f, const Script& s, const Cfg& c, U mirrorWords = 1u << 18) {
-    using namespace ntw2_loco;
+    using namespace kntwr_loco;
     Counts n{};
     MoveLog log{};
     Require(MoveLogInit(log, c.records ? c.records : f.count, c.memberships ? c.memberships : f.count * f.cap, c.perBatch, A(At(0x1318038))),
@@ -168,18 +168,18 @@ static Counts RunLog(Fixture& f, const Script& s, const Cfg& c, U mirrorWords = 
         case OpHiddenInsert: NativeCall(f.Va(op.rec), true); break;
         case OpPokeCount: Put<U>(f.Rec(op.rec), 0xac, Get<U>(f.Rec(op.rec), 0xac) + 1); break;
         case OpUnlink: case OpInsert: {
-            const MoveOpKind kind = op.kind == OpUnlink ? ntw2_loco::MoveUnlinkGrid : ntw2_loco::MoveInsertGrid;
+            const MoveOpKind kind = op.kind == OpUnlink ? kntwr_loco::MoveUnlinkGrid : kntwr_loco::MoveInsertGrid;
             const bool insert = op.kind == OpInsert;
-            ExtractResult r = ExtractMoveOp(log, f.Va(op.rec), ordinal, kind, ntw2_loco::MoveFromWorker, !c.shadow);
-            if (r == ntw2_loco::ExtractBatchFull) {
+            ExtractResult r = ExtractMoveOp(log, f.Va(op.rec), ordinal, kind, kntwr_loco::MoveFromWorker, !c.shadow);
+            if (r == kntwr_loco::ExtractBatchFull) {
                 ++n.batchFull; flush();
-                r = ExtractMoveOp(log, f.Va(op.rec), ordinal, kind, ntw2_loco::MoveFromWorker, !c.shadow);
-                Require(r != ntw2_loco::ExtractBatchFull, "an empty batch always has record-table room");
+                r = ExtractMoveOp(log, f.Va(op.rec), ordinal, kind, kntwr_loco::MoveFromWorker, !c.shadow);
+                Require(r != kntwr_loco::ExtractBatchFull, "an empty batch always has record-table room");
             }
-            if (r == ntw2_loco::ExtractLogged) {
+            if (r == kntwr_loco::ExtractLogged) {
                 ++n.logged;
                 if (c.shadow) { RelinkMirrorTouch(mirror, log, log.count - 1); NativeCall(f.Va(op.rec), insert); }
-            } else if (r == ntw2_loco::ExtractNoop) {
+            } else if (r == kntwr_loco::ExtractNoop) {
                 ++n.noop; if (c.shadow) NativeCall(f.Va(op.rec), insert);
             } else { ++n.serial; flush(); NativeCall(f.Va(op.rec), insert); }
             break;
@@ -376,7 +376,7 @@ static void ShadowDetectionCases() {
 
 // Net-effect rules and the delta view contract on a hand-built batch.
 static void NetEffectCases() {
-    using namespace ntw2_loco;
+    using namespace kntwr_loco;
     currentCase = "relink net effect rules and delta view";
     Fixture f(6, 63, 4, 16);
     { std::mt19937 populate(3); Populate(f, populate, 10.0f, 50.0f, 0.2f, 0.4f); }
@@ -475,9 +475,9 @@ static void BenchFixture(U lanes, U movers, U stages, bool clustered, U perBatch
     std::printf("relink bench: %u movers, %.3f nodes/record, %s, %u participants, batch<=%u records, parallel min %u cells\n", movers,
         double(members) / movers, clustered ? "clustered" : "uniform", lanes, perBatch, minCells);
     g_eventPool.Start(lanes - 1);
-    ntw2_loco::MoveLog log{};
-    Require(ntw2_loco::MoveLogInit(log, movers, movers * 4, perBatch, A(At(0x1318038))), "bench log allocates");
-    ntw2_loco::RelinkDispatcher disp{&EventDispatch, 0, lanes - 1};
+    kntwr_loco::MoveLog log{};
+    Require(kntwr_loco::MoveLogInit(log, movers, movers * 4, perBatch, A(At(0x1318038))), "bench log allocates");
+    kntwr_loco::RelinkDispatcher disp{&EventDispatch, 0, lanes - 1};
     std::vector<double> serialMs, logMs, applyMs, totalMs; double dispatches = 0, partitions = 0, batches = 0, cpuMs = 0;
     std::vector<U> order(movers); for (U i = 0; i < movers; ++i) order[i] = i;
     typedef void(__fastcall* Service)(void*);
@@ -497,22 +497,22 @@ static void BenchFixture(U lanes, U movers, U stages, bool clustered, U perBatch
         const State serialResult = Save(f);
         Restore(f, start);
         // log + pool apply, batch by batch
-        ntw2_loco::MoveLogBeginStage(log, stage);
-        ntw2_loco::RelinkApplyStats stats{};
+        kntwr_loco::MoveLogBeginStage(log, stage);
+        kntwr_loco::RelinkApplyStats stats{};
         double logUs = 0, applyUs = 0; U parallelBatches = 0, batchCount = 0;
         const auto flush = [&] {
-            if (!ntw2_loco::MoveLogBatchOps(log)) return;
+            if (!kntwr_loco::MoveLogBatchOps(log)) return;
             const double a = NowUs();
-            parallelBatches += ntw2_loco::RelinkApplyLive(log, &disp, minCells, stats);
-            applyUs += NowUs() - a; ++batchCount; ntw2_loco::MoveLogCloseBatch(log);
+            parallelBatches += kntwr_loco::RelinkApplyLive(log, &disp, minCells, stats);
+            applyUs += NowUs() - a; ++batchCount; kntwr_loco::MoveLogCloseBatch(log);
         };
         const double t0 = NowUs();
         for (U i : order) {
             f.Pose(i, nx[i], nz[i], Get<float>(f.Rec(i), 0x58), 0);
-            for (const MoveOpKind kind : {ntw2_loco::MoveUnlinkGrid, ntw2_loco::MoveInsertGrid}) {
-                ExtractResult r = ntw2_loco::ExtractMoveOp(log, f.Va(i), i, kind, ntw2_loco::MoveFromWorker, true);
-                if (r == ntw2_loco::ExtractBatchFull) { flush(); r = ntw2_loco::ExtractMoveOp(log, f.Va(i), i, kind, ntw2_loco::MoveFromWorker, true); }
-                Require(r == ntw2_loco::ExtractLogged || r == ntw2_loco::ExtractNoop, "bench op logs");
+            for (const MoveOpKind kind : {kntwr_loco::MoveUnlinkGrid, kntwr_loco::MoveInsertGrid}) {
+                ExtractResult r = kntwr_loco::ExtractMoveOp(log, f.Va(i), i, kind, kntwr_loco::MoveFromWorker, true);
+                if (r == kntwr_loco::ExtractBatchFull) { flush(); r = kntwr_loco::ExtractMoveOp(log, f.Va(i), i, kind, kntwr_loco::MoveFromWorker, true); }
+                Require(r == kntwr_loco::ExtractLogged || r == kntwr_loco::ExtractNoop, "bench op logs");
             }
         }
         flush();
@@ -525,15 +525,15 @@ static void BenchFixture(U lanes, U movers, U stages, bool clustered, U perBatch
         }
     }
     {   // owner-side cost split of one extraction pass (diagnostic): coverage arithmetic alone, and the node/old-cell reads alone
-        ntw2_loco::CoverGeometry geometry{1.0f, 0.5f, 0, maximum};
+        kntwr_loco::CoverGeometry geometry{1.0f, 0.5f, 0, maximum};
         volatile U sink = 0; double a = NowUs();
-        for (U rep = 0; rep < 8; ++rep) for (U i : order) { const ntw2_loco::CoverRect r = ntw2_loco::CoverRecord(Get<float>(f.Rec(i), 0x48), Get<float>(f.Rec(i), 0x50), Get<float>(f.Rec(i), 0x58), false, geometry); sink += r.left + r.bottom; }
+        for (U rep = 0; rep < 8; ++rep) for (U i : order) { const kntwr_loco::CoverRect r = kntwr_loco::CoverRecord(Get<float>(f.Rec(i), 0x48), Get<float>(f.Rec(i), 0x50), Get<float>(f.Rec(i), 0x58), false, geometry); sink += r.left + r.bottom; }
         const double cover = (NowUs() - a) / 8000.0; a = NowUs();
         for (U rep = 0; rep < 8; ++rep) for (U i : order) { const U n = Get<U>(f.Rec(i), 0xac), base = Get<U>(f.Rec(i), 0xa8); for (U k = 0; k < n; ++k) sink += Get<U>(reinterpret_cast<const B*>(base + k * 0x1c), 0x18); }
         const double reads = (NowUs() - a) / 8000.0;
         std::printf("  diagnostic: CoverRecord x %u records = %.3f ms; record+node reads = %.3f ms\n", movers, cover, reads);
     }
-    ntw2_loco::MoveLogFree(log); g_eventPool.Shutdown();
+    kntwr_loco::MoveLogFree(log); g_eventPool.Shutdown();
     const auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
     std::printf("  pose writes only (in both loops): %7.3f ms/stage\n", median(poseMs));
     std::printf("  owner-serial native services : %7.3f ms/stage (median)\n", median(serialMs));

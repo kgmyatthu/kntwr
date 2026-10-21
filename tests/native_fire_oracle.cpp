@@ -16,7 +16,7 @@
 #include "native_image_relocation.h"
 #include "native_fire.h"
 #include "loco/native_sweep.h"
-namespace port = ntw2_fire;
+namespace port = kntwr_fire;
 using U = uint32_t;
 using B = uint8_t;
 static B* image;
@@ -218,7 +218,7 @@ static void RefusalCases() {
   work.refusal == port::Refusal::Request, "watcher invalidation resets sequence before request refusal");
  Fixture obstacle(4); Put(obstacle.soldier.data(), 0x4F4, 0.0f); Put(obstacle.soldier.data(), 0x4F0, 8.0f);
  Put(obstacle.soldier.data(), 0x424, 10.0f); obstacle.cells.fill(0x100);
- ntw2_sweep::WorkerScene environment; environment.built = true; environment.topology.type.push_back(0x800);
+ kntwr_sweep::WorkerScene environment; environment.built = true; environment.topology.type.push_back(0x800);
  environment.model = A(obstacle.model.data());
  Check(port::Capture(A(obstacle.soldier.data()), snapshot, &environment) && !port::Run(snapshot, work) &&
   work.refusal == port::Refusal::Candidate, "borrowed environment preserves obstacle narrow-phase refusal");

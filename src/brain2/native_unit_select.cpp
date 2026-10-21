@@ -2,7 +2,7 @@
 #include "native_unit_select.h"
 #include <string.h>
 
-namespace ntw2_unit_select {
+namespace kntwr_unit_select {
 namespace {
 static_assert(sizeof(void*) == 4, "unit selection reads the Win32 game image");
 // Approved-image preferred VAs (SHA-256 13fcab62...).
@@ -86,4 +86,4 @@ U Scan(const Rules& rules, U manager, AcceptFn accept, void* ctx, U maxSelected)
     }
     return infantry;
 }
-} // namespace ntw2_unit_select
+} // namespace kntwr_unit_select

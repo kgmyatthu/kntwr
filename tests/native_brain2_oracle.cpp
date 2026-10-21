@@ -18,7 +18,7 @@
 #include <cstring>
 #include <vector>
 #include "native_image_relocation.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #include "native_brain2.h"
 #include "native_finalizer.h"
 #include "native_brain_s0.h"
@@ -26,15 +26,15 @@
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace brain = ntw2_brain2;
+namespace brain = kntwr_brain2;
 static_assert(sizeof(void*) == 4, "x86 native ABI");
 extern "C" unsigned long _tls_index;
 __declspec(thread) static volatile U tlsPad[32];
 static B* image;
 static U delta, checks, cases, ownerThread;
 static const char* currentCase = "mapping";
-static ntw2_clone_set clones{};
-static U bindings[NTW2_BIND_COUNT];
+static kntwr_clone_set clones{};
+static U bindings[KNTWR_BIND_COUNT];
 [[noreturn]] static void Fail(const char* fmt, ...) {
     std::fprintf(stderr, "FAIL [%s]: ", currentCase);
     va_list ap; va_start(ap, fmt); std::vfprintf(stderr, fmt, ap); va_end(ap);
@@ -96,9 +96,9 @@ static void Map(const char* path) {
         reinterpret_cast<IMAGE_NT_HEADERS32*>(image + dos->e_lfanew), delta), "image relocation");
     std::fill(std::begin(bindings), std::end(bindings), Fn(&UnexpectedBinding));
     brain::Bind(A(image), bindings);
-    Require(ntw2_brain_s0::Bind(A(image), bindings), "S0 gates bind with collision-free dispatch tables");
+    Require(kntwr_brain_s0::Bind(A(image), bindings), "S0 gates bind with collision-free dispatch tables");
     U detail = 0;
-    const U error = ntw2_build_clones(A(image), bindings, &clones, &detail);
+    const U error = kntwr_build_clones(A(image), bindings, &clones, &detail);
     if (error) Fail("clone construction error=%u detail=%u", error, detail);
 }
 enum ObservationKind : U { ChargeCallback, AnimationCallback };
@@ -527,7 +527,7 @@ template<class F> __declspec(noinline) static void Probe(const char* what, U va,
         std::initializer_list<U> argv, U entity, brain::Classification expect,
         std::initializer_list<Region> regions, bool execute, F&& call) {
     currentCase = what;
-    if (std::getenv("NTW2_ORACLE_TRACE")) { std::fprintf(stderr, "probe %s %X\n", what, va); std::fflush(stderr); }
+    if (std::getenv("KNTWR_ORACLE_TRACE")) { std::fprintf(stderr, "probe %s %X\n", what, va); std::fflush(stderr); }
     U gate[8] = {};
     { size_t k = 0; for (U v : argv) gate[k++] = v; }
     U service = 0;
@@ -1251,7 +1251,7 @@ static void ProofCases(World& world) {
         Probe("807490 empty label list", 0x807490, 0x659612, a + 0x394, {}, a, Inactive, {ro[0], ro[1]}, true,
             [&] { CallService(A(At(0x807490)), a + 0x394, CallAbi::Byte0); });
     }
-    if (std::getenv("NTW2_ORACLE_TRACE")) std::fprintf(stderr, "block observe\n");
+    if (std::getenv("KNTWR_ORACLE_TRACE")) std::fprintf(stderr, "block observe\n");
     // ---- observation points
     {
         Fixture f; f.Init(world, Spec{4,0,9}, 407);
@@ -1366,18 +1366,18 @@ static void ProofCases(World& world) {
         }
         // --brain-finalizer-shadow mechanism: private-copy original vs live original, bit-exact; an input changed
         // between the two runs must be reported.
-        ntw2_finalizer::Configure(true); ntw2_finalizer::Reset();
+        kntwr_finalizer::Configure(true); kntwr_finalizer::Reset();
         for (U state : {0u, terminal}) {
             Base(state, A(fw.frame.data())); Put(ag, 0x110, U(1)); Put(ag, 0x118, B(1));
-            ntw2_finalizer::ShadowBefore(a); CallService(fin, a, CallAbi::Void0); ntw2_finalizer::ShadowAfter();
+            kntwr_finalizer::ShadowBefore(a); CallService(fin, a, CallAbi::Void0); kntwr_finalizer::ShadowAfter();
         }
-        Require(ntw2_finalizer::Counter(ntw2_finalizer::ShadowCalls) == 2 &&
-                ntw2_finalizer::Counter(ntw2_finalizer::ShadowMismatches) == 0 &&
-                ntw2_finalizer::Counter(ntw2_finalizer::ShadowFaults) == 0, "shadow copy equals the live original");
+        Require(kntwr_finalizer::Counter(kntwr_finalizer::ShadowCalls) == 2 &&
+                kntwr_finalizer::Counter(kntwr_finalizer::ShadowMismatches) == 0 &&
+                kntwr_finalizer::Counter(kntwr_finalizer::ShadowFaults) == 0, "shadow copy equals the live original");
         Base(terminal, A(fw.frame.data()));
-        ntw2_finalizer::ShadowBefore(a); Put(ag, 0x58, 9.0f); CallService(fin, a, CallAbi::Void0); ntw2_finalizer::ShadowAfter();
-        Require(ntw2_finalizer::Counter(ntw2_finalizer::ShadowMismatches) == 1, "shadow reports a diverged live run");
-        ntw2_finalizer::Configure(false); ntw2_finalizer::Reset();
+        kntwr_finalizer::ShadowBefore(a); Put(ag, 0x58, 9.0f); CallService(fin, a, CallAbi::Void0); kntwr_finalizer::ShadowAfter();
+        Require(kntwr_finalizer::Counter(kntwr_finalizer::ShadowMismatches) == 1, "shadow reports a diverged live run");
+        kntwr_finalizer::Configure(false); kntwr_finalizer::Reset();
         // Dependencies: foreign frame + world, own-part frame needs only the world.
         U gate[4] = {};
         Base(terminal, A(fw.frame.data()));
@@ -1518,7 +1518,7 @@ static void ProofCases(World& world) {
             if (after) reached |= 1u << ((after - A(At(0x1454168))) / 4);
             if (Get<U>(ag, 0x44c) != 0xdeadbeefu || Get<U>(ag, 0x454) != 0xdeadbeefu) ++animated;
         }
-        if (std::getenv("NTW2_ORACLE_TRACE"))
+        if (std::getenv("KNTWR_ORACLE_TRACE"))
             std::fprintf(stderr, "posture: transitions=%u animated=%u reached=%04X\n", transitions, animated, reached);
         U distinct = 0;
         for (U bits = reached; bits; bits &= bits - 1) ++distinct;
@@ -1541,14 +1541,14 @@ static void ProofCases(World& world) {
             as.rows[0x56c / 4] ^= 1;
             Put(ag, 0x1d8, U(2)); deps = brain::WitnessDeps{};
             Require(brain::WorkerClassify(fin, 0x654513, a, gate, a, nullptr, &deps) == Inactive && deps.count == 2 &&
-                    deps.items[1].aux == (0x20 | ntw2_finalizer::kAnimSelects) && brain::WitnessDepsHold(deps),
+                    deps.items[1].aux == (0x20 | kntwr_finalizer::kAnimSelects) && brain::WitnessDepsHold(deps),
                     "R+1D8 <= 3: the 6616C0 ids join the read set");
             Put(as.data[3].data(), 0x70, 7.0f); Require(!brain::WitnessDepsHold(deps), "changed id 31 duration breaks Anim");
             Put(as.data[3].data(), 0x70, 0.25f + 0.125f * 3);
             Put(ag, 0x1d8, U(4));
             Put(ag, 0x458, B(0)); deps = brain::WitnessDeps{};
             Require(brain::WorkerClassify(fin, 0x654513, a, gate, a, nullptr, &deps) == Inactive && deps.count == 2 &&
-                    deps.items[1].aux == ntw2_finalizer::kNoAnimIndex, "R+458 != 1: no R+1BC entry in the read set");
+                    deps.items[1].aux == kntwr_finalizer::kNoAnimIndex, "R+458 != 1: no R+1BC entry in the read set");
             as.table[0x20] = 0; Require(brain::WitnessDepsHold(deps), "R+1BC entry is outside that read set");
             as.table[0x20] = A(as.entries[7].data());
             Base(terminal, 0); Put(ag, 0x218, A(as.set.data())); deps = brain::WitnessDeps{};
@@ -1595,13 +1595,13 @@ static void ProofCases(World& world) {
                 if (Get<U>(ag, 0xf8) != A(At(0x1454168 + 4 * state))) ++reachMoves;
                 if (Get<U>(ag, 0xe8) != 0xdeadbeefu) { ++reachE8; Require(Get<float>(ag, 0xe8) == 1.75f, "5FB920 stores the reach float"); }
             }
-            if (std::getenv("NTW2_ORACLE_TRACE")) std::fprintf(stderr, "132BBC0: moves=%u e8=%u\n", reachMoves, reachE8);
+            if (std::getenv("KNTWR_ORACLE_TRACE")) std::fprintf(stderr, "132BBC0: moves=%u e8=%u\n", reachMoves, reachE8);
             Require(reachMoves > 0, "the 132BBC0 posture runs cover transitions");
             Base(A(At(0x145416c)), 0); Put(ag, 0xf4, A(At(0x132bbc0))); Put(ag, 0x218, A(as.set.data()));
             Put(ag, 0x458, B(1)); Put(ag, 0x1bc, U(0x20)); Put(ag, 0x1d8, U(4));
             brain::WitnessDeps reach{};
             Require(brain::WorkerClassify(fin, 0x654513, a, gate, a, nullptr, &reach) == Inactive && reach.count == 2 &&
-                    reach.items[1].kind == brain::WitnessDepAnim && reach.items[1].aux == (0x20 | ntw2_finalizer::kAnimReach) &&
+                    reach.items[1].kind == brain::WitnessDepAnim && reach.items[1].aux == (0x20 | kntwr_finalizer::kAnimReach) &&
                     brain::WitnessDepsHold(reach), "132BBC0 records the animation set with the reach float");
             Put(as.reachBlock.data(), 0x14, 2.5f); Require(!brain::WitnessDepsHold(reach), "changed reach float breaks Anim");
             Put(as.reachBlock.data(), 0x14, 1.75f); Require(brain::WitnessDepsHold(reach), "restored reach float holds");
@@ -1782,10 +1782,10 @@ static void ProofCases(World& world) {
             Put(ag, 0, A(At(0x1333714))); Put(ag, 0x1ec, U(0)); Put(ag, 0x628, U(0)); Put(ag, 0x66c, U(0)); Put(ag, 0x670, U(0));
         }
     }
-    if (std::getenv("NTW2_ORACLE_TRACE")) std::fprintf(stderr, "block api\n");
+    if (std::getenv("KNTWR_ORACLE_TRACE")) std::fprintf(stderr, "block api\n");
     // ---- worker API shape
     {
-        Require(brain::CloneIdFor(0x66ce00) == NTW2_CLONE_BRAIN_W && brain::CloneIdFor(0x66e780) == NTW2_CLONE_BRAIN_W_WATCHER &&
+        Require(brain::CloneIdFor(0x66ce00) == KNTWR_CLONE_BRAIN_W && brain::CloneIdFor(0x66e780) == KNTWR_CLONE_BRAIN_W_WATCHER &&
             brain::CloneIdFor(0x123456) == ~0u && brain::CloneIdFor(0x7ee750) == ~0u, "clone id map");
         Require(brain::WorkerSiteForced(0x658f39) && brain::WorkerSiteForced(0x658bd3) && brain::WorkerSiteForced(0x66bf95) &&
             !brain::WorkerSiteForced(0x66d638), "site-forced rules");
@@ -1811,7 +1811,7 @@ static void ProofCases(World& world) {
         vec[0] = 1.0f;
         Require(brain::WorkerClassify(A(At(0x5cb830)), site, a, gate, a, nullptr) == Active, "wrapper effect nonzero vector");
     }
-    if (std::getenv("NTW2_ORACLE_TRACE")) std::fprintf(stderr, "block done\n");
+    if (std::getenv("KNTWR_ORACLE_TRACE")) std::fprintf(stderr, "block done\n");
     brain::Reset();
 }
 static void SiteHistogramChecks() {
@@ -2060,7 +2060,7 @@ static void CheckLifecycle() {
     Require(status[brain::Bound] == 1 && status[brain::Occurrences] == 0, "rebind starts a fresh activation");
 }
 // ---- --brain-s0 attribution timer (native_brain_s0.h) ----------------------------------------------------------
-namespace s0 = ntw2_brain_s0;
+namespace s0 = kntwr_brain_s0;
 using S0Words = std::array<U, s0::kWords>;
 static S0Words S0Now() { S0Words w{}; s0::Snapshot(w.data()); return w; }
 static const U* S0Row(const S0Words& w, U row) { return w.data() + s0::kHeaderWords + row * s0::kRowWords; }
@@ -2159,22 +2159,22 @@ static void S0Start(U shift) {
 static void S0Probe() {
     currentCase = "S0 gate register/EFLAGS/RET-n contract";
     S0Start(0);
-    Require(s0::OverrideGateTarget(NTW2_BIND_S0_TARGET, Fn(&ProbeTarget)), "direct gate accepts an oracle target");
-    Require(!s0::OverrideGateTarget(NTW2_BIND_S0_SELECTOR, Fn(&ProbeTarget)), "dispatch gates are table-routed only");
-    probeGate = bindings[NTW2_BIND_S0_TARGET]; probeEaxIn = 0xA0A0A0A0;
+    Require(s0::OverrideGateTarget(KNTWR_BIND_S0_TARGET, Fn(&ProbeTarget)), "direct gate accepts an oracle target");
+    Require(!s0::OverrideGateTarget(KNTWR_BIND_S0_SELECTOR, Fn(&ProbeTarget)), "dispatch gates are table-routed only");
+    probeGate = bindings[KNTWR_BIND_S0_TARGET]; probeEaxIn = 0xA0A0A0A0;
     RunProbe(); CheckProbe(0xC1C1C1C1, "unsampled direct gate delivers every register");
     s0::RunTimedRoot(s0::StepOther, Fn(&ProbeRoot), 0);
     CheckProbe(0xC1C1C1C1, "timed direct gate delivers every register");
     // Selector gate (66D43B keeps `mov ecx,edi`): EAX = vtable, target [vt+108]; an unknown class is its miss row.
     static U vtable[0x110 / 4];
     vtable[0x108 / 4] = Fn(&ProbeTarget);
-    probeGate = bindings[NTW2_BIND_S0_SELECTOR]; probeEaxIn = A(vtable);
+    probeGate = bindings[KNTWR_BIND_S0_SELECTOR]; probeEaxIn = A(vtable);
     RunProbe(); CheckProbe(0xC1C1C1C1, "unsampled dispatch gate delivers every register");
     s0::RunTimedRoot(s0::StepOther, Fn(&ProbeRoot), 0);
     CheckProbe(0xC1C1C1C1, "timed dispatch gate delivers every register");
     // Node-step gate performs the replaced `mov ecx,edi` itself.
     vtable[8 / 4] = Fn(&ProbeTarget);
-    probeGate = bindings[NTW2_BIND_S0_NODE_STEP];
+    probeGate = bindings[KNTWR_BIND_S0_NODE_STEP];
     RunProbe(); CheckProbe(0xD1D1D1D1, "node gate performs the replaced mov ecx,edi");
     const S0Words w = S0Now();
     Require(S0Pair(S0Row(w, s0::SelectorOther)) == 2 && S0Row(w, s0::SelectorOther)[s0::Sampled] == 1 &&
@@ -2199,18 +2199,18 @@ static void __fastcall TreeRoot(void*, void*) {
 }
 static void S0Nesting() {
     currentCase = "S0 nesting accounting on a synthetic call tree";
-    treeGate[0] = bindings[NTW2_BIND_S0_TARGET]; treeGate[1] = bindings[NTW2_BIND_S0_DRIVER];
-    treeGate[2] = bindings[NTW2_BIND_S0_PATH]; treeGate[3] = bindings[NTW2_BIND_S0_POSTURE];
+    treeGate[0] = bindings[KNTWR_BIND_S0_TARGET]; treeGate[1] = bindings[KNTWR_BIND_S0_DRIVER];
+    treeGate[2] = bindings[KNTWR_BIND_S0_PATH]; treeGate[3] = bindings[KNTWR_BIND_S0_POSTURE];
     const uint64_t spins[5] = {400000, 100000, 300000, 200000, 150000};
     std::copy(std::begin(spins), std::end(spins), treeSpin);
     const U rows[5] = {s0::StepOther, s0::Target, s0::Driver, s0::Path, s0::Posture};
     bool close = false;
     for (U attempt = 0; attempt < 8 && !close; ++attempt) {
         S0Start(0);
-        Require(s0::OverrideGateTarget(NTW2_BIND_S0_TARGET, Fn(&TreeTarget)) &&
-                s0::OverrideGateTarget(NTW2_BIND_S0_DRIVER, Fn(&TreeDriver)) &&
-                s0::OverrideGateTarget(NTW2_BIND_S0_PATH, Fn(&TreePath)) &&
-                s0::OverrideGateTarget(NTW2_BIND_S0_POSTURE, Fn(&TreePosture)), "tree gates take oracle targets");
+        Require(s0::OverrideGateTarget(KNTWR_BIND_S0_TARGET, Fn(&TreeTarget)) &&
+                s0::OverrideGateTarget(KNTWR_BIND_S0_DRIVER, Fn(&TreeDriver)) &&
+                s0::OverrideGateTarget(KNTWR_BIND_S0_PATH, Fn(&TreePath)) &&
+                s0::OverrideGateTarget(KNTWR_BIND_S0_POSTURE, Fn(&TreePosture)), "tree gates take oracle targets");
         const uint64_t measured = s0::RunTimedRoot(s0::StepOther, Fn(&TreeRoot), 0);
         const S0Words w = S0Now();
         // Exact structure: sampled / direct children / descendants per frame.
@@ -2339,14 +2339,14 @@ static void S0Fixtures(World& world) {
 // ---- --brain-locality census (native_brain_locality.h) -----------------------------------------------------------
 // The runner calls the original step exactly once per occurrence and only reads/prefetches: every case compares the
 // complete soldier, nested objects, shared world, FP state and callbacks bit-for-bit against the native step.
-namespace loc = ntw2_brain_locality;
+namespace loc = kntwr_brain_locality;
 using LocWords = std::array<U, loc::kWords>;
 static LocWords LocNow() { LocWords w{}; loc::Snapshot(w.data()); return w; }
 static const brain::OccurrenceRunner kLocRunner = {&loc::BeginStage, &loc::EndStage, &loc::RunOccurrence};
 static uint64_t LocPair(const U* p) { return (static_cast<uint64_t>(p[1]) << 32) | p[0]; }
-static const U* LocType(const LocWords& w, U row) { return w.data() + NTW2_BRAIN_LOC_TYPE_BASE + row * NTW2_BRAIN_LOC_TYPE_WORDS; }
-static const U* LocArm(const LocWords& w, U arm) { return w.data() + NTW2_BRAIN_LOC_ARM_BASE + arm * NTW2_BRAIN_LOC_ARM_WORDS; }
-static const U* LocScalars(const LocWords& w) { return w.data() + NTW2_BRAIN_LOC_SCALAR_BASE; }
+static const U* LocType(const LocWords& w, U row) { return w.data() + KNTWR_BRAIN_LOC_TYPE_BASE + row * KNTWR_BRAIN_LOC_TYPE_WORDS; }
+static const U* LocArm(const LocWords& w, U arm) { return w.data() + KNTWR_BRAIN_LOC_ARM_BASE + arm * KNTWR_BRAIN_LOC_ARM_WORDS; }
+static const U* LocScalars(const LocWords& w) { return w.data() + KNTWR_BRAIN_LOC_SCALAR_BASE; }
 static void LocalityInversions() {
     currentCase = "locality merge-sort inversion count against brute force";
     uint32_t seed = 12345;
@@ -2534,7 +2534,7 @@ int main(int argc, char** argv) {
     static World world;
     // Data-only fixture virtual: original callees and their instructions stay real.
     U* vcc = reinterpret_cast<U*>(At(0x1333714) + 0xcc); const U saved = *vcc; *vcc = Fn(&Vcc);
-#define STAGE(call) do { if (std::getenv("NTW2_ORACLE_TRACE")) { std::fprintf(stderr, "stage %s\n", #call); std::fflush(stderr); } call; } while (0)
+#define STAGE(call) do { if (std::getenv("KNTWR_ORACLE_TRACE")) { std::fprintf(stderr, "stage %s\n", #call); std::fflush(stderr); } call; } while (0)
     STAGE(ServiceCases(world));
     STAGE(ProofCases(world));
     STAGE(WorklistCases());

@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace ntw2_loco {
+namespace kntwr_loco {
 // Borrowed immutable publication. Lifetime ends at the next Stage entry,
 // CaptureGrid attempt (including refusal), or Stop: every array is rewritten in place by the next
 // build (only record/serial/incarnation/active/inserted identity is double-buffered across epochs).

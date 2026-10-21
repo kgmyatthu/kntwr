@@ -17,7 +17,7 @@
 //   (old & and) | or. Retained native: target+224 = 9 at 658F44 (pair), node ctor/dtor, 7E1ED0 RNG, watcher, setters 655B20/
 //   643C90, 659600, every per-man node-state branch (+2C4/+234/+36C/+5B8/+5AB/+534). Unit-only lookups (64F8F0 =
 //   55B0A0(U), 57E1F0(U), 649520 at 6544DB) are evaluated once per unit and stage and served from the slot.
-#define NTW2_UNIT_POSTURE_ENGAGE_LABELS \
+#define KNTWR_UNIT_POSTURE_ENGAGE_LABELS \
  "version", "posture_mode", "engage_mode", "stages", "p_decide_units", "p_admitted_last", \
  "p_admitted_unit_stages", "p_refused_unit_stages", "p_refuse_no_unit", "p_refuse_fsm", "p_refuse_state", \
  "p_refuse_active", "p_act_a", "p_act_b", "p_act_c", "p_act_d", "p_act_e", "p_applied", "p_transition", \
@@ -47,10 +47,10 @@
  "p_moving_member_request", "p_moving_member_fsm", "reserved126", "faults"
 #ifdef __cplusplus
 #include "native_unit_policy.h"
-namespace ntw2_unit_posture_engage {
+namespace kntwr_unit_posture_engage {
 using U = uint32_t;
 constexpr U kVersion = 1, kWords = 128;
-// Slot layouts (ntw2_unit_policy::kSlotWords = 64 words per mechanic per unit). Asm contract: do not reorder.
+// Slot layouts (kntwr_unit_policy::kSlotWords = 64 words per mechanic per unit). Asm contract: do not reorder.
 enum PostureSlot : U {
     PsTarget,        // 0 absolute address of the target posture state singleton; 0 = native (shadow / not admitted)
     PsRest,          // 1 absolute address of the rest singleton (AL result)
@@ -66,7 +66,7 @@ enum EngageSlot : U {
     ObOrder = 24, ObStance, ObMode                                                // shadow observation scratch
 };
 constexpr U kLkPredicate = 1, kLkArrival = 2, kLkModifier = 4;
-// Status word bases (labels: NTW2_UNIT_POSTURE_ENGAGE_LABELS). Counters wrap modulo 2^32.
+// Status word bases (labels: KNTWR_UNIT_POSTURE_ENGAGE_LABELS). Counters wrap modulo 2^32.
 enum WordBase : U {
     WVersion = 0, WPostureMode, WEngageMode, WStages,
     WPDecide = 4,        // decide_units, admitted_last, admitted_unit_stages, refused_unit_stages, refuse x4, act A..E
@@ -84,13 +84,13 @@ enum WordBase : U {
     WFaults = 127
 };
 bool Bind(U imageBase, U* bindings);
-// Owner, before the first stage. Modes are ntw2_unit_policy::Mode values (Off/Shadow/Live). Returns false when a mode is on
+// Owner, before the first stage. Modes are kntwr_unit_policy::Mode values (Off/Shadow/Live). Returns false when a mode is on
 // but the pinned image tables do not match (the module then stays off).
 bool Start(U imageBase, U postureMode, U engageMode, const U* cloneEntries);
-const ntw2_unit_policy::Provider* PostureProvider();  // nullptr when posture mode is Off
-const ntw2_unit_policy::Provider* EngageProvider();   // nullptr when engage mode is Off
+const kntwr_unit_policy::Provider* PostureProvider();  // nullptr when posture mode is Off
+const kntwr_unit_policy::Provider* EngageProvider();   // nullptr when engage mode is Off
 void Stop();
 void Reset();
 void Snapshot(U* words /*[kWords]*/);
-} // namespace ntw2_unit_posture_engage
+} // namespace kntwr_unit_posture_engage
 #endif

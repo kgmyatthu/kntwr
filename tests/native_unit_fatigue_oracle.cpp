@@ -1,13 +1,13 @@
 // S4 per-unit fatigue oracle on the mapped approved image (no game process, no .text patch). Every native body runs from the
 // private relocated copy; fixtures are plain soldier/unit/manager/stat-record memory.
-//  1. Arithmetic: ntw2_unit_fatigue::Step (Rate, ActivityClass, hysteresis, clamp) byte-equal to the native 0x670F40 -> 0x671230
+//  1. Arithmetic: kntwr_unit_fatigue::Step (Rate, ActivityClass, hysteresis, clamp) byte-equal to the native 0x670F40 -> 0x671230
 //     on randomized homogeneous fixtures: every activity code incl. > 0x4E, node virtual +20 results, environment entries,
 //     speed band gate and thresholds, negative rates, hysteresis boundaries and clamp edges, wrap, A+1F0 == 0.
 //  2. Unit model: ResolveUnit admission/refusal (FSM states A..E, unknown FSM, engaged, class variance, band invariance, cold
 //     records, null row) and the native step for every code of each model on the image.
-//  3. Gate ABI (NTW2_BIND_U_FATIGUE): apply / native fallback / entity mismatch; callee-saved registers and ESP preserved.
-//  4. Provider through the shared module (ntw2_unit_policy on a manager/registry fixture): selection equals
-//     ntw2_unit_select::Scan, serial-bit routing, one advance per stage, idempotent duplicate occurrences, out-of-worklist
+//  3. Gate ABI (KNTWR_BIND_U_FATIGUE): apply / native fallback / entity mismatch; callee-saved registers and ESP preserved.
+//  4. Provider through the shared module (kntwr_unit_policy on a manager/registry fixture): selection equals
+//     kntwr_unit_select::Scan, serial-bit routing, one advance per stage, idempotent duplicate occurrences, out-of-worklist
 //     publication, generation re-init, inactive reset, stance refusal, shadow divergence tallies, Drain cooldown, and
 //     determinism of two runs on worlds at different addresses. The unit pair is compared with the native 670F40 run on a
 //     reference man of a homogeneous unit stage by stage.
@@ -29,12 +29,12 @@
 #include "brain2/native_unit_fatigue.h"
 #include "brain2/native_unit_policy.h"
 #include "brain2/native_unit_select.h"
-#include "clones/ntw2_clones.h"
+#include "clones/kntwr_clones.h"
 #pragma fenv_access(on)
 using U = uint32_t;
 using B = unsigned char;
-namespace uf = ntw2_unit_fatigue;
-namespace up = ntw2_unit_policy;
+namespace uf = kntwr_unit_fatigue;
+namespace up = kntwr_unit_policy;
 static_assert(sizeof(void*) == 4, "Win32 native ABI");
 static B* image;
 static U delta, checks, cases;
@@ -354,9 +354,9 @@ static void CheckAbi(const U (&out)[6], const char* what) {
 }
 static void TestGate() {
     label = "gate abi";
-    U bindings[NTW2_BIND_COUNT] = {};
-    Require(uf::Bind(Addr(image), bindings) && bindings[NTW2_BIND_U_FATIGUE] == uf::GateAddress(), "Bind writes the gate");
-    Require(up::Bind(Addr(image), bindings) && bindings[NTW2_BIND_U_OCC] == Addr(&up::g_occ), "policy Bind writes g_occ");
+    U bindings[KNTWR_BIND_COUNT] = {};
+    Require(uf::Bind(Addr(image), bindings) && bindings[KNTWR_BIND_U_FATIGUE] == uf::GateAddress(), "Bind writes the gate");
+    Require(up::Bind(Addr(image), bindings) && bindings[KNTWR_BIND_U_OCC] == Addr(&up::g_occ), "policy Bind writes g_occ");
     std::array<U, 0x80> vt{}; vt[0x108 / 4] = Fn(&ForwardStub);
     Soldier a{}, other{};
     Put(a.data(), 0, Addr(vt.data())); Put(other.data(), 0, Addr(vt.data()));
@@ -428,7 +428,7 @@ static bool StartModule(World& w, U mode) {
     if (!uf::Start(Addr(image), mode)) return false;
     up::Config cfg{};
     cfg.imageBase = Addr(image); cfg.providers[up::Fatigue] = uf::Provider(); cfg.s0 = true;
-    U bindings[NTW2_BIND_COUNT] = {};
+    U bindings[KNTWR_BIND_COUNT] = {};
     uf::Bind(Addr(image), bindings);                  // the gate reads &g_occ through this
     return up::Start(cfg);
 }
@@ -451,10 +451,10 @@ static uint64_t Scenario(World& w, bool verify) {
     w.Init();
     Require(StartModule(w, up::Live), "start live module on the mapped image");
     // selection equals the shared scan
-    ntw2_unit_select::Rules rules{};
+    kntwr_unit_select::Rules rules{};
     Require(rules.Pin(Addr(image)), "rules pin");
     struct Ctx { World* w; U count, handle, ord; } ctx = {&w, 0, 0, 0};
-    ntw2_unit_select::Scan(rules, Addr(w.manager.data()), [](void* c, U unit, U ord, U) {
+    kntwr_unit_select::Scan(rules, Addr(w.manager.data()), [](void* c, U unit, U ord, U) {
         Ctx& x = *static_cast<Ctx*>(c); ++x.count; x.handle = unit; x.ord = ord; return true; }, &ctx, 16);
     // (the scan above is read-only: it only looks at the registry)
     // stage 1: three of four men run (man 3 is out of the worklist)
@@ -593,9 +593,9 @@ static void Bench() {
     Require(StartModule(*w, up::Live), "start live module (bench)");
     up::BeginStage(Addr(w->manager.data()));
     Require(up::View(0) && up::View(0)->admitted, "bench unit admitted");
-    U entries[NTW2_CLONE_COUNT] = {};
+    U entries[KNTWR_CLONE_COUNT] = {};
     const U stub = static_cast<U>(reinterpret_cast<uintptr_t>(&StubStep));
-    entries[NTW2_CLONE_BRAIN_U] = stub;
+    entries[KNTWR_CLONE_BRAIN_U] = stub;
     const U core = Addr(image) + (0x66CE00 - 0x400000);
     constexpr U kIters = 2000000;
     LARGE_INTEGER f, t0, t1; QueryPerformanceFrequency(&f);

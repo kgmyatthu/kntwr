@@ -1,19 +1,19 @@
 #pragma once
 #include <stdint.h>
-#define NTW2_ACTION_NODE_WORD_LABELS \
+#define KNTWR_ACTION_NODE_WORD_LABELS \
  "version", "enabled", "bound", "captures", "admitted", "refused", "begins", "steps", \
  "comparisons", "matches", "mismatches", "node_mismatches", "owner_mismatches", "event_mismatches", \
  "predicted_events", "observed_events", "phase_checkpoints", "needs_owner", "predicate_needs_owner", \
  "projection_needs_owner", "cold_adjustment_needs_owner", "reentrant_refusals", "last_node", \
  "last_operation", "last_mismatch_offset", "last_expected", "last_actual", "empty_begins", \
  "empty_steps", "private_projection_calls", "workers_blocked", "fake_table_installed"
-#define NTW2_ACTION_NODE_EVENT_WORD_LABELS \
+#define KNTWR_ACTION_NODE_EVENT_WORD_LABELS \
  "order_predicted", "order_observed", "setter_predicted", "setter_observed", \
  "request_predicted", "request_observed", "reset_predicted", "reset_observed", \
  "move_predicted", "move_observed", "pose_predicted", "pose_observed", \
  "event_mismatches", "missing_events", "reserved14", "reserved15"
 #ifdef __cplusplus
-namespace ntw2_action_node {
+namespace kntwr_action_node {
 using U = uint32_t;
 using B = unsigned char;
 constexpr U kClassCount = 3, kWords = 32, kEventWords = 16;
@@ -44,5 +44,5 @@ U Before(U originalVA, U receiver, const U* args, const U* cloneEntries);
 U BeforeSite(U originalVA, U callsiteVA, U receiver, const U* args, const U* cloneEntries);
 void Observe(U originalVA, U receiver, const U* args);
 void After(U token);
-} // namespace ntw2_action_node
+} // namespace kntwr_action_node
 #endif

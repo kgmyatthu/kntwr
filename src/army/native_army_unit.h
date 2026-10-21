@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-// Army per-unit update, Item 4 Stage A (--army-unit-shadow, NTW2_ARMY_UNIT_SHADOW): instrumentation only.
+// Army per-unit update, Item 4 Stage A (--army-unit-shadow, KNTWR_ARMY_UNIT_SHADOW): instrumentation only.
 //
 // Question measured: under the approved compromises (frozen foreign units per army stage, conflicts by unit ordinal,
 // per-unit deterministic RNG streams; NOT delayed callbacks), which 0x581F30 occurrences could leave the owner, what
@@ -10,7 +10,7 @@
 // Hooks (runtime host data only, no code/game bytes): siteCallees[18] (ARMY clone's call 0x580342 of the ARMY_UPDATE
 // clone, ECX = container C) -> Stage; siteCallees[101]/[103] (ARMY_UPDATE's 0x5804C2 main-list C+F0/F4 and 0x5804FF
 // alternate-list C+1A4/1A8 calls of 0x581F30, ECX = unit U) -> Unit. The native call is unchanged and authoritative;
-// this module only READS native memory (every range proven readable first, ntw2_region::Table) and writes its own rows.
+// this module only READS native memory (every range proven readable first, kntwr_region::Table) and writes its own rows.
 //
 // Per occurrence, on the tick owner around the native call:
 //  * cost: QPC of the 0x581F30 call alone (instrumentation excluded; it is reported as observer_us).
@@ -26,7 +26,7 @@
 //    6A5CE0 counters, 69E4D0 publication and callback 69E66E), model+50 RNG (MSVC LCG 343FD/269EC3: bounded endpoint
 //    inference, the number of LCG steps <= kRngBound from the pre to the post state; a reseed or more draws than the
 //    bound count as rng_unresolved, and draws that return to the same state are invisible),
-//    planner mutators (ntw2_ai_census owner-thread calls; only with --features ai_census), member/attached/driver
+//    planner mutators (kntwr_ai_census owner-thread calls; only with --features ai_census), member/attached/driver
 //    counts, command U+930/934, FSM state [U+D6C].
 //  * reasons (owner-only under the approved compromises): notification (A40|608|BD0|trigger), planner, allocation/list
 //    (member/attached/driver/command changes, attached removal, formation command), return-dependent (FSM transition,
@@ -36,31 +36,31 @@
 //    complete (unit unreadable, or a fault caught while reading) is counted in unreadable/unreadable_us only: it is
 //    neither eligible nor attributed to a reason, and its cost stays owner-only in the projection.
 //  * observation safety: readability proofs are re-established before each pre and post observation (the native call
-//    may free or decommit probed memory) and every load runs under SEH bracketed by ntw2::probeDepth.
+//    may free or decommit probed memory) and every load runs under SEH bracketed by kntwr::probeDepth.
 //  * foreign witness: distinct foreign units in the lists the closure enumerates: 5821B0 candidates [[U+1EC]+D8]+44/48
 //    (pre) and 53A9E0's [U+1EC]+F0/F4 (post state; its pure-read gates are replicated, 55AC40/55C480 and the U+1B0/1AF
 //    command queries are not: upper bound). Pinned cells: 4 per aggregation unit (D9E, C00, +2704, C2C), 18 per
 //    neighbour (ADC, F+670, pose 3, transform pointer, 12 transform floats).
 // Per stage: one measured frozen-copy of the section 8.4 cells of every listed unit (snapshot_us), not used by anything.
-#define NTW2_ARMY_UNIT_HEADER_LABELS "version", "enabled", "stages", "occurrences", "main_occurrences", \
+#define KNTWR_ARMY_UNIT_HEADER_LABELS "version", "enabled", "stages", "occurrences", "main_occurrences", \
  "alternate_occurrences", "ticks", "units_last_stage", "max_units_stage", "strict_eligible", "dynamic_eligible", \
  "rng_drawing", "rng_draws", "rng_unresolved", "planner_measured", "unreadable", "unit_us", "strict_eligible_us", \
  "dynamic_eligible_us", "stage_us", "observer_us", "snapshot_us", "snapshot_units", "quantile_ticks", \
  "tick_p50_sum_dus", "tick_p90_sum_dus", "last_tick_p50_dus", "last_tick_p90_dus", "max_tick_p90_dus", \
  "tick_buffer_overflow", "workers", "ai2_concurrent"
-#define NTW2_ARMY_UNIT_REASON_LABELS "notification", "planner_write", "alloc_list", "return_dependent", "non_closed"
-#define NTW2_ARMY_UNIT_DETAIL_LABELS "k_identity_57F109", "k_fsm_10FBBDA", "k_selected_581F8F", "k_alternate_581FF3", \
+#define KNTWR_ARMY_UNIT_REASON_LABELS "notification", "planner_write", "alloc_list", "return_dependent", "non_closed"
+#define KNTWR_ARMY_UNIT_DETAIL_LABELS "k_identity_57F109", "k_fsm_10FBBDA", "k_selected_581F8F", "k_alternate_581FF3", \
  "k_command_582680", "k_driver_582081", "k_formation_585D9B", "k_member_getters_57F17B", "k_601500", "k_600EF0", \
  "k_attached_remove_52E840", "k_formation_command_580B1F", "k_reserved12", "k_reserved13", "k_reserved14", \
  "k_reserved15", "e_notify_a40_585890", "e_notify_608_5858E0", "e_notify_bd0_57F0F8", "e_trigger_5CCA60", "e_rng", \
  "e_planner", "e_members", "e_attached", "e_drivers", "e_command", "e_fsm", "e_unreadable", "e_reserved28", \
  "e_reserved29", "e_reserved30", "e_reserved31"
-#define NTW2_ARMY_UNIT_FOREIGN_LABELS "foreign_distinct_sum", "foreign_distinct_max", "foreign_aggregation_sum", \
+#define KNTWR_ARMY_UNIT_FOREIGN_LABELS "foreign_distinct_sum", "foreign_distinct_max", "foreign_aggregation_sum", \
  "foreign_neighbour_sum", "aggregation_skipped", "foreign_unreadable", "foreign_set_overflow", "pinned_cells_sum"
-#define NTW2_ARMY_UNIT_COMMAND_LABELS "va", "occurrences", "dynamic_owner_only", "cost_us", "rng_drawing"
+#define KNTWR_ARMY_UNIT_COMMAND_LABELS "va", "occurrences", "dynamic_owner_only", "cost_us", "rng_drawing"
 
 // B0 qualification (analysis/native-army-stage-b-plan.md section 7), same --army-unit-shadow activation, own row
-// ntw2_status::army_b0_words (NTW2_ARMY_B0_WORDS). The Stage A row's spare words (188..191 and the eight reserved
+// kntwr_status::army_b0_words (KNTWR_ARMY_B0_WORDS). The Stage A row's spare words (188..191 and the eight reserved
 // detail counters) are far too few for 160 words, so they keep their meaning and stay zero. Still observation only: no
 // native write; every read VirtualQuery-proven and SEH-bracketed.
 //  * unit occurrence: the runtime runs the generator-pinned ARMY_UNIT clone of 0x581F30 (identical instructions; only
@@ -89,7 +89,7 @@
 //  * refusal: one mutually exclusive bucket per occurrence, in order unreadable, alloc_list (Stage A), FSM transition,
 //    recorder not replayable (tail appended or unknown while unqualified), other refused (Stage A notification/
 //    planner/return-dependent, dirty formation, unknown FSM table/state), completable.
-#define NTW2_ARMY_B0_LABELS "b0_version", "b0_occurrences", "fsm_calls", "fsm_occurrences", "fsm_multi", \
+#define KNTWR_ARMY_B0_LABELS "b0_version", "b0_occurrences", "fsm_calls", "fsm_occurrences", "fsm_multi", \
  "fsm_transitions", "fsm_steps", "fsm_unreadable", "fsm_foreign_table", "fsm_us", "fsm_transition_us", "fsm_step_us", \
  "closed_step_mask", "b0_observer_us", "fsm_outside_unit", "fsm_not_reached_us", \
  "a_steps", "a_step_us", "a_step_occ_us", "a_from", "a_to", "b_steps", "b_step_us", "b_step_occ_us", "b_from", "b_to", \
@@ -121,8 +121,8 @@
  "transition_occurrences", "transition_occurrences_us", "b0_reserved156", "b0_reserved157", "b0_reserved158", \
  "b0_reserved159"
 #ifdef __cplusplus
-namespace ntw2_region { struct Table; }
-namespace ntw2_army_unit {
+namespace kntwr_region { struct Table; }
+namespace kntwr_army_unit {
 using U = uint32_t;
 constexpr U kVersion = 1;
 constexpr U kReasons = 5, kDetails = 32, kHistogram = 16, kCommands = 16, kCommandStride = 5;
@@ -155,13 +155,13 @@ enum Word : U {
 };
 static_assert(DuplicateOccurrences == 47 && ForeignDistinctSum == 80 && PinnedCellsSum == 87 &&
               CommandDistinct == 104 && Reserved188 == 188 && WordCount == 192,
-              "army unit status row geometry (NTW2_ARMY_UNIT_WORDS)");
+              "army unit status row geometry (KNTWR_ARMY_UNIT_WORDS)");
 constexpr U kWords = WordCount;
 
 struct Binding {
     U image_base;            // relocation of the preferred-base class constant 13211D8
     U workers;               // reported for the projection only; Stage A never dispatches
-    U (*planner_calls)();    // owner-thread planner-mutator call counter (ntw2_ai_census::OwnerCalls) or null
+    U (*planner_calls)();    // owner-thread planner-mutator call counter (kntwr_ai_census::OwnerCalls) or null
     U ai2_concurrent;        // 1 when the AI worker can run during the tick (model+50/planner deltas are then shared)
 };
 bool Start(const Binding& binding); // allocates the module storage; false leaves it off
@@ -180,7 +180,7 @@ struct Probe {
     U readable, aa0, d48, dc8, trigger /*byte R+68, ~0 unreadable*/, dcc, ae8, c930, c934, command /*vtable*/, a60,
       ab0, acc, adc, members /*U+2CC*/, attached /*[U+1F4]+10*/, attachedRemove, fsm /*[U+D6C]*/, formationCommand;
 };
-bool ReadProbe(U unit, U delta, ntw2_region::Table& table, U& queries, Probe& out);
+bool ReadProbe(U unit, U delta, kntwr_region::Table& table, U& queries, Probe& out);
 // Steps of the model+50 LCG from `from` to `to` (0 when equal), ~0 when not reached within `bound` steps.
 U RngSteps(U from, U to, U bound);
 // Reason bitset (1 << Reason); `detail` receives the Detail bits.
@@ -228,7 +228,7 @@ enum B0Word : U {
 static_assert(FormationInfantry == 51 && SecondaryStateCounts == 67 && QueueClassRows == 75 && AllocRows == 93 &&
               RecorderStages == 101 && RecorderTailUs == 120 && RngMemberBoundSum == 121 && OwnKbSum == 125 &&
               RefusalRows == 132 && CompletableStepUnclosed == 144 && OtherRows == 148 && TransitionOccurrences == 154,
-              "army B0 status row geometry (NTW2_ARMY_B0_WORDS)");
+              "army B0 status row geometry (KNTWR_ARMY_B0_WORDS)");
 constexpr U kB0Words = B0WordCount;
 
 // Tick owner, inside a Unit occurrence: wraps ARMY_UNIT's 582530 call (ECX = S = U+D68); runs the native once.
@@ -242,7 +242,7 @@ struct Globals {
     U scratchOk, recCap, recCount, recBacking, distCap, distCount, distBacking;
     U recorderOk, enable, dcc, manager, provider, managerOk, m4, m20, comparator, inhibit;
 };
-void ReadGlobals(U delta, ntw2_region::Table& table, U& queries, Globals& out);
+void ReadGlobals(U delta, kntwr_region::Table& table, U& queries, Globals& out);
 bool RecorderQualified(const Globals& g);
 U RecorderAppends(const Globals& before, const Globals& after); // ~0 when not comparable
 struct OwnSpan { U base, bytes; };
@@ -251,8 +251,8 @@ struct B0Probe {
     OwnSpan span[2 + 8];
     U commands, commandClass[kQueueSample], commandState[kQueueSample]; // preferred VAs; state ~0 when not 1324B54
 };
-bool ReadB0Probe(U unit, U delta, ntw2_region::Table& table, U& queries, B0Probe& out);
+bool ReadB0Probe(U unit, U delta, kntwr_region::Table& table, U& queries, B0Probe& out);
 U Refuse(bool observed, U reasons, bool transition, bool recorderRefused, bool otherRefused);
 U AllocSplit(U detail, bool growth, bool reserved);
-} // namespace ntw2_army_unit
+} // namespace kntwr_army_unit
 #endif

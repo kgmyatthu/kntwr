@@ -12,7 +12,7 @@
 #include "native_sweep.h"
 
 static_assert(sizeof(void*) == 4, "sweep uses the native x86 identity ABI");
-namespace ntw2_sweep {
+namespace kntwr_sweep {
 namespace {
 U words[WordCount];
 struct TargetCount { U target, calls; };
