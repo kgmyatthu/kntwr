@@ -503,7 +503,7 @@ static void CheckBlob(const char* name, const uint8_t* blob, uint32_t size, cons
 // Diagnostic bisection (--gameplay-patch-only-runs / --gameplay-patch-skip-runs): the filter only decides which non-header runs reach the live image.
 //   ONLY={}  : no code run is written: the image is the stock loader image with the patched header and the appended sections;
 //   SKIP={44,48}: the two relocated-operand runs (RVA 0x43C70C / 0x43F2F1) stay stock, every other byte is the loader-equivalent patched image;
-//   launcher default (ntw2_gp_filter_exclude_d3d9_swap on ALL): exactly the rel32 fields of the two Direct3DCreate9 calls (RVA 0xCA6203 / 0xDFD3FF,
+//   --no-d3d9-swap (ntw2_gp_filter_exclude_d3d9_swap on ALL): exactly the rel32 fields of the two Direct3DCreate9 calls (RVA 0xCA6203 / 0xDFD3FF,
 //   4 bytes after the E8 opcode) stay stock, every other byte is the loader-equivalent patched image.
 static void RunFilter(const Case& c, uint32_t base) {
     ntw2_gp_filter parsed;
@@ -529,7 +529,7 @@ static void RunFilter(const Case& c, uint32_t base) {
     Bytes stockImage = LoaderImage(c.stock, base, "stock");
     const uint32_t windows[2] = {0x43C70Cu, 0x43F2F1u};
     const uint32_t d3dSites[2] = {0xCA6203u, 0xDFD3FFu};
-    const char* names[3] = {"ONLY={}", "SKIP={44,48}", "default"};
+    const char* names[3] = {"ONLY={}", "SKIP={44,48}", "no-d3d9"};
     for (int variant = 0; variant < 3; ++variant) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image (filter)");
@@ -572,7 +572,7 @@ static void RunFilter(const Case& c, uint32_t base) {
             Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "SKIP={44,48} skips exactly two runs");
             Require(stockWindowBytes >= 2, "the two skipped runs stay stock in the live image");
         } else {
-            Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "default skips exactly the two D3D9 runs");
+            Require(rep.runs_skipped == 2 && rep.runs_applied + rep.runs_skipped + rep.runs_header == rep.runs_total, "--no-d3d9-swap skips exactly the two D3D9 runs");
             Require(stockWindowBytes >= 2, "both Direct3DCreate9 call sites stay stock in the live image");
         }
         std::printf("  filter %-12s applied %u skipped %u header %u: live image matches its expectation over [0, %#x)\n", names[variant],
