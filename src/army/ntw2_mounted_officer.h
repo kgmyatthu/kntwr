@@ -58,12 +58,10 @@ constexpr uint32_t kCallSite = 0x531340, kCtor = 0x51B7D0, kGate = 0x51C22E;
 
 // Formation-follow offset (0x66AD00), independent of AI and of the solver. The
 // native path and the owned node port share this read-only planar decision.
-// March: original slot + 5 game units along formation facing. Halt/fire: rear
-// placement, preserving the slot's lateral coordinate. For >250 occupied files,
-// use the intended last rank from the controller's persistent layout, not a
-// physical straggler. Smaller formations use the rearmost OTHER member; the
-// mount is excluded to prevent a self-expanding rear boundary. Native terrain/
-// frame projection and movement remain unchanged; no patrol or extra orders.
+// Constant policy: original slot + 8 game units along formation facing, for
+// every order family and for units with no active order, marching and
+// stationary alike. Native terrain/frame projection and movement remain
+// unchanged; no patrol or extra orders.
 constexpr uint32_t kSlotAdjust = 0x66AD00;
 bool HasPlacement(uint32_t agent);
 bool Placement(uint32_t agent, const float world[3], float planar[2]);

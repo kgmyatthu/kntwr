@@ -114,16 +114,6 @@ enum Status : int { kOk = 0, kCapacity = 1, kBadInput = 2 };
 // out must hold in.men Slot entries.  Records never exceed men (remaining is decremented per record).
 int Generate(const Input& in, Slot* out, uint32_t capacity, Result* result);
 
-// Geometry-only traversal: no slot array, surface lookup, allocation or per-man
-// iteration. Files are the occupied columns of the first rank; the last rank's
-// centre/angle come from the same straight/arc traversal as Generate.
-struct RankOutline {
-    uint32_t files, count;
-    float rearX, rearZ, forwardX, forwardZ;
-    uint16_t angle;
-};
-int Outline(const Input& in, RankOutline* result);
-
 // Adapter to ntw_formation::SlotInput (native_formation_slot.h): slotX = worldX, slotZ = worldZ, slotAngle = angle.
 void ToSlotArrays(const Slot* slots, uint32_t count, float* slotX, float* slotZ, uint16_t* slotAngle);
 

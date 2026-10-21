@@ -284,7 +284,6 @@ ntw2_harness(native_target_cull_oracle STD 20 FP strict
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_mounted_officer_oracle STD 20 FP strict
   SOURCES native_mounted_officer_oracle.cpp "${NTW2_SRC}/army/ntw2_mounted_officer.cpp"
-  OBJECTS ntw2_formation_layout
   INCLUDES "${NTW2_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 ntw2_harness(native_clip_picker_guard_oracle STD 20 FP strict
   SOURCES native_clip_picker_guard_oracle.cpp "${NTW2_SRC}/animation/ntw2_clip_picker_guard.cpp"
@@ -352,7 +351,6 @@ ntw2_harness(native_move_node_oracle STD 20 FP strict
 # The native and owned follow-node paths share mounted-officer placement.
 foreach(_consumer native_brain2_oracle native_brain_workers_oracle native_unit_brain_oracle native_node_oracle native_move_node_oracle)
   target_sources(${_consumer} PRIVATE "${NTW2_SRC}/army/ntw2_mounted_officer.cpp")
-  target_link_libraries(${_consumer} PRIVATE ntw2_formation_layout)
 endforeach()
 # Per-unit posture / engage: the BRAIN_U_* clones and gates against the mapped originals (private relocated image).
 ntw2_harness(native_unit_posture_engage_oracle STD 20 FP strict

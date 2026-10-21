@@ -3,12 +3,10 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <string.h>
-#include <math.h>
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>
 #include "ntw2_mounted_officer.h"
-#include "formation/native_formation_layout.h"
 
 namespace ntw2_mounted_officer {
 using U = uint32_t;
@@ -194,113 +192,18 @@ U OfficerUnit(U agent) {
     const U rider = Rd(Rd(agent + 0x670));
     return rider && rider == Rd(Rd(unit + kUnitMenData)) && rider == Rd(Rd(unit + kUnitPersData)) ? unit : 0;
 }
-// The controller's persistent container is the intended formation, unlike the
-// physical rectangle at F+644. This is the input recipe used by native 581D40.
-// Traverse rows only: no generated soldier array, terrain query or allocation.
-bool IntendedRear(U unit, U formation, ntw_formation_layout::RankOutline& rear) {
-    namespace layout = ntw_formation_layout;
-    const U men = Rd(formation + 0x18);
-    if (men <= 250 || men > 4096) return false;
-    const U controller = Rd(unit + 0x384), shape = Rd(formation + 0x628);
-    if (!controller || !shape || !Rd(shape)) return false;
-    const U generator = Rd(Rd(shape) + 0x24) - placementDelta;
-    if (generator != 0x62FD60 && generator != 0x18ED200) return false;
-    const U alternate = Rd(controller + 8);
-    const U container = alternate ? Rd(alternate + 0x48) : Rd(controller + 0xC);
-    if (!container || Rd(container + 0x2C) < men) return false;
-    const U count = Rd(container + 0x10), children = Rd(container + 0x14);
-    if (!count || count > 64 || !children) return false;
-    layout::Input in{};
-    in.men = men; in.f = Float(controller + 0x24);
-    in.layout8 = Float(shape + 8); in.layout10 = Float(shape + 0x10); in.layout14 = Float(shape + 0x14);
-    if (!Finite(in.f) || !Finite(in.layout8) || !Finite(in.layout10) || !Finite(in.layout14) ||
-        in.f <= 0 || in.layout8 < 0 || in.layout10 <= 0 || in.layout14 <= 0) return false;
-    layout::Piece pieces[64]{};
-    for (U i = 0; i < count; ++i) {
-        const U child = Rd(children + 4 * i), type = child ? Rd(child) - placementDelta : 0;
-        if (type != 0x1333944 && type != 0x133396C) return false;
-        layout::Piece& p = pieces[i];
-        p.isArc = type == 0x133396C;
-        p.mode = static_cast<int32_t>(Rd(child + 4));
-        p.angle = static_cast<uint16_t>(Rd(child + 8));
-        p.p0[0] = Float(child + 0xC); p.p0[1] = Float(child + 0x10);
-        p.p1[0] = Float(child + 0x14); p.p1[1] = Float(child + 0x18);
-        p.step[0] = Float(child + 0x60); p.step[1] = Float(child + 0x64);
-        p.width = Float(child + 0x70);
-        p.dir[0] = Float(child + 0x8C); p.dir[1] = Float(child + 0x90);
-        if (p.isArc) {
-            p.arcStart[0] = Float(child + 0x7C); p.arcStart[1] = Float(child + 0x80);
-            p.center[0] = Float(child + 0x98); p.center[1] = Float(child + 0x9C);
-            p.arcWidth = Float(child + 0xA0);
-        }
-        const float coordinates[] = {p.p0[0],p.p0[1],p.p1[0],p.p1[1],p.step[0],p.step[1],
-            p.dir[0],p.dir[1],p.width,p.arcStart[0],p.arcStart[1],p.center[0],p.center[1],p.arcWidth};
-        for (float value : coordinates) if (!Finite(value)) return false;
-        const float dx = p.p1[0] - p.p0[0], dz = p.p1[1] - p.p0[1];
-        if ((!p.isArc && dx * dx + dz * dz <= 0) || (p.isArc ? p.arcWidth : p.width) <= 0) return false;
-    }
-    float xyz[3];
-    const U origin = container + 0x18;
-    if (!Rd(origin + 0x10)) {
-        xyz[0] = Float(origin); xyz[1] = Float(origin + 4); xyz[2] = Float(origin + 8);
-    } else {
-        using World = U(__fastcall*)(U, U, float*);
-        reinterpret_cast<World>(static_cast<uintptr_t>(placementDelta + 0x80E9D0))(origin,0,xyz);
-    }
-    if (!Finite(xyz[0]) || !Finite(xyz[2])) return false;
-    in.origin = {xyz[0],xyz[1],xyz[2],-1}; in.pieces = pieces; in.pieceCount = count;
-    if (layout::Outline(in,&rear) != layout::kOk || rear.count != men || rear.files <= 250 ||
-        !Finite(rear.rearX) || !Finite(rear.rearZ)) return false;
-    const float norm = rear.forwardX * rear.forwardX + rear.forwardZ * rear.forwardZ;
-    if (!Finite(norm) || norm <= 0) return false;
-    const float inverse = 1.0f / sqrtf(norm);
-    rear.forwardX *= inverse; rear.forwardZ *= inverse;
-    return true;
-}
 bool Place(U agent, const float world[3], float planar[2]) {
     const U unit = OfficerUnit(agent);
     if (!unit || Rd(unit + 0xAE8) != 0 || !Finite(world[0]) || !Finite(world[2])) return false;
     const U formation = Rd(unit + 0xADC);
     if (!formation) return false;
-    const U queued = Rd(formation + 0x460);
-    if (queued > 8) return false;
-    const U command = queued ? Rd(formation + 0x418 + 8 * queued) : 0;
-    const U vt = command ? Rd(command) - placementDelta : 0;
-    const bool marching = vt == 0x1325470;
-    // Native is_moving is command vtable+C (55C320/55C2E0). Recognise the
-    // pinned false leaf, not a guessed list of "fire" command class names.
-    const bool resting = !vt || (vt >= 0x1300000 && vt < 0x14A0000 &&
-        Rd(placementDelta + vt + 0xC) == placementDelta + 0x462CB0);
-    if (!marching && !resting) return false;
     const U angle = *reinterpret_cast<const volatile uint16_t*>(static_cast<uintptr_t>(formation + 0x64C));
-    float fx = Float(placementDelta + 0x176CFF8 + 8 * angle);
-    float fz = Float(placementDelta + 0x176CFFC + 8 * angle);
+    const float fx = Float(placementDelta + 0x176CFF8 + 8 * angle);
+    const float fz = Float(placementDelta + 0x176CFFC + 8 * angle);
     if (!Finite(fx) || !Finite(fz)) return false;
-    float distance = 5.0f;
-    if (!marching) {
-        const U count = Rd(formation + 0x18), members = Rd(formation + 0x1C);
-        if (!count || count > 4096 || !members) return false;
-        ntw_formation_layout::RankOutline intended{};
-        if (IntendedRear(unit,formation,intended)) {
-            fx = intended.forwardX; fz = intended.forwardZ;
-            distance = (intended.rearX - world[0]) * fx + (intended.rearZ - world[2]) * fz - 5.0f;
-        } else {
-            bool haveRear = false;
-            float rear = 0.0f;
-            for (U i = 0; i < count; ++i) {
-                const U member = Rd(members + 4 * i);
-                if (!member || member == agent) continue;
-                const float x = Float(member + 0x48), z = Float(member + 0x50);
-                if (!Finite(x) || !Finite(z)) return false;
-                const float along = (x - world[0]) * fx + (z - world[2]) * fz;
-                if (!haveRear || along < rear) rear = along;
-                haveRear = true;
-            }
-            if (!haveRear) return false;
-            distance = rear - 5.0f;
-        }
-    }
-    const float x = world[0] + distance * fx, z = world[2] + distance * fz;
+    // Constant policy: original slot + 8 game units along formation facing,
+    // for every order family, marching or stationary.
+    const float x = world[0] + 8.0f * fx, z = world[2] + 8.0f * fz;
     if (!Finite(x) || !Finite(z)) return false;
     planar[0] = x; planar[1] = z;
     return true;

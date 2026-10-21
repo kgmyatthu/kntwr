@@ -23,7 +23,6 @@
 #include "native_image_relocation.h"
 #include "ntw2_runtime.h"
 #include "army/ntw2_mounted_officer.h"
-#include "formation/native_formation_layout.h"
 #pragma comment(lib,"bcrypt.lib")
 using U=uint32_t;
 using B=unsigned char;
@@ -303,21 +302,33 @@ static void Placement() {
     Require(!mo::Placement(A(mount),world,out),"disabled placement leaves caller's target alone");
     InteriorPlacementRefused(false);
     Require(mo::InstallPlacement(delta),"install native formation offset");
-    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==205.0f,"march advances only the officer slot five metres");
-    const U rearCommands[]={0x1324B54,0x1325428,0x13239B0,0x13239F0,0x1323A30,0x1323A70,0x1323AB0,0x1323AF0,0x1323B30};
-    for(U vt:rearCommands) {
+    // Constant policy: every state projects the original slot eight game units
+    // along formation facing. Order families, the command queue, occupied-file
+    // counts, intended ranks and stragglers are all irrelevant.
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"march advances the officer slot eight units along facing");
+    const U stationaryCommands[]={0x1324B54,0x1325428,0x13239B0,0x13239F0,0x1323A30,0x1323A70,0x1323AB0,0x1323AF0,0x1323B30};
+    for(U vt:stationaryCommands) {
         Put(command,0,vt+delta);
-        Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==175.0f,"stationary command uses rear plane, not old front slot");
+        Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"stationary orders keep the same constant forward slot");
     }
     Put(formation,0x460,0);
-    Require(mo::Placement(A(mount),world,out) && out[1]==175.0f,"empty command queue is stationary");
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"empty command queue keeps the constant forward slot");
     Put(formation,0x460,1);
-    Put(formation,0x64C,0x4000);
-    Require(mo::Placement(A(mount),world,out) && out[0]==75.0f && out[1]==200.0f,"rear rotates with formation facing, not world Z");
+    Put(command,0,0xDEADBEEF);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"unrecognised order family keeps the constant forward slot");
     Put(command,0,0x1325470+delta);
-    Require(mo::Placement(A(mount),world,out) && out[0]==105.0f && out[1]==200.0f,"new march restores forward slot without cumulative drift");
-    // Wide frontage uses intended ranks even when a soldier has straggled far
-    // behind. The count includes the mount, just as the native slot generator.
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"repeated calls do not drift the slot");
+    Put(formation,0x64C,0x4000);
+    Require(mo::Placement(A(mount),world,out) && out[0]==108.0f && out[1]==200.0f,"constant slot rotates with formation facing, not world Z");
+    Put(command,0,0x1324B54+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==108.0f && out[1]==200.0f,"rotated stationary orders also advance along facing");
+    Put(command,0,0x1325470+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==108.0f && out[1]==200.0f,"rotated march keeps the same slot without cumulative drift");
+    // Wide frontage: 250, 251 and far larger occupied-file counts, intended
+    // ranks from the controller's persistent layout and physically straggled
+    // soldiers must all leave the constant slot untouched. The member count
+    // includes the mount, just as the native slot generator counts it.
+    Put(formation,0x64C,0);
     B controller[0x40]={}, layout[0x20]={}, container[0x40]={}, piece[0xA4]={};
     std::array<std::array<B,0x80>,501> wideTroops{};
     std::array<U,502> wideMembers{};
@@ -328,7 +339,7 @@ static void Placement() {
     }
     PutF(wideTroops[0].data(),0x50,-1000.0f);
     U children[]={A(piece)};
-    Put(fx.unit,0x384,A(controller)); Put(formation,0x628,A(layout)); Put(formation,0x64C,0);
+    Put(fx.unit,0x384,A(controller)); Put(formation,0x628,A(layout));
     Put(formation,0x18,502); Put(formation,0x1C,A(wideMembers.data()));
     Put(controller,0xC,A(container)); PutF(controller,0x24,251.0f);
     Put(layout,0,0x1333AA8+delta); PutF(layout,8,1); PutF(layout,0x10,1); PutF(layout,0x14,2);
@@ -337,27 +348,35 @@ static void Placement() {
     Put(piece,0,0x1333944+delta); PutF(piece,0xC,100); PutF(piece,0x10,200);
     PutF(piece,0x14,100); PutF(piece,0x18,0); PutF(piece,0x60,1); PutF(piece,0x70,400); PutF(piece,0x90,-1);
     Put(command,0,0x1324B54+delta);
-    Require(mo::Placement(A(mount),world,out) && out[0]==100 && out[1]==193,"251 files: last rank z198 minus five, ignoring physical straggler");
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"251 files: constant slot ignores intended ranks and the physical straggler");
+    const float stragglerZ[]={-5000.0f,-1000.0f,0.0f,175.0f,5000.0f};
+    for(float z:stragglerZ) {
+        PutF(wideTroops[0].data(),0x50,z);
+        Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"constant slot is independent of the straggler position");
+    }
+    PutF(controller,0x24,250.0f);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"exactly 250 files keeps the constant slot");
+    PutF(controller,0x24,4000.0f); PutF(piece,0x70,4000.0f);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"large frontage keeps the constant slot");
+    Put(command,0,0x1325470+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"wide march keeps the constant slot");
+    Put(command,0,0x1323B30+delta);
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"seventh reshape family keeps the constant slot");
     U copiedLayout[18]{};
     copiedLayout[9]=delta+0x18ED200;
     Put(layout,0,A(copiedLayout));
-    Require(mo::Placement(A(mount),world,out) && out[1]==193,"copied gameplay-patch layout uses intended last rank");
-    copiedLayout[9]=delta+0x462CB0;
-    Require(mo::Placement(A(mount),world,out) && out[1]==-1005,"unsupported generator keeps physical-rear policy");
-    copiedLayout[9]=delta+0x18ED200;
-    PutF(piece,0x14,-100); PutF(piece,0x18,200); PutF(piece,0x60,0); PutF(piece,0x64,-1);
-    PutF(piece,0x8C,-1); PutF(piece,0x90,0);
-    Require(mo::Placement(A(mount),world,out) && out[0]==93 && out[1]==200,"wide rear follows intended rank orientation while physical facing lags");
-    PutF(piece,0x14,100); PutF(piece,0x18,0); PutF(piece,0x60,1); PutF(piece,0x64,0);
-    PutF(piece,0x8C,0); PutF(piece,0x90,-1);
-    PutF(controller,0x24,250);
-    Require(mo::Placement(A(mount),world,out) && out[1]==-1005,"exactly 250 files does not enter wide-frontage rule");
-    PutF(controller,0x24,251); Put(command,0,0x1325470+delta);
-    Require(mo::Placement(A(mount),world,out) && out[1]==205,"march takes precedence over wide-frontage rear rule");
-    Put(command,0,0x1323B30+delta);
-    Require(mo::Placement(A(mount),world,out) && out[1]==193,"stationary formation predicate includes seventh reshape family");
+    Require(mo::Placement(A(mount),world,out) && out[0]==100.0f && out[1]==208.0f,"copied gameplay-patch layout keeps the constant slot");
     Put(formation,0x18,4); Put(formation,0x1C,A(members)); Put(fx.unit,0x384,0);
     Put(command,0,0x1325470+delta);
+    // Eligibility and guards are preserved: the constant policy never widens them.
+    Put(fx.unit,0xADC,0);
+    Require(!mo::Placement(A(mount),world,out),"missing formation keeps native targeting");
+    Put(fx.unit,0xADC,A(formation));
+    Put(fx.unit,0xAA0,2);
+    Require(!mo::Placement(A(mount),world,out),"unit state 0xAA0 == 2 keeps native targeting");
+    Put(fx.unit,0xAA0,0); Put(fx.unit,0xAE8,1);
+    Require(!mo::Placement(A(mount),world,out),"unit state 0xAE8 != 0 keeps native targeting");
+    Put(fx.unit,0xAE8,0);
     Put(fx.unit,mo::kUnitMounts,1);
     Require(!mo::Placement(A(mount),world,out),"stock cavalry is unchanged");
     Put(fx.unit,mo::kUnitMounts,0); Put(fx.unit,mo::kUnitGuns,1);
@@ -366,8 +385,11 @@ static void Placement() {
     Require(!mo::Placement(A(mount),world,out),"riderless horse is unchanged");
     Put(mount,mo::kMountRiders,1); fx.persArray[0]=A(fx.men[1]);
     Require(!mo::Placement(A(mount),world,out),"non-officer rider is unchanged");
-    fx.persArray[0]=A(fx.men[0]); Put(command,0,0xDEADBEEF);
-    Require(!mo::Placement(A(mount),world,out),"unrecognised order families retain native targeting");
+    fx.persArray[0]=A(fx.men[0]);
+    float badWorld[3]={100.0f,7.0f,200.0f}; U nanBits=0x7FC00000; std::memcpy(&badWorld[0],&nanBits,4);
+    Require(!mo::Placement(A(mount),badWorld,out),"non-finite slot keeps native targeting");
+    const U infBits=0x7F800000; std::memcpy(&badWorld[0],&world[0],4); std::memcpy(&badWorld[2],&infBits,4);
+    Require(!mo::Placement(A(mount),badWorld,out),"non-finite facing sum keeps native targeting");
     // Execute the patched entry's real native passthrough on an unowned agent:
     // checks the displaced prologue, calling convention, return and all 20 bytes.
     Put(mount,0x1F0,0);

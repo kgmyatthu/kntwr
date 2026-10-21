@@ -112,7 +112,6 @@ struct Entry {
 struct Gen {
     const Input* in;
     Slot* out;
-    RankOutline* outline;
     uint32_t capacity;
     uint32_t count;      // out->+8
     uint32_t mark;       // out->+0x10
@@ -402,31 +401,18 @@ uint32_t FilesPerRow(float w, float l8, float l10) {
 }
 
 // ---- 0x65A410 (ctx vfn0) + 0x65A3F0 (counter++) ----
-template<bool OutlineOnly>
 uint32_t StepEntry(Gen& g, const Entry& e) {
     const float w = (e.width < g.f) ? e.width : g.f;     // minss xmm0(width), [ctx+4]
     const uint32_t files = FilesPerRow(w, g.l8, g.spacingFile);
     uint32_t cnt = files;
     if (e.rem < files) cnt = e.rem;
     if (cnt < 1u) cnt = 1u;
-    uint32_t r;
-    if constexpr (OutlineOnly) {
-        const uint32_t emitted = MinU(cnt, files - g.count % files);
-        if (!g.count) g.outline->files = emitted;
-        g.outline->rearX = e.x; g.outline->rearZ = e.z;
-        g.outline->forwardX = -e.sz; g.outline->forwardZ = e.sx;
-        g.outline->angle = e.angle;
-        g.count += emitted;
-        r = e.rem - emitted;
-    } else {
-        r = EmitColumn(g, e, files, cnt, g.spacingFile);
-    }
+    const uint32_t r = EmitColumn(g, e, files, cnt, g.spacingFile);
     ++g.counter;
     return r;
 }
 
 // ---- 0x659F00 (class A vfn18) ----
-template<bool OutlineOnly>
 uint32_t WalkA(Gen& g, const Piece& c, float posx, float posz, uint32_t rem) {
     const float dx = c.p1[0] - c.p0[0];
     const float dz = c.p1[1] - c.p0[1];
@@ -461,7 +447,7 @@ uint32_t WalkA(Gen& g, const Piece& c, float posx, float posz, uint32_t rem) {
             e.width = c.width;
             e.angle = c.angle;
             e.rem = r;
-            r = StepEntry<OutlineOnly>(g, e);
+            r = StepEntry(g, e);
             if (r == 0) return 0;
             const float mx = Mul(dirx, spacing);
             const float mz = Mul(dirz, spacing);
@@ -498,7 +484,6 @@ inline void ArcDirection(const Piece& c, float px, float pz, float* o) {
 }
 
 // ---- 0x65A160 (class B vfn18) ----
-template<bool OutlineOnly>
 uint32_t WalkB(Gen& g, const Piece& c, float posx, float posz, uint32_t rem) {
     const float dirx = c.dir[0];
     const float dirz = c.dir[1];
@@ -537,7 +522,7 @@ uint32_t WalkB(Gen& g, const Piece& c, float posx, float posz, uint32_t rem) {
             e.width = c.arcWidth;
             e.angle = c.angle;
             e.rem = r;
-            r = StepEntry<OutlineOnly>(g, e);
+            r = StepEntry(g, e);
             if (r == 0) return 0;
             const float mz = Mul(spacing, dirz);
             const float mx = Mul(spacing, dirx);
@@ -574,9 +559,8 @@ bool Validate(const Input& in) {
 
 }  // namespace
 
-template<bool OutlineOnly>
-static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* result, RankOutline* outline) {
-    if (!result || (!OutlineOnly && !out && capacity)) return kBadInput;
+static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* result) {
+    if (!result || (!out && capacity)) return kBadInput;
     result->count = 0;
     result->mark = 0;
     if (!Validate(in)) return kBadInput;
@@ -588,7 +572,6 @@ static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* r
     g.in = &in;
     g.out = out;
     g.capacity = capacity;
-    g.outline = outline;
     g.carry = 0.0f;
     g.f = in.f;
     g.l8 = in.layout8;
@@ -620,7 +603,7 @@ static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* r
             pos[0] = p.p0[0];         // 0x63BF70
             pos[1] = p.p0[1];
         }
-        rem = p.isArc ? WalkB<OutlineOnly>(g, p, pos[0], pos[1], rem) : WalkA<OutlineOnly>(g, p, pos[0], pos[1], rem);
+        rem = p.isArc ? WalkB(g, p, pos[0], pos[1], rem) : WalkA(g, p, pos[0], pos[1], rem);
         if (g.status != kOk) break;
     }
     result->count = g.count;
@@ -629,16 +612,7 @@ static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* r
 }
 
 int Generate(const Input& in, Slot* out, uint32_t capacity, Result* result) {
-    return GenerateImpl<false>(in, out, capacity, result, nullptr);
-}
-
-int Outline(const Input& in, RankOutline* result) {
-    if (!result) return kBadInput;
-    *result = {};
-    Result generated{};
-    const int status = GenerateImpl<true>(in, nullptr, in.men, &generated, result);
-    result->count = generated.count;
-    return status;
+    return GenerateImpl(in, out, capacity, result);
 }
 
 void ToSlotArrays(const Slot* slots, uint32_t count, float* slotX, float* slotZ, uint16_t* slotAngle) {
