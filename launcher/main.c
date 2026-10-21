@@ -220,7 +220,8 @@ typedef struct Options {
     BOOL arena_release;      /* --arena-release: release pose/scene arena blocks at battle teardown + high-water trim (NTW2_ARENA_RELEASE) */
     BOOL no_arena_release;   /* --no-arena-release: opt out of --arena-release under --features all */
     BOOL heap_optimize;      /* --heap-optimize: process-heap / provider HeapOptimizeResources (NTW2_HEAP_OPTIMIZE) */
-    BOOL mounted_officer;    /* --mounted-officer: opt-in gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); never implied by --features all */
+    BOOL mounted_officer;    /* --mounted-officer: gameplay feature, one mount for the officer of units with resolved mount columns (NTW2_MOUNTED_OFFICER); implied by --features all unless --no-mounted-officer */
+    BOOL no_mounted_officer; /* --no-mounted-officer: opt out of --mounted-officer under --features all */
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (NTW2_MOUNTED_OFFICER_WIDEN) */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (NTW2_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (NTW2_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
@@ -6775,10 +6776,11 @@ static void usage(void)
         L"  --no-arena-release    opt out of --arena-release under --features all\n"
         L"  --heap-optimize       opt-in HeapOptimizeResources at teardown and <640 MiB watermark (1 Hz GlobalMemoryStatusEx\n"
         L"                        sample even without --va-watch; arena_words, receipt arena). Default off.\n"
-        L"  --mounted-officer     opt-in GAMEPLAY feature (NEVER implied by --features all; replays desync vs vanilla): an infantry unit whose unit_stats_land\n"
+        L"  --mounted-officer     GAMEPLAY feature (implied by --features all unless --no-mounted-officer; replays desync vs vanilla): an infantry unit whose unit_stats_land\n"
         L"                        row fills the mount columns (mount_model, mount_entity, mount_animations_table, mount_armour, mount_health) with horse = 0\n"
         L"                        gets exactly one mount for its officer (men[0]). Data decides which units qualify. Redirects the unit constructor call\n"
         L"                        0x531340 to a private constructor clone at start (restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
+        L"  --no-mounted-officer  opt out of --mounted-officer under --features all\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
@@ -7068,6 +7070,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--no-arena-release")) o->no_arena_release = TRUE;
         else if (!wcscmp(name, L"--heap-optimize")) o->heap_optimize = TRUE;
         else if (!wcscmp(name, L"--mounted-officer")) o->mounted_officer = TRUE;
+        else if (!wcscmp(name, L"--no-mounted-officer")) o->no_mounted_officer = TRUE;
         else if (!wcscmp(name, L"--engage-census")) o->engage_census = TRUE;
         else if (!wcscmp(name, L"--formation-census")) {
             o->formation_census = TRUE;
@@ -7258,6 +7261,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_arena_release)
         o->arena_release = TRUE;
+    /* The shipping set also implies the mounted officer (user decision 2026-10-21; infantry spacing unless --mounted-officer-widen).
+       --no-mounted-officer opts out. */
+    if (o->mounted_officer && o->no_mounted_officer) {
+        errsay(L"--mounted-officer / --mounted-officer-widen and --no-mounted-officer are exclusive.\n");
+        return -1;
+    }
+    if ((o->mask & NTW2_ALL) == NTW2_ALL && !o->no_mounted_officer)
+        o->mounted_officer = TRUE;
     if ((o->mask & NTW2_GRID_CENSUS) && !(o->mask & NTW2_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;

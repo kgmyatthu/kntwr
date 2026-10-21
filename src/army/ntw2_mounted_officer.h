@@ -4,7 +4,7 @@
 
 // --mounted-officer (ntw2_config::va_watch_flags NTW2_MOUNTED_OFFICER / NTW2_MOUNTED_OFFICER_WIDEN; analysis/native-mounted-officer.md): an infantry unit whose
 // unit_stats_land row names a mount (mount_model / mount_entity / mount_animations_table, `horse` = 0) gets exactly ONE mount agent for its officer.  USER-APPROVED
-// GAMEPLAY FEATURE (opt-in, never implied by --features all; replays desync vs vanilla).  Data decides which units qualify: there is no class list here.
+// GAMEPLAY FEATURE (implied by --features all unless --no-mounted-officer; replays desync vs vanilla).  Data decides which units qualify: there is no class list here.
 //
 // Native structure [proven by disasm, Steam image 13fcab62..., details in the analysis note]:
 //   * The unit constructor 0x51B7D0 embeds a copy of the unit's stats record at unit+0x20 (0x514FB0, source = *[army entry]).  That record is built by the row
