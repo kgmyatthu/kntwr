@@ -73,6 +73,7 @@
 
 static const wchar_t *g_game_exe = L"Napoleon.exe";   /* --game-exe NAME (diagnostic): the exe file name inside the game folder */
 #define GAME_EXE_NAME (g_game_exe)
+#define NTW2_STEAM_APP_ID L"34030"   /* Total War: NAPOLEON - Definitive Edition (steamapps/appmanifest_34030.acf) */
 #define MAXP 4096u
 
 enum {
@@ -232,6 +233,7 @@ typedef struct Options {
     ntw2_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes (the D3D9 swap runs are removed unless --d3d9-swap) */
     BOOL gp_filter_listed;   /* an explicit --gameplay-patch-*-runs list was given */
     BOOL d3d9_swap;          /* --d3d9-swap: also write the patch's Direct3DCreate9 swap (runs 65, 92); default leaves both call sites stock */
+    BOOL steam;              /* --steam: give the game SteamAppId/SteamGameId=34030 (multiplayer, lobbies, overlay); opt-in while the Steam-attached startup crash is open */
     wchar_t game_exe[MAXP];  /* --game-exe NAME */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
@@ -6620,6 +6622,21 @@ static BOOL launch_game(Run *r)
         SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_EVERY", ev);
         if (r->opt.formation_census_men) SetEnvironmentVariableW(L"NTW2_FORMATION_CENSUS_MEN", L"1");
     }
+    /* --steam: a game created outside Steam has no app id, so SteamAPI_Init cannot attach (no steam_appid.txt, no
+       RestartAppIfNecessary) and multiplayer, lobbies and the overlay are unavailable. Give the child what a Steam launch gives
+       it; values already present (NTW2 started by Steam or by the user) are kept. Opt-in: with Steam attached, the patched
+       image crashed during startup in 6 of 8 launches (2026-10-21, cause under investigation). */
+    if (r->opt.steam) {
+        static const wchar_t *const steam_vars[2] = { L"SteamAppId", L"SteamGameId" };
+        wchar_t val[64];
+        int v;
+        for (v = 0; v < 2; ++v) {
+            const DWORD got = GetEnvironmentVariableW(steam_vars[v], val, 64);
+            const BOOL keep = got > 0 && got < 64;
+            if (!keep) SetEnvironmentVariableW(steam_vars[v], NTW2_STEAM_APP_ID);
+            say(L"  steam: %ls=%ls (%ls)\n", steam_vars[v], keep ? val : NTW2_STEAM_APP_ID, keep ? L"inherited" : L"set by ntw2");
+        }
+    }
     memset(&pi, 0, sizeof pi);
     for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
         DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
@@ -6797,6 +6814,8 @@ static void usage(void)
         L"                        gameplay patch (LIST like 14-16,36-38,44); the PE header, relocations and the five appended sections are always applied\n"
         L"  --d3d9-swap           also write the patch's Direct3DCreate9 swap (runs 65, 92: both factory calls -> .aistbl 0x18F3000, SysWOW64 d3d9.dll\n"
         L"                        force-load). Default: both call sites stay stock; every other gameplay-patch run is written\n"
+        L"  --steam               give the game Steam's app id (SteamAppId / SteamGameId = 34030, kept when already set) so Steam multiplayer,\n"
+        L"                        lobbies and the overlay work; Steam must be running. Opt-in: Steam-attached startup crash under investigation\n"
         L"  --game-exe NAME       diagnostic: the game executable inside the game folder (default Napoleon.exe; e.g. a copy of the pinned patched image)\n"
         L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
         L"                        the infantry spacing)\n"
@@ -7084,6 +7103,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         }
         else if (!wcscmp(name, L"--no-gameplay-patch")) o->no_gameplay_patch = TRUE;
         else if (!wcscmp(name, L"--d3d9-swap")) o->d3d9_swap = TRUE;
+        else if (!wcscmp(name, L"--steam")) o->steam = TRUE;
         else if (!wcscmp(name, L"--gameplay-patch-only-runs") || !wcscmp(name, L"--gameplay-patch-skip-runs")) {
             const uint32_t want = name[wcslen(L"--gameplay-patch-")] == L'o' ? NTW2_GP_ONLY : NTW2_GP_SKIP;
             char narrow[256];
