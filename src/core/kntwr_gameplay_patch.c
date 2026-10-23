@@ -80,7 +80,7 @@ typedef struct gp_run {
     uint32_t rva;           /* image RVA of the first byte */
     int header;             /* inside the PE headers */
     uint32_t idx;           /* blob run index; GP_RUN_PINNED for the heap-serialization overlay */
-    int pinned;             /* heap-serialization overlay run: always written, never filtered, never counted skipped */
+    int pinned;             /* stock-hash-keyed overlay run (heap serialization / allocator initialization): always written, never filtered, never counted skipped */
 } gp_run;
 
 typedef struct gp_blob {
@@ -92,20 +92,23 @@ typedef struct gp_blob {
     const uint8_t *old_tail, *new_tail;
 } gp_blob;
 
-/* ------------------------------------------------------------------------------------------------ pinned heap-serialization runs */
-/* Merged into the Napoleon patch (keyed on the blob's stock SHA-256); see the header for the crash this fixes.
- * File offsets are inside .text/.data raw data; the
- * RVAs are 0xBF8895 (.text `xor eax,1` of the flags setter at 0xBF8890) and 0x1062CE8 (the .data HeapAlloc-flags global).
- * Both runs are FIXUP-FREE in the stock relocation table (nearest HIGHLOW entries: 0xBF8899 and 0x1062CF0), so the old/new
- * bytes are identical in the file and in the live image at any base. */
-enum { GP_HS_RUNS = 2 };
+/* ------------------------------------------------------------------------------------------------ pinned allocator-initialization runs */
+/* Merged into the Napoleon patch (keyed on the blob's stock SHA-256).  Two groups, all fixup-free, so the old/new bytes are
+ * identical in the file and in the live image at any base:
+ *  - heap serialization (see the header for the crash this fixes): RVAs 0xBF8895 (.text `xor eax,1` of the flags setter at
+ *    0xBF8890) and 0x1062CE8 (the .data HeapAlloc-flags global); nearest HIGHLOW entries 0xBF8899 and 0x1062CF0.
+ *  - Provider[2] heap size: RVA 0xBF809C is the 32-bit immediate-carrying `push 0x6400000` (68 00 00 40 06) that passes the
+ *    growable heap's INITIAL size (100 MiB) to the native heap constructor; it becomes `push 0x100000` (1 MiB), like Providers 0
+ *    and 1.  Only the initial size changes: the maximum stays 0 (growable), so larger allocations still succeed. */
+enum { GP_HS_RUNS = 3 };
 static const uint32_t GP_RUN_PINNED = UINT32_MAX - 1u;
 static const uint8_t gp_hs_stock_sha[32] = {
     0x44, 0x88, 0x0e, 0xc1, 0x77, 0x0f, 0x60, 0x01, 0x63, 0xa3, 0x36, 0xee, 0xc8, 0x3b, 0x43, 0x66,
     0x90, 0x14, 0x84, 0xc5, 0xcc, 0xee, 0xc8, 0x3d, 0xc3, 0x26, 0xe2, 0x93, 0x2f, 0x02, 0xa0, 0x54
 };
-static const struct { uint64_t off; uint32_t len; uint8_t old_b[4], new_b[4]; } gp_hs_runs[GP_HS_RUNS] = {
-    { 0xBF7C95ull, 3u, { 0x83, 0xF0, 0x01, 0 }, { 0x31, 0xC0, 0x90, 0 } },      /* xor eax,1  -> xor eax,eax; nop */
+static const struct { uint64_t off; uint32_t len; uint8_t old_b[8], new_b[8]; } gp_hs_runs[GP_HS_RUNS] = {
+    { 0xBF749Cull, 5u, { 0x68, 0x00, 0x00, 0x40, 0x06 }, { 0x68, 0x00, 0x00, 0x10, 0x00 } }, /* push 0x6400000 -> push 0x100000 (Provider[2] initial heap size) */
+    { 0xBF7C95ull, 3u, { 0x83, 0xF0, 0x01 }, { 0x31, 0xC0, 0x90 } },      /* xor eax,1  -> xor eax,eax; nop */
     { 0x1060EE8ull, 4u, { 0x01, 0x00, 0x00, 0x00 }, { 0x00, 0x00, 0x00, 0x00 } } /* flags global 1 -> 0 */
 };
 
@@ -463,9 +466,9 @@ static int gp_apply_impl(const kntwr_gp_memory *mem, uint32_t base, uint32_t pre
 
     if ((rc = gp_parse_blob(blob, blob_size, &b, rep)) != 0) goto done;
     rep->runs_total = b.run_count;
-    /* The pinned heap-serialization runs ride with the Napoleon patch (runs_total keeps counting the blob's runs; the
-       overlay is reported through runs_applied/bytes_applied and GP_RUN_PINNED in fail_run).  Inserted in file-offset
-       order so the run list stays ordered, and far from every blob run (verified: no blob run within +/-0x40). */
+    /* The pinned runs ride with the Napoleon patch (runs_total keeps counting the blob's runs; the overlay is reported
+       through runs_applied/bytes_applied and GP_RUN_PINNED in fail_run).  Inserted in file-offset
+       order so the run list stays ordered (the oracle's whole-image comparison proves they do not collide with blob runs). */
     if (memcmp(b.stock_sha, gp_hs_stock_sha, 32) == 0) {
         gp_run *grown = (gp_run *)realloc(b.runs, (size_t)(b.run_count + GP_HS_RUNS) * sizeof(gp_run));
         if (!grown) { rc = gp_error(rep, KNTWR_GP_E_NOMEM, "out of memory (pinned runs)"); goto done; }
@@ -616,7 +619,7 @@ static int gp_apply_impl(const kntwr_gp_memory *mem, uint32_t base, uint32_t pre
             rep->fail_run = r->idx;
             rep->fail_va = base + r->rva;
             rc = r->pinned
-                     ? gp_error(rep, KNTWR_GP_E_STOCK, "pinned heap-serialization run at VA %#x: live bytes differ from the stock image",
+                     ? gp_error(rep, KNTWR_GP_E_STOCK, "pinned allocator/heap run at VA %#x: live bytes differ from the stock image",
                                 (unsigned)(base + r->rva))
                      : gp_error(rep, KNTWR_GP_E_STOCK, "run %u at VA %#x: live bytes (relocation removed) differ from the stock image", (unsigned)r->idx,
                                 (unsigned)(base + r->rva));

@@ -226,7 +226,7 @@ struct Case {
     Bytes stock, patched;
     Pe sp, pp;
     bool hasAppended;
-    bool hasOverlay;  // the pinned heap-serialization runs merge with this blob (Napoleon only)
+    bool hasOverlay;  // the pinned allocator-initialization runs (heap serialization, Provider[2] initial heap size) merge with this blob (Napoleon only)
 };
 
 static Case MakeCase(const char* name, const uint8_t* blob, uint32_t blobSize, const Bytes& stock, const Bytes& patched) {
@@ -252,18 +252,20 @@ static void ReportLine(const char* what, const kntwr_gp_report& r) {
                 r.fixups_stock_total, r.fixups_patched_total, r.sections_mapped, r.section_bytes, r.section_fixups);
 }
 
-// The pinned heap-serialization overlay (src/core/kntwr_gameplay_patch.c): merged into the Napoleon patch and written in
-// every filter mode.  Both sites are fixup-free, so the expected bytes are identical at every base.
-static const struct { uint32_t rva; uint32_t len; uint8_t bytes[4]; } kHsOverlay[] = {
-    {0xBF8895u, 3u, {0x31, 0xC0, 0x90, 0x00}},   // .text: `xor eax,1` of the flags setter -> `xor eax,eax; nop`
-    {0x1062CE8u, 4u, {0x00, 0x00, 0x00, 0x00}},  // .data: the HeapAlloc-flags global, stock 1 -> 0
+// The pinned allocator overlay (src/core/kntwr_gameplay_patch.c): merged into the Napoleon patch and written in every filter
+// mode.  All sites are fixup-free, so the expected bytes are identical at every base.
+static const struct { uint32_t rva; uint32_t len; uint8_t bytes[5]; } kHsOverlay[] = {
+    {0xBF809Cu, 5u, {0x68, 0x00, 0x00, 0x10, 0x00}},  // .text: Provider[2] heap ctor `push 0x6400000` -> `push 0x100000` (initial size 100 MiB -> 1 MiB)
+    {0xBF8895u, 3u, {0x31, 0xC0, 0x90, 0x00, 0x00}},  // .text: `xor eax,1` of the flags setter -> `xor eax,eax; nop`
+    {0x1062CE8u, 4u, {0x00, 0x00, 0x00, 0x00, 0x00}}, // .data: the HeapAlloc-flags global, stock 1 -> 0
 };
+static const uint32_t kHsOverlayCount = static_cast<uint32_t>(sizeof(kHsOverlay) / sizeof(kHsOverlay[0]));
 static void PokeHsOverlay(Bytes* image) {
     for (const auto& o : kHsOverlay) std::memcpy(image->data() + o.rva, o.bytes, o.len);
 }
 static void RequireHsOverlayLive(const uint8_t* live, const char* where) {
-    RequireF(std::memcmp(live + kHsOverlay[0].rva, kHsOverlay[0].bytes, 3) == 0, "%s: pinned setter bytes (31 C0 90) are live", where);
-    RequireF(std::memcmp(live + kHsOverlay[1].rva, kHsOverlay[1].bytes, 4) == 0, "%s: pinned flags dword (00 00 00 00) is live", where);
+    for (const auto& o : kHsOverlay)
+        RequireF(std::memcmp(live + o.rva, o.bytes, o.len) == 0, "%s: pinned overlay bytes at RVA %#x are live", where, o.rva);
 }
 
 static void RunPrivate(const Case& c, uint32_t base, bool* unrelocatedWindowSeen) {
@@ -277,7 +279,7 @@ static void RunPrivate(const Case& c, uint32_t base, bool* unrelocatedWindowSeen
     char label[64];
     std::snprintf(label, sizeof label, "%s @ %#010x (delta %+d)", c.name, base, static_cast<int>(base - c.sp.base));
     ReportLine(label, rep);
-    Require(rep.runs_applied + rep.runs_header == rep.runs_total + (c.hasOverlay ? 2u : 0u), "every run is applied or header-verified");
+    Require(rep.runs_applied + rep.runs_header == rep.runs_total + (c.hasOverlay ? kHsOverlayCount : 0u), "every run is applied or header-verified");
     Require(rep.status == KNTWR_GP_OK && rep.phase == 1, "report status");
     Require(rep.remap.stage == KNTWR_GP_RA_NONE && !rep.remap.mutated, "a successful remap reports no failure stage");
     Bytes patchedImage = LoaderImage(c.patched, base, "patched");
@@ -404,22 +406,36 @@ static void RunNegatives(const Case& c, uint32_t base) {
         Require(kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == KNTWR_GP_E_HEADER, "a non-PE target is refused with E_HEADER");
         Unmap(&m);
     }
-    // 5. Tampered pinned-overlay site (the .data flags dword): refused like any run, naming the pinned run.
+    // 5. Tampered pinned-overlay sites: refused like any run, naming the pinned run, with the image untouched.
+    //    Covers the .data flags dword and the opcode / immediate bytes of the Provider[2] heap-size push.
     if (c.hasOverlay) {
-        Mapping m;
-        Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (overlay tamper)");
-        Require(m.base[0x1062CE8u] == 0x01, "stock flags dword is 1 before tampering");
-        m.base[0x1062CE8u] = 0x02;
-        Bytes before(m.base, m.base + c.sp.soi);
-        kntwr_gp_report rep;
-        kntwr_gp_pm selfPm; kntwr_gp_memory mem = SelfMemory(&selfPm);
-        int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
-        Require(rc == KNTWR_GP_E_STOCK && rep.phase == 0, "tampered overlay site is refused with E_STOCK before writing");
-        Require(rep.fail_run == 0xFFFFFFFEu, "the refusal names the pinned run (0xFFFFFFFE)");
-        Require(rep.fail_va == base + 0x1062CE8u, "the refusal names the flags dword address");
-        Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "overlay tamper: image untouched");
-        std::printf("  negative: overlay tamper -> %s\n", rep.error);
-        Unmap(&m);
+        const struct { uint32_t rva; uint8_t stock; uint8_t tampered; const char* what; } sites[] = {
+            {0x1062CE8u, 0x01, 0x02, "flags dword"},
+            {0xBF809Cu, 0x68, 0x69, "heap-size push opcode"},
+            {0xBF809Fu, 0x40, 0x41, "heap-size push immediate"},
+        };
+        for (const auto& s : sites) {
+            Mapping m;
+            Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (overlay tamper)");
+            RequireF(m.base[s.rva] == s.stock, "stock %s byte is %#x before tampering", s.what, s.stock);
+            DWORD oldProtect = 0, ignoredProtect = 0;
+            Require(VirtualProtect(m.base + s.rva, 1, PAGE_EXECUTE_READWRITE, &oldProtect) != 0,
+                    "make the fixture byte writable for tampering");
+            m.base[s.rva] = s.tampered;
+            Require(VirtualProtect(m.base + s.rva, 1, oldProtect, &ignoredProtect) != 0,
+                    "restore the fixture page protection after tampering");
+            Bytes before(m.base, m.base + c.sp.soi);
+            kntwr_gp_report rep;
+            kntwr_gp_pm selfPm; kntwr_gp_memory mem = SelfMemory(&selfPm);
+            int rc = kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep);
+            RequireF(rc == KNTWR_GP_E_STOCK && rep.phase == 0, "tampered %s is refused with E_STOCK before writing", s.what);
+            Require(rep.fail_run == 0xFFFFFFFEu, "the refusal names the pinned run (0xFFFFFFFE)");
+            RequireF(rep.fail_va >= base + s.rva - 4u && rep.fail_va <= base + s.rva, "the refusal names the %s site", s.what);
+            RequireF(rep.runs_applied == 0, "%s tamper: nothing was applied", s.what);
+            Require(std::memcmp(before.data(), m.base, c.sp.soi) == 0, "overlay tamper: image untouched");
+            std::printf("  negative: overlay tamper (%s) -> %s\n", s.what, rep.error);
+            Unmap(&m);
+        }
     }
 }
 
@@ -820,7 +836,7 @@ static void RunFilter(const Case& c, uint32_t base) {
     const uint32_t windows[2] = {0x43C70Cu, 0x43F2F1u};
     const uint32_t d3dSites[2] = {0xCA6203u, 0xDFD3FFu};
     const char* names[3] = {"ONLY={}", "SKIP={44,48}", "no-d3d9"};
-    const uint32_t ov = c.hasOverlay ? 2u : 0u;
+    const uint32_t ov = c.hasOverlay ? kHsOverlayCount : 0u;
     for (int variant = 0; variant < 3; ++variant) {
         Mapping m;
         Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock image (filter)");

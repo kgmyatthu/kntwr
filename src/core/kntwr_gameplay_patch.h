@@ -33,8 +33,8 @@
  *     The installed game files are never touched and the gameplay bytes are never on disk;
  *   - a live module without appended sections (mss32.dll, patched after the loader ran) is patched in place; the caller freezes
  *     every thread first.  If a write or the read-back fails, the original bytes are restored and verified (report.rollback).
- *   - the pinned heap-serialization correction is part of every Napoleon apply: two extra, fixup-free runs are
- *     merged into the patch, verified against the stock bytes, written and read back
+ *   - the pinned allocator corrections are part of every Napoleon apply: three extra, fixup-free runs (heap serialization flags,
+ *     and Provider[2]'s initial growable-heap size 100 MiB -> 1 MiB, maximum unchanged) are merged into the patch, verified against the stock bytes, written and read back
  *     like any patch run.  They are written in EVERY run-filter mode (they fix a crash, not bisectable gameplay content);
  *     only --no-gameplay-patch (which leaves the whole stock image in memory) skips them, by design.
  * Verification happens first and writes nothing.  The same code runs against a private test mapping
@@ -136,7 +136,7 @@ typedef struct kntwr_gp_report {
     uint32_t section_bytes;       /* committed bytes of the appended range */
     uint32_t section_fixups;      /* relocation entries applied inside appended sections */
     uint32_t section_base_va;     /* first appended byte (image_base + stock SizeOfImage) */
-    uint32_t fail_run;            /* run index of an E_STOCK / E_LAYOUT failure, 0xFFFFFFFE = the pinned heap-serialization run, else 0xFFFFFFFF */
+    uint32_t fail_run;            /* run index of an E_STOCK / E_LAYOUT failure, 0xFFFFFFFE = a pinned allocator-initialization run, else 0xFFFFFFFF */
     uint32_t fail_va;
     uint32_t rollback;            /* KNTWR_GP_ROLLBACK_* */
     /* One trampoline into an appended section and the first bytes of that section, for live read-back proofs. */
@@ -166,8 +166,9 @@ int kntwr_gp_apply(const kntwr_gp_memory *mem, uint32_t image_base, uint32_t pre
 
 /* Diagnostic bisection: which non-header runs are written.  Header runs always shape the patched layout (section table, relocation tables, appended
    sections); runs outside the selection are simply not written, so the live bytes there stay stock (with the loader's stock relocation applied).
-   The pinned heap-serialization runs are beyond the filter: they are always written with the Napoleon patch. They clear the HEAP_NO_SERIALIZE
-   flag at RVA 0x1062CE8 and replace the setter's xor at RVA 0xBF8895 with xor eax,eax; nop, so the shared process heap stays serialized. */
+   The pinned allocator runs are beyond the filter: they are always written with the Napoleon patch. They clear the HEAP_NO_SERIALIZE
+   flag at RVA 0x1062CE8, replace the setter's xor at RVA 0xBF8895 with xor eax,eax; nop (so the shared process heap stays serialized), and
+   change the immediate of the Provider[2] heap constructor's `push` at RVA 0xBF809C from 0x6400000 to 0x100000 (initial size only; the maximum stays 0 = growable). */
 #define KNTWR_GP_MAX_RUNS 128u
 enum { KNTWR_GP_ALL = 0, KNTWR_GP_ONLY = 1, KNTWR_GP_SKIP = 2 };
 typedef struct kntwr_gp_filter {
