@@ -4,4 +4,7 @@ kntwr_runtime_sources(
   native_army_storm.cpp
   native_army_unit.cpp
   kntwr_mounted_officer.cpp
+  native_cavalry_orbit.cpp
+  native_cavalry_runtime.cpp
+  kntwr_cavalry_intent_hook.cpp
 )

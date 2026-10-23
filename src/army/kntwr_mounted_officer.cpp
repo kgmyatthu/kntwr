@@ -5,6 +5,7 @@
 #include <string.h>
 #include <windows.h>
 #include <intrin.h>
+#include "core/kntwr_entry_patch.h"
 #include <atomic>
 #include "kntwr_mounted_officer.h"
 
@@ -233,70 +234,13 @@ U __fastcall Adjust(U agent, U, U* out, const U* reference) {
     }
     return OriginalAdjust(agent, 0, out, reference);
 }
-// Atomic code bytes do not protect a thread between displaced instructions.
-// Enumerate through the kernel (no heap/loader activity while threads are held),
-// freeze peers, and refuse an interior IP rather than rewriting its context.
-struct PlacementThreads {
-    HANDLE handles[512]{};
-    DWORD ids[512]{};
-    U count = 0;
-    ~PlacementThreads() {
-        for (U i = count; i; --i) {
-            ResumeThread(handles[i - 1]);
-            CloseHandle(handles[i - 1]);
-        }
-    }
-    bool Freeze(U site) {
-        using NextThread = LONG (NTAPI*)(HANDLE,HANDLE,ACCESS_MASK,ULONG,ULONG,PHANDLE);
-        const auto nextThread = reinterpret_cast<NextThread>(
-            GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtGetNextThread"));
-        if (!nextThread) return false;
-        const DWORD self = GetCurrentThreadId();
-        for (U pass = 0; pass < 16; ++pass) {
-            const U previousCount = count;
-            HANDLE cursor = nullptr;
-            bool retained = false;
-            for (;;) {
-                HANDLE next = nullptr;
-                const LONG status = nextThread(GetCurrentProcess(),cursor,
-                    THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                    0,0,&next);
-                if (cursor && !retained) CloseHandle(cursor);
-                cursor = next; retained = false;
-                if (status == static_cast<LONG>(0x8000001Au)) break;
-                if (status < 0) return false;
-                const DWORD id = GetThreadId(cursor);
-                if (!id) { CloseHandle(cursor); return false; }
-                bool known = id == self;
-                for (U i = 0; !known && i < count; ++i) known = ids[i] == id;
-                if (known) continue;
-                if (count == 512 || SuspendThread(cursor) == static_cast<DWORD>(-1)) {
-                    CloseHandle(cursor); return false;
-                }
-                handles[count] = cursor; ids[count++] = id; retained = true;
-                CONTEXT context{};
-                context.ContextFlags = CONTEXT_CONTROL;
-                if (!GetThreadContext(cursor,&context) ||
-                    (context.Eip > site && context.Eip < site + 8)) return false;
-            }
-            if (count == previousCount) return true;
-        }
-        return false;
-    }
-};
+// Atomic code bytes do not protect a thread between displaced instructions; the shared freeze/interior-IP-refusal/CAS
+// policy (core/kntwr_entry_patch.h, extracted verbatim from this policy's original form) refuses an interior IP
+// rather than rewriting its context. The store of `placementActive` still happens while peers are frozen.
 bool SwapAdjust(U site, const unsigned char* from, const unsigned char* to, bool activeAfter) {
-    LONG64 before, after;
-    memcpy(&before,from,8); memcpy(&after,to,8);
-    PlacementThreads peers;
-    if (!peers.Freeze(site)) return false;
-    DWORD protection;
-    if (!VirtualProtect(reinterpret_cast<void*>(static_cast<uintptr_t>(site)),8,PAGE_EXECUTE_READWRITE,&protection)) return false;
-    const bool changed = _InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(static_cast<uintptr_t>(site)),after,before) == before;
-    DWORD ignored;
-    VirtualProtect(reinterpret_cast<void*>(static_cast<uintptr_t>(site)),8,protection,&ignored);
-    FlushInstructionCache(GetCurrentProcess(),reinterpret_cast<void*>(static_cast<uintptr_t>(site)),8);
-    if (changed) placementActive.store(activeAfter,std::memory_order_release);
-    return changed;
+    return kntwr_entry_patch::Swap8(site,from,to,8,kntwr_entry_patch::Guard{},[activeAfter]{
+        placementActive.store(activeAfter,std::memory_order_release);
+    });
 }
 }
 bool HasPlacement(U agent) {
@@ -325,5 +269,138 @@ bool RemovePlacement(U delta) {
     if (delta != placementDelta || !SwapAdjust(delta + kSlotAdjust,adjustPatch,kAdjustOriginal,false)) return false;
     Set(WFlags,words[WFlags] & ~4u);
     return true;
+}
+
+namespace {
+// Infantry visual eligibility (kntwr_mounted_officer.h).  The 13 displaced bytes are COMPLETE instructions with no relative operand except the jne, whose two targets
+// the gate reaches through absolute jumps.
+constexpr unsigned char kVisualOriginal[kVisualSpan] = {0x83,0xBF,0x2C,0x02,0x00,0x00,0x00,0x0F,0x85,0xC8,0x01,0x00,0x00};
+constexpr U kVisualSkip = 0x72CBA7;                          // jne target of the original bytes
+constexpr unsigned char kVisualTail[8] = {0xC7,0x1C,0xA5,0x72,0xC9,0xD2,0xB1,0x6E}; // gate tail marker (never executed)
+constexpr U kVisualScanBytes = 192;
+volatile U visualFall, visualSkip;                           // site+13 / 0x72CBA7 relocated: written only while the patch is unreachable
+volatile LONG visualInGate;                                  // >0 while a thread is between the gate's inc and dec
+std::atomic<bool> visualActive{false};
+U visualSite, visualDelta;
+unsigned char visualPatch[8];
+
+bool BytesAre(U address, const unsigned char* expected, U bytes) {
+    __try { return memcmp(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), expected, bytes) == 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// 1 only for a unit with a non-empty equipment vector whose class category is infantry (the visual constructor must then still build the bayonet attachment list).
+// 0 for an empty equipment vector (the native cmp/je route takes the list itself) and for every other class.  Reads are inside SEH; an unreadable class is "not infantry".
+U __stdcall VisualDecision(U unit) {
+    __try {
+        if (!Rd(unit + kUnitEquipVec + 4)) return 0;
+        const U descriptor = Rd(unit + kUnitClass);
+        return descriptor && Rd(descriptor + kClassCategory) == kCategoryInfantry;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+// Entry state: EDI = unit, every register/flag native.  The C++ helper (SEH) runs between an aligned fxsave/fxrstor, so x87, XMM and MXCSR leave exactly as they entered
+// (the native cmp/jne touches none of them).  Exits with the registers, EFLAGS and ESP the native `cmp [edi+22Ch],0` leaves (the cmp is replayed on both
+// exits), jumping to the native fall-through (zero count, or infantry) or to the native jne target (anything else).
+__declspec(naked) void VisualGate() {
+    __asm {
+        pushfd
+        pushad
+        lock inc dword ptr [visualInGate]
+        mov ebp, esp
+        sub esp, 528
+        and esp, -16
+        fxsave [esp]
+        cld
+        push edi
+        call VisualDecision
+        fxrstor [esp]
+        mov esp, ebp
+        lock dec dword ptr [visualInGate]
+        test eax, eax
+        jnz allow
+        popad
+        popfd
+        cmp dword ptr [edi + 0x22C], 0
+        je fall
+        jmp dword ptr [visualSkip]
+    allow:
+        popad
+        popfd
+        cmp dword ptr [edi + 0x22C], 0
+    fall:
+        jmp dword ptr [visualFall]
+        _emit 0xC7               // tail marker (never executed)
+        _emit 0x1C
+        _emit 0xA5
+        _emit 0x72
+        _emit 0xC9
+        _emit 0xD2
+        _emit 0xB1
+        _emit 0x6E
+    }
+}
+// Follows a jmp rel32 thunk the toolchain may have emitted for &VisualGate.
+U ResolveGate(U fn) {
+    for (U hop = 0; hop < 4; ++hop) {
+        const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(fn));
+        U displacement = 0;
+        __try {
+            if (p[0] != 0xE9) return fn;
+            memcpy(&displacement, p + 1, 4);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+        const U next = fn + 5 + displacement;
+        if (next <= fn || next - fn > 0x10000u) return 0;
+        fn = next;
+    }
+    return 0;
+}
+// [begin, end) covers every gate byte a frozen thread could still execute, including the final jmp; accepted only when `FF 25 <&visualFall>` sits right before the marker.
+bool VisualGateRange(U& begin, U& end) {
+    const U gate = ResolveGate(static_cast<U>(reinterpret_cast<uintptr_t>(&VisualGate)));
+    if (!gate) return false;
+    const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(gate));
+    const U fallSlot = static_cast<U>(reinterpret_cast<uintptr_t>(&visualFall));
+    for (U offset = 6; offset + 8 <= kVisualScanBytes; ++offset) {
+        if (memcmp(p + offset, kVisualTail, 8) != 0 || p[offset - 6] != 0xFF || p[offset - 5] != 0x25) continue;
+        U operand; memcpy(&operand, p + offset - 4, 4);
+        if (operand != fallSlot) continue;
+        begin = gate; end = gate + offset;
+        return true;
+    }
+    return false;
+}
+}
+
+bool InstallVisual(U delta) {
+    if (visualActive.load(std::memory_order_acquire)) return visualDelta == delta;
+    const U site = delta + kVisualSite;
+    if (!BytesAre(site, kVisualOriginal, kVisualSpan)) return false;      // exact pinned original, all 13 bytes
+    U begin = 0, end = 0;
+    if (!VisualGateRange(begin, end)) return false;                       // gate layout pinned before it is ever entered
+    visualSite = site; visualDelta = delta;
+    visualFall = site + kVisualSpan; visualSkip = delta + kVisualSkip;    // immutable once the patch is reachable
+    memcpy(visualPatch, kVisualOriginal, 8);
+    visualPatch[0] = 0xE9;
+    const U displacement = begin - site - 5;
+    memcpy(visualPatch + 1, &displacement, 4);
+    const kntwr_entry_patch::Guard drain{begin, end, &visualInGate};
+    const bool swapped = kntwr_entry_patch::Swap8(site, kVisualOriginal, visualPatch, kVisualSpan, drain, [] {
+        visualActive.store(true, std::memory_order_release);
+    });
+    if (swapped) Set(WFlags, words[WFlags] | 8u);
+    return swapped;
+}
+
+bool RemoveVisual(U delta) {
+    if (!visualActive.load(std::memory_order_acquire)) return true;
+    if (delta != visualDelta) return false;
+    U begin = 0, end = 0;
+    if (!VisualGateRange(begin, end)) return false;                       // cannot prove the gate drained: keep the patch
+    if (!BytesAre(visualSite + 8, kVisualOriginal + 8, kVisualSpan - 8)) return false; // untouched tail drifted: nothing is restored
+    const kntwr_entry_patch::Guard drain{begin, end, &visualInGate};
+    const bool swapped = kntwr_entry_patch::Swap8(visualSite, visualPatch, kVisualOriginal, kVisualSpan, drain, [] {
+        visualActive.store(false, std::memory_order_release);
+    });
+    if (swapped) Set(WFlags, words[WFlags] & ~8u);
+    return swapped;
 }
 } // namespace kntwr_mounted_officer

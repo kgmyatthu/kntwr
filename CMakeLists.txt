@@ -46,7 +46,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
-option(KNTWR_BUILD_RUNTIME "Build kntwr_runtime.dll and the kntwr.exe launcher (the product)" ON)
+option(KNTWR_BUILD_RUNTIME "Build kntwr_runtime.dll and the KNTWR.exe launcher (the product)" ON)
 option(KNTWR_BUILD_TESTS "Build native oracles/harnesses/payload audits and register them with CTest" OFF)
 set(KNTWR_TEST_IMAGE "" CACHE FILEPATH
     "The PATCHED pinned image (SHA-256 KNTWR_IMAGE_SHA256 in include/kntwr_runtime.h) = what the launcher builds in memory from the stock game files; generate it with tools/apply_ntwpatch.py. Image oracles are registered only when this file exists.")
@@ -166,7 +166,7 @@ set(KNTWR_EXPORTS_RUNTIME_ABI
   /EXPORT:kntwr_profile,DATA)
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Product: kntwr_runtime.dll (loaded into the game by the launcher) + kntwr.exe (launcher), side by side in bin/.
+# Product: kntwr_runtime.dll (loaded into the game by the launcher) + KNTWR.exe (launcher), side by side in bin/.
 #
 # Generated source-pinning metadata is checked in; product builds need no Python.
 # Missing required runtime sources are a configure error, never a skipped module.
@@ -189,7 +189,7 @@ if(KNTWR_BUILD_RUNTIME)
     loco/native_sweep.cpp loco/native_resolve.cpp loco/native_env.cpp
     brain2/native_unit_select.cpp brain2/native_unit_policy.cpp brain2/native_unit_fatigue.cpp ai/kntwr_planner_search.cpp
     ai/kntwr_spiral.cpp ai/kntwr_claim_once.cpp brain/kntwr_retarget_jitter.cpp brain/kntwr_target_cull.cpp
-    ai/kntwr_record_test.cpp core/kntwr_alloc_census.cpp render/kntwr_arena_release.cpp army/kntwr_mounted_officer.cpp ai/kntwr_engage_census.cpp
+    ai/kntwr_record_test.cpp core/kntwr_alloc_census.cpp render/kntwr_arena_release.cpp army/kntwr_mounted_officer.cpp army/native_cavalry_orbit.cpp army/native_cavalry_runtime.cpp army/kntwr_cavalry_intent_hook.cpp ai/kntwr_engage_census.cpp
     animation/kntwr_clip_picker_guard.cpp formation/kntwr_formation_census.cpp)
   get_property(_kntwr_registered GLOBAL PROPERTY KNTWR_RUNTIME_DOMAIN_SOURCES)
   set(KNTWR_RUNTIME_SOURCES "")
@@ -235,13 +235,18 @@ if(KNTWR_BUILD_RUNTIME)
   set_target_properties(kntwr_runtime PROPERTIES OUTPUT_NAME kntwr_runtime)
 
   # Launcher: plain C, x86, static CRT.  The runtime DLL name is baked from the target so launcher and DLL cannot drift.
+  # setup.c uses static GUIDs for IFileOpenDialog, so no uuid.lib is needed; ole32/user32 are already linked here.
   add_executable(kntwr ${KNTWR_LAUNCHER_SOURCES} ${KNTWR_GAMEPLAY_PATCH_SOURCE})
   target_include_directories(kntwr PRIVATE include launcher src) # src: C-compatible src/loco/native_loco.h word labels
   target_compile_options(kntwr PRIVATE /O2 /W4 /utf-8)
   target_compile_definitions(kntwr PRIVATE KNTWR_RUNTIME_DLL_NAME="$<TARGET_FILE_NAME:kntwr_runtime>")
   target_link_libraries(kntwr PRIVATE bcrypt shell32 ole32 user32 advapi32)
+  # Windows subsystem keeps Windows from ever creating a console for the launcher (no flash for wrappers/double-click);
+  # wmain stays the entry point: main.c attaches to an inherited terminal so its text is never dropped (never creating a
+  # window), and attaches/allocates a console only for --console (development).
+  target_link_options(kntwr PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   add_dependencies(kntwr kntwr_runtime)
-  set_target_properties(kntwr PROPERTIES OUTPUT_NAME kntwr)
+  set_target_properties(kntwr PROPERTIES OUTPUT_NAME KNTWR)
 
   install(TARGETS kntwr kntwr_runtime RUNTIME DESTINATION .)
 endif()

@@ -26,7 +26,7 @@
 // (0xEDB6A0/0xEDB700 return 0), and a non-empty mount_model with an unknown key makes the whole unit row fail (0xEDBC42); both are covered by the predicate.
 namespace kntwr_mounted_officer {
 // mounted_officer_words (kntwr_status::mounted_officer_words, KNTWR_MOUNTED_OFFICER_LABELS):
-//  0 version  1 flags (bit0 gate armed, bit1 widen, bit2 placement hook)  2 units_seen  3 units_eligible ([unit+0x34]==0 and men>0)  4 officer_first (eligible with men[0] == first
+//  0 version  1 flags (bit0 gate armed, bit1 widen, bit2 placement hook, bit3 infantry visual gate)  2 units_seen  3 units_eligible ([unit+0x34]==0 and men>0)  4 officer_first (eligible with men[0] == first
 //  personality)  5 skipped_has_mounts ([unit+0x34]>0, stock loop)  6 skipped_no_refs (eligible, references unresolved)  7 skipped_no_officer (resolved, men[0] is not
 //  the first personality)  8 mounts_created  9 attach_failures (mount has no rider after 0x655B20)  10 alloc_failures  11 serial_last  12 last_rider_vtable
 //  13 skipped_has_guns ([unit+0x38] > 0: artillery; their mount columns name the gun-team horses, the engine section uses them)  14 faults (SEH, the unit was left native)  15 patch_installed (the 0x531340 redirect is live)
@@ -67,6 +67,21 @@ bool HasPlacement(uint32_t agent);
 bool Placement(uint32_t agent, const float world[3], float planar[2]);
 bool InstallPlacement(uint32_t delta);
 bool RemovePlacement(uint32_t delta);
+
+// Infantry visual eligibility.  The unit's 3D visual constructor (0x72BC70) builds the bayonet attachment candidate list only when the unit's equipment count
+// [unit+0x22C] is 0: `83 BF 2C 02 00 00 00 cmp dword ptr [edi+0x22C], 0` / `0F 85 C8 01 00 00 jne 0x72CBA7` at 0x72C9D2 (13 bytes, EDI = unit = [EBP+0x14]; no branch or
+// absolute reference targets 0x72C9D3..0x72C9DE anywhere in the image).  The officer mount adds one equipment entry, so the jne skipped the list and the bayonets of an
+// infantry unit with a mounted officer were never drawn.  A 5-byte `jmp rel32` + the 3 untouched original bytes replaces the first 8 bytes (shared entry-patch Swap8,
+// span 13) and routes into a gate that lets the native list code (0x72C9DF) run when the unit is infantry (class category [[unit+0x2C]+0x1C] == 2, the
+// native-ai-hold-slots.md table: 0 cavalry, 1 artillery, 2 infantry, 3 dragoons, 4 elephants) and leaves every other unit on the native instructions: the gate replays
+// `cmp [edi+0x22C], 0` and the original branch (equal -> 0x72C9DF, not equal -> 0x72CBA7) for cavalry/other classes, an unreadable class, and a zero count.  The equipment
+// count, the vectors, the asset selection and the zero-equipment route are never written.  Registers, EFLAGS and the stack pointer leave the gate as the native
+// cmp/jne leaves them.  Install requires all 13 pinned original bytes; both Install and Remove use the shared freeze/interior-IP refusal and refuse while a peer is
+// inside the gate (in-gate counter + the gate's code range); Remove restores only the bytes it wrote (a foreign change writes nothing and reports false).
+constexpr uint32_t kVisualSite = 0x72C9D2, kVisualSpan = 13;
+constexpr uint32_t kUnitClass = 0x2C, kClassCategory = 0x1C, kCategoryInfantry = 2;
+bool InstallVisual(uint32_t delta);
+bool RemoveVisual(uint32_t delta);
 
 // Arms the gate (targets are image-relocated VAs); `widen` also raises the unit radius.  Zeroes the row, then sets version/flags/widen.
 void Configure(bool widen, const Targets& targets);

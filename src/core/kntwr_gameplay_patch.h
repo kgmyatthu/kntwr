@@ -6,16 +6,37 @@
  *   - every patch run (file offset -> RVA through the stock section table) is verified byte for byte against the live stock
  *     bytes, with the loader's base relocation un-applied, then replaced by the patched bytes with the relocation of the
  *     PATCHED image applied (stock fixups inside a run are un-relocated, patched fixups re-relocated, with the live delta);
- *   - the stock image mapping has SizeOfImage 0x14EB000, which is NOT 64 KiB aligned: Windows rounds every new VirtualAlloc
- *     reservation down to a 64 KiB boundary, so pages [base+0x14EB000, base+0x14F0000) inside the image's last 64 KiB
- *     granule cannot be reserved beside the existing image VAD.  When the patch adds sections, the applier verifies that
- *     [base+oldSizeOfImage, base+newSizeOfImage) is free, unmaps the stock view and replaces it with one contiguous
- *     [base, base+newSizeOfImage) allocation (same AllocationBase = base for every section, as required by runtime slot and
- *     clone checks), copying the verified stock image, the appended sections (relocated with their .reloc entries) and the
- *     patched PE header (so ParseImage/ValidateSource see the 11 sections and 0x14F5000 SizeOfImage) with each section's
- *     page protection;
+ *   - the patched image is larger than the stock one (SizeOfImage 0x14EB000 -> 0x14F5000).  Pages above the stock image are
+ *     NOT free in a freshly created process: Windows places the PEBs and the process parameters inside the same 64 KiB
+ *     granule / 2 MiB region, before any game code runs.  The launcher therefore never extends the image late: it creates
+ *     the UNCHANGED stock Napoleon.exe with one extra input attribute, PS_ATTRIBUTE_MEMORY_RESERVE, reserving exactly the
+ *     64 KiB-aligned tail above the stock image at process creation (kntwr_gp_reserve), before the PEBs are placed.  The
+ *     attribute rides the normal Win32 CreateProcessW path through a scoped wrapper around the launcher process's OWN
+ *     KernelBase.dll import slot for NtCreateUserProcess (one modified call, same thread, restored immediately); the game
+ *     file, its bytes, its path identity and every stock multiplayer/checksum behavior are untouched;
+ *   - the appended-section remap replaces the loader's view of the stock image by one contiguous [base, base+newSizeOfImage)
+ *     SEC_IMAGE view (same AllocationBase = base for every section, as required by runtime slot and clone checks), then
+ *     writes the verified stock image, the appended sections (relocated with their .reloc entries) and the patched PE
+ *     header (so ParseImage/ValidateSource see the 11 sections and 0x14F5000 SizeOfImage) into it with each section's page
+ *     protection.  The view MUST be MEM_IMAGE, not a private VirtualAlloc: x86 RtlIsValidHandler accepts SEH handlers only
+ *     inside image mappings, so a MEM_PRIVATE main image makes every SEH exception whose chain reaches a game frame fatal
+ *     (STATUS_INVALID_EXCEPTION_HANDLER 0xC00001A5; FINDINGS.md, 2026-10-21).  The process backend therefore maps a tiny
+ *     temporary header-only PE (patched header, no data directories, no raw data) as the section: the kernel view is
+ *     image-typed and demand-zero, and the applier's writes copy-on-write the pages.  That temp file
+ *     (%TEMP%\kntwr-gp-image-*.tmp, ~1 KiB) is FILE_FLAG_DELETE_ON_CLOSE and its handle is deliberately kept open for the
+ *     life of the launcher process: Windows silently skips a delete-on-close while the image view exists, so the file is
+ *     removed when the launcher closes it after the game has exited; leftovers of a crashed run are swept at the next remap.
+ *     The remap preflight accepts every page above the stock image only as MEM_FREE or as exactly the caller-recorded
+ *     creation-time reservation (kntwr_gp_pm::owned_reserve_*); any other page there (committed, mapped, a foreign
+ *     reservation) is refused BEFORE anything is unmapped, WITHOUT consuming the reservation.  The reservation is
+ *     re-validated and released exactly once, immediately before the old view is unmapped at the remap itself.
+ *     The installed game files are never touched and the gameplay bytes are never on disk;
  *   - a live module without appended sections (mss32.dll, patched after the loader ran) is patched in place; the caller freezes
  *     every thread first.  If a write or the read-back fails, the original bytes are restored and verified (report.rollback).
+ *   - the pinned heap-serialization correction is part of every Napoleon apply: two extra, fixup-free runs are
+ *     merged into the patch, verified against the stock bytes, written and read back
+ *     like any patch run.  They are written in EVERY run-filter mode (they fix a crash, not bisectable gameplay content);
+ *     only --no-gameplay-patch (which leaves the whole stock image in memory) skips them, by design.
  * Verification happens first and writes nothing.  The same code runs against a private test mapping
  * (tests/native_gameplay_patch_oracle.cpp) and against a real suspended game process (the launcher).
  *
@@ -25,6 +46,7 @@
 #ifndef KNTWR_GAMEPLAY_PATCH_H
 #define KNTWR_GAMEPLAY_PATCH_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -38,10 +60,11 @@ enum {
     KNTWR_GP_E_HEADER,      /* target is not a PE32 image of the expected shape */
     KNTWR_GP_E_STOCK,       /* a run's old bytes do not match the live stock image (wrong/modified image) */
     KNTWR_GP_E_LAYOUT,      /* runs/sections/relocations do not fit the supported patch shape */
-    KNTWR_GP_E_ALLOC,       /* the appended-section range above the image is not free */
+    KNTWR_GP_E_ALLOC,       /* the range above the image is not free, or the recorded reservation does not match (refused before any change) */
     KNTWR_GP_E_WRITE,       /* write/protect failed (the target may be partially patched: discard it) */
     KNTWR_GP_E_VERIFY,      /* read-back differs from what was written (the target may be partially patched: discard it) */
-    KNTWR_GP_E_NOMEM
+    KNTWR_GP_E_NOMEM,
+    KNTWR_GP_E_REMAP        /* the image remap failed at report.remap.stage; report.phase says whether the old view was already unmapped */
 };
 
 /* kntwr_gp_report::rollback.  Only a live module patched in place (no remapped image) can be rolled back. */
@@ -51,22 +74,55 @@ enum {
     KNTWR_GP_ROLLBACK_FAILED = 2    /* the restore itself failed: the target is partially patched, terminate it */
 };
 
+/* Which step of the image remap failed (kntwr_gp_remalloc_diag::stage). */
+enum {
+    KNTWR_GP_RA_NONE = 0,
+    KNTWR_GP_RA_TAIL_QUERY,     /* VirtualQueryEx of the range above the image (or of the recorded reservation) failed */
+    KNTWR_GP_RA_TAIL_FOREIGN,   /* a page above the image is not free, or the recorded reservation's region does not match (nothing changed) */
+    KNTWR_GP_RA_TAIL_RELEASE,   /* the verified creation-time reservation could not be released (nothing changed) */
+    KNTWR_GP_RA_PARAMS,         /* the patched header cannot be turned into a header-only backing image (nothing changed) */
+    KNTWR_GP_RA_NTDLL,          /* ntdll entry points unavailable (nothing changed) */
+    KNTWR_GP_RA_BACKING_CREATE, /* temporary backing file could not be created (nothing changed) */
+    KNTWR_GP_RA_BACKING_WRITE,  /* temporary backing file could not be written (nothing changed) */
+    KNTWR_GP_RA_SECTION,        /* NtCreateSection(SEC_IMAGE) over the backing failed (nothing changed) */
+    KNTWR_GP_RA_UNMAP,          /* the old view could not be queried/unmapped (mutated only if the unmap itself succeeded: it did not) */
+    KNTWR_GP_RA_MAP,            /* the old view is GONE and the new view could not be mapped (mutated) */
+    KNTWR_GP_RA_VERIFY          /* the new view is mapped but is not an image view based at the expected address (mutated) */};
+const char *kntwr_gp_remalloc_stage_name(uint32_t stage);
+
+/* Per-call diagnostics of one remalloc, filled by the backend: exact stage, the Win32 error or NTSTATUS, whether the
+   target was already changed, and the memory region that decided a refusal. */
+typedef struct kntwr_gp_remalloc_diag {
+    uint32_t stage;             /* KNTWR_GP_RA_* (NONE after a successful remap) */
+    uint32_t code;              /* Win32 error (code_is_ntstatus == 0) or NTSTATUS (== 1) of the failing call */
+    uint32_t code_is_ntstatus;
+    uint32_t mutated;           /* 1 once the old view was unmapped/released: the target must be discarded */
+    uint32_t region_base, region_size, region_state, region_type, region_alloc_base; /* last region examined (0 if none) */
+} kntwr_gp_remalloc_diag;
+
 /* Target memory.  All addresses are 32-bit virtual addresses of the target.  Return 0 on success. */
 typedef struct kntwr_gp_memory {
     void *ctx;
     int (*read)(void *ctx, uint32_t va, void *dst, uint32_t n);
     /* Write into committed memory, lifting and restoring page protection, flushing the instruction cache. */
     int (*write)(void *ctx, uint32_t va, const void *src, uint32_t n);
-    /* Replace the target's [va, va+old_size) mapping with one read/write allocation covering [va, va+new_size).
-       Must refuse (without unmapping, returning nonzero) when [va+old_size, va+new_size) is not free. */
-    int (*remalloc)(void *ctx, uint32_t va, uint32_t old_size, uint32_t new_size);
+    /* Replace the target's [va, va+old_size) mapping with one contiguous image view covering [va, va+new_size).
+       patched_header/new_header_len describe the final in-memory PE header (new_size = its SizeOfImage); the backend maps
+       an image section whose layout matches it.  Preflight: refuse (without unmapping, returning nonzero, diag->stage
+       TAIL_FOREIGN) unless every page of [va+old_size, va+new_size) is either MEM_FREE or exactly the caller-recorded
+       creation-time reservation (kntwr_gp_pm::owned_reserve_*).  The reservation is NOT released during preflight: it is
+       re-validated and released (exactly once, zeroing the recording) only immediately before the old view is unmapped at
+       the remap itself, so a pre-remap refusal leaves it intact.  Always fills *diag on failure and sets diag->mutated
+       once the old mapping is gone. */
+    int (*remalloc)(void *ctx, uint32_t va, uint32_t old_size, uint32_t new_size,
+                    const uint8_t *patched_header, uint32_t header_len, kntwr_gp_remalloc_diag *diag);
     /* Final protection (Win32 PAGE_* value) of [va, va+size). */
     int (*protect)(void *ctx, uint32_t va, uint32_t size, uint32_t protection);
 } kntwr_gp_memory;
 
 typedef struct kntwr_gp_report {
     uint32_t status;              /* KNTWR_GP_* */
-    uint32_t phase;               /* 0 verify (nothing written), 1 writing (target changed) */
+    uint32_t phase;               /* 0 verify (nothing written/unmapped), 1 writing or remapped (target changed) */
     uint32_t image_base, preferred_base, delta;
     uint32_t runs_total;          /* runs in the patch */
     uint32_t runs_header;         /* runs inside the PE header (verified and applied when sections are appended) */
@@ -80,7 +136,7 @@ typedef struct kntwr_gp_report {
     uint32_t section_bytes;       /* committed bytes of the appended range */
     uint32_t section_fixups;      /* relocation entries applied inside appended sections */
     uint32_t section_base_va;     /* first appended byte (image_base + stock SizeOfImage) */
-    uint32_t fail_run;            /* run index of an E_STOCK / E_LAYOUT failure, else 0xFFFFFFFF */
+    uint32_t fail_run;            /* run index of an E_STOCK / E_LAYOUT failure, 0xFFFFFFFE = the pinned heap-serialization run, else 0xFFFFFFFF */
     uint32_t fail_va;
     uint32_t rollback;            /* KNTWR_GP_ROLLBACK_* */
     /* One trampoline into an appended section and the first bytes of that section, for live read-back proofs. */
@@ -89,6 +145,7 @@ typedef struct kntwr_gp_report {
     uint32_t proof_section_va;
     uint8_t proof_section_bytes[8];
     char error[200];
+    kntwr_gp_remalloc_diag remap; /* the image remap (all zero when no remap ran or it succeeded) */
 } kntwr_gp_report;
 
 /* Embedded verbatim NTWPATCH files. */
@@ -108,7 +165,9 @@ int kntwr_gp_apply(const kntwr_gp_memory *mem, uint32_t image_base, uint32_t pre
                   const uint8_t *blob, uint32_t blob_size, kntwr_gp_report *rep);
 
 /* Diagnostic bisection: which non-header runs are written.  Header runs always shape the patched layout (section table, relocation tables, appended
-   sections); runs outside the selection are simply not written, so the live bytes there stay stock (with the loader's stock relocation applied). */
+   sections); runs outside the selection are simply not written, so the live bytes there stay stock (with the loader's stock relocation applied).
+   The pinned heap-serialization runs are beyond the filter: they are always written with the Napoleon patch. They clear the HEAP_NO_SERIALIZE
+   flag at RVA 0x1062CE8 and replace the setter's xor at RVA 0xBF8895 with xor eax,eax; nop, so the shared process heap stays serialized. */
 #define KNTWR_GP_MAX_RUNS 128u
 enum { KNTWR_GP_ALL = 0, KNTWR_GP_ONLY = 1, KNTWR_GP_SKIP = 2 };
 typedef struct kntwr_gp_filter {
@@ -130,9 +189,99 @@ int kntwr_gp_apply_filtered(const kntwr_gp_memory *mem, uint32_t image_base, uin
                            const uint8_t *blob, uint32_t blob_size, const kntwr_gp_filter *filter, kntwr_gp_report *rep);
 
 #ifdef _WIN32
-/* Backend over a process handle (PROCESS_VM_OPERATION|READ|WRITE|QUERY_INFORMATION); GetCurrentProcess() works too.
-   handle is a HANDLE. */
-kntwr_gp_memory kntwr_gp_process_memory(void *handle);
+/* Process-memory backend.  handle is a HANDLE (PROCESS_VM_OPERATION|READ|WRITE|QUERY_INFORMATION); GetCurrentProcess()
+   works too.  owned_reserve_* record the creation-time reservation the launcher attached to the child (kntwr_gp_reserve);
+   pm_remalloc verifies that exact region and releases it exactly once, before unmapping the old view.  Zero means no owned
+   reservation (the oracle's private mappings, live modules): the range above the image must simply be free. */
+typedef struct kntwr_gp_pm {
+    void *process;                 /* HANDLE */
+    uint32_t owned_reserve_base;   /* child VA (kntwr_gp_reserve::reserve_base); 0 = none */
+    uint32_t owned_reserve_size;
+} kntwr_gp_pm;
+void kntwr_gp_pm_init(kntwr_gp_pm *pm, void *handle);
+kntwr_gp_memory kntwr_gp_pm_memory(kntwr_gp_pm *pm);
+
+/* ---- creation-time reservation ----------------------------------------------------------------------------------------
+   The patched image needs more pages than the stock one reserves, and Windows places the PEBs in the way before any game
+   code runs.  Instead of extending the image late, the launcher asks the kernel to reserve the missing 64 KiB-aligned tail
+   AT process creation, through the documented process-creation attribute PS_ATTRIBUTE_MEMORY_RESERVE.  CreateProcessW has
+   no attribute-list parameter on this OS, so the launcher hands the attribute to NtCreateUserProcess directly: one scoped
+   wrapper around the launcher process's OWN KernelBase.dll import slot for that export (the slot must hold the genuine
+   ntdll address, else fail closed), one modified call on the same thread, restored immediately after CreateProcessW returns,
+   before anything else runs.  Invariants:
+     - both image extents are derived from the trusted patch blob and the source's own header (never constants); the child's
+       actual image base is predicted from a read-only SEC_IMAGE section of the caller's already-open source handle
+       (NtQuerySection/SectionImageInformation: TransferAddress minus AddressOfEntryPoint);
+     - exactly one attribute is appended, for exactly one child, on the owning thread; a second call on that thread, a
+       malformed attribute list, or a pre-existing memory-reserve attribute is refused (the child creation fails);
+     - the caller must verify the whole recorded reservation in the child (base match, one region, MEM_RESERVE|MEM_PRIVATE,
+       AllocationBase == reserve_base) before relying on it; kntwr_gp_reserve_verify does this;
+     - nothing is cached globally: hook -> CreateProcessW -> unhook -> verify, then pm_remalloc releases only the proven
+       reservation, exactly once; the original executable's path, bytes and identity checks are untouched. */
+enum {  /* kntwr_gp_reserve_report::stage */
+    KNTWR_GP_RS_NONE = 0,
+    KNTWR_GP_RS_BLOB,          /* patch blob / derived extents */
+    KNTWR_GP_RS_SOURCE,        /* source file identity (size vs the blob's stock length) */
+    KNTWR_GP_RS_SECTION,       /* SEC_IMAGE section of the source */
+    KNTWR_GP_RS_QUERY,         /* SectionImageInformation query */
+    KNTWR_GP_RS_NTDLL,         /* ntdll entry points unavailable */
+    KNTWR_GP_RS_IMPORTS,       /* KernelBase import slot for NtCreateUserProcess not found */
+    KNTWR_GP_RS_FOREIGN_HOOK,  /* the import slot does not hold the genuine export (refused, nothing changed) */
+    KNTWR_GP_RS_HOOK,          /* the wrapper could not be installed */
+    KNTWR_GP_RS_RESTORE,       /* the import slot could not be restored */
+    KNTWR_GP_RS_BASE,          /* the child's actual image base differs from the prediction */
+    KNTWR_GP_RS_TAIL           /* the reserved tail in the child is not exactly the recorded reservation */
+};
+const char *kntwr_gp_reserve_stage_name(uint32_t stage);
+
+typedef struct kntwr_gp_reserve_report {
+    uint32_t status;           /* KNTWR_GP_* */
+    uint32_t stage;            /* KNTWR_GP_RS_* of the failure */
+    uint32_t code;             /* Win32 error or NTSTATUS of the failing call (0 if none) */
+    uint32_t code_is_ntstatus; /* code is an NTSTATUS */
+    char error[200];
+} kntwr_gp_reserve_report;
+
+typedef struct kntwr_gp_reserve {
+    void *section;             /* pinned read-only SEC_IMAGE section of the source; held from plan until kntwr_gp_reserve_dispose */
+    uint32_t predicted_base;   /* the child's expected actual image base */
+    uint32_t reserve_base;     /* the child VA the kernel must reserve (64 KiB aligned) */
+    uint32_t reserve_size;     /* the reserved span (64 KiB aligned, > 0) */
+    uint32_t stock_soi, patched_soi;
+    uint32_t slot_protect;     /* the import slot's original page protection, captured at install and restored at unhook */
+    /* Wrapper facts, for the receipt and for diagnosing a failed CreateProcessW. */
+    uint32_t hook_installed, hook_restored;
+    uint32_t calls_seen;       /* NtCreateUserProcess calls observed through the slot */
+    uint32_t calls_modified;   /* calls that received the reservation attribute (0 or 1) */
+    uint32_t reject;           /* 0 none, 1 malformed attribute list, 2 too many attributes, 3 attribute already present, 4 a second call on this thread */
+    uint32_t hook_ntstatus;    /* NTSTATUS returned to the child-creating call */
+    uint32_t hook_has_status;  /* hook_ntstatus is valid */
+} kntwr_gp_reserve;
+
+/* Derives the extents from the blob and the source's own header, pins a read-only SEC_IMAGE section of the source (HANDLE,
+   GENERIC_READ) so the kernel's image-section identity for the base prediction is the file being launched, and computes
+   predicted_base / reserve_base / reserve_size.  The pin is held in rsv->section until kntwr_gp_reserve_dispose (it must
+   stay open through CreateProcessW).  Returns 0, or a KNTWR_GP_E_* status with *rep filled and nothing pinned. */
+int kntwr_gp_reserve_plan(void *source_file, const uint8_t *blob, uint32_t blob_size,
+                          kntwr_gp_reserve *rsv, kntwr_gp_reserve_report *rep);
+/* Installs the scoped wrapper (fail closed: genuine-export check first, CAS install, original protection captured in
+   rsv->slot_protect).  The genuine export address is published before the slot is touched and stays valid for the process
+   lifetime, so a concurrent foreign call through the slot always reaches it.  Returns 0 with the wrapper active. */
+int kntwr_gp_reserve_hook(kntwr_gp_reserve *rsv, kntwr_gp_reserve_report *rep);
+/* Restores the import slot and copies the wrapper's counters into *rsv.  Must run immediately after CreateProcessW,
+   whether it succeeded or not, before any child query.  CAS restore (only our own wrapper is ever replaced), original
+   protection from rsv->slot_protect, both checked.  Returns 0 only when the slot provably holds the original export with
+   its original protection again; a failure must be treated as fatal for the child (never resume it).  Idempotent: a second
+   call after a successful restore is a no-op. */
+int kntwr_gp_reserve_unhook(kntwr_gp_reserve *rsv, kntwr_gp_reserve_report *rep);
+/* Closes the pinned section (idempotent).  Call after the unhook, on every success and failure path once CreateProcessW
+   has been attempted (or when the hook could not be installed and no child will be created). */
+void kntwr_gp_reserve_dispose(kntwr_gp_reserve *rsv);
+/* Verifies the suspended child: the wrapper must have wrapped exactly one successful call (calls_seen == 1,
+   calls_modified == 1, reject == 0, a success NTSTATUS, hook restored), actual_base must equal predicted_base, and
+   [reserve_base, reserve_base+reserve_size) must be exactly one region, MEM_RESERVE|MEM_PRIVATE,
+   AllocationBase == reserve_base.  Returns 0 on success. */
+int kntwr_gp_reserve_verify(const kntwr_gp_reserve *rsv, void *process, uint32_t actual_base, kntwr_gp_reserve_report *rep);
 #endif
 
 #ifdef __cplusplus

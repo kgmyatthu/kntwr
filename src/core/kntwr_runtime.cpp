@@ -31,6 +31,8 @@
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
 #include "army/native_army_solver.h"
+#include "army/native_cavalry_runtime.h"
+#include "army/kntwr_cavalry_intent_hook.h"
 #include "formation/native_formation_solver.h"
 #include "brain2/native_brain_s0.h"
 #include "brain2/native_brain_locality.h"
@@ -88,7 +90,7 @@ void __fastcall bal_worker(bal_job*, U);
 }
 
 namespace {
-constexpr U kPreferred = 0x400000, kSimulation = KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO;
+constexpr U kPreferred = 0x400000, kSimulation = KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT;
 constexpr U kProjectileCapacity = 65536, kStopTimeoutMs = 15000;
 enum Error : U { BadConfig=1, BadImage=2, MissingExport=3, CloneError=4, ModuleError=5,
                  SlotConflict=6, SlotProtection=7, StopTimeout=8, PoolError=9, ThreadError=10,
@@ -114,7 +116,7 @@ volatile U* pathStorage;
 volatile U* formationDiag;
 constexpr U kBrainSlotCount = KNTWR_BRAIN_SLOTS;
 constexpr U kMaxSlots = 11 + kBrainSlotCount + kntwr_ai_census::kPinCount + kntwr_ai_async2::kPinCount + kntwr_prepass::kNodeThinkSlotCount + 2 + 2 + 2 + 1 + 1 + kntwr_alloc_census::kSlotCount; // batch64 + formation + task + planner walk + visual + brain vtables + ai census pins + ai_async2 pins + prepass node/presize slots + the PS observer slot, with margin + the spiral fallback/controller gates + the storm census R2/R1 route slots + the solver's second R1 slot + the --ai-record-test alternate delegate slot + alloc census provider slots
-Slot slots[kMaxSlots];
+Slot slots[kMaxSlots + 1]; // +1: the cavalry go-command slot (0x132BA04+0x118); AddSlot has no bounds check, so the table owns the spare entry
 U censusSlotFirst, censusSlotEnd; // [first,end) of the AI census pins inside slots[] for the current generation
 U allocCensusSlotFirst, allocCensusSlotEnd; // [first,end) of the alloc census provider slots inside slots[]
 U allocCensusRequestedMode; // 0 = off, 1 = --alloc-census, 2 = --alloc-fix (captured at kntwr_start before status reset)
@@ -411,7 +413,7 @@ volatile LONG gateDepth;
 constexpr U kRouted = kSimulation | KNTWR_PROFILE; // the clone route is also taken for profiling (sub-phase timing)
 // Features whose sites live behind the MANAGER clone route (FORMATION takes its own hook; PATH and BALLISTICS are
 // bound in the TICK clone). Every other routed feature must take the clone, or its site gates are never reached.
-constexpr U kManagerRouted = KNTWR_PROFILE | KNTWR_BRAIN2 | KNTWR_AI_ASYNC | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO;
+constexpr U kManagerRouted = KNTWR_PROFILE | KNTWR_BRAIN2 | KNTWR_AI_ASYNC | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT;
 static_assert(kManagerRouted == (kRouted & ~(KNTWR_FORMATION | KNTWR_PATH | KNTWR_BALLISTICS)),
               "every routed feature except formation/path/ballistics takes the MANAGER clone");
 volatile U phaseUs[3];       // manager, ballistics, path: accumulated inside the current tick (single executor, depth <= 1)
@@ -1544,6 +1546,59 @@ __declspec(naked) void NodeStepGate() {
         jmp dword ptr [nodeStepOriginal]
     }
 }
+
+bool CavalryEpoch() {
+    return (epochMask & KNTWR_CAVALRY_ORBIT) != 0 &&
+           static_cast<U>(Load(&tickOwner)) == GetCurrentThreadId();
+}
+void __fastcall CavalryMoveGate(U mount, U edx, const void* descriptor) {
+    const auto original = reinterpret_cast<kntwr_cavalry::NativeOrder>(V(0x5dd450));
+    if (CavalryEpoch()) kntwr_cavalry::Move(mount, descriptor, original);
+    else { kntwr_cavalry::NoteForeignOrder(mount); original(mount, edx, descriptor); }
+}
+void __fastcall CavalryCombatGate(U mount, U edx, const void* descriptor) {
+    const auto original = reinterpret_cast<kntwr_cavalry::NativeOrder>(V(0x5dcde0));
+    if (CavalryEpoch())
+        kntwr_cavalry::Combat(mount, descriptor, Address(_ReturnAddress()), original);
+    else { kntwr_cavalry::NoteForeignOrder(mount); original(mount, edx, descriptor); }
+}
+// Go-command begin gate (agent vtable +0x118, stock original 0x5DCE70; thiscall, ret 4).  Reached by `jmp [eax+0x118]` at 0x809CE7, so the
+// return address is the 0x7FF4F0 caller's (0x7FF51A entity / 0x7FF53D point); the original is the only other callee.
+void __fastcall CavalryGoGate(U mount, U edx, const void* descriptor) {
+    const auto original = reinterpret_cast<kntwr_cavalry::NativeOrder>(V(0x5dce70));
+    if (CavalryEpoch())
+        kntwr_cavalry::Go(mount, descriptor, Address(_ReturnAddress()), original);
+    else { kntwr_cavalry::NoteForeignOrder(mount); original(mount, edx, descriptor); }
+}
+U __fastcall CavalryTrackerGate(U tracker, U edx, U mount) {
+    if (CavalryEpoch())
+        return kntwr_cavalry::Tracker(tracker, mount, &kntwr_retarget_jitter::TrackerTick);
+    return kntwr_retarget_jitter::TrackerTick(tracker, edx, mount);
+}
+// Attack-row destructor gate (vtable 0x1324080 slot 0, stock original 0x529D80; thiscall(row,flags), ret 4,
+// EAX=row). The row's owner/serial/target are intact only before the original runs, so the observation precedes
+// the call and is owner-epoch-only (every other caller of the slot is a byte-identical passthrough). The return
+// address classifies the end: 0x582738 is the queue-step normal pop; 0x56D8D8 is the 56D8B0 pop path, whose own
+// return address (the word above 56D8B0's edi/esi pushes) must be the normal 0x58275C. Every other caller class
+// (the 542AE0 flush loop 0x542B11, the 0x581FA0 formation-abort pop, issuer in-place destroys) is a cancel the
+// adapter applies conservatively, so no stack word is read for them.
+U CavalryOuterReturn(const U* frame) {
+    U outer=0;
+    ++kntwr::probeDepth; // a guarded probe of the caller's live frame, not a gameplay crash capture
+    __try { outer=frame[4]; }
+    __except(EXCEPTION_EXECUTE_HANDLER) { outer=0; }
+    --kntwr::probeDepth;
+    return outer;
+}
+U __fastcall CavalryAttackRowDtorGate(U row, U edx, U flags) {
+    if (CavalryEpoch()) {
+        const U* const frame=static_cast<const U*>(_AddressOfReturnAddress()); // f[0]=ret f[1]=flags f[2]=edi f[3]=esi
+        const U ret=Address(_ReturnAddress());
+        const U outer=(ret==V(0x56d8d8)) ? CavalryOuterReturn(frame) : 0u;
+        kntwr_cavalry::ObserveRowEnd(row,ret,outer);
+    }
+    return reinterpret_cast<U(__fastcall*)(U,U,U)>(V(0x529d80))(row,edx,flags);
+}
 // AI2_WALK 7F1D73: EAX = model in, ESI = static interest tree object (live root model+0xBC) out. A retained read
 // generation replaces exactly this resolution; registers other than ESI and EFLAGS are untouched.
 __declspec(naked) void Ai2RootInterest() {
@@ -2475,9 +2530,11 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     __try {
         Ai2TickStart(); // one effect seam: service a posted worker call; join only an already-complete batch
         AiBarrier(); // no previous tick is permitted to retain native AI frames
+        if (currentMask & KNTWR_CAVALRY_ORBIT) kntwr_cavalry::BeginTick(Address(model), modelTick);
         result=reinterpret_cast<Tick>(privateTick)(model,edx,a,b);
         if (config.va_watch_flags&(KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) kntwr_alloc_census::ReclaimTick(Address(model));
         Ai2TickEnd(); ai2Published=true; AiBarrier(); // normal completion is included in the tick duration
+        if (currentMask & KNTWR_CAVALRY_ORBIT) kntwr_cavalry::EndTick();
         QueryPerformanceCounter(&end);
         const U bodyUs=Micro(start.QuadPart,end.QuadPart);
         SimRecord(start.QuadPart,end.QuadPart,tid,true);
@@ -2603,7 +2660,7 @@ bool BuildClones() {
     bindings[KNTWR_BIND_AI_CENSUS_REBUILD]=kntwr_ai_census::Gate(6);
     bindings[KNTWR_BIND_PS_WALK_CALL]=FnAddress(&PsWalkCall);
     bindings[KNTWR_BIND_PS_POLY]=FnAddress(&kntwr_poly::Gate);
-    bindings[KNTWR_BIND_RJ_TRACKER_TICK]=FnAddress(&kntwr_retarget_jitter::TrackerTick);
+    bindings[KNTWR_BIND_RJ_TRACKER_TICK]=FnAddress(&CavalryTrackerGate);
     bindings[KNTWR_BIND_MO_GATE]=FnAddress(&kntwr_mounted_officer::Gate);
     bindings[KNTWR_BIND_PS_LADDER]=FnAddress(&kntwr_spiral::Ladder);
     bindings[KNTWR_BIND_PS_LADDER_PROBE]=FnAddress(&kntwr_spiral::LadderProbe);
@@ -3115,7 +3172,14 @@ bool BuildSlots() {
         AddSlot(kntwr_spiral::kControllerSlot,kntwr_spiral::kControllerOriginal,FnAddress(&kntwr_spiral::ControllerGate));
     } else if (config.ai_ctrl_flags & KNTWR_AI_CLAIM_BITS) AddSlot(kntwr_claim_once::kFallbackSlot,kntwr_claim_once::kFallbackOriginal,FnAddress(&kntwr_claim_once::Gate));
     // --brain-target-cull* / --brain-retarget-jitter: the combat node step slot (0x1333E44 = 0x66D750) -> NodeStepGate (the clone runs only on the tick thread inside site 6).
-    if (config.ai_ctrl_flags & KNTWR_AI_BRAIN_STEP_BITS) AddSlot(kntwr_retarget_jitter::kVtableSlot,kntwr_retarget_jitter::kThunk,FnAddress(&NodeStepGate));
+    if ((config.ai_ctrl_flags & KNTWR_AI_BRAIN_STEP_BITS) || (config.enabled_mask & KNTWR_CAVALRY_ORBIT))
+        AddSlot(kntwr_retarget_jitter::kVtableSlot,kntwr_retarget_jitter::kThunk,FnAddress(&NodeStepGate));
+    if (config.enabled_mask & KNTWR_CAVALRY_ORBIT) {
+        AddSlot(0x132ba04 + 0x188, 0x5dd450, FnAddress(&CavalryMoveGate));
+        AddSlot(0x132ba04 + 0x110, 0x5dcde0, FnAddress(&CavalryCombatGate));
+        AddSlot(0x132ba04 + 0x118, 0x5dce70, FnAddress(&CavalryGoGate));
+        AddSlot(0x1324080, 0x529d80, FnAddress(&CavalryAttackRowDtorGate)); // attack-row dtor slot 0: retained-intent observation
+    }
     // Keep original entry slots intact in BRAIN2 observe/census mode. Its optional
     // timing is independent of the older profiling-family slot publication.
     if ((config.enabled_mask & KNTWR_BRAIN) && !(config.enabled_mask & KNTWR_BRAIN2))
@@ -3434,6 +3498,14 @@ bool StopModules() {
     kntwr_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     kntwr_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
     kntwr_army_storm::Stop();
+    if (config.enabled_mask & KNTWR_CAVALRY_ORBIT) {
+        // The flush detour must be gone before the adapter state it publishes is discarded: the detour calls
+        // kntwr_cavalry::ObserveFlush on any thread. A refused removal leaves the detour live, so the adapter
+        // state stays resident (fail closed: this stop reports failure and a later stop retries the removal).
+        if (!kntwr_cavalry_intent_hook::Installed() || kntwr_cavalry_intent_hook::Remove())
+            kntwr_cavalry::Reset();
+        else { RecordError(SlotConflict,0x542ae0u); all=false; }
+    }
     if (config.va_watch_flags&KNTWR_FORMATION_CENSUS) kntwr_formation_census::Stop(); // tick owner drained: flush the buffered rows, rewrite the summary
     kntwr_army_solver::Stop(); // same drain: the final counters stay published
     if (config.va_watch_flags&(KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) {
@@ -3552,6 +3624,7 @@ bool Activate(const World& candidate) {
         kntwr_retarget_jitter::Configure((config.ai_ctrl_flags&KNTWR_AI_RETARGET_JITTER)!=0,targets);
         nodeStepClone=clones.entries[KNTWR_CLONE_STEP_676FD0]; nodeStepOriginal=V(kntwr_retarget_jitter::kThunk);
     }
+    if (config.enabled_mask & KNTWR_CAVALRY_ORBIT) kntwr_cavalry::Bind(imageBase);
     // Site 6 (the ACTIVE clone's call of the entity loop 0x585D10) stays timed either way; only its callee changes with the feature.
     siteCallees[6]=(config.enabled_mask&KNTWR_BRAIN2) ? FnAddress(&BrainKernelGate) : V(0x585d10);
     siteCallees[13]=(config.enabled_mask&KNTWR_LOCO) ? FnAddress(&LocoMoveGate) : V(0x531af0);
@@ -3568,6 +3641,14 @@ bool Activate(const World& candidate) {
     StateBegin(); kntwr_state.root=world.root; kntwr_state.model=world.model; kntwr_state.phase=KNTWR_ACTIVATING; StateEnd();
     if (!BuildSlots() || !VirtualBudget(0,true) || !PrepareActivationWorkload() || !StartModules() ||
         !VirtualBudget(0,false,true)) { Deactivate(); return false; }
+    // Cavalry retained intent: the 542AE0 flush entry detour goes in after the adapter Bind (its fixed atomic
+    // publication/cancel state is the detour's only payload) and strictly before this activation exposes the
+    // dtor slot or the cavalry epoch. A refusal (foreign bytes at the pinned entry) fails the activation closed.
+    if ((config.enabled_mask & KNTWR_CAVALRY_ORBIT) && !kntwr_cavalry_intent_hook::Install(imageBase)) {
+        RecordError(SlotConflict,0x542ae0u);
+        Deactivate();
+        return false;
+    }
     SampleMemoryStorage();
     StateBegin();
     PublishMemory();
@@ -3709,6 +3790,7 @@ DWORD WINAPI Monitor(void*) {
         mo::Configure((config.va_watch_flags&KNTWR_MOUNTED_OFFICER_WIDEN)!=0,targets);
         if (!mo::InstallRedirect(delta,clones.entries[KNTWR_CLONE_UNIT_CTOR])) RecordError(SlotConflict,mo::kCallSite);
         if (!failure && !mo::InstallPlacement(delta)) RecordError(SlotConflict,mo::kSlotAdjust);
+        if (!failure && !mo::InstallVisual(delta)) RecordError(SlotConflict,mo::kVisualSite);
         PublishMountedOfficer();
     }
     if (!failure) {
@@ -3781,8 +3863,16 @@ DWORD WINAPI Monitor(void*) {
     if (clean && (config.enabled_mask&KNTWR_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context
     CrashRemove();
     kntwr_profile_stop();
+    // Cavalry flush detour: a refusal inside StopModules left it live with the adapter state resident (that stop
+    // already reported failure). Retry once more at the final teardown; only a successful removal lets the last
+    // owner-locked adapter state go. A second refusal keeps both resident and fails this stop closed.
+    if ((config.enabled_mask & KNTWR_CAVALRY_ORBIT) && kntwr_cavalry_intent_hook::Installed()) {
+        if (kntwr_cavalry_intent_hook::Remove()) kntwr_cavalry::Reset();
+        else { RecordError(SlotConflict,0x542ae0u); clean=false; }
+    }
     if (!kntwr_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
     if (!kntwr_mounted_officer::RemovePlacement(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kSlotAdjust); clean=false; }
+    if (!kntwr_mounted_officer::RemoveVisual(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kVisualSite); clean=false; }
     PublishMountedOfficer();
     if (!kntwr_clip_picker_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_clip_picker_guard::kEntry); clean=false; } // restore the picker entry before the final publish
     PublishAnimGuard();
@@ -3858,6 +3948,10 @@ static U StartImpl(void* raw) {
         ((next.enabled_mask&KNTWR_AI_CENSUS) && !(next.enabled_mask&KNTWR_AI_ASYNC)) ||
         // ai_async2 shares the AI worker, site 33 and the delegate slots with ai_ctrl/ai_census.
         ((next.enabled_mask&KNTWR_AI_ASYNC2) && (!(next.enabled_mask&KNTWR_AI_ASYNC) || (next.enabled_mask&(KNTWR_AI_CTRL|KNTWR_AI_CENSUS)))) ||
+        // Cavalry requires the original driver callsite and joined owner epoch. BRAIN2 can substitute
+        // serial cloned drivers as well as speculative receivers; neither is an admitted cavalry path.
+        ((next.enabled_mask & KNTWR_CAVALRY_ORBIT) &&
+         (next.enabled_mask & (KNTWR_AI_ASYNC2 | KNTWR_BRAIN2))) ||
         // The deferred schedule is an AI_ASYNC2 mode: K in 1..MAX_K, budget B >= 1, no other bits.
         (next.ai_deferred && (!(next.enabled_mask&KNTWR_AI_ASYNC2) ||
                               (next.ai_deferred&~(KNTWR_AI_DEFERRED_K_MASK|KNTWR_AI_DEFERRED_BUDGET_MASK)) ||

@@ -125,14 +125,23 @@ U ReservationBytes(const Limits& limits) {
     if (bytes>0xffffffffu-65535u) return 0xffffffffu;
     return static_cast<U>((bytes+65535)&~size_t(65535));
 }
+// The contact cursor is the one Job word every chunk increments concurrently. Both sides are padded by a
+// cache line's worth of bytes: a 4-byte aligned word shares its 64-byte line with at most 60 bytes on either
+// side, so no read-mostly Job field (counts, shift, phase, failure, ...) shares its line wherever the stack
+// places the Job.
+struct ContactCounter { B lead[60]; volatile LONG value; B tail[60]; };
+static_assert(sizeof(ContactCounter)==2*60+sizeof(LONG),"contact cursor owns its cache line");
 struct Job {
     U count, primaryCount, workCount, cells, shift, origin, maximum, chunkSize, chunks;
     U owner, mxcsr, phase, totalPairs;
-    volatile LONG contactCount;
+    ContactCounter contactCount;
     U sortCount,sortKeys,sortStride,sortChunks;
     U auditCount,nativeQueries;
     volatile LONG auditVisits;
     ULONGLONG workerCpu,chunkCpu[kChunks];
+    // PacketPhase candidate totals. Chunk n is the sole writer of chunkPairs[n] (one store at chunk end); the
+    // owner folds them into totalPairs after the dispatch barrier.
+    U chunkPairs[kChunks];
     // Contact-plan dispatch: accepted contacts of the stage (dense plan rows), contact-range
     // chunk count, per-chunk QPC occupancy ticks (plan_thread_us; GetThreadTimes is 15.6 ms
     // quanta) and per-chunk Predict calls (oracle seam ContactPlans).
@@ -373,7 +382,7 @@ __forceinline U MakePacket(Job& j,U i,U s,U cell,U querySerial) {
         if (reinterpret_cast<Radius>(V(0x81a670))(&threshold,r.shape(),n.shape(),dx,dz,rr,rs,r.heading(),n.heading()) &&
             !Greater(threshold,distance)) return 0xffffffffu;
     }
-    U index=static_cast<U>(_InterlockedIncrement(&j.contactCount))-1;
+    U index=static_cast<U>(_InterlockedIncrement(&j.contactCount.value))-1;
     if (index>=kContacts) { Fail(j,CapacityFallbacks); return 0xffffffffu; }
     Packet& p=a.packets[index]; p.other=s;
     float weight=Mul(r.inverse(),n.mass());
@@ -398,14 +407,19 @@ bool Enqueue(Job& j,U id,U& queued) {
     See(id); arena->order[queued++]=id;
     return true;
 }
-bool AccountCandidates(Job& j,U count) {
-    U previous=static_cast<U>(_InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&j.totalPairs),static_cast<LONG>(count)));
-    if (previous>kPairs || count>kPairs-previous) { Fail(j,CapacityFallbacks); return false; }
+// Pair accounting is never a shared atomic: the owner's running total (serial native-record counts, then the
+// per-chunk totals folded after the PacketPhase barrier) and each chunk's private tally are plain words with a
+// single writer. `total` never exceeds kPairs on entry, so the subtraction cannot wrap; exactly kPairs is accepted.
+bool AccountCandidates(Job& j,U& total,U count) {
+    if (count>kPairs-total) { Fail(j,CapacityFallbacks); return false; }
+    total+=count;
     return true;
 }
 // The rebuild instantiation runs on the owner, before ranks exist; the packet instantiation
 // streams each query once in parallel. Compile-time selection adds no per-pair indirect call.
-template<bool Rebuild> bool Enumerate(Job& j,U chunk,U i,U& queued) {
+// `tally`: rebuild = BFS queue length; packet = candidate total of the calling chunk only (its sole writer),
+// bounded by kPairs so the owner's later fold over at most kChunks totals cannot wrap.
+template<bool Rebuild> bool Enumerate(Job& j,U chunk,U i,U& tally) {
     Arena& a=*arena;
     if (!Rebuild) a.first[i]=kNoPacket;
     if (!a.rec[i] || !a.active[i] || !(a.flags[i]&3) || a.nativeRecord[i] ||
@@ -446,7 +460,7 @@ template<bool Rebuild> bool Enumerate(Job& j,U chunk,U i,U& queued) {
             }
             if (++count>kPairs) { Fail(j,CapacityFallbacks); return false; }
             if (Rebuild) {
-                if (!Enqueue(j,a.serial[s]&0xffff,queued)) return false;
+                if (!Enqueue(j,a.serial[s]&0xffff,tally)) return false;
             } else {
                 // Count even ineligible/rejected candidates, but never allocate storage for them.
                 if (a.rank[i]==0xffffffffu || a.done[s] || a.rank[s]<a.rank[i]) continue;
@@ -461,7 +475,7 @@ template<bool Rebuild> bool Enumerate(Job& j,U chunk,U i,U& queued) {
         }
     }
     a.span[i]=count;
-    return Rebuild || AccountCandidates(j,count);
+    return Rebuild || AccountCandidates(j,tally,count);
 }
 void Reduce(Job& j,U i) {
     Arena& a=*arena;
@@ -541,6 +555,7 @@ void Body(Job& j,U chunk) {
         return;
     }
     U start=chunk*j.chunkSize,end=(std::min)(start+j.chunkSize,j.count);
+    U pairs=0; // PacketPhase only: this chunk's candidate tally
     for (U i=start;i<end && !j.failure;++i) {
         // Query metadata is primary-sized; secondary registry records are destinations only.
         if (i>=j.primaryCount && (j.phase==NativeClassifyPhase ||
@@ -556,8 +571,7 @@ void Body(Job& j,U chunk) {
                 a.entries[at++]={(y<<j.shift)+x,i};
         } else if (j.phase==PacketPhase) {
             if (a.nativeRecord[i]) continue;
-            U unused=0;
-            Enumerate<false>(j,chunk,i,unused);
+            Enumerate<false>(j,chunk,i,pairs);
         }
         else if (j.phase==IncomingFillPhase) {
             if (a.nativeRecord[i] || !a.accepted[i]) continue;
@@ -577,6 +591,8 @@ void Body(Job& j,U chunk) {
                 if (a.badCell[(y<<j.shift)+x]) a.nativeRecord[i]=1;
         }
     }
+    // One store per chunk, read by the owner only after the dispatch barrier.
+    if (j.phase==PacketPhase) j.chunkPairs[chunk]=pairs;
 }
 void __fastcall Chunk(void* context,U chunk) {
     Job& j=*static_cast<Job*>(context);
@@ -861,9 +877,11 @@ bool Prepare(Job& j,void* manager) {
     // participate in the same fixed stage capacity. BFS already enumerated ranked queries.
     for (U i=0;i<j.primaryCount;++i) if (arena->nativeRecord[i]) {
         if (j.rebuild && arena->rank[i]==0xffffffffu && !NativeNeighbors(j,i,nullptr)) return false;
-        if (!AccountCandidates(j,arena->span[i])) return false;
+        if (!AccountCandidates(j,j.totalPairs,arena->span[i])) return false;
     }
     start=Begin(j); Dispatch(j,PacketPhase); End(j,start,PairsUs,PairsThreadUs); if (j.failure) return false;
+    // Fold the single-writer chunk totals before the dispatch-snapshot check and before any game write.
+    for (U n=0;n<j.chunks;++n) if (!AccountCandidates(j,j.totalPairs,j.chunkPairs[n])) return false;
     // This runtime word is not a SOURCE pin. Refuse a changed dispatch snapshot before any writes.
     if (*reinterpret_cast<volatile uint16_t*>(V(0x150fbc4))!=j.headingBias) { Fail(j,LayoutFallbacks); return false; }
     start=Begin(j);

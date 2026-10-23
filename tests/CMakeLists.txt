@@ -285,6 +285,20 @@ kntwr_harness(native_target_cull_oracle STD 20 FP strict
 kntwr_harness(native_mounted_officer_oracle STD 20 FP strict
   SOURCES native_mounted_officer_oracle.cpp "${KNTWR_SRC}/army/kntwr_mounted_officer.cpp"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+# Pure cavalry-orbit policy: no image, no assets, no native memory.
+kntwr_harness(native_cavalry_orbit_oracle STD 20 FP strict
+  SOURCES native_cavalry_orbit.cpp "${KNTWR_SRC}/army/native_cavalry_orbit.cpp"
+  INCLUDES "${KNTWR_SRC}" "${KNTWR_SRC}/army")
+add_test(NAME kntwr_cavalry_orbit COMMAND native_cavalry_orbit_oracle)
+set_tests_properties(kntwr_cavalry_orbit PROPERTIES LABELS "native" TIMEOUT 120)
+kntwr_note_registered(kntwr_cavalry_orbit)
+# Isolated adapter graph: no game image, native movement, input, or live processes.
+kntwr_harness(native_cavalry_runtime_oracle STD 20 FP strict
+  SOURCES native_cavalry_runtime.cpp "${KNTWR_SRC}/army/native_cavalry_orbit.cpp"
+  INCLUDES "${KNTWR_SRC}")
+add_test(NAME kntwr_cavalry_runtime COMMAND native_cavalry_runtime_oracle)
+set_tests_properties(kntwr_cavalry_runtime PROPERTIES LABELS "synthetic" TIMEOUT 120)
+kntwr_note_registered(kntwr_cavalry_runtime)
 kntwr_harness(native_clip_picker_guard_oracle STD 20 FP strict
   SOURCES native_clip_picker_guard_oracle.cpp "${KNTWR_SRC}/animation/kntwr_clip_picker_guard.cpp"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)

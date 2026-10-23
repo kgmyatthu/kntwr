@@ -1579,7 +1579,7 @@ static void CapacityCases(U workers) {
 
     for (bool borrowed : {false,true}) {
         auto bind = Binding(workers); if (borrowed) bind.read_grid = &ReadView;
-        auto run = [&](const char* name, Spec spec, kntwr_workload::Capacity cap, bool refuse) {
+        auto run = [&](const char* name, Spec spec, kntwr_workload::Capacity cap, bool refuse, U* measuredPairs = nullptr) {
             currentCase = name;
             Fixture ref(spec), own(spec);
             OwnedView view; if (borrowed) BuildView(own,spec.tick,view);
@@ -1595,6 +1595,7 @@ static void CapacityCases(U workers) {
             Execute(ref,true); Execute(own,false);
             if (borrowed) Require(Hash(view) == viewHash, "borrowed geometry and inclusive bounds remain read-only");
             U words[kntwr_collide::WordCount]; kntwr_collide::Sample(words);
+            if (measuredPairs) *measuredPairs = words[kntwr_collide::MaxPairs];
             Require(kntwr_collide::StorageBytes() == bytes, "stage never grows or replaces activation storage");
             Require(words[kntwr_collide::Faults] == 0, "capacity boundary is a clean refusal, never an access fault");
             if (refuse) {
@@ -1609,6 +1610,17 @@ static void CapacityCases(U workers) {
                 Compare(ref,own,spec,false);
             }
             gView = nullptr; ++cases;
+        };
+        // Candidate totals are tallied per chunk and folded after the packet barrier, so the stage-wide bound
+        // must hold across chunks and the serial native-record counts: measure the stage's exact total, then
+        // require that total admitted (inclusive) and one fewer refused before any write, with no chunk alone
+        // over the reduced limit (every record counts at least its partner, so chunks sum to the total).
+        auto exactPairBoundary = [&](const char* name, const Spec& spec, kntwr_workload::Capacity cap) {
+            U total = 0;
+            run(name,spec,cap,false,&total);
+            Require(total > 0, "pair boundary fixture produces candidates");
+            cap.pairs = total; run(name,spec,cap,false);
+            cap.pairs = total - 1; run(name,spec,cap,true);
         };
         Spec four; four.input.resize(4); four.expectedContacts = 4;
         const float xs[]{1.5f,1.875f,2.375f,3.125f};
@@ -1655,11 +1667,13 @@ static void CapacityCases(U workers) {
             mixed.input[0].nodeType = 16;
             const kntwr_workload::Capacity mixedCapacity{6,6,1024,64,512};
             run("streaming mixed native-local BFS preserves raw-ID order",mixed,mixedCapacity,false);
+            exactPairBoundary("exact mixed native and chunk candidate total boundary",mixed,mixedCapacity);
             mixed.rebuild = 0; mixed.breadthFirst = false;
             // Reverse reuse queries record 0 last. Its type-16 destination nodes do not
             // emit +44 callbacks for the two earlier native queries; rebuild seeded 0 first.
             mixed.expectedContacts = 4;
             run("streaming mixed native-local reuse preserves owner query order",mixed,mixedCapacity,false);
+            exactPairBoundary("exact mixed reuse candidate total boundary",mixed,mixedCapacity);
             mixed.rebuild = 1; mixed.breadthFirst = true;
             mixed.expectedContacts = mixed.expectedSolverContacts = 0;
             for (Input& in : mixed.input) in.radius = 0.125f;
@@ -1684,8 +1698,10 @@ static void CapacityCases(U workers) {
         }
         const kntwr_workload::Capacity lanes{640,640,1024,2560,10240};
         run("compact contacts preserve order across every worker lane",parallel,lanes,false);
+        exactPairBoundary("aggregate candidates across lanes: exact limit admitted, one fewer refused",parallel,lanes);
         parallel.rebuild = 1;
         run("owner rebuild then streamed contacts preserve every lane's order",parallel,lanes,false);
+        exactPairBoundary("aggregate rebuilt candidates across lanes: exact limit admitted, one fewer refused",parallel,lanes);
         parallel.rebuild = 0;
         for (U i = 0; i < parallel.input.size(); ++i) {
             U group = i / 8;

@@ -402,6 +402,192 @@ static void Placement() {
     Require(!mo::Placement(A(mount),world,out),"detached placement is disabled");
 }
 
+// ---------------------------------------------------------------------------------------------------------------------- infantry visual eligibility
+// The installed gate runs for real inside the private relocated mapping: control enters the ORIGINAL bytes at 0x72C9D2 (patched or not) from a frame with marker
+// registers, and leaves through sentinels planted at the two native continuations (0x72C9DF = the bayonet candidate list, 0x72CBA7 = the skip).  The sentinels
+// capture every register, EFLAGS and ESP, then return to the harness; the rest of the visual constructor is never executed.
+static U capEax, capEbx, capEcx, capEdx, capEsi, capEdi, capEbp, capEsp, capFlags, capWhere, visualSavedEsp, visualEntryEsp, visualTarget;
+constexpr U kFall=1, kSkip=2, kFlagMask=0xCD5;
+alignas(16) static B entryFx[512], capFx[512], harnessFx[512], xmmMarker[128];
+static unsigned short markerFcw=0x0A7F;   // round up, 53-bit precision, every exception masked: not the 0x027F/0x037F defaults
+static U markerMxcsr=0xBFA5;               // flush-to-zero, round-down, masked, IE/ZE/PE sticky flags set: not the 0x1F80 default
+__declspec(naked) static void SentinelCommon() {
+    __asm {
+        mov dword ptr [capEax], eax
+        mov dword ptr [capEbx], ebx
+        mov dword ptr [capEcx], ecx
+        mov dword ptr [capEdx], edx
+        mov dword ptr [capEsi], esi
+        mov dword ptr [capEdi], edi
+        mov dword ptr [capEbp], ebp
+        mov dword ptr [capEsp], esp
+        pushfd
+        pop dword ptr [capFlags]
+        fxsave [capFx]
+        fxrstor [harnessFx]
+        cld
+        mov eax, dword ptr [capWhere]
+        mov esp, dword ptr [visualSavedEsp]
+        pop ebp
+        pop edi
+        pop esi
+        pop ebx
+        ret
+    }
+}
+__declspec(naked) static void SentinelFall() { __asm { mov dword ptr [capWhere], 1
+                                                       jmp SentinelCommon } }
+__declspec(naked) static void SentinelSkip() { __asm { mov dword ptr [capWhere], 2
+                                                       jmp SentinelCommon } }
+// cdecl RunSite(unit): EDI = unit as the native frame has it, the other registers are markers, DF set, non-default x87 control word with two live x87 values,
+// non-default MXCSR and deliberate XMM0-7 markers, then jump to the native site.  The harness FP state is saved first and restored by the sentinel.
+__declspec(naked) static U __cdecl RunSite(U) {
+    __asm {
+        push ebx
+        push esi
+        push edi
+        push ebp
+        mov dword ptr [visualSavedEsp], esp
+        mov dword ptr [visualEntryEsp], esp
+        fxsave [harnessFx]
+        fninit
+        fldcw word ptr [markerFcw]
+        fldpi
+        fld1
+        ldmxcsr dword ptr [markerMxcsr]
+        movups xmm0, xmmword ptr [xmmMarker]
+        movups xmm1, xmmword ptr [xmmMarker + 16]
+        movups xmm2, xmmword ptr [xmmMarker + 32]
+        movups xmm3, xmmword ptr [xmmMarker + 48]
+        movups xmm4, xmmword ptr [xmmMarker + 64]
+        movups xmm5, xmmword ptr [xmmMarker + 80]
+        movups xmm6, xmmword ptr [xmmMarker + 96]
+        movups xmm7, xmmword ptr [xmmMarker + 112]
+        fxsave [entryFx]
+        mov edi, dword ptr [esp + 20]
+        mov dword ptr [capWhere], 0
+        mov eax, 0xA1A1A1A1
+        mov ebx, 0xB2B2B2B2
+        mov ecx, 0xC3C3C3C3
+        mov edx, 0xD4D4D4D4
+        mov esi, 0x5E5E5E5E
+        mov ebp, 0x8B8B8B8B
+        std
+        jmp dword ptr [visualTarget]
+    }
+}
+static void PlantSentinel(U va,const B* expect,U expectBytes,void (*target)()) {
+    B* p=At(va); Require(!std::memcmp(p,expect,expectBytes),"native continuation is the pinned original");
+    p[0]=0xE9; Put(p,1,A(reinterpret_cast<const void*>(target))-(A(p)+5));
+}
+struct VisualCase { U count; int category; };   // category >= 0: readable descriptor; -1 null class pointer; -2 unreadable 0x10; -3 unreadable 0xFFFFFFF0
+static U VisualNativeRoute(const VisualCase& c) { return c.count==0 ? kFall : kSkip; }
+static U VisualPatchedRoute(const VisualCase& c) { return c.count==0 || c.category==static_cast<int>(mo::kCategoryInfantry) ? kFall : kSkip; }
+static std::vector<VisualCase> VisualCases() {
+    std::vector<VisualCase> cases;
+    for(U count:{0u,1u,2u,0x80000000u,0xFFFFFFFFu})
+        for(int category:{0,1,2,3,4,5,0x7FFFFFFF,-1,-2,-3}) cases.push_back({count,category});
+    return cases;
+}
+struct VisualRun { U route, flags; std::vector<B> unit, descriptor; };
+static VisualRun RunVisualCase(const VisualCase& c) {
+    alignas(16) static B unit[0x300], descriptor[0x40];
+    std::memset(unit,0xA5,sizeof unit); std::memset(descriptor,0x5A,sizeof descriptor);
+    Put(unit,mo::kUnitEquipVec+4,c.count);
+    Put(descriptor,mo::kClassCategory,c.category>=0 ? static_cast<U>(c.category) : 0xA5A5A5A5u);
+    Put(unit,mo::kUnitClass,c.category>=0 ? A(descriptor) : c.category==-1 ? 0u : c.category==-2 ? 0x10u : 0xFFFFFFF0u);
+    const std::vector<B> unitBefore(unit,unit+sizeof unit), descriptorBefore(descriptor,descriptor+sizeof descriptor);
+    for(U i=0;i<sizeof xmmMarker;++i) xmmMarker[i]=static_cast<B>(0x31+7*i);
+    std::memset(entryFx,0,sizeof entryFx); std::memset(capFx,0,sizeof capFx);
+    const U route=reinterpret_cast<U(__cdecl*)(U)>(&RunSite)(A(unit));
+    Require(route==capWhere && (route==kFall || route==kSkip),"the site reached exactly one native continuation");
+    Require(capEax==0xA1A1A1A1u && capEbx==0xB2B2B2B2u && capEcx==0xC3C3C3C3u && capEdx==0xD4D4D4D4u && capEsi==0x5E5E5E5Eu && capEbp==0x8B8B8B8Bu,
+            "every register leaves the site as the native cmp/jne leaves it");
+    Require(capEdi==A(unit) && capEsp==visualEntryEsp,"EDI is the unit and the stack pointer is unchanged");
+    Require(!std::memcmp(unitBefore.data(),unit,sizeof unit) && !std::memcmp(descriptorBefore.data(),descriptor,sizeof descriptor),
+            "the equipment count, class and every other unit byte are untouched");
+    Require((capFlags&0x400)!=0,"direction flag is preserved");
+    Require(!std::memcmp(entryFx,capFx,8) && !std::memcmp(entryFx+24,capFx+24,288-24),
+            "x87 control/status/tag, every x87 stack value, MXCSR and XMM0-7 leave the site exactly as they entered");
+    Require(std::memcmp(entryFx+160,xmmMarker,128)==0 && (std::memcmp(capFx+160,xmmMarker,128)==0) && *reinterpret_cast<const U*>(capFx+24)==markerMxcsr,
+            "the deliberate XMM markers and the non-default MXCSR reached the exit unchanged");
+    Require(*reinterpret_cast<const unsigned short*>(capFx)==markerFcw,"the non-default x87 control word reached the exit unchanged");
+    return {route,capFlags&kFlagMask,unitBefore,descriptorBefore};
+}
+static void VisualInterior(bool removing,U eip,const char* what) {
+    HANDLE event=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    Require(event!=nullptr,"create visual peer event");
+    HANDLE peer=CreateThread(nullptr,0,PlacementPeer,event,CREATE_SUSPENDED,nullptr);
+    Require(peer!=nullptr,"create suspended visual peer");
+    CONTEXT saved{}; saved.ContextFlags=CONTEXT_CONTROL;
+    Require(GetThreadContext(peer,&saved)!=0,"capture visual peer control context");
+    CONTEXT parked=saved; parked.Eip=eip;
+    Require(SetThreadContext(peer,&parked)!=0,"park visual peer");
+    B before[mo::kVisualSpan]; std::memcpy(before,At(mo::kVisualSite),sizeof before);
+    Require(!(removing ? mo::RemoveVisual(delta) : mo::InstallVisual(delta)),what);
+    Require(!std::memcmp(before,At(mo::kVisualSite),sizeof before),"refusal leaves every site byte unchanged");
+    Require(SuspendThread(peer)==1 && ResumeThread(peer)==2,"refusal preserves existing suspension count");
+    Require(SetThreadContext(peer,&saved)!=0,"restore visual peer context");
+    Require(SetEvent(event)!=0 && ResumeThread(peer)==1,"resume visual peer");
+    Require(WaitForSingleObject(peer,5000)==WAIT_OBJECT_0,"visual peer exits");
+    CloseHandle(peer); CloseHandle(event);
+}
+static void VisualGate() {
+    B* site=At(mo::kVisualSite);
+    const B stock[mo::kVisualSpan]={0x83,0xBF,0x2C,0x02,0x00,0x00,0x00,0x0F,0x85,0xC8,0x01,0x00,0x00};
+    Require(!std::memcmp(site,stock,sizeof stock),"0x72C9D2 is the pinned cmp [edi+22Ch],0 / jne 0x72CBA7");
+    B original[mo::kVisualSpan]; std::memcpy(original,site,sizeof original);
+    Require(site+mo::kVisualSpan==At(0x72C9DF) && A(At(0x72C9DF))+Get(site,9)==A(At(0x72CBA7)),"fall-through and jne target are 0x72C9DF and 0x72CBA7");
+    { const B fall[]={0x8D,0x8F,0xAC,0x0D,0x00,0x00}, skip[]={0x8B,0x87,0xEC,0x01,0x00,0x00};
+      PlantSentinel(0x72C9DF,fall,sizeof fall,&SentinelFall); PlantSentinel(0x72CBA7,skip,sizeof skip,&SentinelSkip); }
+    visualTarget=A(site);
+    const std::vector<VisualCase> cases=VisualCases();
+    // Native reference: the original bytes, no patch.  Zero count falls through to the candidate list, every other count takes the skip, whatever the class.
+    std::vector<VisualRun> native;
+    for(const VisualCase& c:cases) { native.push_back(RunVisualCase(c)); Require(native.back().route==VisualNativeRoute(c),"stock bytes: zero count -> list, any mount/equipment -> skip"); }
+    // Install refusals while still stock: a thread inside the displaced instructions (+3 in the cmp, +7 the jne opcode, +12 the last byte) and any foreign byte change.
+    Require(mo::RemoveVisual(delta),"remove without install is a no-op success");
+    for(U interior:{3u,7u,12u}) VisualInterior(false,A(site)+interior,"interior instruction pointer refuses the gate install");
+    for(U i=0;i<mo::kVisualSpan;++i) {
+        site[i]^=0x40; B modified[mo::kVisualSpan]; std::memcpy(modified,site,sizeof modified);
+        Require(!mo::InstallVisual(delta) && !std::memcmp(modified,site,sizeof modified),"install refuses any changed pinned byte and writes nothing");
+        site[i]^=0x40;
+    }
+    Require(!std::memcmp(original,site,sizeof original),"stock bytes restored by the harness after the foreign-change probes");
+    // Install: the first 8 bytes become jmp rel32 + 3 untouched original bytes, the tail 5 bytes are never written.
+    Require(mo::InstallVisual(delta),"install the visual gate");
+    Require((mo::words[mo::WFlags]&8u)!=0,"flags bit 3 reports the installed visual gate");
+    Require(site[0]==0xE9 && !std::memcmp(site+5,original+5,mo::kVisualSpan-5),"jmp rel32 over the first five bytes, every other original byte untouched");
+    const U gate=A(site)+5+Get(site,1);
+    Require(mo::InstallVisual(delta) && !mo::InstallVisual(delta+0x1000),"install is idempotent for its own image and refuses a different one");
+    for(size_t i=0;i<cases.size();++i) {
+        const VisualCase& c=cases[i];
+        const VisualRun run=RunVisualCase(c);
+        Require(run.route==VisualPatchedRoute(c),"installed gate: zero count or infantry -> candidate list, mounted cavalry/other classes/unreadable class -> skip");
+        Require(run.flags==native[i].flags,"flags leave the site as the native cmp leaves them");
+        Require(run.unit==native[i].unit && run.descriptor==native[i].descriptor,"unit and class bytes identical to the native run");
+    }
+    // The infantry-with-mount case is the one that moves (skip -> list); the cavalry and zero-count routes do not.
+    { const VisualCase mounted{1,static_cast<int>(mo::kCategoryInfantry)}, horse{1,0}, none{0,2};
+      Require(RunVisualCase(mounted).route==kFall && VisualNativeRoute(mounted)==kSkip,"infantry with a mount reaches the original candidate-list block instead of the skip");
+      Require(RunVisualCase(horse).route==kSkip && RunVisualCase(none).route==kFall,"cavalry with a horse stays on the original skip; zero equipment stays on the original list route"); }
+    // Refusals while installed: a thread inside the displaced span or anywhere in the gate (including its entry) keeps the patch; so does any foreign byte change.
+    { B patched[mo::kVisualSpan]; std::memcpy(patched,site,sizeof patched);
+      VisualInterior(true,A(site)+7,"interior instruction pointer refuses the gate removal");
+      VisualInterior(true,gate,"a thread at the gate entry refuses the removal");
+      VisualInterior(true,gate+3,"a thread inside the gate refuses the removal");
+      Require(!std::memcmp(patched,site,sizeof patched),"refused removals left the owned patch in place");
+      for(U i=0;i<mo::kVisualSpan;++i) {
+          site[i]^=0x40; B modified[mo::kVisualSpan]; std::memcpy(modified,site,sizeof modified);
+          Require(!mo::RemoveVisual(delta) && !std::memcmp(modified,site,sizeof modified),"remove refuses any foreign change of the patched site and writes nothing");
+          site[i]^=0x40;
+      }
+      Require(!std::memcmp(patched,site,sizeof patched) && RunVisualCase({1,static_cast<int>(mo::kCategoryInfantry)}).route==kFall,"owned patch still active after the refusals"); }
+    Require(mo::RemoveVisual(delta) && !std::memcmp(original,site,sizeof original) && (mo::words[mo::WFlags]&8u)==0,"remove restores all 13 original bytes and clears flags bit 3");
+    Require(mo::RemoveVisual(delta),"remove without install is a no-op success");
+    for(size_t i=0;i<cases.size();++i) Require(RunVisualCase(cases[i]).route==VisualNativeRoute(cases[i]) && RunVisualCase(cases[i]).flags==native[i].flags,"after removal every route is the stock route");
+}
+
 int main(int argc,char** argv) {
     if(argc<2) { std::fprintf(stderr,"usage: native_mounted_officer_oracle <Napoleon.exe>\n"); return 2; }
     Map(argv[1]);
@@ -412,6 +598,7 @@ int main(int argc,char** argv) {
     Predicates();
     Redirect();
     Placement();
+    VisualGate();
     std::printf("native_mounted_officer_oracle: OK (%u checks)\n",checks);
     return 0;
 }

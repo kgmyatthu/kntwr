@@ -1,7 +1,8 @@
 /*
- * kntwr.exe - native launcher for KNTWR, Kaung's Napoleon Total War Runtime (x86 multithreading runtime for Napoleon Total War).
+ * KNTWR.exe - native launcher for KNTWR, Kaung's Napoleon Total War Runtime (x86 multithreading runtime for Napoleon Total War).
  *
- * Flow: locate game directory (argument or prompt) -> validate Napoleon.exe (PE32/i386 + SHA-256 pin, streamed, no heap
+ * Flow: locate game directory (--game argument, else the saved configuration, else every Steam library, else -- interactively
+ * only -- a folder picker) -> validate Napoleon.exe (PE32/i386 + SHA-256 pin, streamed, no heap
  * copy) -> validate the adjacent runtime DLL (PE32/i386 DLL, start/stop/state/profile/trace exports, file-mapped, no
  * heap copy) -> refuse if any Napoleon.exe is already running -> CreateProcessW the game -> wait for loader stability ->
  * verify the remote lifetime (image file identity, main module base) -> remote LoadLibraryW of the runtime DLL ->
@@ -55,9 +56,10 @@
 #include "profile/kntwr_profile.h"
 #include "core/kntwr_gameplay_patch.h"
 #include "census.h"
+#include "setup.h"
 
 #if !defined(_M_IX86) && !defined(__i386__)
-#error "kntwr.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
+#error "KNTWR.exe must be built as a 32-bit x86 executable: it resolves 32-bit system exports for the 32-bit game process."
 #endif
 
 #pragma comment(lib, "bcrypt.lib")
@@ -92,8 +94,13 @@ enum {
 };
 
 /* ------------------------------------------------------------------------------------------------ console output */
-static HANDLE g_hout, g_herr, g_hin;
-static BOOL g_out_con, g_err_con, g_in_con;
+static HANDLE g_hout, g_herr;
+static BOOL g_out_con, g_err_con;
+static wchar_t g_err_text[2048];  /* newline-joined text of every errsay() call, shown by the quiet-failure MessageBox */
+static size_t g_err_len;
+static BOOL g_redirected;         /* any std handle is a pipe/file: sampled in wmain before console acquisition */
+static BOOL g_attached;           /* the process attached to the caller's terminal (text output is visible there) */
+static BOOL g_ui_mute;            /* --check/--validate-only: read-only runs never show a dialog */
 
 static void emit(HANDLE h, BOOL con, const wchar_t *s, size_t n)
 {
@@ -136,6 +143,89 @@ static void errsay(const wchar_t *fmt, ...)
     va_start(ap, fmt);
     vsay(g_herr, g_err_con, L"kntwr: error: ", fmt, ap);
     va_end(ap);
+    /* Also keep the message for the quiet-failure MessageBox (a double-click run has nowhere else to show it). */
+    va_start(ap, fmt);
+    {
+        wchar_t buf[MAXP];
+        int n = _vsnwprintf_s(buf, MAXP, _TRUNCATE, fmt, ap);
+        if (n > 0) {
+            while (n && buf[n - 1] == L'\n') --n;
+            if (g_err_len + 2 + (size_t)n >= sizeof g_err_text / sizeof g_err_text[0]) g_err_len = 0; /* keep the newest */
+            if (g_err_len) g_err_text[g_err_len++] = L'\n';
+            memcpy(g_err_text + g_err_len, buf, (size_t)n * sizeof(wchar_t));
+            g_err_len += (size_t)n;
+            g_err_text[g_err_len] = 0;
+        }
+    }
+    va_end(ap);
+}
+
+/* KNTWR.exe is a Windows-subsystem executable (CMakeLists: /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup), so Windows never
+   creates a console for it: no window can flash on a double-click or when a wrapper spawns it, and a caller that
+   redirected stdout/stderr (pipe or file) gets exactly that output with no console touched.  The shipping no-argument
+   run is fully quiet but never drops the caller's text: when the standard handles are an inherited terminal (a GUI
+   process gets the handles without the attachment, and console writes are rejected without it), it attaches to that
+   terminal only -- AttachConsole creates no window and never hides or detaches a shared terminal, and the inherited
+   handles start working as-is; no handle is ever replaced.  AllocConsole (a window of our own) happens only for
+   --console (development) with no terminal to attach to. */
+static BOOL std_handle_usable(DWORD which)
+{
+    HANDLE h = GetStdHandle(which);
+    return h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+}
+
+/* TRUE when a standard handle is a console device handle (FILE_TYPE_CHAR) that console APIs reject, i.e. the caller's
+   console handle was inherited without console attachment.  GetConsoleMode on NUL also fails, so this also reports NUL;
+   treating it as "needs attach" is harmless (attaching changes nothing visibly and no handle is replaced). */
+static BOOL std_handle_inherited_console(DWORD which)
+{
+    HANDLE h = GetStdHandle(which);
+    DWORD mode;
+    return h && h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_CHAR && !GetConsoleMode(h, &mode);
+}
+
+static void std_handle_from_console(DWORD which, const wchar_t *device)
+{
+    HANDLE h;
+    if (std_handle_usable(which)) return;
+    h = CreateFileW(device, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) SetStdHandle(which, h);
+}
+
+/* TRUE when any standard handle is redirected to a pipe or file: an automated/wrapper run.  Sampled before any console
+   is acquired so the launcher's own attach/alloc cannot mask the caller's redirection. */
+static BOOL std_redirected(void)
+{
+    static const DWORD which[3] = { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE };
+    int i;
+    for (i = 0; i < 3; ++i) {
+        HANDLE h = GetStdHandle(which[i]);
+        DWORD t;
+        if (!h || h == INVALID_HANDLE_VALUE) continue;
+        t = GetFileType(h);
+        if (t == FILE_TYPE_DISK || t == FILE_TYPE_PIPE) return TRUE;
+    }
+    return FALSE;
+}
+
+static void acquire_console(int console_mode) /* 1 = --console, 0 = default, -1 = --no-console */
+{
+    BOOL inherited_console = std_handle_inherited_console(STD_INPUT_HANDLE) ||
+                             std_handle_inherited_console(STD_OUTPUT_HANDLE) ||
+                             std_handle_inherited_console(STD_ERROR_HANDLE);
+    if (console_mode < 0) return; /* --no-console: leave every handle and every console exactly as the caller left it */
+    if (console_mode == 0) {
+        /* Quiet default: attach to the caller's terminal only when its handles were inherited without the attachment
+           (otherwise every text write would be dropped).  Never create a console of our own, never touch a handle. */
+        if (inherited_console && AttachConsole(ATTACH_PARENT_PROCESS)) g_attached = TRUE;
+        return;
+    }
+    if (!inherited_console && std_handle_usable(STD_OUTPUT_HANDLE) && std_handle_usable(STD_ERROR_HANDLE)) return;
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) g_attached = TRUE;
+    else if (!AllocConsole()) return;
+    std_handle_from_console(STD_INPUT_HANDLE, L"CONIN$");
+    std_handle_from_console(STD_OUTPUT_HANDLE, L"CONOUT$");
+    std_handle_from_console(STD_ERROR_HANDLE, L"CONOUT$");
 }
 
 static void init_console(void)
@@ -143,10 +233,8 @@ static void init_console(void)
     DWORD mode;
     g_hout = GetStdHandle(STD_OUTPUT_HANDLE);
     g_herr = GetStdHandle(STD_ERROR_HANDLE);
-    g_hin = GetStdHandle(STD_INPUT_HANDLE);
     g_out_con = g_hout && g_hout != INVALID_HANDLE_VALUE && GetConsoleMode(g_hout, &mode);
     g_err_con = g_herr && g_herr != INVALID_HANDLE_VALUE && GetConsoleMode(g_herr, &mode);
-    g_in_con = g_hin && g_hin != INVALID_HANDLE_VALUE && GetConsoleMode(g_hin, &mode);
 }
 
 static void win_message(DWORD e, wchar_t *out, size_t n)
@@ -172,8 +260,8 @@ typedef struct FileId {
 /* On-disk state of mss32.dll.  Only Napoleon.exe is required to be a supported image: the gameplay patch does not depend on the
    audio DLL, so an unrecognised or missing mss32.dll is reported loudly (console + receipt) and the in-memory audio patch is
    skipped; it is never silently labelled patched. */
-enum { MSS_MISSING = 0, MSS_STOCK, MSS_PATCHED, MSS_UNKNOWN };
-static const char *const k_mss_state_name[4] = { "missing", "stock", "patched", "unknown" };
+enum { MSS_MISSING = 0, MSS_STOCK, MSS_UNKNOWN };
+static const char *const k_mss_state_name[3] = { "missing", "stock", "unknown" };
 
 typedef struct Options {
     wchar_t game[MAXP];
@@ -233,7 +321,7 @@ typedef struct Options {
     kntwr_gp_filter gp_filter;/* --gameplay-patch-only-runs / --gameplay-patch-skip-runs: which non-header runs the in-memory applier writes (the D3D9 swap runs are removed with --no-d3d9-swap) */
     BOOL gp_filter_listed;   /* an explicit --gameplay-patch-*-runs list was given */
     BOOL no_d3d9_swap;       /* --no-d3d9-swap: leave the patch's Direct3DCreate9 swap (runs 65, 92) stock; default writes the whole patch */
-    BOOL steam;              /* --steam: give the game SteamAppId/SteamGameId=34030 (multiplayer, lobbies, overlay); opt-in while the Steam-attached startup crash is open */
+    BOOL steam;              /* --steam (default) / --no-steam: give the game SteamAppId/SteamGameId=34030 (multiplayer, lobbies, overlay) */
     wchar_t game_exe[MAXP];  /* --game-exe NAME */
     uint32_t va_floor_mib;   /* --va-floor-mib N, 64..1024 (0 = default 256): total free VA floor, bits 22..26 of va_watch_flags in 32 MiB units */
     uint32_t va_hole_mib;    /* --va-hole-mib M, 32..512 (0 = default 128): largest free hole floor, bits 27..31 of va_watch_flags in 32 MiB units */
@@ -264,6 +352,9 @@ typedef struct Options {
     uint32_t inject_timeout_s;
     BOOL activate;
     BOOL validate_only;
+    BOOL no_launch;         /* --no-launch: validate + save the resolved game folder, start nothing; no picker, no dialog */
+    BOOL setup;             /* --setup: pick a game folder with the native picker, validate exe + DLL, save it, start nothing */
+    BOOL no_steam;          /* --no-steam: start the game without the Steam app id (flag accepted; steam=FALSE does the work) */
     BOOL allow_concurrent;
     BOOL focus;
     BOOL exit_game_after_observe;
@@ -331,6 +422,10 @@ typedef struct Run {
     uint32_t mss32_base;
     kntwr_gp_report gp_rep, mss32_rep;
     HANDLE exe_file;   /* held share-read-only from validation until the game is set up: no swap/modify window */
+    /* The creation-time reservation for the gameplay-patched child (kntwr_gameplay_patch.h): planned from the held source
+       handle, attached through a scoped import wrapper, verified before patching, released by the remap exactly once. */
+    kntwr_gp_reserve gp_rsv;
+    kntwr_gp_reserve_report gp_rsv_rep;
     HANDLE dll_file;
     DllInfo dll;
     HANDLE proc;
@@ -429,6 +524,7 @@ static const struct { uint32_t bit; const wchar_t *name; const char *jname; } k_
     { KNTWR_AI_CENSUS, L"ai_census", "ai_census" },
     { KNTWR_AI_ASYNC2, L"ai_async2", "ai_async2" },
     { KNTWR_ARMY_UNIT_SHADOW, L"army_unit_shadow", "army_unit_shadow" },
+    { KNTWR_CAVALRY_ORBIT, L"cavalry_orbit", "cavalry_orbit" },
 };
 #define NFEATURES (sizeof k_features / sizeof k_features[0])
 
@@ -755,47 +851,6 @@ static BOOL resolve_game_dir(const wchar_t *in, wchar_t *out)
     return TRUE;
 }
 
-/* Suggest the Steam install when it can be found; never required. */
-static BOOL suggest_game_dir(wchar_t *out)
-{
-    static const wchar_t *const keys[] = { L"SOFTWARE\\Valve\\Steam", L"SOFTWARE\\WOW6432Node\\Valve\\Steam" };
-    wchar_t steam[MAXP], cand[MAXP], exe[MAXP];
-    size_t i;
-    for (i = 0; i < 3; ++i) {
-        HKEY k;
-        DWORD type, sz = sizeof steam - sizeof(wchar_t);
-        LONG r;
-        steam[0] = 0;
-        if (i == 0) r = RegOpenKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\Valve\\Steam", 0, KEY_READ | KEY_WOW64_32KEY, &k);
-        else r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, keys[i - 1], 0, KEY_READ, &k);
-        if (r != ERROR_SUCCESS) continue;
-        r = RegQueryValueExW(k, i == 0 ? L"SteamPath" : L"InstallPath", NULL, &type, (LPBYTE)steam, &sz);
-        RegCloseKey(k);
-        if (r != ERROR_SUCCESS || type != REG_SZ) continue;
-        steam[sz / sizeof(wchar_t)] = 0;
-        {
-            wchar_t *p;
-            for (p = steam; *p; ++p) if (*p == L'/') *p = L'\\';
-        }
-        _snwprintf_s(cand, MAXP, _TRUNCATE, L"%ls\\steamapps\\common\\Napoleon Total War", steam);
-        join_path(exe, cand, GAME_EXE_NAME);
-        if (GetFileAttributesW(exe) != INVALID_FILE_ATTRIBUTES) {
-            wcscpy_s(out, MAXP, cand);
-            return TRUE;
-        }
-    }
-    return FALSE;
-}
-
-static BOOL read_line(wchar_t *buf, DWORD cap)
-{
-    DWORD n = 0;
-    if (!ReadConsoleW(g_hin, buf, cap - 1, &n, NULL)) return FALSE;
-    buf[n] = 0;
-    trim_input(buf);
-    return TRUE;
-}
-
 /* ------------------------------------------------------------------------------------------------ game validation */
 static BOOL validate_game(Run *r)
 {
@@ -864,18 +919,14 @@ static BOOL validate_game(Run *r)
         r->exe_is_stock = TRUE;
         say(L"Napoleon.exe: stock (gameplay patch applied in memory; x86 PE32, %I64u bytes, SHA-256 match).\n",
             (unsigned long long)r->exe_size);
-    } else if (_stricmp(r->exe_sha, KNTWR_IMAGE_SHA256) == 0) {
-        r->exe_is_stock = FALSE;
-        say(L"Napoleon.exe: already patched on disk (in-memory gameplay patch skipped; x86 PE32, %I64u bytes, SHA-256 match).\n",
-            (unsigned long long)r->exe_size);
     } else {
-        wchar_t got[65], want_s[65], want_p[65];
+        wchar_t got[65], want_s[65];
         MultiByteToWideChar(CP_ACP, 0, r->exe_sha, -1, got, 65);
         MultiByteToWideChar(CP_ACP, 0, KNTWR_STOCK_IMAGE_SHA256, -1, want_s, 65);
-        MultiByteToWideChar(CP_ACP, 0, KNTWR_IMAGE_SHA256, -1, want_p, 65);
-        errsay(L"\"%ls\" is not a supported Napoleon.exe.\n  size   : %I64u bytes\n  sha256 : %ls\n  stock  : %ls\n  patched: %ls\n"
-               L"Only the stock Steam image or the pinned patched image is supported; the game files were not modified.\n",
-               r->exe_path, (unsigned long long)r->exe_size, got, want_s, want_p);
+        errsay(L"\"%ls\" is not a supported Napoleon.exe.\n  size   : %I64u bytes\n  sha256 : %ls\n  stock  : %ls\n"
+               L"Only the stock Steam executable is supported. Restore it with Steam > Properties > Installed Files > Verify integrity of game files.\n"
+               L"The game files were not modified.\n",
+               r->exe_path, (unsigned long long)r->exe_size, got, want_s);
         return FALSE;
     }
     {
@@ -894,13 +945,10 @@ static BOOL validate_game(Run *r)
             } else if (_stricmp(r->mss32_sha, KNTWR_STOCK_MSS32_SHA256) == 0) {
                 r->mss32_state = MSS_STOCK;
                 say(L"mss32.dll: stock (audio DSP patch applied in memory; %I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
-            } else if (_stricmp(r->mss32_sha, KNTWR_MSS32_SHA256) == 0) {
-                r->mss32_state = MSS_PATCHED;
-                say(L"mss32.dll: already patched on disk (%I64u bytes, SHA-256 match).\n", (unsigned long long)r->mss32_size);
             } else {
                 wchar_t got[65];
                 MultiByteToWideChar(CP_ACP, 0, r->mss32_sha, -1, got, 65);
-                say(L"mss32.dll: UNKNOWN (%I64u bytes, sha256 %ls; neither stock nor the pinned patched build). The in-memory audio patch is skipped.\n",
+                say(L"mss32.dll: UNKNOWN (%I64u bytes, sha256 %ls; not the supported stock build). The in-memory audio patch is skipped.\n",
                     (unsigned long long)r->mss32_size, got);
             }
             CloseHandle(mf);
@@ -922,7 +970,7 @@ static BOOL validate_runtime(Run *r)
     BOOL ok = FALSE;
 
     if (GetModuleFileNameW(NULL, self, MAXP) == 0 || GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-        win_fail(L"locating kntwr.exe", GetLastError());
+        win_fail(L"locating KNTWR.exe", GetLastError());
         return FALSE;
     }
     slash = wcsrchr(self, L'\\');
@@ -934,7 +982,7 @@ static BOOL validate_runtime(Run *r)
         DWORD e = GetLastError();
         r->dll_file = NULL;
         if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)
-            errsay(L"runtime DLL \"%ls\" was not found next to kntwr.exe.\n", r->dll_path);
+            errsay(L"runtime DLL \"%ls\" was not found next to KNTWR.exe.\n", r->dll_path);
         else win_fail(L"opening the runtime DLL", e);
         return FALSE;
     }
@@ -1302,7 +1350,62 @@ static BOOL resolve_remote_loadlibrary(Run *r, uint32_t *addr)
 
 enum { RC_OK = 0, RC_TIMEOUT, RC_DIED, RC_CREATE };
 
-static int remote_call(Run *r, uint32_t fn, uint32_t arg, DWORD timeout_ms, DWORD *exit_code, DWORD *err)
+/* A dying process terminates every one of its threads, a remote call's thread included, with the process exit status as
+   the thread exit code.  That status is not the function's return value, so remote_call classifies a finished thread against
+   the process before it hands the exit code to its caller.  The wait ceiling matches the other post-termination waits. */
+enum { kDeathSettleMs = 5000 };
+
+static const wchar_t *exit_status_name(DWORD s)
+{
+    switch (s) {
+    case 0xC0000005u: return L" STATUS_ACCESS_VIOLATION";
+    case 0xC000001Du: return L" STATUS_ILLEGAL_INSTRUCTION";
+    case 0xC0000094u: return L" STATUS_INTEGER_DIVIDE_BY_ZERO";
+    case 0xC00000FDu: return L" STATUS_STACK_OVERFLOW";
+    case 0xC0000135u: return L" STATUS_DLL_NOT_FOUND";
+    case 0xC0000142u: return L" STATUS_DLL_INIT_FAILED";
+    case 0xC00001A5u: return L" STATUS_INVALID_EXCEPTION_HANDLER";
+    case 0xC0000374u: return L" STATUS_HEAP_CORRUPTION";
+    case 0xC0000409u: return L" STATUS_STACK_BUFFER_OVERRUN";
+    case 0x80000003u: return L" STATUS_BREAKPOINT";
+    default: return L"";
+    }
+}
+
+/* TRUE once the game process has terminated (object signalled, or its exit status already published). */
+static BOOL game_terminated(Run *r)
+{
+    DWORD status;
+    if (WaitForSingleObject(r->proc, 0) == WAIT_OBJECT_0) return TRUE;
+    return GetExitCodeProcess(r->proc, &status) && status != STILL_ACTIVE;
+}
+
+/* Records an observed game exit (receipt game_exited / game_exit_code and the failure summary) without touching a live game. */
+static void note_game_exit(Run *r)
+{
+    DWORD status;
+    if (r->game_exited || !r->proc) return;
+    if (!GetExitCodeProcess(r->proc, &status)) return;
+    if (status == STILL_ACTIVE && WaitForSingleObject(r->proc, 0) != WAIT_OBJECT_0) return;
+    r->game_exited = TRUE;
+    r->game_exit = status;
+}
+
+/* The game died while a remote call was in flight: record its exit status and report that as the cause. */
+static void report_remote_death(Run *r, const wchar_t *what)
+{
+    note_game_exit(r);
+    if (r->game_exited)
+        errsay(L"%ls: the game process exited while the remote call was running (exit status 0x%08lX%ls).\n", what,
+               (unsigned long)r->game_exit, exit_status_name(r->game_exit));
+    else
+        errsay(L"%ls: the game process exited while the remote call was running.\n", what);
+}
+
+/* impossible_bits: exit-code bits a genuine return value never has (an HMODULE is 64 KiB aligned; the kntwr entry points
+   return small codes).  A code with one of them set is a process exit status; the process object is then awaited, which
+   settles the thread-versus-process signalling order without delaying any real result. */
+static int remote_call(Run *r, uint32_t fn, uint32_t arg, DWORD timeout_ms, DWORD impossible_bits, DWORD *exit_code, DWORD *err)
 {
     HANDLE th, w[2];
     DWORD tid, wr;
@@ -1314,6 +1417,8 @@ static int remote_call(Run *r, uint32_t fn, uint32_t arg, DWORD timeout_ms, DWOR
     wr = WaitForMultipleObjects(2, w, FALSE, timeout_ms);
     if (wr == WAIT_OBJECT_0 || (wr == WAIT_OBJECT_0 + 1 && WaitForSingleObject(th, 0) == WAIT_OBJECT_0)) {
         if (!GetExitCodeThread(th, exit_code)) { *err = GetLastError(); rc = RC_CREATE; }
+        else if (game_terminated(r) ||
+                 ((*exit_code & impossible_bits) && WaitForSingleObject(r->proc, kDeathSettleMs) == WAIT_OBJECT_0)) rc = RC_DIED;
         else rc = RC_OK;
     } else if (wr == WAIT_OBJECT_0 + 1) {
         rc = RC_DIED;
@@ -2423,9 +2528,9 @@ static void print_mounted_officer(const uint32_t *w)
     unsigned i;
     if (!w[0]) return;
     say(L"  mounted_officer: units_seen=%lu eligible(no mounts)=%lu officer_first=%lu has_mounts=%lu skipped_no_refs=%lu skipped_no_officer=%lu MOUNTS_CREATED=%lu "
-        L"attach_failures=%lu alloc_failures=%lu faults=%lu widen=%lu patch_installed=%lu\n",
+        L"attach_failures=%lu alloc_failures=%lu faults=%lu widen=%lu patch_installed=%lu visual_gate=%lu\n",
         (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8],
-        (unsigned long)w[9], (unsigned long)w[10], (unsigned long)w[14], (unsigned long)(w[1] >> 1 & 1u), (unsigned long)w[15]);
+        (unsigned long)w[9], (unsigned long)w[10], (unsigned long)w[14], (unsigned long)(w[1] >> 1 & 1u), (unsigned long)w[15], (unsigned long)(w[1] >> 3 & 1u));
     say(L"  mounted_officer words:");
     for (i = 0; i < KNTWR_MOUNTED_OFFICER_WORDS; ++i) say(L" %hs=%lu", k_mounted_officer_metrics[i], (unsigned long)w[i]);
     say(L"\n");
@@ -3602,6 +3707,14 @@ static void sb_wstr(Sb *b, const wchar_t *s)
         else sb_put(b, (const char *)&c, 1);
     }
     sb_put(b, "\"", 1);
+}
+
+/* A short ASCII/ANSI diagnostic (the gameplay patch's error buffers) as a JSON string. */
+static void sb_astr(Sb *b, const char *s)
+{
+    wchar_t w[256];
+    if (MultiByteToWideChar(CP_ACP, 0, s, -1, w, 256) <= 0) w[0] = 0;
+    sb_wstr(b, w);
 }
 
 static void iso_time(const FILETIME *ft, char *out, size_t n)
@@ -5078,7 +5191,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     }
     GetSystemTimePreciseAsFileTime(&now);
     sb_put(&b, "{\n", 2);
-    sb_fmt(&b, "  \"tool\": \"kntwr.exe\",\n  \"abi\": %u,\n", KNTWR_ABI);
+    sb_fmt(&b, "  \"tool\": \"KNTWR.exe\",\n  \"abi\": %u,\n", KNTWR_ABI);
     iso_time(&r->t_start, ts, sizeof ts);
     sb_fmt(&b, "  \"started\": \"%s\",\n", ts);
     iso_time(&now, ts, sizeof ts);
@@ -5095,7 +5208,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, ",\n  \"image_sha256\": \"%s\",\n  \"image_size\": %I64u,\n  \"image_sha256_expected\": \"%s\",\n", r->exe_sha,
            (unsigned long long)r->exe_size, KNTWR_IMAGE_SHA256);
     sb_fmt(&b, "  \"image_on_disk\": \"%s\",\n  \"image_sha256_stock_expected\": \"%s\",\n",
-           r->exe_is_stock ? "stock" : "patched", KNTWR_STOCK_IMAGE_SHA256);
+           r->exe_is_stock ? "stock" : "unknown", KNTWR_STOCK_IMAGE_SHA256);
     {
         const kntwr_gp_report *g = &r->gp_rep;
         sb_fmt(&b, "  \"gameplay_patch\": {\n    \"on_disk\": \"%s\",\n    \"applied\": %s,\n    \"status\": %lu,\n"
@@ -5106,7 +5219,7 @@ static BOOL write_receipt(Run *r, int exit_code)
                    "    \"proof_site_bytes\": \"%02x%02x%02x%02x%02x\",\n    \"proof_section_va\": \"0x%08lX\",\n"
                    "    \"proof_section_bytes\": \"%02x%02x%02x%02x%02x%02x%02x%02x\",\n    \"live_verified\": %s,\n    \"d3d9_swap\": %s,\n"
                    "    \"mss32_on_disk\": \"%s\",\n    \"mss32_applied\": %s,\n    \"mss32_runs_applied\": %lu,\n    \"mss32_bytes_applied\": %lu\n  },\n",
-               r->exe_is_stock ? "stock" : "patched", r->gp_applied ? "true" : "false", (unsigned long)g->status,
+               r->exe_is_stock ? "stock" : "unknown", r->gp_applied ? "true" : "false", (unsigned long)g->status,
                (unsigned long)g->runs_total, (unsigned long)g->runs_header, (unsigned long)g->runs_applied, (unsigned long)g->runs_skipped, (unsigned long)g->bytes_applied,
                (unsigned long)g->fixups_stock_unrelocated, (unsigned long)g->fixups_patched_relocated,
                (unsigned long)g->sections_mapped, (unsigned long)g->section_bytes, (unsigned long)g->section_fixups,
@@ -5116,9 +5229,34 @@ static BOOL write_receipt(Run *r, int exit_code)
                g->proof_section_bytes[0], g->proof_section_bytes[1], g->proof_section_bytes[2], g->proof_section_bytes[3],
                g->proof_section_bytes[4], g->proof_section_bytes[5], g->proof_section_bytes[6], g->proof_section_bytes[7],
                r->gp_live_verified ? "true" : "false",
-               (r->gp_applied ? !r->opt.no_d3d9_swap : !r->exe_is_stock) ? "true" : "false",
+               (r->gp_applied && !r->opt.no_d3d9_swap) ? "true" : "false",
                k_mss_state_name[r->mss32_state], r->mss32_applied ? "true" : "false",
                (unsigned long)r->mss32_rep.runs_applied, (unsigned long)r->mss32_rep.bytes_applied);
+    }
+    {
+        const kntwr_gp_reserve *v = &r->gp_rsv;
+        const kntwr_gp_reserve_report *s = &r->gp_rsv_rep;
+        const kntwr_gp_remalloc_diag *d = &r->gp_rep.remap;
+        sb_fmt(&b, "  \"launch_reserve\": {\n    \"active\": %s,\n    \"predicted_base\": \"0x%08lX\",\n    \"reserve_base\": \"0x%08lX\",\n"
+                   "    \"reserve_size\": \"0x%08lX\",\n    \"stock_size_of_image\": \"0x%08lX\",\n    \"patched_size_of_image\": \"0x%08lX\",\n"
+                   "    \"hook_installed\": %s,\n    \"hook_restored\": %s,\n    \"calls_seen\": %lu,\n    \"calls_modified\": %lu,\n"
+                   "    \"reject\": %lu,\n    \"hook_ntstatus\": \"0x%08lX\",\n    \"status\": %lu,\n    \"stage\": \"%s\",\n    \"code\": \"0x%08lX\",\n"
+                   "    \"code_is_ntstatus\": %s,\n    \"error\": ",
+               v->reserve_size ? "true" : "false", (unsigned long)v->predicted_base, (unsigned long)v->reserve_base,
+               (unsigned long)v->reserve_size, (unsigned long)v->stock_soi, (unsigned long)v->patched_soi,
+               v->hook_installed ? "true" : "false", v->hook_restored ? "true" : "false",
+               (unsigned long)v->calls_seen, (unsigned long)v->calls_modified, (unsigned long)v->reject,
+               (unsigned long)v->hook_ntstatus, (unsigned long)s->status, kntwr_gp_reserve_stage_name(s->stage),
+               (unsigned long)s->code, s->code_is_ntstatus ? "true" : "false");
+        sb_astr(&b, s->error);
+        sb_fmt(&b, ",\n    \"gameplay_patch_error\": ");
+        sb_astr(&b, r->gp_rep.error);
+        sb_fmt(&b, ",\n    \"gameplay_patch_phase\": %lu,\n    \"remap\": {\"stage\": \"%s\", \"code\": \"0x%08lX\", \"code_is_ntstatus\": %s, \"mutated\": %s, "
+                   "\"region_base\": \"0x%08lX\", \"region_size\": \"0x%08lX\", \"region_state\": \"0x%08lX\", \"region_type\": \"0x%08lX\", "
+                   "\"region_alloc_base\": \"0x%08lX\"}\n  },\n",
+               (unsigned long)r->gp_rep.phase, kntwr_gp_remalloc_stage_name(d->stage), (unsigned long)d->code, d->code_is_ntstatus ? "true" : "false",
+               d->mutated ? "true" : "false", (unsigned long)d->region_base, (unsigned long)d->region_size, (unsigned long)d->region_state,
+               (unsigned long)d->region_type, (unsigned long)d->region_alloc_base);
     }
     sb_put(&b, "  \"runtime_dll\": ", 17);
     sb_wstr(&b, r->dll_path);
@@ -5181,6 +5319,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"collide_contact_shadow\": %s,\n", r->opt.collide_contact_shadow ? "true" : "false");
     sb_fmt(&b, "  \"collide_contact_workers\": %s,\n", r->opt.collide_contact_workers ? "true" : "false");
     sb_fmt(&b, "  \"army_unit_shadow\": %s,\n", (r->opt.mask & KNTWR_ARMY_UNIT_SHADOW) ? "true" : "false");
+    sb_fmt(&b, "  \"cavalry_orbit\": %s,\n", (r->opt.mask & KNTWR_CAVALRY_ORBIT) ? "true" : "false");
     sb_fmt(&b, "  \"armed\": %s,\n  \"reached_full_activation\": %s,\n  \"remote_thread_outstanding\": %s,\n",
            r->ever_armed ? "true" : "false", r->ever_full ? "true" : "false", r->remote_leaked ? "true" : "false");
     sb_fmt(&b, "  \"game_exited\": %s,\n  \"game_exit_code\": %lu,\n", r->game_exited ? "true" : "false",
@@ -5811,6 +5950,15 @@ static BOOL write_profile(Run *r)
     return TRUE;
 }
 
+/* A launch that failed after CreateProcessW: nothing of the suspended process may survive. */
+static void launch_abort(PROCESS_INFORMATION *pi)
+{
+    TerminateProcess(pi->hProcess, 1);
+    WaitForSingleObject(pi->hProcess, 2000);
+    CloseHandle(pi->hThread);
+    CloseHandle(pi->hProcess);
+}
+
 /* Releases launcher resources; game shutdown, when requested, happens before this. */
 static int finish(Run *r, int code, const wchar_t *outcome)
 {
@@ -5985,11 +6133,11 @@ static int install_runtime(Run *r)
     /* Lifetime verification: the process image is the validated file, and the first module is that image. */
     if (!QueryFullProcessImageNameW(r->proc, 0, proc_path, &plen)) { win_fail(L"querying the game's image path", GetLastError()); return EXIT_INSTALL; }
     if (!file_id_path(proc_path, &pid_id) || !same_id(&pid_id, &r->exe_id)) {
-        errsay(L"the running process image \"%ls\" is not the validated Napoleon.exe; runtime not installed.\n", proc_path);
+        errsay(L"the running process image \"%ls\" is not the validated Napoleon.exe \"%ls\"; runtime not installed.\n", proc_path, r->exe_path);
         return EXIT_INSTALL;
     }
     if (!file_id_path(scan.main_path, &mod_id) || !same_id(&mod_id, &r->exe_id)) {
-        errsay(L"the game's main module \"%ls\" is not the validated Napoleon.exe; runtime not installed.\n", scan.main_path);
+        errsay(L"the game's main module \"%ls\" is not the validated Napoleon.exe \"%ls\"; runtime not installed.\n", scan.main_path, r->exe_path);
         return EXIT_INSTALL;
     }
     why = read_remote_ident(r->proc, scan.main_base, FALSE, &id);
@@ -6017,7 +6165,8 @@ static int install_runtime(Run *r)
         NameFind mf;
         uint32_t msz = 0, tries;
         const uint8_t *mb = kntwr_gp_mss32_blob(&msz);
-        kntwr_gp_memory mm = kntwr_gp_process_memory(r->proc);
+        kntwr_gp_pm mm_ctx;
+        kntwr_gp_memory mm;
         ThreadFreeze fz;
         wchar_t why_freeze[256];
         unsigned fz_count;
@@ -6042,6 +6191,8 @@ static int install_runtime(Run *r)
             return EXIT_INSTALL;
         }
         fz_count = fz.n;
+        kntwr_gp_pm_init(&mm_ctx, r->proc);
+        mm = kntwr_gp_pm_memory(&mm_ctx);
         mrc = kntwr_gp_apply(&mm, mf.base, 0x21100000u, mb, msz, &r->mss32_rep);
         if (mrc != 0 && r->mss32_rep.rollback == KNTWR_GP_ROLLBACK_FAILED) {
             /* The patch is partly written and could not be undone: the launcher-owned game must not run. */
@@ -6135,18 +6286,20 @@ static int install_runtime(Run *r)
     HeapFree(GetProcessHeap(), 0, local);
 
     say(L"Loading %ls into the game ...\n", r->dll_path);
-    rc = remote_call(r, ll_addr, mem + sizeof r->cfg, 60000, &code, &err);
+    rc = remote_call(r, ll_addr, mem + sizeof r->cfg, 60000, 0xFFFFu, &code, &err);
     if (rc != RC_OK) {
         if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(LoadLibraryW)", err);
+        else if (rc == RC_DIED) report_remote_death(r, L"remote LoadLibraryW");
         else errsay(L"remote LoadLibraryW %ls.\n", rc_text(rc));
         if (rc == RC_TIMEOUT) r->remote_leaked = TRUE;
         else if (rc != RC_DIED) VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);
-        if (rc == RC_DIED) { GetExitCodeProcess(r->proc, &code); r->game_exited = TRUE; r->game_exit = code; }
         return EXIT_INSTALL;
     }
     if (code == 0) {
+        note_game_exit(r);
         errsay(L"LoadLibraryW returned NULL inside the game for \"%ls\" (missing dependency, wrong architecture or blocked "
-               L"load). The game keeps running unmodified.\n", r->dll_path);
+               L"load). %ls\n", r->dll_path,
+               r->game_exited ? L"The game process has since exited." : L"The game keeps running unmodified.");
         VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);
         return EXIT_INSTALL;
     }
@@ -6171,13 +6324,13 @@ static int install_runtime(Run *r)
     r->state_addr = r->dll_base + r->dll.state_rva;
     say(L"Runtime loaded at 0x%08lX and verified against the local file.\n", (unsigned long)r->dll_base);
 
-    rc = remote_call(r, r->dll_base + r->dll.start_rva, mem, 30000, &code, &err);
+    rc = remote_call(r, r->dll_base + r->dll.start_rva, mem, 30000, 0xFFFF0000u, &code, &err);
     if (rc != RC_OK) {
         if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(kntwr_start)", err);
+        else if (rc == RC_DIED) report_remote_death(r, L"kntwr_start");
         else errsay(L"kntwr_start %ls.\n", rc_text(rc));
         if (rc == RC_TIMEOUT) r->remote_leaked = TRUE;
         else if (rc != RC_DIED) VirtualFreeEx(r->proc, (LPVOID)(uintptr_t)mem, 0, MEM_RELEASE);
-        if (rc == RC_DIED) { GetExitCodeProcess(r->proc, &code); r->game_exited = TRUE; r->game_exit = code; }
         return EXIT_INSTALL;
     }
     if (code != 0) {
@@ -6209,9 +6362,10 @@ static BOOL request_stop(Run *r)
     BOOL have_prev = FALSE;
     kntwr_status prev;
     say(L"Stopping the runtime (restoring hooks); the game keeps running ...\n");
-    rc = remote_call(r, r->dll_base + r->dll.stop_rva, 0, kStopProgressCapMs, &code, &err);
+    rc = remote_call(r, r->dll_base + r->dll.stop_rva, 0, kStopProgressCapMs, 0xFFFF0000u, &code, &err);
     if (rc != RC_OK) {
         if (rc == RC_CREATE) win_fail(L"CreateRemoteThread(kntwr_stop)", err);
+        else if (rc == RC_DIED) report_remote_death(r, L"kntwr_stop");
         else errsay(L"kntwr_stop %ls.\n", rc_text(rc));
         if (rc == RC_TIMEOUT) r->remote_leaked = TRUE;
         return FALSE;
@@ -6391,7 +6545,13 @@ static int monitor(Run *r)
             profile_ok = write_profile(r);
             ok = request_stop(r);
             r->stop_requested = TRUE;
-            say(ok ? L"Runtime stopped cleanly. Game left running (pid %lu).\n" : L"Runtime stop did not complete cleanly. Game left running (pid %lu).\n", (unsigned long)r->pid);
+            note_game_exit(r);
+            if (r->game_exited)
+                say(ok ? L"Runtime stopped cleanly. The game has exited (exit status 0x%08lX%ls).\n"
+                       : L"Runtime stop did not complete cleanly. The game has exited (exit status 0x%08lX%ls).\n",
+                    (unsigned long)r->game_exit, exit_status_name(r->game_exit));
+            else
+                say(ok ? L"Runtime stopped cleanly. Game left running (pid %lu).\n" : L"Runtime stop did not complete cleanly. Game left running (pid %lu).\n", (unsigned long)r->pid);
             return !ok ? EXIT_STOP_FAILED : (!profile_ok ? EXIT_RECEIPT : EXIT_INTERRUPTED);
         }
         if (r->opt.observe_s && now_ms() - t0 >= (uint64_t)r->opt.observe_s * 1000u) {
@@ -6406,7 +6566,12 @@ static int monitor(Run *r)
             if (r->opt.exit_game_after_observe) {
                 if (!stop_then_close_game(r)) return EXIT_GAME_STOP_FAILED;
             } else {
-                say(L"Game and runtime are left running, unchanged.\n");
+                note_game_exit(r);
+                if (r->game_exited)
+                    say(L"The game has exited (exit status 0x%08lX%ls); the runtime was left unchanged.\n",
+                        (unsigned long)r->game_exit, exit_status_name(r->game_exit));
+                else
+                    say(L"Game and runtime are left running, unchanged.\n");
             }
             return !profile_ok ? EXIT_RECEIPT : (r->ever_full ? EXIT_OK : EXIT_NOT_ACTIVE);
         }
@@ -6581,7 +6746,7 @@ static BOOL launch_game(Run *r)
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     FILETIME ex, kt, ut;
-    int n, attempt;
+    int n;
 
     if (r->opt.replay[0])
         n = _snwprintf_s(cmd, 32768, _TRUNCATE, L"\"%ls\" game_startup_mode replay \"%ls\"", r->exe_path, r->opt.replay);
@@ -6605,14 +6770,13 @@ static BOOL launch_game(Run *r)
     if (r->opt.formation_census)
         say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
             (unsigned long)(r->opt.formation_census_every ? r->opt.formation_census_every : 30u), r->opt.formation_census_csv);
-    if (r->opt.no_gameplay_patch) say(L"  gameplay patch: NOT applied (--no-gameplay-patch, stock bytes in memory)\n");
+    if (r->opt.no_gameplay_patch) say(L"  gameplay patch and heap serialization correction: NOT applied (--no-gameplay-patch, disk image unchanged in memory)\n");
     else {
         if (r->opt.gp_filter_listed)
             say(L"  gameplay patch: SUBSET (--gameplay-patch-%ls-runs: %lu run bits listed; header and appended sections always applied)\n",
                 r->opt.gp_filter.mode == KNTWR_GP_ONLY ? L"only" : L"skip",
                 (unsigned long)(__popcnt(r->opt.gp_filter.runs[0]) + __popcnt(r->opt.gp_filter.runs[1]) + __popcnt(r->opt.gp_filter.runs[2]) + __popcnt(r->opt.gp_filter.runs[3])));
-        if (r->opt.no_d3d9_swap && r->exe_is_stock) say(L"  gameplay patch: D3D9 swap OFF (--no-d3d9-swap: Direct3DCreate9 runs 65, 92 left stock)\n");
-        else if (r->opt.no_d3d9_swap) say(L"  note: Napoleon.exe is patched on disk, so its D3D9 swap is already in the file and cannot be left out.\n");
+        if (r->opt.no_d3d9_swap) say(L"  gameplay patch: D3D9 swap OFF (--no-d3d9-swap: Direct3DCreate9 runs 65, 92 left stock)\n");
     }
     if (r->opt.formation_census && r->opt.activate) {   /* the in-process census reads its path / period from the game's environment */
         wchar_t ev[16];
@@ -6621,10 +6785,9 @@ static BOOL launch_game(Run *r)
         SetEnvironmentVariableW(L"KNTWR_FORMATION_CENSUS_EVERY", ev);
         if (r->opt.formation_census_men) SetEnvironmentVariableW(L"KNTWR_FORMATION_CENSUS_MEN", L"1");
     }
-    /* --steam: a game created outside Steam has no app id, so SteamAPI_Init cannot attach (no steam_appid.txt, no
+    /* --steam (default): a game created outside Steam has no app id, so SteamAPI_Init cannot attach (no steam_appid.txt, no
        RestartAppIfNecessary) and multiplayer, lobbies and the overlay are unavailable. Give the child what a Steam launch gives
-       it; values already present (KNTWR started by Steam or by the user) are kept. Opt-in: with Steam attached, the patched
-       image crashed during startup in 6 of 8 launches (2026-10-21, cause under investigation). */
+       it; values already present (KNTWR started by Steam or by the user) are kept. --no-steam opts out of Steam integration. */
     if (r->opt.steam) {
         static const wchar_t *const steam_vars[2] = { L"SteamAppId", L"SteamGameId" };
         wchar_t val[64];
@@ -6637,51 +6800,102 @@ static BOOL launch_game(Run *r)
         }
     }
     memset(&pi, 0, sizeof pi);
-    for (attempt = 1; attempt <= (r->exe_is_stock ? 16 : 1); ++attempt) {
-        DWORD flags = CREATE_UNICODE_ENVIRONMENT | (r->exe_is_stock ? CREATE_SUSPENDED : 0u);
-        memset(&pi, 0, sizeof pi);
-        if (!CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, flags, NULL, r->game_dir, &si, &pi)) {
-            DWORD e = GetLastError();
-            if (e == ERROR_ELEVATION_REQUIRED)
-                errsay(L"Windows says Napoleon.exe requires elevation. Run kntwr.exe from an elevated prompt (nothing was started).\n");
-            else win_fail(L"CreateProcessW(Napoleon.exe)", e);
+    if (!r->opt.no_gameplay_patch) {
+        /* The stock image ends 0x5000 below a 64 KiB boundary and the patch appends 0xA000 bytes of sections; Windows places
+           the PEBs and other allocations in that gap before any game code runs, so a running image cannot reliably be
+           extended after creation.  Instead the child is created with one extra input attribute, PS_ATTRIBUTE_MEMORY_RESERVE, reserving exactly
+           the computed 64 KiB-aligned tail above the stock image, attached through a scoped wrapper around this process's OWN
+           KernelBase import of NtCreateUserProcess.  The installed file, its path, identity, hash and every stock behavior are
+           untouched (multiplayer checksums see the stock image); the wrapper wraps only this one creation on this thread and is
+           restored immediately afterwards. */
+        uint32_t bsz = 0;
+        const uint8_t *blob = kntwr_gp_napoleon_blob(&bsz);
+        if (kntwr_gp_reserve_plan(r->exe_file, blob, bsz, &r->gp_rsv, &r->gp_rsv_rep) != 0) {
+            errsay(L"planning the launch reservation failed at stage %hs (code %lu): %hs. Nothing was started; the installed game was not touched.\n",
+                   kntwr_gp_reserve_stage_name(r->gp_rsv_rep.stage), (unsigned long)r->gp_rsv_rep.code, r->gp_rsv_rep.error);
             return FALSE;
         }
-        if (r->exe_is_stock) {
-            uint32_t base = 0, bsz = 0;
-            const uint8_t *blob = kntwr_gp_napoleon_blob(&bsz);
-            kntwr_gp_memory pm = kntwr_gp_process_memory(pi.hProcess);
-            int grc;
-            if (!query_peb32_image_base(pi.hProcess, &base)) {
-                errsay(L"unable to read the suspended game's image base from the PEB.\n");
-                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        if (kntwr_gp_reserve_hook(&r->gp_rsv, &r->gp_rsv_rep) != 0) {
+            errsay(L"installing the launch-reservation wrapper failed at stage %hs (code %lu): %hs. No game was started.\n",
+                   kntwr_gp_reserve_stage_name(r->gp_rsv_rep.stage), (unsigned long)r->gp_rsv_rep.code, r->gp_rsv_rep.error);
+            kntwr_gp_reserve_dispose(&r->gp_rsv);
+            return FALSE;
+        }
+        say(L"  launch reservation: 0x%lX bytes at 0x%08lX (SizeOfImage 0x%lX -> 0x%lX held at creation via PS_ATTRIBUTE_MEMORY_RESERVE; "
+            L"the stock image, its path and its identity are untouched)\n",
+            (unsigned long)r->gp_rsv.reserve_size, (unsigned long)r->gp_rsv.reserve_base,
+            (unsigned long)r->gp_rsv.stock_soi, (unsigned long)r->gp_rsv.patched_soi);
+    }
+    {
+        const BOOL hooked = r->gp_rsv.hook_installed != 0;
+        const BOOL created = CreateProcessW(r->exe_path, cmd, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, NULL, r->game_dir, &si, &pi);
+        const DWORD cp_err = created ? 0 : GetLastError();
+        if (hooked) {
+            /* The import is always restored before anything else looks at the child. */
+            kntwr_gp_reserve_report urep;
+            if (kntwr_gp_reserve_unhook(&r->gp_rsv, &urep) != 0) {
+                r->gp_rsv_rep = urep;
+                errsay(L"restoring the import after process creation failed at stage %hs (code %lu): %hs.\n",
+                       kntwr_gp_reserve_stage_name(urep.stage), (unsigned long)urep.code, urep.error);
+                kntwr_gp_reserve_dispose(&r->gp_rsv);
+                if (created) launch_abort(&pi);
                 return FALSE;
             }
-            if (r->opt.no_gameplay_patch) {
-                if (ResumeThread(pi.hThread) == (DWORD)-1) {
-                    win_fail(L"ResumeThread(Napoleon.exe)", GetLastError());
-                    TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-                    return FALSE;
-                }
-                r->exe_base = base;
-                say(L"  gameplay patch NOT applied (--no-gameplay-patch): stock image resumed at base 0x%08lX (delta %+ld).\n", (unsigned long)base, (long)(base - 0x400000u));
-                break;
+        }
+        kntwr_gp_reserve_dispose(&r->gp_rsv); /* the pin's lifetime is the creation; idempotent on the no-patch path */
+        if (!created) {
+            if (cp_err == ERROR_ELEVATION_REQUIRED)
+                errsay(L"Windows says Napoleon.exe requires elevation. Run KNTWR.exe from an elevated prompt (nothing was started).\n");
+            else if (r->gp_rsv.reject)
+                errsay(L"the launch-reservation wrapper refused the child creation (reject %lu; %lu call(s) seen, %lu wrapped). Nothing was started.\n",
+                       (unsigned long)r->gp_rsv.reject, (unsigned long)r->gp_rsv.calls_seen, (unsigned long)r->gp_rsv.calls_modified);
+            else
+                win_fail(L"CreateProcessW(Napoleon.exe)", cp_err);
+            return FALSE;
+        }
+    }
+    {
+        uint32_t base = 0;
+        if (!query_peb32_image_base(pi.hProcess, &base)) {
+            errsay(L"unable to read the suspended game's image base from the PEB.\n");
+            launch_abort(&pi);
+            return FALSE;
+        }
+        if (r->opt.no_gameplay_patch) {
+            if (ResumeThread(pi.hThread) == (DWORD)-1) {
+                win_fail(L"ResumeThread(Napoleon.exe)", GetLastError());
+                launch_abort(&pi);
+                return FALSE;
             }
+            r->exe_base = base;
+            say(L"  gameplay patch and heap correction NOT applied (--no-gameplay-patch): disk image resumed at base 0x%08lX (delta %+ld).\n", (unsigned long)base, (long)(base - 0x400000u));
+        } else {
+            /* Patch the stock image and correct heap serialization before any game code executes. */
+            uint32_t bsz = 0;
+            const uint8_t *blob = kntwr_gp_napoleon_blob(&bsz);
+            kntwr_gp_pm pm_ctx;
+            kntwr_gp_memory pm;
+            int grc;
+            if (kntwr_gp_reserve_verify(&r->gp_rsv, pi.hProcess, base, &r->gp_rsv_rep) != 0) {
+                errsay(L"the launch reservation is not what creation was asked for (stage %hs, code %lu): %hs. The suspended process was terminated, nothing ran.\n",
+                       kntwr_gp_reserve_stage_name(r->gp_rsv_rep.stage), (unsigned long)r->gp_rsv_rep.code, r->gp_rsv_rep.error);
+                launch_abort(&pi);
+                return FALSE;
+            }
+            kntwr_gp_pm_init(&pm_ctx, pi.hProcess);
+            pm_ctx.owned_reserve_base = r->gp_rsv.reserve_base;
+            pm_ctx.owned_reserve_size = r->gp_rsv.reserve_size;
+            pm = kntwr_gp_pm_memory(&pm_ctx);
             grc = kntwr_gp_apply_filtered(&pm, base, 0x400000u, blob, bsz, &r->opt.gp_filter, &r->gp_rep);
-            if (grc == KNTWR_GP_E_ALLOC && r->gp_rep.phase == 0 && attempt < 16) {
-                say(L"  attempt %d: the range above the game image is busy in this process (early private allocation); starting a new process.\n", attempt);
-                TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, 2000);
-                CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-                continue;
-            }
             if (grc != 0) {
-                errsay(L"applying the in-memory gameplay patch failed: %hs.\n", r->gp_rep.error);
-                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                errsay(L"applying the in-memory gameplay patch failed: %hs (%ls; the suspended process was terminated, nothing ran).\n", r->gp_rep.error,
+                       r->gp_rep.phase ? L"the target had already been modified" : L"the target was unchanged");
+                launch_abort(&pi);
                 return FALSE;
             }
             if (ResumeThread(pi.hThread) == (DWORD)-1) {
                 win_fail(L"ResumeThread(Napoleon.exe)", GetLastError());
-                TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                launch_abort(&pi);
                 return FALSE;
             }
             r->gp_applied = TRUE;
@@ -6692,7 +6906,6 @@ static BOOL launch_game(Run *r)
                 (unsigned long)r->gp_rep.bytes_applied, (unsigned long)r->gp_rep.sections_mapped, (unsigned long)r->gp_rep.section_bytes,
                 (unsigned long)r->gp_rep.section_base_va, (unsigned long)r->gp_rep.section_fixups);
         }
-        break;
     }
     CloseHandle(pi.hThread);
     r->proc = pi.hProcess;
@@ -6706,17 +6919,18 @@ static BOOL launch_game(Run *r)
 /* ------------------------------------------------------------------------------------------------ command line */
 static void usage(void)
 {
-    say(L"kntwr - KNTWR, Kaung's Napoleon Total War Runtime (native multithreading launcher)\n\n"
-        L"usage: kntwr.exe [--game DIR] [options]\n"
-        L"  --game DIR            folder containing Napoleon.exe (prompted when omitted)\n"
+    say(L"KNTWR - Kaung's Napoleon Total War Runtime (native multithreading launcher)\n\n"
+        L"usage: KNTWR.exe [--game DIR] [options]\n"
+        L"  --game DIR            folder containing Napoleon.exe (default: the saved configuration, then every Steam library;\n"
+        L"                        a launch that finds nothing interactively opens a folder picker and remembers the choice)\n"
         L"  --replay FILE         start the game on a replay (game_startup_mode replay \"FILE\")\n"
-        L"  --features LIST       all (default) or comma list of path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2\n"
+        L"  --features LIST       default: all,cavalry_orbit; an explicit list replaces it (all selects accepted optimizations only)\n"
         L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
         L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --brain-target-cull --tick-pcore\n"
         L"                        --army-solver-memo); any explicit\n"
         L"                        --loco-*/--collide-contact-* (resp. --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census, --brain-target-cull-shadow,\n"
-        L"                        --tick-core-ab, --army-solver-shadow) switch replaces those defaults; spell the shipping set as just all\n"
+        L"                        --tick-core-ab, --army-solver-shadow) switch replaces those defaults; shipping set: all,cavalry_orbit\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
@@ -6795,7 +7009,8 @@ static void usage(void)
         L"  --mounted-officer     GAMEPLAY feature (implied by --features all unless --no-mounted-officer; replays desync vs vanilla): an infantry unit whose unit_stats_land\n"
         L"                        row fills the mount columns (mount_model, mount_entity, mount_animations_table, mount_armour, mount_health) with horse = 0\n"
         L"                        gets exactly one mount for its officer (men[0]). Data decides which units qualify. Redirects the unit constructor call\n"
-        L"                        0x531340 to a private constructor clone at start (restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
+        L"                        0x531340 to a private constructor clone and the unit visual constructor test at 0x72C9D2 to a gate that still builds the bayonet\n"
+        L"                        attachment list for infantry that carry the officer's horse (all restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
         L"  --no-mounted-officer  opt out of --mounted-officer under --features all\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
@@ -6808,14 +7023,15 @@ static void usage(void)
         L"                        ReadProcessMemory census of an unmodified game (no slots; moving = centroid speed > 0.5 m/s). Honours --observe-seconds.\n"
         L"  --formation-census-men  with --formation-census (runtime only): also FILE.men.csv, per-man steering of the first 6 AI + 3 player marching 400+-man units\n"
         L"                        (agent order/path-follower state, move-target position object and its world point, order-node slot object, sampled men + unit aggregates)\n"
-        L"  --no-gameplay-patch   diagnostic bisection, needs --no-activate: resume the stock image unpatched (no in-memory gameplay patch)\n"
+        L"  --no-gameplay-patch   diagnostic bisection, needs --no-activate: resume the disk image without gameplay or heap-serialization corrections\n"
         L"  --gameplay-patch-only-runs LIST / --gameplay-patch-skip-runs LIST  diagnostic bisection: write only (or all but) the listed non-header runs of the 103-run\n"
-        L"                        gameplay patch (LIST like 14-16,36-38,44); the PE header, relocations and the five appended sections are always applied\n"
+        L"                        gameplay patch (LIST like 14-16,36-38,44); PE layout and the two heap-serialization safety runs are always applied\n"
         L"  --no-d3d9-swap        leave the patch's Direct3DCreate9 swap stock (runs 65, 92: both factory calls -> .aistbl 0x18F3000, which hot-patches\n"
         L"                        one copy loop of an already-loaded, exact-build SysWOW64 d3d9.dll; no-op otherwise). Default: the whole patch is written\n"
         L"  --steam               give the game Steam's app id (SteamAppId / SteamGameId = 34030, kept when already set) so Steam multiplayer,\n"
-        L"                        lobbies and the overlay work; Steam must be running. Opt-in: Steam-attached startup crash under investigation\n"
-        L"  --game-exe NAME       diagnostic: the game executable inside the game folder (default Napoleon.exe; e.g. a copy of the pinned patched image)\n"
+        L"                        lobbies and the overlay work; Steam must be running. Default ON\n"
+        L"  --no-steam            start the game without the Steam app id (the previous default)\n"
+        L"  --game-exe NAME       diagnostic: the game executable inside the game folder (default Napoleon.exe; must match the supported stock image)\n"
         L"  --mounted-officer-widen  sets --mounted-officer; the officer's mount also raises the unit radius like a stock cavalry mount (default keeps\n"
         L"                        the infantry spacing)\n"
         L"  --ai-ctrl             experimental controller offload with immediate join (same as ai_ctrl; default off; requires ai)\n"
@@ -6854,6 +7070,11 @@ static void usage(void)
         L"                        add ai,ai_census to measure planner writes. Also Stage B0 qualification (army_b0_words,\n"
         L"                        receipt army_unit.b0): FSM steps/transitions, formation queue/scratch, recorder pins, RNG\n"
         L"                        member bound, own-state copy, exclusive refusal cost and the Stage B release gates\n"
+        L"  --cavalry-orbit       gameplay feature enabled by default; adds cavalry to an explicit --features list: cavalry of\n"
+        L"                        both sides orbit an explicitly attack-ordered square in periodic small rider melee waves\n"
+        L"                        with native eligible mounted fire and immediate native handback (mask bit cavalry_orbit,\n"
+        L"                        0x100000; no status row, no logging). Routes its own tick; excludes ai_async2 and brain2\n"
+        L"                        (including serial cloned-driver diagnostics); replays desync vs vanilla\n"
         L"  --army-storm-census   requires profile or a simulation feature; exclusive with --army-unit-shadow: opt-in site-18 storm\n"
         L"                        census. Times every 0x581F30 call (sites 101/103), counts units taking the command/formation\n"
         L"                        route, sub-brackets the preparation/FSM/formation calls, and keeps the top-8 storm ticks (site 18\n"
@@ -6931,7 +7152,7 @@ static void usage(void)
         L"                        change. Needs a routed tick, excludes ai_ctrl/ai_async2/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
         L"  --brain-target-cull-shadow  native answers every target search while the host replacement runs beside it and is compared (mismatch\n"
         L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
-        L"  --workers N           worker threads 1..16 (default 4; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
+        L"  --workers N           worker threads 1..16 (default 8; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
         L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
         L"  --collide-lod-m N      far-unit surface separation in world metres, 1..100000 (default 40)\n");
@@ -6947,10 +7168,19 @@ static void usage(void)
         L"  --tick-log FILE       retain every observed tick (10 ms launcher polls, maximum 200000 entries)\n"
         L"                        write KNTWRTLOG binary at observation end; receipt includes summary and loss count\n"
         L"  --no-activate         launch the game without installing the runtime\n"
-        L"  --validate-only       validate Napoleon.exe and the runtime DLL, start nothing\n"
+        L"  --check               read-only: resolve the game folder (saved config, then every Steam library; never a picker),\n"
+        L"                        print it with workers and the Steam state; no dialog, nothing started, nothing saved\n"
+        L"  --validate-only       same as --check\n"
+        L"  --setup               open the folder picker, validate Napoleon.exe and the runtime DLL, save the folder to the configuration and exit;\n"
+        L"                        never starts the game; cannot be combined with --game, --check/--validate-only or --no-launch\n"
+        L"  --no-launch           validate and save the resolved game folder to the configuration, but start nothing;\n"
+        L"                        never a folder picker, and no dialog when output is redirected (automation-safe)\n"
         L"  --allow-concurrent    diagnostic: allow a second game instance (replay verification); timings are not comparable between concurrent runs\n"
         L"  --focus               allow normal game-window activation (default: no activation requested)\n"
         L"  --no-focus            explicitly keep the default nonactivating startup (best effort)\n"
+        L"  --console             development: attach to the parent terminal or create a console window for launcher output\n"
+        L"                        (the default for a no-argument run, i.e. a double-click; a run from a terminal shows its output there either way)\n"
+        L"  --no-console          skip even the inherited-terminal attach, dropping terminal output (wrappers only)\n"
         L"  --help\n\n"
         L"exit codes: 0 active/ok, 1 usage, 2 unsupported game/runtime, 3 game already running, 4 launch failed,\n"
         L"  5 install failed, 6 runtime failed, 7 armed but never fully active, 8 interrupted (runtime stopped),\n"
@@ -6990,7 +7220,7 @@ static BOOL parse_features(const wchar_t *s, uint32_t *mask)
         for (i = 0; i < NFEATURES; ++i)
             if (_wcsicmp(tok, k_features[i].name) == 0) { bit = k_features[i].bit; break; }
         if (!bit) {
-            errsay(L"unknown --features item \"%ls\"; use all,path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2,army_unit_shadow.\n", tok);
+            errsay(L"unknown --features item \"%ls\"; use all,path,formation,ballistics,ai,ai_ctrl,batch64,brain2,visual,collide,collide_lod,loco,profile,brain,grid_census,ai_census,ai_async2,army_unit_shadow,cavalry_orbit.\n", tok);
             return FALSE;
         }
         if (m & bit) {
@@ -7008,8 +7238,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 {
     int i;
     uint32_t feature_options = 0;
-    o->mask = KNTWR_ALL;
-    o->workers = 4;
+    o->mask = KNTWR_ALL | KNTWR_CAVALRY_ORBIT;
+    o->workers = 8;
     o->poll_ms = 100;
     o->ai_deferred_k = KNTWR_AI_DEFERRED_DEFAULT_K;
     o->ai_deferred_budget = KNTWR_AI_DEFERRED_DEFAULT_BUDGET;
@@ -7023,6 +7253,9 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     o->collide_lod_m = 40;
     o->inject_timeout_s = 120;
     o->activate = TRUE;
+    o->steam = TRUE;   /* shipping default; --no-steam opts out */
+    o->no_launch = FALSE;
+    o->no_steam = FALSE;
     for (i = 1; i < argc; ++i) {
         wchar_t *a = argv[i], *eq = wcschr(a, L'='), *val = NULL;
         wchar_t name[64];
@@ -7035,10 +7268,13 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         if (eq) val = eq + 1;
 #define NEEDVAL() do { if (!val) { if (i + 1 >= argc) { errsay(L"%ls needs a value.\n", name); return -1; } val = argv[++i]; } } while (0)
         if (!wcscmp(name, L"--help") || !wcscmp(name, L"-h")) return 1;
+        else if (!wcscmp(name, L"--console")) { /* consumed in wmain before any console is acquired */ }
+        else if (!wcscmp(name, L"--no-console")) { /* consumed in wmain before any console is acquired */ }
         else if (!wcscmp(name, L"--no-activate")) o->activate = FALSE;
         else if (!wcscmp(name, L"--collide-census")) o->collide_census = TRUE;
         else if (!wcscmp(name, L"--grid-census")) feature_options |= KNTWR_GRID_CENSUS;
         else if (!wcscmp(name, L"--army-unit-shadow")) feature_options |= KNTWR_ARMY_UNIT_SHADOW;
+        else if (!wcscmp(name, L"--cavalry-orbit")) feature_options |= KNTWR_CAVALRY_ORBIT;
         else if (!wcscmp(name, L"--loco-clone")) o->loco_clone = TRUE;
         else if (!wcscmp(name, L"--loco-parallel")) o->loco_parallel = TRUE;
         else if (!wcscmp(name, L"--loco-owned-services")) o->loco_owned = TRUE;
@@ -7152,7 +7388,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
         else if (!wcscmp(name, L"--loco-shadow")) o->loco_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= KNTWR_AI_CTRL;
-        else if (!wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
+        else if (!wcscmp(name, L"--check") || !wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
+        else if (!wcscmp(name, L"--no-launch")) o->no_launch = TRUE;
+        else if (!wcscmp(name, L"--setup")) o->setup = TRUE;
+        else if (!wcscmp(name, L"--no-steam")) o->steam = FALSE;
         else if (!wcscmp(name, L"--allow-concurrent")) o->allow_concurrent = TRUE;
         else if (!wcscmp(name, L"--no-focus")) o->focus = FALSE;
         else if (!wcscmp(name, L"--focus")) o->focus = TRUE;
@@ -7298,8 +7537,16 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & KNTWR_ARMY_UNIT_SHADOW) &&
         !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 |
-                     KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+                     KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
         errsay(L"--army-unit-shadow needs a routed tick: add profile or a simulation feature (e.g. --features ai,profile).\n");
+        return -1;
+    }
+    if ((o->mask & KNTWR_CAVALRY_ORBIT) && (o->mask & KNTWR_AI_ASYNC2)) {
+        errsay(L"--cavalry-orbit and ai_async2 are exclusive: the orbit owner epoch is never speculative copies or inter-tick AI.\n");
+        return -1;
+    }
+    if ((o->mask & KNTWR_CAVALRY_ORBIT) && (o->mask & KNTWR_BRAIN2)) {
+        errsay(L"--cavalry-orbit excludes brain2: cloned driver callsites and speculative receivers are not supported.\n");
         return -1;
     }
     if ((o->mask & KNTWR_AI_ASYNC2) && (!(o->mask & KNTWR_AI_ASYNC) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_CENSUS)))) {
@@ -7318,14 +7565,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
-                             !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO)))) {
+                             !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT)))) {
         errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
                L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
         return -1;
     }
     if ((o->brain_target_cull || o->brain_target_cull_shadow || o->brain_retarget_jitter) &&
         ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
-         !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO)))) {
+         !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT)))) {
         errsay(L"--brain-target-cull / --brain-target-cull-shadow / --brain-retarget-jitter need a routed tick (add profile or a simulation feature, e.g. --features all), "
                L"exclude the ai_ctrl and ai_async2 features and --ai-ctrl-geometry; --brain-target-cull and --brain-target-cull-shadow are exclusive.\n");
         return -1;
@@ -7346,7 +7593,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if (o->army_storm_census &&
-        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
         errsay(L"--army-storm-census needs the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
         return -1;
     }
@@ -7362,18 +7609,18 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->tick_pcore || o->tick_core_ab) &&
-        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
         errsay(L"--tick-pcore/--tick-core-ab need a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
     if (o->engage_census &&
-        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
         errsay(L"--engage-census needs a routed tick: add profile or a simulation feature (e.g. --features all).\n");
         return -1;
     }
     if (o->formation_census) {
         if (!o->formation_census_csv[0]) { errsay(L"--formation-census needs --formation-census-csv FILE.\n"); return -1; }
-        if (o->activate && !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+        if (o->activate && !(o->mask & (KNTWR_PROFILE | KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
             errsay(L"--formation-census with a runtime needs a routed tick: add profile or a simulation feature (e.g. --features all); or use --no-activate for the launcher-side census.\n");
             return -1;
         }
@@ -7392,7 +7639,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->army_solver_memo || o->army_solver_shadow) &&
-        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO))) {
+        !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT))) {
         errsay(L"--army-solver-memo/--army-solver-shadow need the manager-routed tick: add profile, ai, brain2, collide, collide_lod or loco (e.g. --features ai,profile).\n");
         return -1;
     }
@@ -7547,13 +7794,30 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--exit-game-after-observe requires nonzero --observe-seconds and runtime activation (or --formation-census with --no-activate).\n");
         return -1;
     }
+    if (o->setup && (o->game[0] || o->validate_only || o->no_launch)) {
+        errsay(L"--setup cannot be combined with --game, --check/--validate-only or --no-launch.\n");
+        return -1;
+    }
     return 0;
 }
 
+/* Explicit --game wins (including a --game-exe folder).  Otherwise the setup module resolves the folder: saved config
+   first, then every Steam library, then - only for a real interactive launch - the IFileOpenDialog picker.  --check and
+   --no-launch are automation modes: they never open the picker and fail fast in text instead. */
 static BOOL choose_game_dir(Run *r)
 {
-    wchar_t line[MAXP], sug[MAXP];
-    int attempt;
+    BOOL interactive = !g_redirected && !r->opt.validate_only && !r->opt.no_launch;
+    if (r->opt.setup) {
+        if (!kntwr_setup_pick(r->game_dir, MAXP)) {
+            errsay(L"--setup: no game folder was selected (the folder picker was cancelled); nothing was saved.\n");
+            return FALSE;
+        }
+        if (!resolve_game_dir(r->game_dir, r->game_dir)) {
+            errsay(L"the selected game directory \"%ls\" is not usable.\n", r->game_dir);
+            return FALSE;
+        }
+        return TRUE;
+    }
     if (r->opt.game[0]) {
         trim_input(r->opt.game);
         if (!resolve_game_dir(r->opt.game, r->game_dir)) {
@@ -7562,39 +7826,27 @@ static BOOL choose_game_dir(Run *r)
         }
         return TRUE;
     }
-    if (!g_in_con) {
-        errsay(L"no --game DIR given and standard input is not a console; cannot prompt.\n");
+    if (!kntwr_setup_locate(r->game_dir, MAXP, interactive)) {
+        errsay(L"no Napoleon.exe game folder was found (tried the saved configuration, then every Steam library%ls).\n",
+               interactive ? L"; the folder picker was cancelled" : L"");
         return FALSE;
     }
-    for (attempt = 0; attempt < 3; ++attempt) {
-        BOOL have_sug = suggest_game_dir(sug);
-        if (have_sug) say(L"Napoleon Total War game directory (folder containing Napoleon.exe)\n  [Enter = %ls]: ", sug);
-        else say(L"Napoleon Total War game directory (folder containing Napoleon.exe): ");
-        if (!read_line(line, MAXP)) { win_fail(L"reading the game directory", GetLastError()); return FALSE; }
-        if (!line[0] && have_sug) wcscpy_s(line, MAXP, sug);
-        if (!line[0]) { errsay(L"no game directory entered.\n"); return FALSE; }
-        if (resolve_game_dir(line, r->game_dir)) {
-            wchar_t exe[MAXP];
-            join_path(exe, r->game_dir, GAME_EXE_NAME);
-            if (GetFileAttributesW(exe) != INVALID_FILE_ATTRIBUTES) return TRUE;
-            errsay(L"%ls was not found in \"%ls\".\n", GAME_EXE_NAME, r->game_dir);
-        } else {
-            errsay(L"\"%ls\" is not an existing directory.\n", line);
-        }
+    if (!resolve_game_dir(r->game_dir, r->game_dir)) { /* normalize (quotes, trailing slashes, inner-file path) */
+        errsay(L"the located game directory \"%ls\" is not usable.\n", r->game_dir);
+        return FALSE;
     }
-    return FALSE;
+    return TRUE;
 }
 
-int wmain(int argc, wchar_t **argv)
+/* Everything after console acquisition and argument parsing; wmain wraps it for the quiet-failure MessageBox. */
+static int run_main(Run *r, int argc, wchar_t **argv)
 {
-    Run *r = &g_run;
     int pr, code;
 
-    init_console();
-    GetSystemTimePreciseAsFileTime(&r->t_start);
     pr = parse_args(argc, argv, &r->opt);
     if (pr == 1) { usage(); return EXIT_OK; }
-    if (pr < 0) { say(L"Run kntwr.exe --help for usage.\n"); return EXIT_USAGE; }
+    if (pr < 0) { say(L"Run KNTWR.exe --console --help for usage.\n"); return EXIT_USAGE; }
+    if (r->opt.validate_only) g_ui_mute = TRUE; /* --check/--validate-only: read-only, never a dialog */
     r->cfg.enabled_mask = r->opt.mask;
     r->cfg.workers = r->opt.workers;
     r->cfg.poll_ms = r->opt.poll_ms;
@@ -7651,10 +7903,22 @@ int wmain(int argc, wchar_t **argv)
 
     if (!choose_game_dir(r)) return finish(r, EXIT_VALIDATE, L"no usable game directory");
     if (!validate_game(r)) return finish(r, EXIT_VALIDATE, L"unsupported or missing Napoleon.exe");
-    if (r->opt.activate || r->opt.validate_only) {
+    if (r->opt.activate || r->opt.validate_only || r->opt.setup) {
         if (!validate_runtime(r)) return finish(r, EXIT_VALIDATE, L"unusable runtime DLL");
     }
+    if (r->opt.setup) {
+        if (!kntwr_setup_save(r->game_dir)) {
+            wchar_t cfg[MAXP];
+            const wchar_t *where = kntwr_setup_config_path(cfg, MAXP) ? cfg : L"the configuration file";
+            errsay(L"the game directory could not be saved to %ls.\n", where);
+            return finish(r, EXIT_VALIDATE, L"validated, but the configuration could not be saved");
+        }
+        say(L"--setup: game directory validated and saved: %ls; nothing was started.\n", r->game_dir);
+        return finish(r, EXIT_OK, L"setup saved");
+    }
     if (r->opt.validate_only) {
+        say(L"  game: %ls\n  workers: %lu\n  steam: %ls (%ls)\n", r->game_dir, (unsigned long)r->opt.workers,
+            r->opt.steam ? L"on" : L"off", r->opt.steam ? L"SteamAppId 34030; --no-steam opts out" : L"--no-steam");
         if (r->opt.alloc_census || r->opt.alloc_fix)
             say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
@@ -7663,6 +7927,19 @@ int wmain(int argc, wchar_t **argv)
         if (r->opt.allow_concurrent) say(L"  concurrent: ALLOWED (a second game instance may run; timings are not comparable between concurrent runs)\n");
         say(L"Validation complete; nothing was started.\n");
         return finish(r, EXIT_OK, L"validated");
+    }
+    /* Remember the directory that just validated (explicit --game, saved config, Steam library or picker) so the next
+       quiet double-click finds it.  Persistence failure is a warning for a launch (the game still runs) but fatal for
+       --no-launch, whose whole job is to leave a working configuration behind. */
+    if (!kntwr_setup_save(r->game_dir)) {
+        wchar_t cfg[MAXP];
+        const wchar_t *where = kntwr_setup_config_path(cfg, MAXP) ? cfg : L"the configuration file";
+        errsay(L"the game directory could not be saved to %ls; it must be found again next run.\n", where);
+        if (r->opt.no_launch) return finish(r, EXIT_VALIDATE, L"validated, but the configuration could not be saved");
+    }
+    if (r->opt.no_launch) {
+        say(L"--no-launch: validation complete and the game directory saved; nothing was started.\n");
+        return finish(r, EXIT_OK, L"validated (no launch)");
     }
     if (!r->opt.allow_concurrent && napoleon_running()) return finish(r, EXIT_CONFLICT, L"Napoleon.exe already running");
 
@@ -7679,9 +7956,14 @@ int wmain(int argc, wchar_t **argv)
 
     code = install_runtime(r);
     if (code != EXIT_OK) {
-        if (code == EXIT_INSTALL || code == EXIT_LAUNCH)
-            say(L"The runtime is NOT active. %ls\n", r->game_exited ? L"The game has exited."
-                                                                       : L"The game was left running without the runtime; close it manually if unwanted.");
+        if (code == EXIT_INSTALL || code == EXIT_LAUNCH) {
+            note_game_exit(r);
+            if (r->game_exited)
+                say(L"The runtime is NOT active. The game has exited (exit status 0x%08lX%ls).\n", (unsigned long)r->game_exit,
+                    exit_status_name(r->game_exit));
+            else
+                say(L"The runtime is NOT active. The game was left running without the runtime; close it manually if unwanted.\n");
+        }
         if (r->remote_leaked) say(L"A remote thread timed out inside the game; its memory is intentionally retained until the game exits.\n");
         return finish(r, code, code == EXIT_INTERRUPTED ? L"interrupted before install" : L"runtime installation failed");
     }
@@ -7700,4 +7982,32 @@ int wmain(int argc, wchar_t **argv)
     case EXIT_GAME_STOP_FAILED: return finish(r, code, L"observation finished; launched game shutdown failed");
     default: return finish(r, code, L"runtime status unavailable");
     }
+}
+
+int wmain(int argc, wchar_t **argv)
+{
+    Run *r = &g_run;
+    const BOOL no_args = argc <= 1;
+    int i, code, console_mode = no_args ? 1 : 0; /* Double-click opens a console; other invocations retain inherited-terminal behavior. */
+
+    /* Both flags are consumed here, before any console is acquired (a later flag wins). */
+    for (i = 1; i < argc; ++i) {
+        if (!wcscmp(argv[i], L"--console")) console_mode = 1;
+        else if (!wcscmp(argv[i], L"--no-console")) console_mode = -1;
+    }
+    g_redirected = std_redirected(); /* sample before acquire_console can replace the caller's handles */
+    acquire_console(console_mode);
+    init_console();
+    GetSystemTimePreciseAsFileTime(&r->t_start);
+    code = run_main(r, argc, argv);
+    /* Preserve readable errors for quiet interactive runs and double-click launches: an allocated console closes on exit.
+       Attached terminals and redirected automation already retain the output; explicit --console keeps its existing behavior.
+       Help is not a failure, and Ctrl+C is deliberate. */
+    if (code != EXIT_OK && code != EXIT_INTERRUPTED && (console_mode <= 0 || no_args) && !g_redirected && !g_attached && !g_ui_mute) {
+        wchar_t msg[MAXP];
+        if (g_err_text[0]) _snwprintf_s(msg, MAXP, _TRUNCATE, L"%ls", g_err_text);
+        else _snwprintf_s(msg, MAXP, _TRUNCATE, L"KNTWR failed (exit code %d). Run KNTWR.exe --console for details.\n", code);
+        MessageBoxW(NULL, msg, L"KNTWR", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    }
+    return code;
 }

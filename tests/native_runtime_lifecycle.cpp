@@ -2245,6 +2245,164 @@ static int GridProbationFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile
     return failures ? 1 : 0;
 }
 
+// Cavalry attack-intent entry hook (native flush 0x542AE0) beside the attack-row slot gate (0x1324080 slot 0). Each scenario runs in a
+// child process because a refused install or refused restoration leaves the runtime FAILED for the life of its process. Only the private
+// mapped image is observed or patched; the installed flush is never called (no valid receiver exists in this fixture).
+constexpr U kCavalryEntryVa=0x542AE0, kCavalryAttackSlotVa=0x1324080, kCavalryGoSlotVa=0x132ba04+0x118; // Go slot: stock 0x5DCE70 (mount virtual +0x118)
+static const uint8_t kCavalryEntryStock[10]={0x56,0x8B,0xF1,0x83,0xBE,0xA0,0x05,0x00,0x00,0x00};
+struct CavalrySlot { U va, original; };
+static const CavalrySlot kCavalrySlots[]={{0x132ba04+0x188,0x5dd450},{0x132ba04+0x110,0x5dcde0},{kCavalryGoSlotVa,0x5dce70},{kCavalryAttackSlotVa,0x529d80}};
+static uint8_t* CavalryEntry() { return reinterpret_cast<uint8_t*>(At(kCavalryEntryVa)); }
+static bool CavalryEntryStockBytes() { return !memcmp(CavalryEntry(),kCavalryEntryStock,sizeof(kCavalryEntryStock)); }
+// A near jump whose destination lies in the runtime module, with the bytes past the 8-byte write window untouched.
+static bool CavalryEntryHooked() {
+    const uint8_t* entry=CavalryEntry();
+    U relative=0; memcpy(&relative,entry+1,sizeof(relative));
+    return entry[0]==0xE9 && InRuntime(A(entry)+5+relative) && !memcmp(entry+8,kCavalryEntryStock+8,2);
+}
+// Every owned gate slot (except skipVa, which a scenario controls) and the tick task slot hold the pinned native original read-only.
+static bool CavalryGatesWithdrawn(U skipVa) {
+    if(*At(0x132e954)!=0x5cc390+delta || !ReadOnly(At(0x132e954))) return false;
+    for(const CavalrySlot& s:kCavalrySlots)
+        if(s.va!=skipVa && (*At(s.va)!=s.original+delta || !ReadOnly(At(s.va)))) return false;
+    return true;
+}
+static bool CavalryGatesPublished() {
+    for(const CavalrySlot& s:kCavalrySlots)
+        if(*At(s.va)==s.original+delta || !ReadOnly(At(s.va)) || !InRuntime(*At(s.va))) return false;
+    return *At(0x132e954)!=0x5cc390+delta;
+}
+static bool CavalryPatchBytes(U va,const void* bytes,size_t count) {
+    void* target=At(va);
+    DWORD old=0,ignored=0;
+    if(!VirtualProtect(target,count,PAGE_EXECUTE_READWRITE,&old)) return false;
+    memcpy(target,bytes,count);
+    const bool flushed=FlushInstructionCache(GetCurrentProcess(),target,count)!=FALSE;
+    return VirtualProtect(target,count,old,&ignored)!=FALSE && flushed;
+}
+static bool CavalryWaitFailed(volatile kntwr_status* state,kntwr_status& snapshot) {
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
+        if(ReadState(state,snapshot)) {
+            PumpActivation(snapshot);
+            if(snapshot.phase==KNTWR_FAILED) return true;
+        }
+    return false;
+}
+static int CavalryEntryFixture(const char* mode,kntwr_start_fn start,kntwr_stop_fn stop,volatile kntwr_status* state,kntwr_config config) {
+    const bool lifecycle=!strcmp(mode,"--cavalry-entry-lifecycle"), foreignEntry=!strcmp(mode,"--cavalry-entry-foreign"),
+               attackConflict=!strcmp(mode,"--cavalry-entry-slot-conflict"), goConflict=!strcmp(mode,"--cavalry-entry-go-slot-conflict"),
+               stopConflict=!strcmp(mode,"--cavalry-entry-stop-conflict"), slotConflict=attackConflict || goConflict;
+    if(!lifecycle && !foreignEntry && !slotConflict && !stopConflict) { fprintf(stderr,"unknown child mode %s\n",mode); return 2; }
+    const U conflictVa=goConflict ? kCavalryGoSlotVa : kCavalryAttackSlotVa, conflictOriginal=goConflict ? 0x5dce70u : 0x529d80u;
+    U* attackSlot=At(conflictVa);  // the slot a conflict scenario poisons (the Go slot or the attack row slot)
+    const U foreign=A(reinterpret_cast<void*>(&ForeignWorker));
+    config.enabled_mask=KNTWR_CAVALRY_ORBIT; config.main_thread_id=0; config.workers=0;
+    Put(model,0xB0,A(armyManager));
+    root[0x2829c]=1;
+    Check(CavalryEntryStockBytes() && CavalryGatesWithdrawn(0),"cavalry fixture: stock flush entry bytes and pristine gate slots");
+    const U entryProtection=PageProtection(CavalryEntry());
+    kntwr_status snapshot={};
+    if(lifecycle) {
+        // Dormancy: an unarmed scheduler publishes neither the entry hook nor any gate.
+        root[0x2829c]=0;
+        Check(start(&config)==0,"cavalry start accepted while the scheduler is unarmed");
+        Sleep(80); // several 10 ms monitor polls
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
+              CavalryEntryStockBytes() && CavalryGatesWithdrawn(0),"dormant cavalry has published neither the flush entry hook nor a gate");
+        root[0x2829c]=1;
+        Check(WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry activates with the exact requested mask");
+        for(unsigned i=0;i<4 && !failures;++i) {
+            if(i) Check(start(&config)==0 && WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry reactivates after a clean stop");
+            Check(CavalryEntryHooked() && CavalryGatesPublished(),"activation installs the flush entry hook and the read-only attack row gate");
+            if(i==0 && !failures) {
+                // Real-execution ABI smoke on the verified empty path: the installed entry is actually called with ECX
+                // pointing into a zeroed private unit (site convention U+0x390). The gate forwards ECX to ObserveFlush by
+                // value only (never dereferenced), saves/restores EFLAGS, all GPRs and the full FXSAVE image, replays the
+                // displaced stock bytes and resumes at site+10. There the stock body's je (stock44880 report §4: bytes
+                // `74 63` → 0x542B4F, "count 0 returns at once", plain ret, no stack args, no globals, EDX preserved)
+                // takes the count dword [ESI+0x5A0] = unit+0x930 == 0 branch, so nothing may be published for the unit
+                // and no FP control state may survive the round trip.
+                void* fakeUnit=VirtualAlloc(nullptr,0x2000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+                Check(fakeUnit!=nullptr,"cavalry smoke: zeroed private unit allocated");
+                if(fakeUnit) {
+                    static const unsigned char kZeroUnit[0x2000]={};
+                    const U entryAddress=A(At(kCavalryEntryVa)), unitAddress=A(fakeUnit)+0x390;
+                    unsigned short cwBefore=0, cwAfter=0;
+                    U mxcsrBefore=0, mxcsrAfter=0;
+                    __asm {
+                        stmxcsr dword ptr [mxcsrBefore]
+                        fnstcw  word ptr [cwBefore]
+                        mov     ecx, dword ptr [unitAddress]
+                        call    dword ptr [entryAddress]
+                        stmxcsr dword ptr [mxcsrAfter]
+                        fnstcw  word ptr [cwAfter]
+                    }
+                    Check(!memcmp(fakeUnit,kZeroUnit,sizeof(kZeroUnit)),"cavalry smoke: empty-count flush call publishes nothing for the unit");
+                    Check(mxcsrAfter==mxcsrBefore && cwAfter==cwBefore,"cavalry smoke: the flush round trip preserves MXCSR and the x87 control word");
+                    Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.active_mask==KNTWR_CAVALRY_ORBIT,
+                          "cavalry smoke: the runtime stays active across the real empty flush call");
+                    VirtualFree(fakeUnit,0,MEM_RELEASE);
+                }
+            }
+            if(i==1) {
+                // World loss: the battle disappears, the feature epoch ends and nothing may keep a gate or the entry hook.
+                Put(model,0,0);
+                Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.phase==KNTWR_WAITING_BATTLE; }),"cavalry world loss returns to waiting");
+                Check(!snapshot.active_mask && CavalryEntryStockBytes() && PageProtection(CavalryEntry())==entryProtection && CavalryGatesWithdrawn(0),
+                      "world loss withdraws the flush entry hook, every gate and the page protection");
+                Put(model,0,A(root));
+                Check(WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry reactivates when the battle returns");
+                Check(CavalryEntryHooked() && CavalryGatesPublished(),"reactivation reinstalls the flush entry hook and gates");
+            }
+            Check(stop(nullptr)==0,"cavalry stop drains and restores");
+            Check(CavalryEntryStockBytes() && PageProtection(CavalryEntry())==entryProtection && CavalryGatesWithdrawn(0),
+                  "stop restores the exact flush entry bytes, page protection and every gate slot");
+            Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask,"cavalry stopped snapshot published");
+            Check(stop(nullptr)==0 && CavalryEntryStockBytes() && CavalryGatesWithdrawn(0),"second stop is idempotent and leaves the stock entry");
+        }
+    } else if(foreignEntry) {
+        // A foreign patch in the flush entry must refuse activation, roll every gate back and survive untouched.
+        Check(RedirectImage(kCavalryEntryVa,reinterpret_cast<const void*>(&ForeignWorker)) && !CavalryEntryStockBytes(),"foreign patch installed in the flush entry");
+        uint8_t foreignBytes[sizeof(kCavalryEntryStock)]; memcpy(foreignBytes,CavalryEntry(),sizeof(foreignBytes));
+        Check(start(&config)==0,"cavalry start accepted for the foreign-entry scenario");
+        const bool failed=CavalryWaitFailed(state,snapshot);
+        Check(failed && snapshot.error && !snapshot.active_mask,"foreign flush entry bytes refuse activation");
+        Check(!memcmp(CavalryEntry(),foreignBytes,sizeof(foreignBytes)) && PageProtection(CavalryEntry())==entryProtection,
+              "the foreign flush patch is not clobbered");
+        Check(CavalryGatesWithdrawn(0),"every gate published before the refusal was rolled back");
+        Check(start(&config)!=0,"refused entry install prevents restart");
+        Check(stop(nullptr)==0,"stop after a refused entry install is clean");
+        Check(!memcmp(CavalryEntry(),foreignBytes,sizeof(foreignBytes)),"clean stop still leaves the foreign flush patch");
+        Check(CavalryPatchBytes(kCavalryEntryVa,kCavalryEntryStock,sizeof(kCavalryEntryStock)),"restore the stock flush entry");
+    } else if(slotConflict) {
+        // A gate slot refused after (or before) the entry hook must leave no dangling entry hook behind.
+        Check(Replace(attackSlot,foreign),"foreign hook installed in the contested gate slot");
+        Check(start(&config)==0,"cavalry start accepted for the foreign-slot scenario");
+        const bool failed=CavalryWaitFailed(state,snapshot);
+        Check(failed && snapshot.error==kSlotConflict && !snapshot.active_mask,goConflict ? "foreign Go slot refuses activation" : "foreign attack row slot refuses activation");
+        Check(CavalryEntryStockBytes() && PageProtection(CavalryEntry())==entryProtection,"refused install leaves no dangling flush entry hook");
+        Check(*attackSlot==foreign && ReadOnly(attackSlot),goConflict ? "the foreign Go hook was not overwritten" : "the foreign attack row hook was not overwritten");
+        Check(CavalryGatesWithdrawn(conflictVa),"every other gate was rolled back");
+        Check(start(&config)!=0,"refused install prevents restart");
+        Check(stop(nullptr)==0 && CavalryEntryStockBytes(),"stop after a refused slot install is clean and leaves stock entry bytes");
+        Replace(attackSlot,conflictOriginal+delta);
+    } else {
+        // A foreign patch written over the live entry hook must make stop refuse restoration without overwriting it.
+        Check(start(&config)==0 && WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry active for the stop conflict");
+        uint8_t hookedBytes[sizeof(kCavalryEntryStock)]; memcpy(hookedBytes,CavalryEntry(),sizeof(hookedBytes));
+        Check(CavalryEntryHooked() && RedirectImage(kCavalryEntryVa,reinterpret_cast<const void*>(&ForeignWorker)) &&
+              memcmp(CavalryEntry(),hookedBytes,sizeof(hookedBytes))!=0,"foreign patch replaces the live flush entry hook");
+        uint8_t foreignBytes[sizeof(kCavalryEntryStock)]; memcpy(foreignBytes,CavalryEntry(),sizeof(foreignBytes));
+        Check(stop(nullptr)!=0,"stop reports refused flush entry restoration");
+        Check(!memcmp(CavalryEntry(),foreignBytes,sizeof(foreignBytes)),"stop does not overwrite the foreign flush patch");
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_FAILED,"refused entry restoration is visible");
+        Check(start(&config)!=0,"failed restoration prevents restart");
+        Check(CavalryPatchBytes(kCavalryEntryVa,kCavalryEntryStock,sizeof(kCavalryEntryStock)),"restore the stock flush entry");
+    }
+    printf("native host lifecycle (cavalry entry %s): checks=%u failures=%u\n",mode+16,checks,failures);
+    return failures ? 1 : 0;
+}
+
 static bool RunChild(const char* image,const char* dllPath,const char* mode) {
     char self[MAX_PATH];
     if(!GetModuleFileNameA(nullptr,self,MAX_PATH)) return false;
@@ -2284,6 +2442,26 @@ int main(int argc,char** argv) {
     Check(unreadable && start(unreadable)==1,"unreadable configuration refused");
     if(unreadable) VirtualFree(unreadable,0,MEM_RELEASE);
     Check(start(&config)==2,"valid 10ms configuration refuses a foreign main image");
+    {
+        kntwr_config cavalry=config;
+        cavalry.enabled_mask=KNTWR_CAVALRY_ORBIT;
+        Check(start(&cavalry)==2,"cavalry self-routes without another simulation feature");
+        cavalry.workers=2; cavalry.main_thread_id=GetCurrentThreadId();
+        cavalry.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
+        Check(start(&cavalry)==2,"inter-tick AI configuration is otherwise admissible");
+        cavalry.enabled_mask|=KNTWR_CAVALRY_ORBIT;
+        Check(start(&cavalry)==1,"cavalry refuses inter-tick AI ownership");
+        cavalry.enabled_mask=KNTWR_BRAIN2;
+        cavalry.brain_flags=KNTWR_BRAIN_PARALLEL|KNTWR_BRAIN_QUIET;
+        Check(start(&cavalry)==2,"speculative brain configuration is otherwise admissible");
+        cavalry.enabled_mask|=KNTWR_CAVALRY_ORBIT;
+        Check(start(&cavalry)==1,"cavalry refuses speculative brain receivers");
+        cavalry.brain_flags=KNTWR_BRAIN_CENSUS;
+        cavalry.enabled_mask=KNTWR_BRAIN2;
+        Check(start(&cavalry)==2,"serial brain census is otherwise admissible");
+        cavalry.enabled_mask|=KNTWR_CAVALRY_ORBIT;
+        Check(start(&cavalry)==1,"cavalry refuses serial cloned driver callsites");
+    }
     config.poll_ms=9; Check(start(&config)==1,"poll below supported boundary refused"); config.poll_ms=10;
     config.abi=1u; Check(start(&config)==1,"previous configuration ABI 1 refused"); config.abi=KNTWR_ABI;
     config.size=72u; Check(start(&config)==1,"previous 72-byte configuration refused"); config.size=sizeof(config);
@@ -2609,6 +2787,7 @@ int main(int argc,char** argv) {
         if(!strcmp(argv[3],"--va-budget-post")) return VirtualBudgetFixture(true,start,stop,state,config);
         if(!strcmp(argv[3],"--va-budget-periodic")) return PeriodicBudgetFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--grid-probation")) return GridProbationFixture(start,stop,state,config);
+        if(!strncmp(argv[3],"--cavalry-entry-",16)) return CavalryEntryFixture(argv[3],start,stop,state,config);
         return !strcmp(argv[3],"--install-conflict") ? InstallConflict(start,stop,state,config) : VisualFixture(argv[3],start,stop,state,config);
     }
     if(!failures) Check(RunChild(argv[1],argv[2],"--grid-census"),"census-first lifecycle child passed");
@@ -3261,6 +3440,11 @@ int main(int argc,char** argv) {
     if(!failures) Check(RunChild(argv[1],argv[2],"--va-budget-post"),"post-reservation VA refusal scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--va-budget-periodic"),"periodic VA native fallback and arena retirement scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--grid-probation"),"grid probation trap/log/resume on a synthetic page scenario passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--cavalry-entry-lifecycle"),"cavalry flush entry hook activation, exact stop restoration, dormancy and reactivation scenario passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--cavalry-entry-foreign"),"foreign flush entry bytes refusal and rollback scenario (child process) passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--cavalry-entry-slot-conflict"),"foreign attack row slot refusal leaves no dangling flush entry hook scenario (child process) passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--cavalry-entry-go-slot-conflict"),"foreign Go slot (mount +0x118) refusal leaves no dangling flush entry hook scenario (child process) passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--cavalry-entry-stop-conflict"),"foreign patch over live flush entry hook stop refusal scenario (child process) passed");
     if(!failures) {
         Check(start(&config)==0 && WaitActive(state),"start for external-hook conflict");
         const U foreign=A(reinterpret_cast<void*>(&ForeignWorker));
