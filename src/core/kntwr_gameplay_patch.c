@@ -79,8 +79,8 @@ typedef struct gp_run {
     const uint8_t *old_b, *new_b;
     uint32_t rva;           /* image RVA of the first byte */
     int header;             /* inside the PE headers */
-    uint32_t idx;           /* blob run index; GP_RUN_PINNED for the heap-serialization overlay */
-    int pinned;             /* stock-hash-keyed overlay run (heap serialization / allocator initialization): always written, never filtered, never counted skipped */
+    uint32_t idx;           /* blob run index; GP_RUN_PINNED for mandatory safety overlays */
+    int pinned;             /* stock-hash-keyed safety run: always written, never filtered, never counted skipped */
 } gp_run;
 
 typedef struct gp_blob {
@@ -92,24 +92,53 @@ typedef struct gp_blob {
     const uint8_t *old_tail, *new_tail;
 } gp_blob;
 
-/* ------------------------------------------------------------------------------------------------ pinned allocator-initialization runs */
-/* Merged into the Napoleon patch (keyed on the blob's stock SHA-256).  Two groups, all fixup-free, so the old/new bytes are
+/* ------------------------------------------------------------------------------------------------ pinned safety runs */
+/* Merged into the Napoleon patch (keyed on the blob's stock SHA-256). All are fixup-free, so old/new bytes are
  * identical in the file and in the live image at any base:
- *  - heap serialization (see the header for the crash this fixes): RVAs 0xBF8895 (.text `xor eax,1` of the flags setter at
- *    0xBF8890) and 0x1062CE8 (the .data HeapAlloc-flags global); nearest HIGHLOW entries 0xBF8899 and 0x1062CF0.
- *  - Provider[2] heap size: RVA 0xBF809C is the 32-bit immediate-carrying `push 0x6400000` (68 00 00 40 06) that passes the
- *    growable heap's INITIAL size (100 MiB) to the native heap constructor; it becomes `push 0x100000` (1 MiB), like Providers 0
- *    and 1.  Only the initial size changes: the maximum stays 0 (growable), so larger allocations still succeed. */
-enum { GP_HS_RUNS = 3 };
+ *  - heap serialization: RVAs 0xBF8895 (.text flags setter) and 0x1062CE8 (.data HeapAlloc flags);
+ *  - Provider[2] initial heap size: RVA 0xBF809C changes push 100 MiB to push 1 MiB; maximum remains 0 (growable);
+ *  - root lifetime: preferred 0x5A8A60 / RVA 0x1A8A60 jumps to unused .text raw padding at 0x13068FC / RVA 0xF068FC.
+ *    The 6-byte entry and 82-byte padding span have no stock/patched HIGHLOW, blob-run or clone-source overlaps.
+ *    Both root callers (0x5BD6E7, 0x5A8E76) enter before any root cleanup. Constructor 0x593F4B initializes +0x282A0
+ *    to zero before publication; only native begin 0x5F34FD sets it, and native join 0x5F9474 clears it after destroy.
+ *    Thus pending!=0, NOT the mutable async option +0x2829C, is the ownership guard. Root2's synchronous path stays zero.
+ *    Mirror only the ownership block at 0x5F9453..0x5F947D: scheduler=[parent-0x18], ECX=scheduler,
+ *    push 0; push parent; call [scheduler_vtable+4] (RET 8); reload parent into ECX; push ECX;
+ *    call 0x12A7A1B (task::destroy, RET 4); clear pending. Never call the tick-work tail of 0x5F9440.
+ *    PUSHFD/PUSHAD and aligned FXSAVE/FXRSTOR preserve the caller even when wait executes work. EBP anchors the saved
+ *    stack; EBX holds root across native thiscalls. CLD gives scheduler work the ABI direction flag; POPFD restores it.
+ *    Then execute the displaced SUB ESP,0x38; PUSH EBX; MOV EBX,ECX and resume at 0x5A8A66.
+ *    All transfers are PIC rel32. No target allocation, runtime-DLL dependency, image growth, or runtime-Stop removal.
+ *    Installed before the first game instruction, this joins on the native owner/main thread before model destruction. */
+enum { GP_HS_RUNS = 5 };
 static const uint32_t GP_RUN_PINNED = UINT32_MAX - 1u;
 static const uint8_t gp_hs_stock_sha[32] = {
     0x44, 0x88, 0x0e, 0xc1, 0x77, 0x0f, 0x60, 0x01, 0x63, 0xa3, 0x36, 0xee, 0xc8, 0x3b, 0x43, 0x66,
     0x90, 0x14, 0x84, 0xc5, 0xcc, 0xee, 0xc8, 0x3d, 0xc3, 0x26, 0xe2, 0x93, 0x2f, 0x02, 0xa0, 0x54
 };
-static const struct { uint64_t off; uint32_t len; uint8_t old_b[8], new_b[8]; } gp_hs_runs[GP_HS_RUNS] = {
-    { 0xBF749Cull, 5u, { 0x68, 0x00, 0x00, 0x40, 0x06 }, { 0x68, 0x00, 0x00, 0x10, 0x00 } }, /* push 0x6400000 -> push 0x100000 (Provider[2] initial heap size) */
-    { 0xBF7C95ull, 3u, { 0x83, 0xF0, 0x01 }, { 0x31, 0xC0, 0x90 } },      /* xor eax,1  -> xor eax,eax; nop */
-    { 0x1060EE8ull, 4u, { 0x01, 0x00, 0x00, 0x00 }, { 0x00, 0x00, 0x00, 0x00 } } /* flags global 1 -> 0 */
+static const uint8_t gp_root_join[] = {
+    /* 00: pushfd; pushad; mov ebp,esp; sub esp,0x210; and esp,-16; fxsave [esp]; cld */
+    0x9C, 0x60, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x02, 0x00, 0x00, 0x83, 0xE4, 0xF0, 0x0F, 0xAE, 0x04, 0x24, 0xFC,
+    /* 12: mov ebx,ecx; mov eax,[ebx+0x282A0]; test eax,eax; jz restore */
+    0x8B, 0xD9, 0x8B, 0x83, 0xA0, 0x82, 0x02, 0x00, 0x85, 0xC0, 0x74, 0x21,
+    /* 1E: mov ecx,[eax-0x18]; mov edx,[ecx]; push 0; push eax; call [edx+4] */
+    0x8B, 0x48, 0xE8, 0x8B, 0x11, 0x6A, 0x00, 0x50, 0xFF, 0x52, 0x04,
+    /* 29: mov ecx,[ebx+0x282A0]; push ecx; call 0x12A7A1B */
+    0x8B, 0x8B, 0xA0, 0x82, 0x02, 0x00, 0x51, 0xE8, 0xEA, 0x10, 0xFA, 0xFF,
+    /* 35: mov dword [ebx+0x282A0],0 */
+    0xC7, 0x83, 0xA0, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /* 3F restore: fxrstor [esp]; mov esp,ebp; popad; popfd */
+    0x0F, 0xAE, 0x0C, 0x24, 0x8B, 0xE5, 0x61, 0x9D,
+    /* 47: displaced original prologue; jmp 0x5A8A66 */
+    0x83, 0xEC, 0x38, 0x53, 0x8B, 0xD9, 0xE9, 0x18, 0x21, 0x2A, 0xFF
+};
+static const uint8_t gp_root_padding[sizeof gp_root_join] = {0};
+static const struct { uint64_t off; uint32_t len; const uint8_t *old_b, *new_b; } gp_hs_runs[GP_HS_RUNS] = {
+    { 0x1A7E60ull, 6u, (const uint8_t *)"\x83\xEC\x38\x53\x8B\xD9", (const uint8_t *)"\xE9\x97\xDE\xD5\x00\x90" },
+    { 0xBF749Cull, 5u, (const uint8_t *)"\x68\x00\x00\x40\x06", (const uint8_t *)"\x68\x00\x00\x10\x00" },
+    { 0xBF7C95ull, 3u, (const uint8_t *)"\x83\xF0\x01", (const uint8_t *)"\x31\xC0\x90" },
+    { 0xF05CFCull, sizeof gp_root_join, gp_root_padding, gp_root_join },
+    { 0x1060EE8ull, 4u, (const uint8_t *)"\x01\x00\x00\x00", (const uint8_t *)"\x00\x00\x00\x00" }
 };
 
 static int gp_error(kntwr_gp_report *rep, uint32_t status, const char *fmt, ...)
@@ -484,6 +513,12 @@ static int gp_apply_impl(const kntwr_gp_memory *mem, uint32_t base, uint32_t pre
             pr.idx = GP_RUN_PINNED;
             pr.pinned = 1;
             for (at = 0; at < b.run_count && b.runs[at].off < pr.off; ++at) {}
+            if ((at && b.runs[at - 1].off + b.runs[at - 1].len > pr.off) ||
+                (at < b.run_count && pr.off + pr.len > b.runs[at].off)) {
+                rep->fail_run = GP_RUN_PINNED;
+                rc = gp_error(rep, KNTWR_GP_E_LAYOUT, "pinned safety run overlaps a patch run");
+                goto done;
+            }
             memmove(b.runs + at + 1, b.runs + at, (size_t)(b.run_count - at) * sizeof(gp_run));
             b.runs[at] = pr;
             b.run_count++;
@@ -592,10 +627,20 @@ static int gp_apply_impl(const kntwr_gp_memory *mem, uint32_t base, uint32_t pre
         }
         /* Window = run plus every stock/patched fixup dword overlapping it. */
         for (k = gp_lower_bound(&stock_fix, r->rva >= 3u ? r->rva - 3u : 0u); k < stock_fix.n && stock_fix.v[k] < r->rva + r->len; ++k) {
+            if (r->pinned) {
+                rep->fail_run = r->idx; rep->fail_va = base + r->rva;
+                rc = gp_error(rep, KNTWR_GP_E_LAYOUT, "pinned safety run overlaps a stock relocation");
+                goto done;
+            }
             if (stock_fix.v[k] < ustart) ustart = stock_fix.v[k];
             if (stock_fix.v[k] + 4u > uend) uend = stock_fix.v[k] + 4u;
         }
         for (k = gp_lower_bound(&patched_fix, r->rva >= 3u ? r->rva - 3u : 0u); k < patched_fix.n && patched_fix.v[k] < r->rva + r->len; ++k) {
+            if (r->pinned) {
+                rep->fail_run = r->idx; rep->fail_va = base + r->rva;
+                rc = gp_error(rep, KNTWR_GP_E_LAYOUT, "pinned safety run overlaps a patched relocation");
+                goto done;
+            }
             if (patched_fix.v[k] < ustart) ustart = patched_fix.v[k];
             if (patched_fix.v[k] + 4u > uend) uend = patched_fix.v[k] + 4u;
         }
@@ -619,7 +664,7 @@ static int gp_apply_impl(const kntwr_gp_memory *mem, uint32_t base, uint32_t pre
             rep->fail_run = r->idx;
             rep->fail_va = base + r->rva;
             rc = r->pinned
-                     ? gp_error(rep, KNTWR_GP_E_STOCK, "pinned allocator/heap run at VA %#x: live bytes differ from the stock image",
+                     ? gp_error(rep, KNTWR_GP_E_STOCK, "pinned safety run at VA %#x: live bytes differ from the stock image",
                                 (unsigned)(base + r->rva))
                      : gp_error(rep, KNTWR_GP_E_STOCK, "run %u at VA %#x: live bytes (relocation removed) differ from the stock image", (unsigned)r->idx,
                                 (unsigned)(base + r->rva));

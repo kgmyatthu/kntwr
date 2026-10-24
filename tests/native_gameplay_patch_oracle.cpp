@@ -1,4 +1,4 @@
-// Byte-identity oracle for the in-memory gameplay patch (src/core/kntwr_gameplay_patch.c).
+// Byte-identity and native-root lifetime oracle for the in-memory gameplay patch (src/core/kntwr_gameplay_patch.c).
 //
 // The game files on disk are stock; the launcher turns the loader-mapped stock image into the patched image in memory. The
 // proof obligation is that the live image is exactly what the Windows loader would have produced from the PATCHED file
@@ -15,7 +15,8 @@
 // foreign pages), a tampered stock byte, a wrong preferred base, an already-patched image, a non-PE target, a tampered pinned
 // heap-serialization site, and a recorded creation-time reservation that does not match the live layout (wrong base, wrong
 // size, foreign range): the reservation is never released unless it matches exactly. The failure-reporting boundary
-// (phase 0 vs mutated) is proven with exact assertions. Nothing here starts the game's code.
+// (phase 0 vs mutated) is proven with exact assertions. An isolated oracle child also executes the root safety stub and
+// displaced prologue against modeled native scheduler/destroy/cleanup seams; no game entry point or game teardown runs.
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -226,7 +227,7 @@ struct Case {
     Bytes stock, patched;
     Pe sp, pp;
     bool hasAppended;
-    bool hasOverlay;  // the pinned allocator-initialization runs (heap serialization, Provider[2] initial heap size) merge with this blob (Napoleon only)
+    bool hasOverlay;  // mandatory allocator and native-root lifetime safety runs (Napoleon only)
 };
 
 static Case MakeCase(const char* name, const uint8_t* blob, uint32_t blobSize, const Bytes& stock, const Bytes& patched) {
@@ -252,12 +253,25 @@ static void ReportLine(const char* what, const kntwr_gp_report& r) {
                 r.fixups_stock_total, r.fixups_patched_total, r.sections_mapped, r.section_bytes, r.section_fixups);
 }
 
-// The pinned allocator overlay (src/core/kntwr_gameplay_patch.c): merged into the Napoleon patch and written in every filter
-// mode.  All sites are fixup-free, so the expected bytes are identical at every base.
-static const struct { uint32_t rva; uint32_t len; uint8_t bytes[5]; } kHsOverlay[] = {
-    {0xBF809Cu, 5u, {0x68, 0x00, 0x00, 0x10, 0x00}},  // .text: Provider[2] heap ctor `push 0x6400000` -> `push 0x100000` (initial size 100 MiB -> 1 MiB)
-    {0xBF8895u, 3u, {0x31, 0xC0, 0x90, 0x00, 0x00}},  // .text: `xor eax,1` of the flags setter -> `xor eax,eax; nop`
-    {0x1062CE8u, 4u, {0x00, 0x00, 0x00, 0x00, 0x00}}, // .data: the HeapAlloc-flags global, stock 1 -> 0
+// Mandatory safety overlays: independent expected bytes, not read back from the production definitions.
+// Every branch/call is relative and the stub contains no loader fixups.
+static const uint8_t kRootEntry[] = {0xE9, 0x97, 0xDE, 0xD5, 0x00, 0x90};
+static const uint8_t kRootOriginal[] = {0x83, 0xEC, 0x38, 0x53, 0x8B, 0xD9};
+static const uint8_t kRootJoin[] = {
+    0x9C, 0x60, 0x8B, 0xEC, 0x81, 0xEC, 0x10, 0x02, 0x00, 0x00, 0x83, 0xE4, 0xF0, 0x0F, 0xAE, 0x04, 0x24, 0xFC,
+    0x8B, 0xD9, 0x8B, 0x83, 0xA0, 0x82, 0x02, 0x00, 0x85, 0xC0, 0x74, 0x21,
+    0x8B, 0x48, 0xE8, 0x8B, 0x11, 0x6A, 0x00, 0x50, 0xFF, 0x52, 0x04,
+    0x8B, 0x8B, 0xA0, 0x82, 0x02, 0x00, 0x51, 0xE8, 0xEA, 0x10, 0xFA, 0xFF,
+    0xC7, 0x83, 0xA0, 0x82, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0F, 0xAE, 0x0C, 0x24, 0x8B, 0xE5, 0x61, 0x9D,
+    0x83, 0xEC, 0x38, 0x53, 0x8B, 0xD9, 0xE9, 0x18, 0x21, 0x2A, 0xFF
+};
+static const struct { uint32_t rva; uint32_t len; const uint8_t* bytes; } kHsOverlay[] = {
+    {0x1A8A60u, sizeof kRootEntry, kRootEntry},
+    {0xBF809Cu, 5u, reinterpret_cast<const uint8_t*>("\x68\x00\x00\x10\x00")},
+    {0xBF8895u, 3u, reinterpret_cast<const uint8_t*>("\x31\xC0\x90")},
+    {0xF068FCu, sizeof kRootJoin, kRootJoin},
+    {0x1062CE8u, 4u, reinterpret_cast<const uint8_t*>("\x00\x00\x00\x00")},
 };
 static const uint32_t kHsOverlayCount = static_cast<uint32_t>(sizeof(kHsOverlay) / sizeof(kHsOverlay[0]));
 static void PokeHsOverlay(Bytes* image) {
@@ -407,12 +421,14 @@ static void RunNegatives(const Case& c, uint32_t base) {
         Unmap(&m);
     }
     // 5. Tampered pinned-overlay sites: refused like any run, naming the pinned run, with the image untouched.
-    //    Covers the .data flags dword and the opcode / immediate bytes of the Provider[2] heap-size push.
+    //    Covers allocator bytes, the root entry and its formerly-zero executable padding.
     if (c.hasOverlay) {
         const struct { uint32_t rva; uint8_t stock; uint8_t tampered; const char* what; } sites[] = {
             {0x1062CE8u, 0x01, 0x02, "flags dword"},
             {0xBF809Cu, 0x68, 0x69, "heap-size push opcode"},
             {0xBF809Fu, 0x40, 0x41, "heap-size push immediate"},
+            {0x1A8A60u, 0x83, 0x82, "root destructor entry"},
+            {0xF068FCu, 0x00, 0x01, "root join padding"},
         };
         for (const auto& s : sites) {
             Mapping m;
@@ -436,6 +452,23 @@ static void RunNegatives(const Case& c, uint32_t base) {
             std::printf("  negative: overlay tamper (%s) -> %s\n", s.what, rep.error);
             Unmap(&m);
         }
+        // The generic applier also supports mss32. A nonmatching blob identity must never authorize Napoleon-only
+        // safety bytes; source SHA authentication remains the launcher's/CheckBlob's existing responsibility.
+        Mapping m;
+        Require(MapStock(c.stock, c.sp, c.pp, base, &m), "map stock (overlay identity)");
+        Bytes differentIdentity(c.blob, c.blob + c.blobSize);
+        differentIdentity[20] ^= 1; // NTWPATCH v1 stock_sha follows magic/version/stock_len.
+        kntwr_gp_filter none = {}; none.mode = KNTWR_GP_ONLY;
+        kntwr_gp_report rep;
+        kntwr_gp_pm pm; kntwr_gp_memory mem = SelfMemory(&pm);
+        Require(kntwr_gp_apply_filtered(&mem, base, c.sp.base, differentIdentity.data(),
+                                       static_cast<uint32_t>(differentIdentity.size()), &none, &rep) == 0,
+                "generic patch with another identity cannot select Napoleon safety overlays");
+        Require(rep.runs_applied == 0 && std::memcmp(m.base + 0x1A8A60, kRootOriginal, sizeof kRootOriginal) == 0,
+                "wrong stock hash cannot authorize the native root detour");
+        const uint8_t empty[sizeof kRootJoin] = {};
+        Require(std::memcmp(m.base + 0xF068FC, empty, sizeof empty) == 0, "wrong stock hash leaves root-join padding untouched");
+        Unmap(&m);
     }
 }
 
@@ -892,6 +925,294 @@ static void RunFilter(const Case& c, uint32_t base) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------- native root lifetime
+// Execute the production-installed entry/stub, never the game body: only the continuation at +6 and task::destroy
+// are redirected to controlled ABI seams. A real worker retains model ownership until the test releases its event.
+// The old six-byte entry is a negative control: it reaches cleanup with the worker still blocked.
+struct RootRegisters { uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax, flags; };
+struct RootScheduler { void** vtable; };
+struct RootTask {
+    void* scheduler;
+    uint8_t prefix[20];
+    uint32_t body;
+    volatile LONG refs;
+};
+static_assert(offsetof(RootTask, body) == 0x18, "native task scheduler lives at parent-0x18");
+struct RootFixture {
+    Bytes root = Bytes(0x282A8, 0);
+    void* waitVtable[2] = {};
+    RootScheduler scheduler = {waitVtable};
+    RootTask task = {};
+    HANDLE release = nullptr, completed = nullptr, waiting = nullptr;
+    volatile LONG errors = 0, modelAlive = 1, workerSawDead = 0;
+    volatile LONG clock = 0, workerOrder = 0, waitOrder = 0, taskOrder = 0, cleanupOrder = 0;
+    volatile LONG waits = 0, destroys = 0, continuations = 0;
+    uint32_t pendingAtCleanup = 0;
+};
+static RootFixture* gRootFixture;
+static void* gRootThis;
+static void* gRootEntry;
+static uint32_t gRootCallStack, gRootReturnStack, gRootSavedEbx;
+static RootRegisters gRootRegisters;
+__declspec(align(16)) static uint8_t gRootFxOriginal[512], gRootFxBefore[512], gRootFxAfter[512];
+__declspec(align(16)) static const uint32_t kRootXmm[4] = {0x12345678, 0x9ABCDEF0, 0x13579BDF, 0x2468ACE0};
+static const uint16_t kRootCw = 0x027F;
+static const uint32_t kRootMxcsr = 0x5F80, kRootClobberMxcsr = 0x1F80;
+
+static uint32_t& RootPending(RootFixture& f) { return *reinterpret_cast<uint32_t*>(f.root.data() + 0x282A0); }
+static uint32_t& RootModel(RootFixture& f) { return *reinterpret_cast<uint32_t*>(f.root.data() + 8); }
+static uint32_t RootParent(RootFixture& f) { return reinterpret_cast<uint32_t>(&f.task.body); }
+
+__declspec(naked) static void RootClobberFp() {
+    __asm {
+        fninit
+        fldz
+        ldmxcsr kRootClobberMxcsr
+        pxor xmm0, xmm0
+        pxor xmm1, xmm1
+        pxor xmm2, xmm2
+        pxor xmm3, xmm3
+        pxor xmm4, xmm4
+        pxor xmm5, xmm5
+        pxor xmm6, xmm6
+        pxor xmm7, xmm7
+        ret
+    }
+}
+// __fastcall gives ECX=this and callee cleanup of the two stack arguments (RET 8), matching scheduler slot +4.
+static void __fastcall RootWait(void* scheduler, void*, uint32_t parent, uint32_t child) {
+    RootFixture& f = *gRootFixture;
+    if (scheduler != &f.scheduler || parent != RootParent(f) || child != 0 ||
+        RootPending(f) != parent || f.modelAlive != 1 || RootModel(f) == 0)
+        InterlockedOr(&f.errors, 1);
+    InterlockedIncrement(&f.waits);
+    SetEvent(f.waiting);
+    if (WaitForSingleObject(f.completed, 5000) != WAIT_OBJECT_0) InterlockedOr(&f.errors, 2);
+    if (f.task.refs != 1 || f.workerOrder == 0 || f.continuations != 0) InterlockedOr(&f.errors, 4);
+    f.waitOrder = InterlockedIncrement(&f.clock);
+    RootClobberFp();
+}
+// ECX=parent AND one stack parent; callee pops four bytes, as native task::destroy does.
+static void __fastcall RootDestroy(uint32_t parent, void*, uint32_t argument) {
+    RootFixture& f = *gRootFixture;
+    if (parent != RootParent(f) || argument != parent || RootPending(f) != parent ||
+        f.waitOrder == 0 || f.modelAlive != 1 || f.task.refs != 1)
+        InterlockedOr(&f.errors, 8);
+    InterlockedIncrement(&f.destroys);
+    f.taskOrder = InterlockedIncrement(&f.clock);
+    RootClobberFp();
+}
+static void RootCleanup() {
+    RootFixture& f = *gRootFixture;
+    f.pendingAtCleanup = RootPending(f);
+    InterlockedIncrement(&f.continuations);
+    f.cleanupOrder = InterlockedIncrement(&f.clock);
+    RootModel(f) = 0;
+    InterlockedExchange(&f.modelAlive, 0);
+}
+__declspec(naked) static void RootContinuation() {
+    __asm {
+        pushfd
+        pushad
+        mov eax, [esp + 36]
+        mov gRootSavedEbx, eax
+        mov esi, esp
+        lea edi, gRootRegisters
+        mov ecx, 9
+        cld
+        rep movsd
+        fxsave gRootFxAfter
+        call RootCleanup
+        popad
+        popfd
+        pop ebx
+        lea esp, [esp + 38h]
+        ret
+    }
+}
+__declspec(naked) static void RootInvoke() {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        fxsave gRootFxOriginal
+        fninit
+        fldcw kRootCw
+        fld1
+        ldmxcsr kRootMxcsr
+        movdqa xmm0, kRootXmm
+        movdqa xmm1, kRootXmm
+        movdqa xmm2, kRootXmm
+        movdqa xmm3, kRootXmm
+        movdqa xmm4, kRootXmm
+        movdqa xmm5, kRootXmm
+        movdqa xmm6, kRootXmm
+        movdqa xmm7, kRootXmm
+        fxsave gRootFxBefore
+        mov eax, 12345678h
+        mov ecx, gRootThis
+        mov edx, 23456789h
+        mov ebx, 3456789Ah
+        mov ebp, 456789ABh
+        mov esi, 56789ABCh
+        mov edi, 6789ABCDh
+        push 603h
+        popfd
+        mov gRootCallStack, esp
+        call gRootEntry
+        mov gRootReturnStack, esp
+        cld
+        fxrstor gRootFxOriginal
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
+    }
+}
+static DWORD WINAPI RootWorker(void*) {
+    RootFixture& f = *gRootFixture;
+    if (WaitForSingleObject(f.release, 5000) != WAIT_OBJECT_0) InterlockedOr(&f.errors, 16);
+    if (!f.modelAlive || !RootModel(f)) InterlockedExchange(&f.workerSawDead, 1);
+    InterlockedDecrement(&f.task.refs);
+    f.workerOrder = InterlockedIncrement(&f.clock);
+    SetEvent(f.completed);
+    return 0;
+}
+static DWORD WINAPI RootDestruction(void*) { RootInvoke(); return 0; }
+
+static void RequireRootState() {
+    const RootRegisters& r = gRootRegisters;
+    Require(r.eax == 0x12345678 && r.ecx == reinterpret_cast<uint32_t>(gRootThis) && r.edx == 0x23456789 &&
+            r.ebx == r.ecx && r.ebp == 0x456789AB && r.esi == 0x56789ABC && r.edi == 0x6789ABCD,
+            "root join preserves all caller registers before the original prologue");
+    Require(gRootSavedEbx == 0x3456789A && r.esp == gRootCallStack - 68 && gRootReturnStack == gRootCallStack,
+            "original prologue saves EBX, allocates 0x38 bytes and returns with the caller stack unchanged");
+    const uint32_t left = gRootCallStack - 4, result = left - 0x38;
+    uint32_t parity = result & 0xFF;
+    parity ^= parity >> 4; parity ^= parity >> 2; parity ^= parity >> 1;
+    const uint32_t flags = 0x600 | (left < 0x38 ? 1 : 0) | ((parity & 1) ? 0 : 4) |
+        ((left ^ 0x38 ^ result) & 0x10) | (result == 0 ? 0x40 : 0) | ((result >> 24) & 0x80) |
+        (((left ^ 0x38) & (left ^ result) & 0x80000000) >> 20);
+    Require((r.flags & 0xED5) == flags, "caller flags survive the join, then change exactly as original SUB ESP,0x38");
+    Require(std::memcmp(gRootFxBefore, gRootFxAfter, 288) == 0,
+            "scheduler clobbers cannot escape: x87 stack/environment, MXCSR and all eight XMM registers restored");
+}
+static void RootWriteJump(const kntwr_gp_memory& mem, uint32_t from, const void* to) {
+    uint8_t jmp[5] = {0xE9};
+    const uint32_t delta = reinterpret_cast<uint32_t>(to) - (from + 5);
+    std::memcpy(jmp + 1, &delta, 4);
+    Require(mem.write(mem.ctx, from, jmp, sizeof jmp) == 0, "install isolated native ABI seam");
+}
+static void RunRootScenario(bool oldEntry, bool async, bool pending) {
+    RootFixture f;
+    f.waitVtable[1] = reinterpret_cast<void*>(&RootWait);
+    f.task.scheduler = &f.scheduler;
+    f.task.refs = 2;
+    f.root[0x2829C] = async ? 1 : 0;
+    RootPending(f) = pending ? RootParent(f) : 0;
+    RootModel(f) = reinterpret_cast<uint32_t>(&f.modelAlive);
+    gRootFixture = &f;
+    gRootThis = f.root.data();
+    std::memset(gRootFxBefore, 0, sizeof gRootFxBefore);
+    std::memset(gRootFxAfter, 0, sizeof gRootFxAfter);
+    const bool workerActive = pending;
+    HANDLE worker = nullptr;
+    if (workerActive) {
+        f.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        f.completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        f.waiting = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        Require(f.release && f.completed && f.waiting, "create deterministic root-lifetime gates");
+        worker = CreateThread(nullptr, 0, RootWorker, nullptr, 0, nullptr);
+        Require(worker != nullptr, "start model-owning worker");
+    }
+    HANDLE destruction = CreateThread(nullptr, 0, RootDestruction, nullptr, 0, nullptr);
+    Require(destruction != nullptr, "start root destruction");
+    if (workerActive) {
+        HANDLE gates[] = {f.waiting, destruction};
+        DWORD gate = WaitForMultipleObjects(2, gates, FALSE, 5000);
+        if (oldEntry) {
+            Require(gate == WAIT_OBJECT_0 + 1 && f.modelAlive == 0 && f.continuations == 1 &&
+                    f.waits == 0 && f.destroys == 0 && RootPending(f) == RootParent(f),
+                    "negative control: original entry destroys the model while its native child is pending");
+        } else {
+            Require(gate == WAIT_OBJECT_0 && f.modelAlive == 1 && f.continuations == 0 && f.destroys == 0 &&
+                    RootPending(f) == RootParent(f) && WaitForSingleObject(destruction, 0) == WAIT_TIMEOUT,
+                    "pending child holds root destruction before any original cleanup effects");
+        }
+        Require(SetEvent(f.release) != 0, "release the model-owning worker");
+        Require(WaitForSingleObject(worker, 5000) == WAIT_OBJECT_0, "worker completes");
+    }
+    Require(WaitForSingleObject(destruction, 5000) == WAIT_OBJECT_0, "root destruction returns");
+    Require(f.errors == 0, "native wait/destroy ABI, ownership and scheduler ordering");
+    Require(f.continuations == 1 && f.modelAlive == 0 && RootModel(f) == 0, "original cleanup continuation executes exactly once");
+    RequireRootState();
+    if (workerActive && !oldEntry) {
+        Require(f.workerSawDead == 0 && f.waits == 1 && f.destroys == 1 && RootPending(f) == 0 && f.pendingAtCleanup == 0 &&
+                f.workerOrder < f.waitOrder && f.waitOrder < f.taskOrder && f.taskOrder < f.cleanupOrder,
+                "worker completion precedes wait return, task destruction, pointer clear and model cleanup");
+        // Only the join is idempotent. A real destructor is never called twice; our modeled continuation is safe to repeat.
+        RootInvoke();
+        Require(f.waits == 1 && f.destroys == 1 && f.continuations == 2 && RootPending(f) == 0,
+                "already-joined entry does not wait or destroy its former task twice");
+        RequireRootState();
+    } else if (oldEntry) {
+        Require(f.workerSawDead == 1 && f.cleanupOrder < f.workerOrder, "negative control exposes the shutdown lifetime violation");
+    } else {
+        Require(f.waits == 0 && f.destroys == 0 && RootPending(f) == 0,
+                "synchronous/no-parent paths do not touch a task");
+    }
+    CloseHandle(destruction);
+    if (worker) { CloseHandle(worker); CloseHandle(f.release); CloseHandle(f.completed); CloseHandle(f.waiting); }
+    gRootFixture = nullptr;
+}
+static void RunRootLifetime(const Case& c) {
+    unsigned used = 0;
+    for (uint32_t base : {0x10000000u, 0x2A5B0000u, 0x5E170000u}) {
+        Mapping m;
+        if (!MapStock(c.stock, c.sp, c.pp, base, &m)) continue;
+        kntwr_gp_pm pm; kntwr_gp_memory mem = SelfMemory(&pm);
+        kntwr_gp_report rep;
+        Require(kntwr_gp_apply(&mem, base, c.sp.base, c.blob, c.blobSize, &rep) == 0, "apply production root lifetime patch");
+        RequireHsOverlayLive(m.base, "executable lifetime fixture");
+        RootWriteJump(mem, base + 0x1A8A66, reinterpret_cast<void*>(&RootContinuation));
+        RootWriteJump(mem, base + 0xEA7A1B, reinterpret_cast<void*>(&RootDestroy));
+        gRootEntry = m.base + 0x1A8A60;
+        Require(mem.write(mem.ctx, base + 0x1A8A60, kRootOriginal, sizeof kRootOriginal) == 0, "restore original entry for negative control");
+        RunRootScenario(true, true, true);
+        Require(mem.write(mem.ctx, base + 0x1A8A60, kRootEntry, sizeof kRootEntry) == 0, "restore production entry after negative control");
+        RunRootScenario(false, true, true);
+        RunRootScenario(false, true, false);
+        RunRootScenario(false, false, false);
+        RunRootScenario(false, false, true);
+        Unmap(&m);
+        if (++used == 2) break;
+    }
+    Require(used == 2, "real PIC root stub behavior exercised at two relocated bases");
+    std::printf("native root lifetime: OK (%u checks)\n", g_checks);
+}
+static void RunRootLifetimeChild() {
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    Require(n != 0 && n < MAX_PATH, "locate oracle executable for isolated lifetime test");
+    std::wstring command = GetCommandLineW();
+    command += L" --root-lifetime-child";
+    STARTUPINFOW si = {}; si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    Require(CreateProcessW(exe, &command[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0,
+            "launch isolated oracle child (not the game or the fixture executable)");
+    const DWORD wait = WaitForSingleObject(pi.hProcess, 60000);
+    if (wait != WAIT_OBJECT_0) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
+    DWORD code = 1;
+    const BOOL got = GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    Require(wait == WAIT_OBJECT_0 && got && code == 0, "isolated executable root-lifetime oracle passes");
+}
+
 int main(int argc, char** argv) {
     const char* patchedPath = Arg(argc, argv, "--patched");
     const char* stockPath = Arg(argc, argv, "--stock");
@@ -905,6 +1226,9 @@ int main(int argc, char** argv) {
     CheckBlob("napoleon", blob, blobSize, stock, patched);
     RequireF(Sha256Hex(patched) == KNTWR_IMAGE_SHA256, "%s: the patched image is not KNTWR_IMAGE_SHA256", "napoleon");
     Case nap = MakeCase("napoleon", blob, blobSize, stock, patched);
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--root-lifetime-child")) { RunRootLifetime(nap); return 0; }
+    RunRootLifetimeChild();
 
     // Bases: the preferred base (delta 0) when free, plus relocated bases with distinct deltas.
     const uint32_t candidates[] = {0x00400000u, 0x10000000u, 0x2A5B0000u, 0x5E170000u, 0x6E7A0000u};
