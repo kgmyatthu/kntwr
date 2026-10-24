@@ -15,15 +15,18 @@ constexpr U kZeroBits = 0x00000000u, kOneBits = 0x3F800000u, kPairWeightBits = 0
 constexpr U kMaxFormations = 256;                 // distinct formations tracked per tick (the count saturates)
 constexpr U kMembersOffset = 0x18;                // F+0x18: member count ([proven by disasm] 5373F0 `cmp [ebx+18],0`)
 using NativeSolve = U (__fastcall*)(const float* ctx, void* edx, Entry12* begin, Entry12* end, U limit, float thr);
+using NativeCacheAssign = U (__fastcall*)(void* cache, void* edx, U slots, U flag, U entries);
+using NativeFormation = void* (__fastcall*)(void* cache, void* edx);
 
 bool g_started;
 Mode g_mode;
-U g_delta, g_nativeSolve, g_nativeAssign, g_cloneAssign;
+U g_delta, g_nativeSolve, g_nativeAssign, g_cloneAssign, g_cacheCloneAssign;
 ntw_solver::Workspace* g_ws;
 ntw_solver::Env g_env;
 LARGE_INTEGER g_frequency;
 u64 g_tscPerSecond;      // rdtsc ticks per second, calibrated against QPC at Start
 U g_ownerTid, g_assignDepth, g_curFormation, g_curMembers;
+bool g_cacheOrigin;
 volatile U g_shimExpected, g_shimSuppressed, g_shimForwarded, g_viaShim;
 volatile U g_gateAddress;
 Entry12 g_shadowCopy[ntw_solver::kMaxM];
@@ -31,7 +34,7 @@ Entry12 g_shadowCopy[ntw_solver::kMaxM];
 struct Totals {
     u64 ticks, seen, flag1, kernel, flag0, foreign, fallback[8], compares, mismatchSolves, mismatchEntries, mismatchEax, assignCalls,
         r1, r1b, r2, nativeQ, kernelQ, evals, distinct, iterations, swaps, removals, observerQ, membersSum, hist[6],
-        scans, gatherQ, profN, profCostQ, profLoopQ, profTotalQ, direct, empty;   // gather/cost/loop/total are raw rdtsc ticks
+        scans, gatherQ, profN, profCostQ, profLoopQ, profTotalQ, direct, empty, cacheAssignCalls, cacheSolvedKernel;   // gather/cost/loop/total are raw rdtsc ticks
     U maxM, maxMembers;
 };
 struct TickAcc {
@@ -73,6 +76,10 @@ void NoteDistinct(U* list, U& count, U formation) {
 void NoteFormation(U formation) { NoteDistinct(g_tick.formations, g_tick.formationCount, formation); }
 // Folds one flag=1 solve into the totals, the tick accumulator and the open tick's top-solve list.
 void Record(U m, const ntw_solver::Counters& c, u64 nativeQ, u64 kernelQ, U flags, U eax) {
+    if (g_cacheOrigin) {
+        flags |= 0x200u;
+        if (flags & 2u) ++g_total.cacheSolvedKernel;
+    }
     g_total.nativeQ += nativeQ; g_total.kernelQ += kernelQ;
     g_total.evals += c.evals; g_total.distinct += c.distinct; g_total.iterations += c.iterations;
     g_total.swaps += c.swaps; g_total.removals += c.removals;
@@ -181,22 +188,36 @@ U __fastcall SolveGate(const float* ctx, void* edx, Entry12* begin, Entry12* end
     Record(m, c, static_cast<u64>(t3 - t2), static_cast<u64>(t1 - t0), 1u | 8u | (c.fallback << 4), eax);
     return eax;
 }
-// 555CEB: the call of 18F0A00 (thiscall ECX = F, four stack arguments, ret 0x10). Records F and its member count, then forwards to the
-// SOLVER_18F0A00 clone (the native original before Start).
-U __fastcall AssignGate(void* formation, void* edx, U a1, U a2, U a3, U a4) {
-    if (!g_started) return reinterpret_cast<NativeAssign>(g_nativeAssign)(formation, edx, a1, a2, a3, a4);
+// Common assignment scope: both the ordinary 555CEB route and the formerly native cache assignment use the same solver gates.
+U RunAssign(void* formation, void* edx, U a1, U a2, U a3, U a4, U target, bool cacheOrigin) {
     const U f = static_cast<U>(reinterpret_cast<uintptr_t>(formation));
     const U members = Bits(f + kMembersOffset);
     ++g_total.assignCalls; g_total.membersSum += members;
+    if (cacheOrigin) ++g_total.cacheAssignCalls;
     if (members > g_total.maxMembers) g_total.maxMembers = members;
     NoteFormation(f);
     const U savedFormation = g_curFormation, savedMembers = g_curMembers;
+    const bool savedCacheOrigin = g_cacheOrigin;
+    g_cacheOrigin = cacheOrigin;
     if (!g_assignDepth++) g_ownerTid = GetCurrentThreadId();
     g_curFormation = f; g_curMembers = members;
-    const U r = reinterpret_cast<NativeAssign>(g_cloneAssign)(formation, edx, a1, a2, a3, a4);
+    const U r = reinterpret_cast<NativeAssign>(target)(formation, edx, a1, a2, a3, a4);
     if (g_assignDepth) --g_assignDepth; // saturates: Stop()/Reset() may have cleared the depth while the occurrence was live
     g_curFormation = savedFormation; g_curMembers = savedMembers;
+    g_cacheOrigin = savedCacheOrigin;
     return r;
+}
+// 555CEB: ECX = formation, four stack arguments, ret 0x10.
+U __fastcall AssignGate(void* formation, void* edx, U a1, U a2, U a3, U a4) {
+    if (!g_started) return reinterpret_cast<NativeAssign>(g_nativeAssign)(formation, edx, a1, a2, a3, a4);
+    return RunAssign(formation, edx, a1, a2, a3, a4, g_cloneAssign, false);
+}
+// 57AC3B: replay the fully pinned 539C90 wrapper. Run 15 selects its stock 5373F0 or overlaid 18F0A00 target.
+// Keep the native 4B4A50 call and argument order; neither the cache vector nor its allocation/free lifetime is changed here.
+U __fastcall CacheAssignGate(void* cache, void* edx, U slots, U flag, U entries) {
+    if (!g_started) return reinterpret_cast<NativeCacheAssign>(V(0x539C90))(cache, edx, slots, flag, entries);
+    void* formation = reinterpret_cast<NativeFormation>(V(0x4B4A50))(cache, edx);
+    return RunAssign(formation, edx, slots, flag, entries, 0xFFFFFFFFu, g_cacheCloneAssign, true);
 }
 // 53765A: the call of the .aistbl trampoline 18F0D00, replayed instruction for instruction (same pushes, same frame offsets); only the
 // compared return address differs: the SOLVER_18F0A00 clone's. Suppression returns with EAX and EFLAGS restored; otherwise the registers,
@@ -232,6 +253,7 @@ void Bind(U delta, uint32_t* bindings) {
     bindings[KNTWR_BIND_SOLVER_ASSIGN] = FnAddress(reinterpret_cast<const void*>(&AssignGate));
     bindings[KNTWR_BIND_SOLVER_SOLVE] = g_gateAddress;
     bindings[KNTWR_BIND_SOLVER_SHIM] = FnAddress(reinterpret_cast<const void*>(&SolveShim));
+    bindings[KNTWR_BIND_SOLVER_CACHE_ASSIGN] = FnAddress(reinterpret_cast<const void*>(&CacheAssignGate));
 }
 
 bool Start(const Binding& binding) {
@@ -243,6 +265,21 @@ bool Start(const Binding& binding) {
     static const uint8_t prologue[] = { 0x64, 0xA1, 0x2C, 0x00, 0x00, 0x00 };
     if (memcmp(reinterpret_cast<const void*>(static_cast<uintptr_t>(V(0x502770))), prologue, sizeof(prologue)) != 0) return false;
     if (Bits(V(0x131a7a4)) != kZeroBits || Bits(V(0x1318048)) != kOneBits || Bits(V(0x1318038)) != kPairWeightBits) return false;
+    // 539C90 has no relocations. Accept only the complete stock wrapper or its exact run-15 overlay.
+    // This check is activation-only: filtered run 15 must not invalidate the always-built clone catalog.
+    static const uint8_t cacheStock[] = {
+        0xE8,0xBB,0xAD,0xF7,0xFF,0x6A,0xFF,0xFF,0x74,0x24,0x10,0x8B,0xC8,0xFF,0x74,
+        0x24,0x10,0xFF,0x74,0x24,0x10,0xE8,0x46,0xD7,0xFF,0xFF,0xC2,0x0C,0x00
+    };
+    static const uint8_t cacheOverlay[] = {
+        0xE8,0xBB,0xAD,0xF7,0xFF,0x6A,0xFF,0xFF,0x74,0x24,0x10,0x8B,0xC8,0xFF,0x74,
+        0x24,0x10,0xFF,0x74,0x24,0x10,0xE8,0x56,0x6D,0x3B,0x01,0xC2,0x0C,0x00
+    };
+    const void* cacheWrapper = reinterpret_cast<const void*>(static_cast<uintptr_t>(V(0x539C90)));
+    if (memcmp(cacheWrapper, cacheStock, sizeof(cacheStock)) == 0) g_cacheCloneAssign = binding.cloneStockAssign;
+    else if (memcmp(cacheWrapper, cacheOverlay, sizeof(cacheOverlay)) == 0) g_cacheCloneAssign = binding.cloneAssign;
+    else return false;
+    if (!binding.cloneAssign || !binding.cloneStockAssign) return false;
     g_env = ntw_solver::Env();
     g_env.angleTable = reinterpret_cast<const float*>(static_cast<uintptr_t>(V(0x176cff8)));
     g_env.zero = *reinterpret_cast<const float*>(static_cast<uintptr_t>(V(0x131a7a4)));
@@ -278,6 +315,8 @@ void Stop() {
     if (g_ws) ntw_solver::DestroyWorkspace(g_ws);
     g_ws = nullptr;
     g_assignDepth = 0;
+    g_cacheOrigin = false;
+    g_cacheCloneAssign = 0;
 }
 void Reset() {
     memset(&g_total, 0, sizeof(g_total));
@@ -287,6 +326,7 @@ void Reset() {
     memset(g_topTicks, 0, sizeof(g_topTicks)); g_topTickCount = 0;
     g_shimSuppressed = g_shimForwarded = g_viaShim = 0;
     g_curFormation = g_curMembers = 0;
+    g_cacheOrigin = false;
 }
 bool Started() { return g_started; }
 unsigned long long StorageBytes() { return g_ws ? ntw_solver::WorkspaceBytes() : 0ull; }
@@ -329,6 +369,7 @@ void Snapshot(U* w) {
     w[ObserverUs] = Us(t.observerQ); w[AssignMembersSum] = Sat(t.membersSum);
     w[ScansLo] = static_cast<U>(t.scans); w[ScansHi] = static_cast<U>(t.scans >> 32); w[CostUs] = TscUs(t.profCostQ); w[LoopUs] = TscUs(t.profLoopQ);
     w[TimedSolves] = Sat(t.profN); w[KernelTotalUs] = TscUs(t.profTotalQ); w[GatherUs] = TscUs(t.gatherQ); w[Direct18F12AA] = Sat(t.direct);
+    w[CacheAssignCalls] = Sat(t.cacheAssignCalls); w[CacheSolvedKernel] = Sat(t.cacheSolvedKernel);
     for (U i = 0; i < g_topTickCount; ++i) {
         const TickRec& r = g_topTicks[i];
         U* e = w + TickTable + i * kTickWords;

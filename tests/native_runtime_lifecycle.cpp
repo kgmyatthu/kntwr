@@ -12,6 +12,7 @@
 #include "kntwr_runtime.h"
 #include "native_image_relocation.h"
 #include "clones/kntwr_clones.h"
+#include "core/kntwr_entry_patch.h"
 
 static_assert(KNTWR_TRACE_ABI==8u && KNTWR_TRACE_ENTRIES==1024u, "trace ABI 8 ring contract");
 static_assert(KNTWR_TRACE_SITES==112u && KNTWR_TIMED_SITES==110u, "trace site capacity and populated range");
@@ -51,9 +52,10 @@ static_assert(KNTWR_VISUAL==0x100u && (KNTWR_ALL&KNTWR_VISUAL)==KNTWR_VISUAL && 
 static_assert(KNTWR_COLLIDE==0x200u && (KNTWR_ALL&KNTWR_COLLIDE)==KNTWR_COLLIDE && (KNTWR_VALID_MASK&KNTWR_COLLIDE)==KNTWR_COLLIDE, "collide is part of the shipping set");
 static_assert(KNTWR_COLLIDE_LOD==0x400u && !(KNTWR_ALL&KNTWR_COLLIDE_LOD) &&
               (KNTWR_VALID_MASK&KNTWR_COLLIDE_LOD)==KNTWR_COLLIDE_LOD, "collision LOD is an opt-in simulation feature");
-static_assert(KNTWR_ALL==(KNTWR_AI_ASYNC|KNTWR_BATCH64|KNTWR_VISUAL|KNTWR_PROFILE|KNTWR_LOCO|KNTWR_COLLIDE), "KNTWR_ALL is exactly the shipping set batch64,ai,visual,profile,loco,collide");
+static_assert(KNTWR_ALL==(KNTWR_AI_ASYNC|KNTWR_BATCH64|KNTWR_VISUAL|KNTWR_LOCO|KNTWR_COLLIDE), "KNTWR_ALL is exactly the optimization set batch64,ai,visual,loco,collide");
+static_assert(!(KNTWR_ALL&KNTWR_PROFILE) && (KNTWR_VALID_MASK&KNTWR_PROFILE), "profiling stays available only by explicit selection");
 static_assert(KNTWR_BRAIN_SLOTS==23u && KNTWR_BRAIN_FAMILIES==5u && KNTWR_BRAIN_SITE_FIRST==46u && KNTWR_BRAIN_SITES==49u && KNTWR_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(kntwr_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+KNTWR_ALLOCATOR_WORDS+2+KNTWR_BRAIN_STATE_WORDS+KNTWR_COLLISION_WORDS+KNTWR_COLLIDE_WORDS+KNTWR_BRAIN2_WORDS+KNTWR_COLLIDE_LOD_WORDS+16+KNTWR_AI_SLICE_BUDGET_WORDS+8+KNTWR_LOCO_WORDS+KNTWR_LOCO_GATE_WORDS+KNTWR_LOCO_SERVICE_WORDS+KNTWR_LOCO_GRID_WORDS+KNTWR_LOCO_PARALLEL_WORDS+KNTWR_SWEEP_WORDS+KNTWR_RESOLVE_WORDS+KNTWR_ENV_WORDS+KNTWR_ENV_TARGET_WORDS+KNTWR_RESOLVE_FRAME_WORDS+KNTWR_LOCO_OWNED_WORDS+KNTWR_LOCO_OWNED_DETAIL_WORDS+KNTWR_LOCO_OWNED_PHASE_WORDS+KNTWR_LOCO_OWNED_LOAD_WORDS+KNTWR_LOCO_GRID_V2_WORDS+KNTWR_COLLIDE_SOURCE_WORDS+KNTWR_MEMORY_WORDS+KNTWR_AI_COMPLETION_WORDS+KNTWR_AI_CENSUS_WORDS+KNTWR_BRAIN2_CENSUS_WORDS+KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS+KNTWR_FIRE_WORDS+KNTWR_BRAIN2_ROUTE_WORDS+KNTWR_FIRE_COMMIT_WORDS+KNTWR_MOVE_NODE_WORDS+KNTWR_MOVE_NODE_EVENT_WORDS+KNTWR_BRAIN2_NODE_TARGET_WORDS+(KNTWR_IDLE_NODE_CLASSES+KNTWR_ACTION_NODE_CLASSES)*(KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS+KNTWR_BRAIN_WORKER_WORDS+KNTWR_AI_ASYNC2_WORDS+KNTWR_BRAIN_WORKER_PHASE_WORDS+KNTWR_BRAIN_UNIT_WORDS+KNTWR_COLLIDE_CONTACT_WORDS+KNTWR_GRID_PROBATION_WORDS+KNTWR_AI_ASYNC2_ROUTE_WORDS+KNTWR_ARMY_UNIT_WORDS+KNTWR_VA_WATCH_WORDS+KNTWR_ARMY_B0_WORDS+KNTWR_ARMY_STORM_WORDS+KNTWR_BRAIN_S0_WORDS+KNTWR_AI_DEFERRED_WORDS+KNTWR_AI_CTRL_REUSE_WORDS+KNTWR_LOCO_RELINK_WORDS+KNTWR_LOCO_CW_WORDS+KNTWR_LOCO_GRID_BUILD_WORDS+KNTWR_BRAIN_UNIT_POLICY_WORDS+KNTWR_AI_PREPASS_CENSUS_WORDS+KNTWR_AI_PREPASS_WORDS+KNTWR_AI_SPIRAL_WORDS+KNTWR_ARMY_SOLVER_WORDS+KNTWR_ALLOC_CENSUS_WORDS+KNTWR_ARENA_WORDS+KNTWR_OVERLAY_WORDS+KNTWR_MOUNTED_OFFICER_WORDS+KNTWR_ENGAGE_CENSUS_WORDS+KNTWR_ANIM_GUARD_WORDS)+sizeof(kntwr_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census and anim guard words without changing existing words");
+static_assert(sizeof(kntwr_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+KNTWR_ALLOCATOR_WORDS+2+KNTWR_BRAIN_STATE_WORDS+KNTWR_COLLISION_WORDS+KNTWR_COLLIDE_WORDS+KNTWR_BRAIN2_WORDS+KNTWR_COLLIDE_LOD_WORDS+16+KNTWR_AI_SLICE_BUDGET_WORDS+8+KNTWR_LOCO_WORDS+KNTWR_LOCO_GATE_WORDS+KNTWR_LOCO_SERVICE_WORDS+KNTWR_LOCO_GRID_WORDS+KNTWR_LOCO_PARALLEL_WORDS+KNTWR_SWEEP_WORDS+KNTWR_RESOLVE_WORDS+KNTWR_ENV_WORDS+KNTWR_ENV_TARGET_WORDS+KNTWR_RESOLVE_FRAME_WORDS+KNTWR_LOCO_OWNED_WORDS+KNTWR_LOCO_OWNED_DETAIL_WORDS+KNTWR_LOCO_OWNED_PHASE_WORDS+KNTWR_LOCO_OWNED_LOAD_WORDS+KNTWR_LOCO_GRID_V2_WORDS+KNTWR_COLLIDE_SOURCE_WORDS+KNTWR_MEMORY_WORDS+KNTWR_AI_COMPLETION_WORDS+KNTWR_AI_CENSUS_WORDS+KNTWR_BRAIN2_CENSUS_WORDS+KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS+KNTWR_FIRE_WORDS+KNTWR_BRAIN2_ROUTE_WORDS+KNTWR_FIRE_COMMIT_WORDS+KNTWR_MOVE_NODE_WORDS+KNTWR_MOVE_NODE_EVENT_WORDS+KNTWR_BRAIN2_NODE_TARGET_WORDS+(KNTWR_IDLE_NODE_CLASSES+KNTWR_ACTION_NODE_CLASSES)*(KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS+KNTWR_BRAIN_WORKER_WORDS+KNTWR_AI_ASYNC2_WORDS+KNTWR_BRAIN_WORKER_PHASE_WORDS+KNTWR_BRAIN_UNIT_WORDS+KNTWR_COLLIDE_CONTACT_WORDS+KNTWR_GRID_PROBATION_WORDS+KNTWR_AI_ASYNC2_ROUTE_WORDS+KNTWR_ARMY_UNIT_WORDS+KNTWR_VA_WATCH_WORDS+KNTWR_ARMY_B0_WORDS+KNTWR_ARMY_STORM_WORDS+KNTWR_BRAIN_S0_WORDS+KNTWR_AI_DEFERRED_WORDS+KNTWR_AI_CTRL_REUSE_WORDS+KNTWR_LOCO_RELINK_WORDS+KNTWR_LOCO_CW_WORDS+KNTWR_LOCO_GRID_BUILD_WORDS+KNTWR_BRAIN_UNIT_POLICY_WORDS+KNTWR_AI_PREPASS_CENSUS_WORDS+KNTWR_AI_PREPASS_WORDS+KNTWR_AI_SPIRAL_WORDS+KNTWR_ARMY_SOLVER_WORDS+KNTWR_ALLOC_CENSUS_WORDS+KNTWR_ARENA_WORDS+KNTWR_OVERLAY_WORDS+KNTWR_MOUNTED_OFFICER_WORDS+KNTWR_ENGAGE_CENSUS_WORDS+KNTWR_ANIM_GUARD_WORDS+KNTWR_FORMATION_RESIDUAL_WORDS)+sizeof(kntwr_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census, anim guard and army residual words without changing existing words");
 static_assert(KNTWR_AI_SLICE_BUDGET_WORDS==8u && offsetof(kntwr_status,ai_slice_budget_words)==offsetof(kntwr_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(kntwr_status,ai_park_words)==offsetof(kntwr_status,ai_slice_budget_words)+KNTWR_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(kntwr_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(kntwr_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -128,13 +130,14 @@ static_assert(offsetof(kntwr_status,memory_words)+KNTWR_MEMORY_WORDS*sizeof(uint
               offsetof(kntwr_status,ai_prepass_census_words)+KNTWR_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_prepass_words) && KNTWR_AI_PREPASS_CENSUS_WORDS==82u &&
               offsetof(kntwr_status,ai_prepass_words)+KNTWR_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_spiral_words) && KNTWR_AI_PREPASS_WORDS==60u && KNTWR_AI_POLY_WORDS==32u && KNTWR_AI_RECORD_TEST_WORDS==28u &&
               offsetof(kntwr_status,ai_spiral_words)+KNTWR_AI_SPIRAL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_solver_words) && KNTWR_AI_SPIRAL_WORDS==32u &&
-              offsetof(kntwr_status,army_solver_words)+KNTWR_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,alloc_census_words) && KNTWR_ARMY_SOLVER_WORDS==519u &&
+              offsetof(kntwr_status,army_solver_words)+KNTWR_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,alloc_census_words) && KNTWR_ARMY_SOLVER_WORDS==521u &&
               offsetof(kntwr_status,alloc_census_words)+KNTWR_ALLOC_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,arena_words) && KNTWR_ALLOC_CENSUS_WORDS==1056u &&
               offsetof(kntwr_status,arena_words)+KNTWR_ARENA_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,overlay_words) && KNTWR_ARENA_WORDS==32u &&
               offsetof(kntwr_status,overlay_words)+KNTWR_OVERLAY_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,mounted_officer_words) && KNTWR_OVERLAY_WORDS==16u &&
               offsetof(kntwr_status,mounted_officer_words)+KNTWR_MOUNTED_OFFICER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,engage_census_words) && KNTWR_MOUNTED_OFFICER_WORDS==16u &&
               offsetof(kntwr_status,engage_census_words)+KNTWR_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,anim_guard_words) && KNTWR_ENGAGE_CENSUS_WORDS==6832u && KNTWR_ENGAGE_CENSUS==0x80000u &&
-              offsetof(kntwr_status,anim_guard_words)+KNTWR_ANIM_GUARD_WORDS*sizeof(uint32_t)==sizeof(kntwr_status) && KNTWR_ANIM_GUARD_WORDS==8u &&
+              offsetof(kntwr_status,anim_guard_words)+KNTWR_ANIM_GUARD_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_residual_words) && KNTWR_ANIM_GUARD_WORDS==8u &&
+              offsetof(kntwr_status,army_residual_words)+KNTWR_FORMATION_RESIDUAL_WORDS*sizeof(uint32_t)==sizeof(kntwr_status) && KNTWR_FORMATION_RESIDUAL_WORDS==320u &&
               KNTWR_AI_CTRL_FLAGS_VALID==0x1F0Fu &&
               KNTWR_AI_POLY_SHADOW==0x4u && KNTWR_AI_POLY==0x8u && KNTWR_AI_SPIRAL_CENSUS==0x10u && KNTWR_AI_SPIRAL_CAP_SHIFT==16u &&
               KNTWR_AI_RECORD_TEST_SHADOW==0x20u && KNTWR_AI_RECORD_TEST==0x40u && KNTWR_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
@@ -872,12 +875,12 @@ static int PeriodicBudgetFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatil
           !snapshot.memory_words[KNTWR_MEM_LOCO_BYTES] && !snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES],
           "restored VA does not silently re-enable or reallocate retired stages");
     Check(snapshot.loco_owned_load_words[0]==1,"retired owned activation counters survive later monitoring samples");
-    root[0x2829c]=0;
+    Put(model,0,0); // Identity loss, not a scheduler-mode change, ends the battle.
     bool waiting=false;
     for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(5))
         if(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE) { waiting=true; break; }
     Check(waiting,"budget fallback can leave the current battle normally");
-    root[0x2829c]=1;
+    Put(model,0,A(root));
     Check(WaitActive(state,KNTWR_BATCH64) && ReadState(state,snapshot) &&
           snapshot.memory_words[KNTWR_MEM_BUDGET_DISABLED_MASK]==owned &&
           !snapshot.memory_words[KNTWR_MEM_LOCO_BYTES] && !snapshot.memory_words[KNTWR_MEM_COLLIDE_BYTES],
@@ -1086,10 +1089,13 @@ static int AiCompletionFixture(bool controller,kntwr_start_fn start,kntwr_stop_f
                                volatile kntwr_status* state,kntwr_config config) {
     auto boundary=reinterpret_cast<kntwr_ai_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_boundary"));
     Check(boundary!=nullptr,"AI lifecycle completion boundary export exists");
-    root[0x2829c]=1; Put(model,0xB0,A(armyManager));
+    root[0x2829c]=0; Put(model,0xB0,A(armyManager));
     config.enabled_mask=KNTWR_AI_ASYNC|(controller ? KNTWR_AI_CTRL : 0);
     config.workers=0;
-    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"AI completion fixture activates");
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"AI completion fixture activates in synchronous mode");
+    kntwr_status modeState={};
+    Check(ReadState(state,modeState),"AI completion generation is readable");
+    const U generation=modeState.generation, worker=modeState.ai_slice_words[7];
     // Redirect only the oracle's private image, after clone byte validation. No installed executable is patched.
     Check(RedirectImage(0x7D99F0,reinterpret_cast<const void*>(&AiFakeThink)),"install synthetic planner in owned image");
     U live[11]={}, destroyed[11]={};
@@ -1106,9 +1112,17 @@ static int AiCompletionFixture(bool controller,kntwr_start_fn start,kntwr_stop_f
         planner.units[1]=nullptr; planner.count=1;
         second.vtable=destroyed; second.owner=nullptr;
         planner.delayMs=12;
+        root[0x2829c]=1;
+        Sleep(80);
+        Check(ReadState(state,modeState) && modeState.phase==KNTWR_ACTIVE && modeState.generation==generation &&
+              modeState.ai_slice_words[7]==worker,"sync-to-async preserves the AI generation and worker");
         Check(boundary(model,&planner,0)==1,"next tick runs a fresh native frame with the changed list");
         Check(planner.calls==2 && planner.dispatches==3 && planner.flags==2 && !aiFakeStale,
               "subordinate destruction between ticks never causes stale slot +0x28 dispatch");
+        root[0x2829c]=0;
+        Sleep(80);
+        Check(ReadState(state,modeState) && modeState.phase==KNTWR_ACTIVE && modeState.generation==generation &&
+              modeState.ai_slice_words[7]==worker,"async-to-sync preserves completed AI work and its worker");
     }
     Check(stop(nullptr)==0,"AI completion fixture joins before teardown");
     kntwr_status snapshot={};
@@ -1132,6 +1146,49 @@ static int AiCompletionFixture(bool controller,kntwr_start_fn start,kntwr_stop_f
     printf(" barrier_hist=");
     for(U i=15;i<24;++i) printf("%s%u",i==15 ? "" : ",",snapshot.ai_completion_words[i]);
     printf(" stale_dispatches=%ld\n",aiFakeStale);
+    return failures ? 1 : 0;
+}
+
+static int ProfileSelectionFixture(kntwr_start_fn start,kntwr_stop_fn stop,
+                                   volatile kntwr_status* state,kntwr_config config) {
+    auto profile=reinterpret_cast<volatile kntwr_profile_status*>(GetProcAddress(runtimeModule,"kntwr_profile"));
+    Check(profile!=nullptr,"canonical profiler export remains available when profiling defaults off");
+    if(!profile) return 1;
+    root[0x2829c]=1; BindLocoScene(true);
+    config.workers=2; config.main_thread_id=GetCurrentThreadId();
+    config.loco_flags=KNTWR_LOCO_CLONE|KNTWR_LOCO_PARALLEL|KNTWR_LOCO_OWNED_SERVICES|KNTWR_LOCO_GRID|KNTWR_LOCO_QUIET;
+    config.collide_flags=KNTWR_COLLIDE_CONTACT_WORKERS;
+    // Exercise the real DLL, first cold/off, then on/off/on. No game tick executes.
+    const U masks[]={KNTWR_ALL,KNTWR_ALL|KNTWR_PROFILE,KNTWR_ALL,KNTWR_ALL|KNTWR_PROFILE};
+    for(U mask:masks) {
+        if(failures) break;
+        const bool sampling=(mask&KNTWR_PROFILE)!=0;
+        const U roundsBefore=profile->rounds, samplesBefore=profile->samples;
+        config.enabled_mask=mask;
+        Check(start(&config)==0 && WaitActive(state,mask),"optimization set activates with profiling independently selected");
+        kntwr_status snapshot={};
+        Check(ReadState(state,snapshot) && snapshot.requested_mask==mask &&
+              (snapshot.active_mask&KNTWR_ALL)==KNTWR_ALL,"profiling selection preserves all optimization feature bits");
+        if(sampling) {
+            bool observed=false;
+            for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
+                if(profile->rounds && profile->main_samples[KNTWR_PROFILE_PHASE_C]) { observed=true; break; }
+            Check(observed && profile->hist_va && profile->tick_hist_va,
+                  "explicit PROFILE allocates histograms and runs the native sampler");
+        } else {
+            Sleep(120);
+            Check(!profile->hist_va && !profile->tick_hist_va && !profile->frames_hist_va &&
+                  profile->rounds==roundsBefore && profile->samples==samplesBefore,
+                  "default optimization set allocates no profiler histograms and performs no sampling");
+            Check(ReadState(state,snapshot) && !snapshot.memory_words[KNTWR_MEM_PROFILE_BYTES],
+                  "default runtime reports zero profiler storage");
+        }
+        Check(stop(nullptr)==0 && !profile->hist_va && !profile->tick_hist_va,
+              "stop releases sampler resources before the next profiling selection");
+        const U stoppedRounds=profile->rounds;
+        Sleep(30);
+        Check(profile->rounds==stoppedRounds,"sampler stays stopped after runtime teardown");
+    }
     return failures ? 1 : 0;
 }
 
@@ -1357,7 +1414,10 @@ static int AiCensusFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
 // destructor 0x69D750 (slot 0 of 0x13376AC, ret 4), the observer owner destructor 0x73E180 (slot 2 of 0x1343318, ret 4)
 // and the observer 0x6A95A0 (slot 16 of 0x13376FC, ret 0xC) are redirected in the owned image to probes. No installed
 // executable is patched.
-struct Ai2Planner { volatile U calls; volatile LONG started; U delayMs, thread, destroyFromWorker, walk; };
+struct Ai2Planner {
+    volatile U calls; volatile LONG started; U delayMs, thread, destroyFromWorker, walk;
+    HANDLE entered,release;
+};
 struct Ai2Probe { volatile LONG calls; U thread, thinksAtEntry; Ai2Planner* planner; };
 static Ai2Probe ai2Probe;
 static U* Ai2DestroyCell() { return At(0x13376AC); }
@@ -1504,6 +1564,8 @@ static DWORD WINAPI Ai2Mutator(void*) { // shared-global writer: any foreign wri
 static void __fastcall Ai2FakeThink(Ai2Planner* planner,void*,U) {
     planner->thread=GetCurrentThreadId();
     InterlockedIncrement(&planner->started);
+    if(planner->entered) SetEvent(planner->entered);
+    if(planner->release) WaitForSingleObject(planner->release,5000);
     if(planner->destroyFromWorker) CallDestroySlot(); // worker-side delegate destruction inside the think: marshalled
     if(planner->walk) Ai2WalkThink();
     Sleep(planner->delayMs);
@@ -1706,7 +1768,7 @@ static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
     ai2Walk.entry=reinterpret_cast<kntwr_ai_async2_private_entry_fn>(GetProcAddress(runtimeModule,"kntwr_ai_async2_private_entry"));
     Check(boundary!=nullptr && siteCallee!=nullptr && ai2Walk.entry!=nullptr,"ai_async2 lifecycle exports present");
     if(!boundary || !siteCallee || !ai2Walk.entry) return 1;
-    root[0x2829c]=1; Put(model,0xB0,A(armyManager));
+    root[0x2829c]=0; Put(model,0xB0,A(armyManager));
     config.workers=0; config.main_thread_id=GetCurrentThreadId();
     config.enabled_mask=KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai_async2 without ai is refused");
     config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2|KNTWR_AI_CTRL; Check(start(&config)==1,"ai_async2 with ai_ctrl is refused");
@@ -1716,7 +1778,10 @@ static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
     Check(destroyOriginal==0x69D750+delta && walkOriginal==0x702BB0+delta && observerOriginal==0x6A95A0+delta &&
           ownerOriginal==0x73E180+delta,"pinned originals before start");
     config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
-    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai_async2 activates");
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),"ai_async2 activates in synchronous mode");
+    kntwr_status modeState={};
+    Check(ReadState(state,modeState),"AI_ASYNC2 initial generation is readable");
+    const U modeGeneration=modeState.generation, modeWorker=modeState.ai_slice_words[7];
     // Probes go in only after the first activation validated and copied the clone sources (0x7D99F0 and 0x6A95A0 are
     // sources); the resident clones call the probed entries as kept externals.
     Check(RedirectImage(0x7D99F0,reinterpret_cast<const void*>(&Ai2FakeThink)) &&
@@ -1751,14 +1816,36 @@ static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
     Sleep(50); // let the worker report idle so the next start join counts the batch as complete
     Check(tick(nullptr,0,0,nullptr)==1,"T2: tick start counts the complete batch without stalling");
     // T3/T4: a think longer than the window: the next tick start blocks until it returns (no think crosses into a tick).
-    Check(tick(&p,300,0,nullptr)==1,"T3: long think queued");
+    p.entered=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    p.release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    Check(p.entered && p.release,"create pending-mode-transition planner rendezvous");
+    Check(tick(&p,300,0,nullptr)==1 && p.entered && WaitForSingleObject(p.entered,3000)==WAIT_OBJECT_0,
+          "T3: long think enters its controlled inter-tick rendezvous");
+    root[0x2829c]=1;
+    Sleep(80);
+    Check(ReadState(state,modeState) && modeState.phase==KNTWR_ACTIVE && modeState.generation==modeGeneration &&
+          modeState.ai_slice_words[7]==modeWorker && p.calls==1,
+          "pending AI_ASYNC2 batch survives sync-to-async without worker replacement");
+    if(p.release) SetEvent(p.release);
     m={};
     Check(tick(nullptr,0,2,&m)==1 && m.thinksAtMid==2 && p.calls==2,"T4: the tick-start lifetime join waited for the whole think");
     // T5/T6: a tick-owner structural writer runs after the start join, never concurrently with the think.
-    Check(tick(&p,150,0,nullptr)==1,"T5: think queued");
+    if(p.entered) ResetEvent(p.entered);
+    if(p.release) ResetEvent(p.release);
+    Check(tick(&p,150,0,nullptr)==1 && p.entered && WaitForSingleObject(p.entered,3000)==WAIT_OBJECT_0,
+          "T5: think enters its controlled inter-tick rendezvous");
+    root[0x2829c]=0;
+    Sleep(80);
+    Check(ReadState(state,modeState) && modeState.phase==KNTWR_ACTIVE && modeState.generation==modeGeneration &&
+          modeState.ai_slice_words[7]==modeWorker && p.calls==2,
+          "pending AI_ASYNC2 batch survives async-to-sync without worker replacement");
+    if(p.release) SetEvent(p.release);
     m={}; m.destroy=true;
     Check(tick(nullptr,0,2,&m)==1 && ai2Probe.calls==1 && ai2Probe.thread==owner && ai2Probe.thinksAtEntry==3 && p.calls==3,
           "T6: tick-side destructor ran only after the think completed");
+    if(p.entered) CloseHandle(p.entered);
+    if(p.release) CloseHandle(p.release);
+    p.entered=p.release=nullptr;
     // T7: a main/render delegate destructor waits for the executing think (owner teardown lease).
     Check(tick(&p,150,0,nullptr)==1,"T7: think queued");
     Ai2TeardownWhileThinking(p,Ai2DestroyCell(),4,4,2,"T7: non-tick delegate destructor blocks until the think returned");
@@ -2303,14 +2390,14 @@ static int CavalryEntryFixture(const char* mode,kntwr_start_fn start,kntwr_stop_
     const U entryProtection=PageProtection(CavalryEntry());
     kntwr_status snapshot={};
     if(lifecycle) {
-        // Dormancy: an unarmed scheduler publishes neither the entry hook nor any gate.
-        root[0x2829c]=0;
-        Check(start(&config)==0,"cavalry start accepted while the scheduler is unarmed");
+        // A missing world publishes neither the entry hook nor any gate, even in synchronous mode.
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"cavalry start accepted without a world");
         Sleep(80); // several 10 ms monitor polls
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
-              CavalryEntryStockBytes() && CavalryGatesWithdrawn(0),"dormant cavalry has published neither the flush entry hook nor a gate");
-        root[0x2829c]=1;
-        Check(WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry activates with the exact requested mask");
+              CavalryEntryStockBytes() && CavalryGatesWithdrawn(0),"missing-world cavalry publishes neither the flush entry hook nor a gate");
+        Put(model,0,A(root));
+        Check(WaitActive(state,KNTWR_CAVALRY_ORBIT),"synchronous cavalry activates with the exact requested mask");
         for(unsigned i=0;i<4 && !failures;++i) {
             if(i) Check(start(&config)==0 && WaitActive(state,KNTWR_CAVALRY_ORBIT),"cavalry reactivates after a clean stop");
             Check(CavalryEntryHooked() && CavalryGatesPublished(),"activation installs the flush entry hook and the read-only attack row gate");
@@ -2403,6 +2490,585 @@ static int CavalryEntryFixture(const char* mode,kntwr_start_fn start,kntwr_stop_
     return failures ? 1 : 0;
 }
 
+static U syncNativeCallAddress;
+// Enter the actual image CALL with its native register/stack contract. The
+// image's result-copy continuation runs too; only its later post-frame bracket
+// is replaced by SyncNativeResume in this private mapping.
+static __declspec(naked) U __stdcall SyncNativeCall(void*,void*,void*) {
+    __asm {
+        push ebx
+        push esi
+        push edi
+        mov ecx, [esp+16]
+        mov esi, [ecx]
+        mov ebx, [esp+24]
+        push ebx
+        push dword ptr [esp+24]
+        jmp dword ptr [syncNativeCallAddress]
+    }
+}
+static __declspec(naked) void SyncNativeResume() {
+    __asm {
+        pop edi
+        pop esi
+        pop ebx
+        ret 12
+    }
+}
+// The tick itself returns out*, but the native result-copy continuation at
+// 5F953C executes mov al,[eax+2] before this bounded adapter returns.
+static U SyncContinuationResult(const uint8_t* output) {
+    return (A(output)&0xFFFFFF00u)|output[2];
+}
+// Execute the complete native TASK body through the published TBB slot. Its
+// native prologue only changes this thread's FP environment, which we restore.
+static U SyncTaskCall(uint8_t* currentModel,uint8_t* output,U entry=0) {
+    Put(root,0xC,A(currentModel));
+    Put(root,0x10,A(root+0x28040));
+    Put(root,0x14,0);
+    Put(root,0x28040,1);
+    U task[2]={0,A(root+0xC)};
+    alignas(16) uint8_t savedFp[512];
+    __asm { lea eax, savedFp }
+    __asm { fxsave [eax] }
+    using Task=U (__fastcall*)(void*,void*);
+    const U result=reinterpret_cast<Task>(entry ? entry : *At(0x132E954))(task,nullptr);
+    __asm { lea eax, savedFp }
+    __asm { fxrstor [eax] }
+    memcpy(output,root+0x2803C,3);
+    return result;
+}
+struct SyncPendingTask {
+    U waitVtable[2], scheduler, parentStorage[8];
+    uint8_t* currentModel;
+    uint8_t* frame;
+    uint8_t output[3], driverOutput[3];
+    HANDLE release, waiting, worker;
+    volatile LONG waits, destroys, errors;
+    U result, driverResult;
+};
+static SyncPendingTask* syncPendingTask;
+static U SyncParent(SyncPendingTask& task) { return A(task.parentStorage+6); }
+static DWORD WINAPI SyncPendingWorker(void* raw) {
+    auto& task=*static_cast<SyncPendingTask*>(raw);
+    if(WaitForSingleObject(task.release,5000)!=WAIT_OBJECT_0) InterlockedOr(&task.errors,1);
+    task.result=SyncTaskCall(task.currentModel,task.output);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(task.parentStorage+7),1);
+    return 0;
+}
+// Only the TBB scheduler/parent destruction are standins: the worker executes
+// the complete published native TASK, and the driver owns the pending clear.
+static void __fastcall SyncPendingWait(void* scheduler,void*,U parent,U child) {
+    auto& task=*syncPendingTask;
+    if(scheduler!=&task.scheduler || parent!=SyncParent(task) || child ||
+       *reinterpret_cast<U*>(root+0x282A0)!=parent) InterlockedOr(&task.errors,2);
+    InterlockedIncrement(&task.waits);
+    SetEvent(task.waiting);
+    if(WaitForSingleObject(task.worker,5000)!=WAIT_OBJECT_0 || task.parentStorage[7]!=1 ||
+       task.result || *reinterpret_cast<U*>(root+0x28040))
+        InterlockedOr(&task.errors,4);
+}
+static void __fastcall SyncPendingDestroy(U parent,void*,U argument) {
+    auto& task=*syncPendingTask;
+    if(parent!=SyncParent(task) || argument!=parent || task.parentStorage[7]!=1 || task.waits!=1 ||
+       *reinterpret_cast<U*>(root+0x282A0)!=parent) InterlockedOr(&task.errors,8);
+    InterlockedIncrement(&task.destroys);
+}
+static U syncDriverTail;
+static __declspec(naked) void SyncDriverResume() {
+    __asm {
+        lea ebx, [esi+14h]
+        jmp dword ptr [syncDriverTail]
+    }
+}
+static DWORD WINAPI SyncPendingDriver(void* raw) {
+    auto& task=*static_cast<SyncPendingTask*>(raw);
+    using Driver=U (__stdcall*)(void*,void*,void*);
+    task.driverResult=reinterpret_cast<Driver>(At(0x57E110))(task.driverOutput,task.frame,root);
+    return 0;
+}
+static bool SyncPendingTransition(volatile kntwr_status* state,uint8_t* currentModel,const uint8_t* expected) {
+    // Real adapter -> driver join/consume/tail, but NOT a full frame: the
+    // post-frame bracket 5EDCB0 alone is skipped. Its two pushed arguments
+    // therefore must not be left on the native tail's four-register stack.
+    // The later mode write is a controlled boundary, not execution of 5EE050.
+    alignas(4) static uint8_t frame[0x28028], ring[0x10];
+    memset(frame,0,sizeof(frame)); memset(ring,0,sizeof(ring));
+    Put(frame,0,0x3DCCCCCDu);
+    kntwr_status snapshot={};
+    Check(ReadState(state,snapshot),"read the generation before a pending native task");
+    const U generation=snapshot.generation, worker=snapshot.ai_slice_words[7];
+    SyncPendingTask task={};
+    task.currentModel=currentModel; task.frame=frame; task.result=task.driverResult=0xFFFFFFFFu;
+    memset(task.output,0xCC,sizeof(task.output)); memset(task.driverOutput,0xCC,sizeof(task.driverOutput));
+    task.waitVtable[1]=A(reinterpret_cast<const void*>(&SyncPendingWait));
+    task.scheduler=A(task.waitVtable); task.parentStorage[0]=A(&task.scheduler); task.parentStorage[7]=2;
+    task.release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    task.waiting=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    syncPendingTask=&task; syncDriverTail=A(At(0x5F9551));
+    uint8_t destroy[5]; memcpy(destroy,At(0x12A7A1B),sizeof(destroy));
+    const bool adapted=RedirectImage(0x12A7A1B,reinterpret_cast<const void*>(&SyncPendingDestroy)) &&
+                       RedirectImage(0x5F9545,reinterpret_cast<const void*>(&SyncDriverResume));
+    Check(adapted && task.release && task.waiting,"prepare only controlled TBB and post-frame boundaries");
+    root[0x2829c]=1; root[0x28044]=0; root[0x282A5]=0;
+    Put(root,0x281D4,A(ring)); Put(root,0x28038,0); Put(root,0x282A0,SyncParent(task));
+    Put(root,0x28040,1);
+    memset(root+0x2803C,0xCC,3); currentModel[0x60]=0;
+    if(adapted && task.release && task.waiting)
+        task.worker=CreateThread(nullptr,0,&SyncPendingWorker,&task,0,nullptr);
+    HANDLE driver=task.worker ? CreateThread(nullptr,0,&SyncPendingDriver,&task,0,nullptr) : nullptr;
+    const bool waiting=driver && WaitForSingleObject(task.waiting,3000)==WAIT_OBJECT_0;
+    Check(waiting && WaitForSingleObject(driver,80)==WAIT_TIMEOUT &&
+          *reinterpret_cast<U*>(root+0x282A0)==SyncParent(task) && *reinterpret_cast<U*>(root+0x28040)==1 &&
+          !task.destroys && !currentModel[0x60],
+          "real native driver waits on its pending task before destroy, clear and result consumption");
+    if(task.release) SetEvent(task.release);
+    const bool workerDone=!task.worker || WaitForSingleObject(task.worker,5000)==WAIT_OBJECT_0;
+    const bool driverDone=!driver || WaitForSingleObject(driver,5000)==WAIT_OBJECT_0;
+    if(!workerDone || !driverDone) ExitProcess(1);
+    const bool consumed=waiting && !task.errors && task.waits==1 && task.destroys==1 && task.result==0 &&
+        task.driverResult==A(task.driverOutput) && !*reinterpret_cast<U*>(root+0x282A0) &&
+        !*reinterpret_cast<U*>(root+0x28040) && *reinterpret_cast<U*>(root+0x14)==*reinterpret_cast<U*>(frame) &&
+        !memcmp(task.output,expected,3) && !memcmp(task.driverOutput,expected,3) && currentModel[0x60]==1;
+    Check(consumed,"native TASK results survive the actual join, destroy, pending clear, ring read and driver copy-out");
+    const bool destroyRestored=CavalryPatchBytes(0x12A7A1B,destroy,sizeof(destroy));
+    const bool directRestored=RedirectImage(0x5F9545,reinterpret_cast<const void*>(&SyncNativeResume));
+    Check(destroyRestored && directRestored,"restore controlled scheduler destruction and direct-sync continuation");
+    bool transitioned=false;
+    if(consumed && directRestored) {
+        root[0x2829c]=0;
+        U zeroFrame[2]={}; uint8_t output[3]={0xCC,0xCC,0xCC};
+        memset(root+0x2803C,0xCC,3); currentModel[0x60]=0;
+        const U result=SyncNativeCall(currentModel,output,zeroFrame);
+        transitioned=result==SyncContinuationResult(output) && !memcmp(output,expected,3) && currentModel[0x60]==1 &&
+            !memcmp(root+0x2803C,expected,3) && task.waits==1 && task.destroys==1 &&
+            WaitFor(state,snapshot,[](const kntwr_status& s){ return s.phase==KNTWR_ACTIVE && s.probe==0; }) &&
+            snapshot.generation==generation && snapshot.ai_slice_words[7]==worker;
+        Check(transitioned,"after the native pending join, the controlled sync transition retains generation and native results");
+    }
+    if(task.worker) CloseHandle(task.worker);
+    if(driver) CloseHandle(driver);
+    if(task.release) CloseHandle(task.release);
+    if(task.waiting) CloseHandle(task.waiting);
+    syncPendingTask=nullptr;
+    Put(root,0x282A0,0); Put(root,0x28040,0); root[0x2829c]=0;
+    return consumed && transitioned && destroyRestored && directRestored;
+}
+static bool SyncWaitActive(volatile kntwr_status* state,U mask,uint8_t* currentModel,U previousGeneration=0,bool taskRoute=false) {
+    kntwr_status snapshot={};
+    uint8_t out[3]={}; U frame[2]={};
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1)) {
+        if(!ReadState(state,snapshot)) continue;
+        if(snapshot.phase==KNTWR_ACTIVE && snapshot.active_mask==mask && snapshot.generation>previousGeneration) return true;
+        if(snapshot.phase==KNTWR_FAILED) return false;
+        if(snapshot.phase==KNTWR_ACTIVATING) {
+            if(taskRoute) SyncTaskCall(currentModel,out);
+            else SyncNativeCall(currentModel,out,frame);
+        }
+    }
+    return false;
+}
+
+static uint8_t* syncGuardOutput;
+static HANDLE syncGuardEntered,syncGuardRelease;
+static volatile LONG syncGuardErrors;
+static LONG CALLBACK SyncOutputFault(EXCEPTION_POINTERS* fault) {
+    const auto record=fault->ExceptionRecord;
+    if(record->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION || record->NumberParameters<2 || !syncGuardOutput ||
+       record->ExceptionInformation[1]<A(syncGuardOutput) || record->ExceptionInformation[1]>=A(syncGuardOutput)+3)
+        return EXCEPTION_CONTINUE_SEARCH;
+    SetEvent(syncGuardEntered);
+    if(WaitForSingleObject(syncGuardRelease,5000)!=WAIT_OBJECT_0) InterlockedIncrement(&syncGuardErrors);
+    DWORD old=0;
+    if(!VirtualProtect(syncGuardOutput,4096,PAGE_READWRITE,&old)) return EXCEPTION_CONTINUE_SEARCH;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+struct SyncTickCall { uint8_t* model; uint8_t* output; U frame[2]; U thread; bool taskRoute; };
+static DWORD WINAPI SyncTickThread(void* raw) {
+    auto call=static_cast<SyncTickCall*>(raw);
+    call->thread=GetCurrentThreadId();
+    if(call->taskRoute) SyncTaskCall(call->model,call->output);
+    else SyncNativeCall(call->model,call->output,call->frame);
+    return 0;
+}
+// Block the real native tick at its output store, without replacing its body
+// or any native leaf. Stop and world replacement must drain the same lifetime.
+static bool SyncDrainInFlight(kntwr_stop_fn stop,volatile kntwr_status* state,uint8_t* currentModel,
+                              uint8_t* nextModel=nullptr,U activeMask=0) {
+    const char* subcase=nextModel ? "world-replacement" :
+        (*reinterpret_cast<U*>(root+8)==A(currentModel) ? "bound-stop" : "foreign-stop");
+    kntwr_status snapshot={};
+    Check(ReadState(state,snapshot),"read the generation before a held native invocation");
+    const U originalGeneration=snapshot.generation, originalWorker=snapshot.ai_slice_words[7];
+    uint8_t installedEntry[8]; memcpy(installedEntry,At(0x57DF40),sizeof(installedEntry));
+    syncGuardErrors=0;
+    syncGuardOutput=static_cast<uint8_t*>(VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    syncGuardEntered=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    syncGuardRelease=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    void* handler=AddVectoredExceptionHandler(1,&SyncOutputFault);
+    DWORD old=0;
+    const bool armed=syncGuardOutput && syncGuardEntered && syncGuardRelease && handler &&
+                     VirtualProtect(syncGuardOutput,4096,PAGE_NOACCESS,&old);
+    Check(armed,"arm a private output-page rendezvous inside the real native tick");
+    SyncTickCall tick={currentModel,syncGuardOutput,{0,0},0};
+    StopCall ending={stop,0xFFFFFFFFu};
+    HANDLE execution=armed ? CreateThread(nullptr,0,&SyncTickThread,&tick,0,nullptr) : nullptr;
+    const bool entered=execution && WaitForSingleObject(syncGuardEntered,3000)==WAIT_OBJECT_0;
+    Check(entered,"native tick reaches its output store with the runtime invocation still in flight");
+    if(entered && nextModel) {
+        const U modes[]={1u,0u};
+        for(U mode:modes) {
+            root[0x2829c]=static_cast<uint8_t>(mode);
+            Check(WaitFor(state,snapshot,[&](const kntwr_status& s){
+                return s.phase==KNTWR_ACTIVE && s.probe==(mode ? 0x100u : 0u);
+            }) && snapshot.generation==originalGeneration && snapshot.ai_slice_words[7]==originalWorker &&
+                  WaitForSingleObject(execution,0)==WAIT_TIMEOUT,
+                  "both mode changes retain the generation and worker while a real native tick is held");
+        }
+        Put(root,8,A(nextModel));
+    }
+    DWORD stopThreadId=0;
+    HANDLE stopping=entered && !nextModel ? CreateThread(nullptr,0,&ConcurrentStop,&ending,0,&stopThreadId) : nullptr;
+    const bool draining=entered && (nextModel || stopping) &&
+        WaitFor(state,snapshot,[](const kntwr_status& s){ return s.phase==KNTWR_RESTORING; });
+    Check(draining && WaitForSingleObject(execution,80)==WAIT_TIMEOUT &&
+          (!stopping || WaitForSingleObject(stopping,0)==WAIT_TIMEOUT) &&
+          !memcmp(installedEntry,At(0x57DF40),sizeof(installedEntry)),
+          "observed lifecycle drain retains the installed native entry while its invocation is blocked");
+    if(syncGuardRelease) SetEvent(syncGuardRelease);
+    const DWORD executionWait=execution ? WaitForSingleObject(execution,5000) : WAIT_OBJECT_0;
+    const DWORD stopWait=stopping ? WaitForSingleObject(stopping,5000) : WAIT_OBJECT_0;
+    const bool tickDone=executionWait==WAIT_OBJECT_0, stopDone=stopWait==WAIT_OBJECT_0;
+    const bool released=tickDone && stopDone && (nextModel || (stopping && ending.result==0)) && !syncGuardErrors;
+    Check(released,"releasing the native instruction permits the requested lifecycle drain");
+    if(!released) {
+        kntwr_status failureState={};
+        const bool stateRead=ReadState(state,failureState);
+        printf("sync native drain failure: case=%s current=%08X next=%08X execution_wait=%08lX stop_wait=%08lX "
+               "stop_result=%u guard_errors=%ld state_read=%u phase=%u error=%u error_detail=%08X generation=%u "
+               "tick_tid=%u stop_tid=%lu\n",
+               subcase,A(currentModel),A(nextModel),executionWait,stopWait,ending.result,syncGuardErrors,
+               static_cast<U>(stateRead),failureState.phase,failureState.error,failureState.error_detail,
+               failureState.generation,tick.thread,stopThreadId);
+        fflush(stdout); // preserve the bounded failure record before a live-thread safety exit
+    }
+    if(!tickDone || !stopDone) ExitProcess(1); // stack arguments and VEH must outlive any blocked thread
+    if(!stopping && !nextModel) stop(nullptr);
+    if(execution) CloseHandle(execution);
+    if(stopping) CloseHandle(stopping);
+    if(handler) RemoveVectoredExceptionHandler(handler);
+    if(syncGuardOutput) VirtualFree(syncGuardOutput,0,MEM_RELEASE);
+    if(syncGuardEntered) CloseHandle(syncGuardEntered);
+    if(syncGuardRelease) CloseHandle(syncGuardRelease);
+    syncGuardOutput=nullptr; syncGuardEntered=syncGuardRelease=nullptr;
+    const bool resumed=!nextModel || SyncWaitActive(state,activeMask,nextModel,originalGeneration);
+    return entered && draining && !syncGuardErrors && resumed && (nextModel || (stopping && ending.result==0));
+}
+
+// Real zero-step native TICK execution, not a simulated tick or direct call to
+// a runtime export. The native driver join/consume region deliberately skips
+// post-frame 5EDCB0; neither it nor the controlled mode write claims a full frame.
+static int SyncNativeFixture(kntwr_start_fn start,kntwr_stop_fn stop,
+                             volatile kntwr_status* state,kntwr_config config) {
+    constexpr U callVa=0x5F952D;
+    const uint8_t stock[8]={0xE8,0x0E,0x4A,0xF8,0xFF,0x66,0x8B,0x08};
+    auto call=reinterpret_cast<const uint8_t*>(At(callVa));
+    Check(!memcmp(call,stock,sizeof(stock)),"sync native callsite starts with the pinned CALL and continuation");
+    const uint8_t resultCopy[19]={
+        0x66,0x8B,0x08,0x66,0x89,0x8E,0x3C,0x80,0x02,0x00,
+        0x8A,0x40,0x02,0x88,0x86,0x3E,0x80,0x02,0x00
+    };
+    const bool copyMatches=!memcmp(At(0x5F9532),resultCopy,sizeof(resultCopy));
+    Check(copyMatches,"native result-copy bytes pin the post-CALL AL clobber contract");
+    if(!copyMatches) return 1;
+    const DWORD protection=PageProtection(call);
+    syncNativeCallAddress=A(call);
+    uint8_t continuation[5]; memcpy(continuation,At(0x5F9545),sizeof(continuation));
+    uint8_t tickEntry[8]; memcpy(tickEntry,At(0x57DF40),sizeof(tickEntry));
+    const U tickProtection=PageProtection(At(0x57DF40));
+    Check(RedirectImage(0x5F9545,reinterpret_cast<const void*>(&SyncNativeResume)),
+          "private-image adapter returns after the unmodified native result-copy continuation");
+    Put(armyManager,0x14,8); model[0x140]=0;
+    uint8_t nativeOut[3]={}; U frame[2]={};
+    using Tick=U (__fastcall*)(void*,void*,U,U);
+    const U nativeResult=reinterpret_cast<Tick>(At(0x57DF40))(model,nullptr,A(nativeOut),A(frame));
+    Check(nativeResult==A(nativeOut) && nativeOut[0]==1 && !nativeOut[1] && !nativeOut[2] && model[0x60]==1,
+          "unmodified native zero-step tick returns its exact output pointer and army-state bytes");
+    uint8_t continuedStorage[4]={0xCC,0xCC,0xCC,0xCC};
+    // A nonzero pointer low byte makes the native AL change observable when
+    // the phase-8 result's third byte is zero, rather than accidentally equal.
+    uint8_t* continuedOut=continuedStorage+((A(continuedStorage)&0xFFu)==0 ? 1 : 0);
+    memset(root+0x2803C,0xCC,3); model[0x60]=0;
+    const U continuedResult=SyncNativeCall(model,continuedOut,frame);
+    Check(continuedResult==SyncContinuationResult(continuedOut) && continuedResult!=A(continuedOut) &&
+          !memcmp(continuedOut,nativeOut,3) && !memcmp(root+0x2803C,nativeOut,3) && model[0x60]==1,
+          "unmodified native CALL independently proves the continuation return and result-copy contract");
+    const U capturesBefore=activationBoundaries;
+    const U taskOriginal=*At(0x132e954);
+    root[0x2829c]=0;
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_COLLIDE;
+    config.workers=0; config.main_thread_id=GetCurrentThreadId();
+    Check(start(&config)==0,"initial synchronous-world request is admitted");
+    const bool active=SyncWaitActive(state,config.enabled_mask,model);
+    Check(active,"initial synchronous world becomes ACTIVE without enabling the async scheduler");
+    if(!active) {
+        Check(stop(nullptr)==0,"failed sync activation is stopped cleanly");
+        return failures ? 1 : 0;
+    }
+    uint8_t routedOut[3]={};
+    model[0x60]=0;
+    memset(root+0x2803C,0xCC,3);
+    SyncNativeCall(model,routedOut,frame);
+    Check(!memcmp(routedOut,nativeOut,sizeof(nativeOut)) && model[0x60]==1 &&
+          !memcmp(root+0x2803C,nativeOut,sizeof(nativeOut)),
+          "actual sync CALL executes the real tick clone and native result-copy continuation");
+    Check(activationBoundaries==capturesBefore,"collision activation captures through the native sync CALL, not an exported fixture boundary");
+    Check(!memcmp(call+5,stock+5,3),"native sync result-copy instructions remain unchanged");
+    Check(PageProtection(call)==protection && root[0x2829c]==0,
+          "sync hook preserves executable protection and never changes the scheduler byte");
+    kntwr_status snapshot={};
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.sim_words[15]>0; }) &&
+          snapshot.sim_words[13]==GetCurrentThreadId(),"native sync call is recorded as a routed tick on the caller thread");
+    const U generation=snapshot.generation, worker=snapshot.ai_slice_words[7], task=*At(0x132e954);
+    const uint8_t scriptCall[5]={0xE8,0x64,0x49,0xF8,0xFF};
+    uint8_t scriptContinuation[5]; memcpy(scriptContinuation,At(0x5F95DC),sizeof(scriptContinuation));
+    const bool scriptReady=!memcmp(At(0x5F95D7),scriptCall,sizeof(scriptCall)) &&
+        RedirectImage(0x5F95DC,reinterpret_cast<const void*>(&SyncNativeResume));
+    Check(scriptReady,"bound-model alternate native CALL has its pinned bytes and a private post-call adapter");
+    if(scriptReady) {
+        // Exercise only this native CALL, not the scripted driver's surrounding frame.
+        const U ticksBefore=snapshot.sim_words[15];
+        syncNativeCallAddress=A(At(0x5F95D7));
+        memset(routedOut,0xCC,3); model[0x60]=0;
+        const U result=SyncNativeCall(model,routedOut,frame);
+        syncNativeCallAddress=A(call);
+        Check(result==A(routedOut) && !memcmp(routedOut,nativeOut,3) && model[0x60]==1,
+              "alternate native callsite preserves the bound-model tick ABI and results");
+        Check(WaitFor(state,snapshot,[&](const kntwr_status& s){ return s.sim_words[15]>ticksBefore; }) &&
+              snapshot.sim_words[13]==GetCurrentThreadId(),"alternate native CALL enters the same caller-thread tick gate");
+        Check(CavalryPatchBytes(0x5F95DC,scriptContinuation,sizeof(scriptContinuation)),
+              "restore alternate native post-call continuation");
+    }
+    const U modes[]={1u,0u};
+    for(U asyncMode:modes) {
+        root[0x2829c]=static_cast<uint8_t>(asyncMode);
+        memset(root+0x2803C,0xCC,3); memset(routedOut,0xCC,3); model[0x60]=0;
+        const U routeResult=asyncMode ? SyncTaskCall(model,routedOut) : SyncNativeCall(model,routedOut,frame);
+        Check(routeResult==(asyncMode ? 0u : SyncContinuationResult(routedOut)) && !memcmp(routedOut,nativeOut,3) && model[0x60]==1 &&
+              !memcmp(root+0x2803C,nativeOut,3) && (!asyncMode || !*reinterpret_cast<U*>(root+0x28040)),
+              "both actual native routes preserve tick results and the task completion flag");
+        Sleep(80);
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==generation &&
+              snapshot.active_mask==config.enabled_mask && snapshot.ai_slice_words[7]==worker &&
+              *At(0x132e954)==task && snapshot.probe==(asyncMode ? 0x100u : 0u),
+              "scheduler transition retains the same world generation, AI worker and TBB task route");
+    }
+    const bool transitioned=SyncPendingTransition(state,model,nativeOut);
+    Check(transitioned,"pending native-task join and controlled synchronous transition preserve one world generation");
+    if(!transitioned) {
+        Check(stop(nullptr)==0,"failed pending-transition fixture stops before any further native calls");
+        return 1;
+    }
+    alignas(4) static uint8_t replacement[sizeof(model)], foreign[sizeof(model)];
+    memcpy(replacement,model,sizeof(model));
+    Check(SyncDrainInFlight(stop,state,model,replacement,config.enabled_mask),
+          "replacement world waits for the held native call, then captures a new generation through the sync route");
+    Check(ReadState(state,snapshot) && snapshot.generation>generation,"world replacement does not retain the previous generation");
+    U priorGeneration=snapshot.generation;
+    Put(replacement,0,0);
+    Check(WaitFor(state,snapshot,[](const kntwr_status& s){ return s.phase==KNTWR_WAITING_BATTLE; }) &&
+          !snapshot.active_mask,"actual world-identity loss deactivates the synchronous generation");
+    Put(replacement,0,A(root));
+    Check(SyncWaitActive(state,config.enabled_mask,replacement,priorGeneration),"same synchronous route recaptures after identity returns");
+    Check(SyncDrainInFlight(stop,state,replacement),"bound-model native sync invocation drains before stop");
+    Check(start(&config)==0 && SyncWaitActive(state,config.enabled_mask,replacement),"restart for foreign-model native fallback");
+    memcpy(foreign,replacement,sizeof(foreign));
+    Check(SyncDrainInFlight(stop,state,foreign),"foreign-model native fallback also drains before stop");
+    config.enabled_mask|=KNTWR_AI_ASYNC2;
+    root[0x2829c]=1;
+    Check(start(&config)==0 && SyncWaitActive(state,config.enabled_mask,replacement,0,true) &&
+          activationBoundaries==capturesBefore,
+          "native TASK route captures AI_ASYNC2 and collision activation without an exported boundary");
+    auto ai2Boundary=reinterpret_cast<kntwr_ai_async2_boundary_fn>(GetProcAddress(runtimeModule,"kntwr_ai_async2_boundary"));
+    Check(ai2Boundary && RedirectImage(0x7D99F0,reinterpret_cast<const void*>(&Ai2FakeThink)),
+          "install the existing planner standin after clone validation");
+    Ai2Planner planner={};
+    planner.entered=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    planner.release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    const bool producerReady=ai2Boundary && planner.entered && planner.release;
+    Check(producerReady,"create deterministic native-consumer AI rendezvous");
+    if(producerReady) {
+        // The exported boundary only produces the pending batch; consumers
+        // execute the real sync CALL or complete native TASK body.
+        for(U taskRoute=0;taskRoute<2;++taskRoute) {
+            ResetEvent(planner.entered); ResetEvent(planner.release);
+            root[0x2829c]=static_cast<uint8_t>(taskRoute);
+            Check(ai2Boundary(replacement,&planner,1,nullptr,nullptr,0)==1 &&
+                  WaitForSingleObject(planner.entered,3000)==WAIT_OBJECT_0 && planner.calls==taskRoute,
+                  "producer publishes a genuinely in-flight inter-tick planner batch");
+            U ticksBefore=0;
+            const bool sampled=WaitFor(state,snapshot,[&](const kntwr_status& s){
+                return s.ai_async2_route_words[3]>=taskRoute+1;
+            });
+            if(sampled) ticksBefore=snapshot.ai_async2_route_words[2];
+            uint8_t out[3]={0xCC,0xCC,0xCC};
+            replacement[0x60]=0;
+            SyncTickCall consumer={replacement,out,{0,0},0,taskRoute!=0};
+            HANDLE thread=CreateThread(nullptr,0,&SyncTickThread,&consumer,0,nullptr);
+            const bool joined=thread && sampled && WaitFor(state,snapshot,[&](const kntwr_status& s){
+                return s.ai_async2_route_words[2]>ticksBefore && s.ai_async2_route_words[8]>taskRoute;
+            });
+            Check(joined && WaitForSingleObject(thread,80)==WAIT_TIMEOUT &&
+                  planner.calls==taskRoute && !replacement[0x60],
+                  "observed native sync/task tick-start join precedes its real tick body");
+            SetEvent(planner.release);
+            const bool completed=thread && WaitForSingleObject(thread,5000)==WAIT_OBJECT_0;
+            Check(completed && planner.calls==taskRoute+1 && replacement[0x60]==1 && !memcmp(out,nativeOut,3),
+                  "planner completion releases each native consumer with unchanged tick results");
+            if(thread && !completed) ExitProcess(1);
+            if(thread) CloseHandle(thread);
+        }
+    }
+    if(planner.release) SetEvent(planner.release);
+    Check(stop(nullptr)==0,"native AI_ASYNC2 consumer generation joins before planner teardown");
+    if(planner.entered) CloseHandle(planner.entered);
+    if(planner.release) CloseHandle(planner.release);
+    root[0x2829c]=0;
+    Check(start(&config)==0,"start a generation whose collision capture is still pending");
+    bool capturePending=false;
+    for(const ULONGLONG end=GetTickCount64()+3000;GetTickCount64()<end;Sleep(1))
+        if(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVATING) { capturePending=true; break; }
+    Check(capturePending && !snapshot.active_mask,"native activation waits for an owner boundary before publishing enabled modules");
+    Check(stop(nullptr)==0,"stop cancels pending native activation without requiring another tick");
+    Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask,
+          "cancelled native capture never publishes an active generation");
+    Put(root,8,A(model));
+    Check(!memcmp(At(0x57DF40),tickEntry,sizeof(tickEntry)) && PageProtection(At(0x57DF40))==tickProtection,
+          "all native tick entry bytes and protection are restored after capture cancellation");
+    Check(!memcmp(call,stock,sizeof(stock)) && PageProtection(call)==protection &&
+          *At(0x132e954)==taskOriginal,"stop restores exact native sync bytes and the original async task");
+    memset(routedOut,0xCC,3); memset(root+0x2803C,0xCC,3); model[0x60]=0;
+    Check(SyncTaskCall(model,routedOut,task)==0 && !memcmp(routedOut,nativeOut,3) && model[0x60]==1 &&
+          !*reinterpret_cast<U*>(root+0x28040),"a cached resident TASK safely falls back to the native tick after stop");
+    Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && !snapshot.active_mask,
+          "a late cached task cannot reactivate a stopped generation");
+    Check(CavalryPatchBytes(0x5F9545,continuation,sizeof(continuation)),"restore private-image continuation adapter bytes");
+    printf("native host lifecycle (sync native): checks=%u failures=%u\n",checks,failures);
+    return failures ? 1 : 0;
+}
+
+struct EntryFreezePeer {
+    HANDLE ready, release;
+    volatile LONG busy;
+};
+static DWORD WINAPI EntryFreezeLivePeer(void* argument) {
+    auto* peer=static_cast<EntryFreezePeer*>(argument);
+    InterlockedExchange(&peer->busy,1);
+    SetEvent(peer->ready);
+    WaitForSingleObject(peer->release,INFINITE);
+    return 0;
+}
+static DWORD WINAPI EntryFreezeCompletedPeer(void*) { return 0; }
+static HANDLE EntryEnumeratedPeer(DWORD wanted,ACCESS_MASK access) {
+    using NextThread=LONG (NTAPI*)(HANDLE,HANDLE,ACCESS_MASK,ULONG,ULONG,PHANDLE);
+    const auto nextThread=reinterpret_cast<NextThread>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtGetNextThread"));
+    if(!nextThread) return nullptr;
+    HANDLE cursor=nullptr;
+    for(U count=0;count<512;++count) {
+        HANDLE next=nullptr;
+        const LONG status=nextThread(GetCurrentProcess(),cursor,access,0,0,&next);
+        if(cursor) CloseHandle(cursor);
+        cursor=next;
+        if(status<0) { if(cursor) CloseHandle(cursor); return nullptr; }
+        if(GetThreadId(cursor)==wanted) return cursor;
+    }
+    if(cursor) CloseHandle(cursor);
+    return nullptr;
+}
+static int EntryFreezeFixture() {
+    // Exercise the production header directly, without a DLL or mapped game.
+    // The original completed-thread HANDLE stays open through both swaps.
+    const uint8_t stock[8]={0xC3,0x90,0x90,0x90,0x90,0x90,0x90,0x90};
+    const uint8_t patched[8]={0xC3,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC,0xCC};
+    auto* site=static_cast<uint8_t*>(VirtualAlloc(nullptr,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+    Check(site!=nullptr,"entry freeze owns aligned executable storage");
+    if(!site) return 1;
+    memcpy(site,stock,sizeof(stock));
+    DWORD oldProtection=0;
+    const bool executable=VirtualProtect(site,4096,PAGE_EXECUTE_READ,&oldProtection)!=FALSE;
+    Check(executable,"entry freeze protects its owned bytes as executable read-only");
+    if(!executable) { VirtualFree(site,0,MEM_RELEASE); return 1; }
+    EntryFreezePeer peer={CreateEventW(nullptr,TRUE,FALSE,nullptr),CreateEventW(nullptr,TRUE,FALSE,nullptr),0};
+    HANDLE live=peer.ready && peer.release ? CreateThread(nullptr,0,&EntryFreezeLivePeer,&peer,0,nullptr) : nullptr;
+    const bool ready=live && WaitForSingleObject(peer.ready,5000)==WAIT_OBJECT_0;
+    Check(ready,"entry freeze has a real live peer with its busy guard set");
+    U swaps=0;
+    const kntwr_entry_patch::Guard guard(0,0,&peer.busy);
+    if(ready) {
+        Check(!kntwr_entry_patch::Swap8(A(site),stock,patched,8,guard,[&](){ ++swaps; }) &&
+              !memcmp(site,stock,8) && swaps==0 && PageProtection(site)==PAGE_EXECUTE_READ &&
+              WaitForSingleObject(live,0)==WAIT_TIMEOUT,
+              "entry freeze refuses a live busy peer without changing bytes, protection or callback state");
+        InterlockedExchange(&peer.busy,0);
+        Check(kntwr_entry_patch::Swap8(A(site),stock,patched,8,guard,[&](){ ++swaps; }) &&
+              !memcmp(site,patched,8) && swaps==1 && PageProtection(site)==PAGE_EXECUTE_READ,
+              "entry freeze swaps with the same live peer after its busy guard clears");
+        Check(kntwr_entry_patch::Swap8(A(site),patched,stock,8,guard,[&](){ ++swaps; }) &&
+              !memcmp(site,stock,8) && swaps==2 && PageProtection(site)==PAGE_EXECUTE_READ,
+              "entry freeze restores bytes and protection with the live peer retained");
+    }
+    DWORD deadId=0;
+    HANDLE completed=ready ? CreateThread(nullptr,0,&EntryFreezeCompletedPeer,nullptr,0,&deadId) : nullptr;
+    const bool exited=completed && WaitForSingleObject(completed,5000)==WAIT_OBJECT_0;
+    Check(exited,"entry freeze retains an explicitly completed peer handle");
+    if(exited) {
+        constexpr ACCESS_MASK legacyAccess=THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION;
+        static_assert(legacyAccess==0x4Au,"regression uses the original freeze enumeration rights");
+        HANDLE legacy=EntryEnumeratedPeer(deadId,legacyAccess);
+        const bool enumerated=legacy!=nullptr;
+        Check(enumerated,"NtGetNextThread with original freeze rights still enumerates the retained dead peer");
+        if(legacy) {
+            const DWORD suspended=SuspendThread(legacy);
+            Check(suspended==static_cast<DWORD>(-1),
+                  "the enumerated completed peer cannot be suspended despite granted suspend access");
+            if(suspended!=static_cast<DWORD>(-1)) ResumeThread(legacy);
+            CloseHandle(legacy);
+        }
+        HANDLE synchronized=EntryEnumeratedPeer(deadId,legacyAccess|SYNCHRONIZE);
+        const bool provenExited=synchronized && WaitForSingleObject(synchronized,0)==WAIT_OBJECT_0;
+        Check(provenExited,"synchronized kernel enumeration positively proves the retained peer has exited");
+        if(synchronized) CloseHandle(synchronized);
+        if(enumerated && provenExited) {
+            Check(kntwr_entry_patch::Swap8(A(site),stock,patched,8,guard,[&](){ ++swaps; }) &&
+                  !memcmp(site,patched,8) && swaps==3 && PageProtection(site)==PAGE_EXECUTE_READ,
+                  "actual entry swap succeeds while a kernel-enumerable completed peer handle remains open");
+            Check(kntwr_entry_patch::Swap8(A(site),patched,stock,8,guard,[&](){ ++swaps; }) &&
+                  !memcmp(site,stock,8) && swaps==4 && PageProtection(site)==PAGE_EXECUTE_READ,
+                  "actual entry restoration succeeds with the completed peer handle still retained");
+            InterlockedExchange(&peer.busy,1);
+            Check(!kntwr_entry_patch::Swap8(A(site),stock,patched,8,guard,[&](){ ++swaps; }) &&
+                  !memcmp(site,stock,8) && swaps==4 && PageProtection(site)==PAGE_EXECUTE_READ,
+                  "recognizing a retained dead peer never bypasses refusal for the still-live busy peer");
+            InterlockedExchange(&peer.busy,0);
+            Check(WaitForSingleObject(completed,0)==WAIT_OBJECT_0 && WaitForSingleObject(live,0)==WAIT_TIMEOUT,
+                  "completed and live peer handles retain their distinct states through both swaps");
+        }
+    }
+    if(peer.release) SetEvent(peer.release);
+    const bool liveDone=!live || WaitForSingleObject(live,5000)==WAIT_OBJECT_0;
+    const bool deadDone=!completed || WaitForSingleObject(completed,5000)==WAIT_OBJECT_0;
+    Check(liveDone && deadDone,"entry freeze resumes its live peer and safely joins both owned threads");
+    if(!liveDone || !deadDone) { fflush(stderr); ExitProcess(1); }
+    if(completed) CloseHandle(completed);
+    if(live) CloseHandle(live);
+    if(peer.ready) CloseHandle(peer.ready);
+    if(peer.release) CloseHandle(peer.release);
+    VirtualFree(site,0,MEM_RELEASE);
+    printf("native host lifecycle (entry freeze): checks=%u failures=%u\n",checks,failures);
+    return failures ? 1 : 0;
+}
+
 static bool RunChild(const char* image,const char* dllPath,const char* mode) {
     char self[MAX_PATH];
     if(!GetModuleFileNameA(nullptr,self,MAX_PATH)) return false;
@@ -2425,8 +3091,14 @@ static bool RunChild(const char* image,const char* dllPath,const char* mode) {
 
 int main(int argc,char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+    if((argc==2 && !strcmp(argv[1],"--entry-freeze")) ||
+       (argc==4 && !strcmp(argv[3],"--entry-freeze"))) return EntryFreezeFixture();
     const bool child=argc==4 && !strncmp(argv[3],"--",2);
     if(argc!=3 && !child) { fprintf(stderr,"usage: native_runtime_lifecycle Napoleon.exe kntwr_runtime.dll\n"); return 2; }
+    if(!child) {
+        Check(RunChild(argv[1],argv[2],"--entry-freeze"),"retained completed-peer entry freeze regression passed");
+        if(failures) return 1;
+    }
     HMODULE dll=LoadLibraryA(argv[2]);
     runtimeModule=dll;
     if(!dll || !MapImage(argv[1])) { fprintf(stderr,"cannot load test inputs (%lu)\n",GetLastError()); return 2; }
@@ -2770,12 +3442,14 @@ int main(int argc,char** argv) {
           RedirectImage(0xff7ef0,reinterpret_cast<const void*>(&TestFree)),"install owned-image allocation probes");
     Check(InstallAllocatorTlsFixture(),"bind executable CRT TLS lookup to the owned-process TLS block");
     if(child) {
+        if(!strcmp(argv[3],"--profile-selection")) return ProfileSelectionFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--grid-census")) return GridCensusFixture(false,start,stop,state,config);
         if(!strcmp(argv[3],"--grid-census-late-enable")) return GridCensusFixture(true,start,stop,state,config);
         if(!strcmp(argv[3],"--allocator-pool-fault")) return AllocatorFailureFixture(false,1,start,stop,state,config);
         if(!strcmp(argv[3],"--allocator-ai-fault")) return AllocatorFailureFixture(true,1,start,stop,state,config);
         if(!strcmp(argv[3],"--allocator-free-fault")) return AllocatorFailureFixture(false,2,start,stop,state,config);
         if(!strcmp(argv[3],"--visual-native-arenas")) return VisualArenaFixture(start,stop,state,config);
+        if(!strcmp(argv[3],"--sync-native")) return SyncNativeFixture(start,stop,state,config);
         if(!strcmp(argv[3],"--ai-completion")) return AiCompletionFixture(false,start,stop,state,config);
         if(!strcmp(argv[3],"--ai-completion-controller")) return AiCompletionFixture(true,start,stop,state,config);
         if(!strcmp(argv[3],"--ai-census")) return AiCensusFixture(start,stop,state,config);
@@ -2790,6 +3464,7 @@ int main(int argc,char** argv) {
         if(!strncmp(argv[3],"--cavalry-entry-",16)) return CavalryEntryFixture(argv[3],start,stop,state,config);
         return !strcmp(argv[3],"--install-conflict") ? InstallConflict(start,stop,state,config) : VisualFixture(argv[3],start,stop,state,config);
     }
+    if(!failures) Check(RunChild(argv[1],argv[2],"--profile-selection"),"default-off and explicit-on profiling lifecycle child passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--grid-census"),"census-first lifecycle child passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--grid-census-late-enable"),"late census admission refusal child passed");
     U* slot=At(0x1345374);
@@ -2884,7 +3559,7 @@ int main(int argc,char** argv) {
     }
     if(!failures) Check(RunChild(argv[1],argv[2],"--install-conflict"),"foreign brain slot refusal scenario (child process) passed");
     if(!failures) {
-        // KNTWR_AI_ASYNC: refusable (no asynchronous scheduler route) and startable (worker created/stopped per generation).
+        // KNTWR_AI_ASYNC: world/manager admission is independent of synchronous versus TBB scheduling.
         // No think runs in these idle cycles: counters stay zero and the worker sleeps without OS suspension.
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta;
@@ -2894,18 +3569,18 @@ int main(int argc,char** argv) {
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"pristine read-only tick task slot");
         config.enabled_mask=aiMasks[0];
         Put(model,0xB0,A(armyManager));
-        root[0x2829c]=0;
-        Check(start(&config)==0,"start with the ai feature");
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"start with the ai feature and no world");
         Sleep(80); // several 10 ms monitor polls
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
-              *taskSlot==taskOriginal && *slot==original,"ai feature is refused without the asynchronous scheduler route");
+              *taskSlot==taskOriginal && *slot==original,"ai waits for a world, not for asynchronous scheduling");
         Put(model,0xB0,0);
-        root[0x2829c]=1;
+        Put(model,0,A(root));
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && snapshot.probe==6 &&
               !snapshot.active_mask,"AI without formation refuses a missing army manager instead of cancelling every job");
         Put(model,0xB0,A(armyManager));
-        Check(WaitActive(state,aiMasks[0]),"AI without formation binds its manager and becomes active");
+        Check(WaitActive(state,aiMasks[0]),"synchronous AI binds its manager and becomes active");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"tick task hook published for the ai feature");
         Check(ReadState(state,snapshot) && AiEventWorker(snapshot),"ai worker owns no suspension after activation");
         Check(stop(nullptr)==0,"ai stop joins the monitor and the think worker");
@@ -2934,7 +3609,7 @@ int main(int argc,char** argv) {
     }
     if(!failures) {
         // BRAIN2 v2 owns site 6 only while active. It needs no worker pool,
-        // preserves the asynchronous-route lifecycle, and keeps profiling entry
+        // preserves world-identity lifecycle across scheduling modes, and keeps profiling entry
         // slots original in both observation and serial-census modes.
         auto siteCallee=reinterpret_cast<kntwr_site_callee_fn>(GetProcAddress(dll,"kntwr_site_callee"));
         Check(siteCallee!=nullptr,"site callee diagnostic export present");
@@ -2943,26 +3618,30 @@ int main(int argc,char** argv) {
         for(unsigned i=0;i<KNTWR_BRAIN_SLOTS;++i) cells[i]=At(kBrain[i].table+0x0c);
         Check(*taskSlot==taskOriginal && ReadOnly(taskSlot),"pristine read-only tick task slot");
         config.enabled_mask=KNTWR_BRAIN2|KNTWR_BATCH64; config.workers=2;
-        root[0x2829c]=0;
-        Check(start(&config)==0,"start with the brain2 feature");
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"start with the brain2 feature and no world");
         Sleep(80); // several 10 ms monitor polls
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
-              *taskSlot==taskOriginal && *slot==original && AllBrain2WordsZero(snapshot),"brain2 feature is refused without the asynchronous scheduler route and counters stay zero");
-        Check(siteCallee && siteCallee(6)==loopOriginal,"entity loop site stays the original until the feature is armed");
-        root[0x2829c]=1;
-        Check(WaitActive(state,config.enabled_mask),"brain2 feature became active with the exact mask");
+              *taskSlot==taskOriginal && *slot==original && AllBrain2WordsZero(snapshot),"brain2 waits for a world and counters stay zero");
+        Check(siteCallee && siteCallee(6)==loopOriginal,"entity loop site stays the original until the world is present");
+        Put(model,0,A(root));
+        Check(WaitActive(state,config.enabled_mask),"synchronous brain2 became active with the exact mask");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"tick task hook published for the brain2 feature");
         Check(ReadState(state,snapshot) && AllBrain2WordsZero(snapshot),"brain2 counters are zero without a dispatch");
         Check(siteCallee && siteCallee(6)!=loopOriginal && InRuntime(siteCallee(6)),"entity loop site bound to the host dispatcher while brain2 is active");
         const U brain2Generation=snapshot.generation, brain2Task=*taskSlot;
         U brain2Before[KNTWR_BRAIN2_WORDS];
         memcpy(brain2Before,snapshot.brain2_words,sizeof(brain2Before));
+        root[0x2829c]=1;
+        Sleep(80);
+        Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==brain2Generation &&
+              snapshot.probe==0x100 && *taskSlot==brain2Task,"initial synchronous brain2 switches to async without reactivation");
         root[0x2829c]=0;
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==brain2Generation &&
               snapshot.active_mask==config.enabled_mask && snapshot.probe==0 && *taskSlot==brain2Task && ReadOnly(taskSlot),
               "same-world synchronous interval keeps brain2 hooks owned and generation active");
-        Check(!memcmp(brain2Before,snapshot.brain2_words,sizeof(brain2Before)),"dormant brain2 interval retains counters");
+        Check(!memcmp(brain2Before,snapshot.brain2_words,sizeof(brain2Before)),"idle synchronous brain2 interval retains counters");
         root[0x2829c]=1;
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_ACTIVE && snapshot.generation==brain2Generation &&
@@ -3087,21 +3766,21 @@ int main(int argc,char** argv) {
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta;
         config.enabled_mask=KNTWR_COLLIDE; config.workers=2; config.main_thread_id=0;
-        root[0x2829c]=0;
-        Check(start(&config)==0,"collide start accepted while scheduler is unarmed");
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"collide start accepted without a world");
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllCollideWordsZero(snapshot),
-              "collide activation refused until asynchronous route is armed");
+              "collide activation waits for world identity");
         Put(model,0xB0,0);
-        root[0x2829c]=1;
+        Put(model,0,A(root));
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && snapshot.probe==6 &&
               !snapshot.active_mask && *taskSlot==taskOriginal,
               "standalone collide waits for its own manager without requiring LOCO or AI");
         Put(model,0xB0,A(armyManager));
         const U boundariesBefore=activationBoundaries;
-        Check(WaitActive(state,KNTWR_COLLIDE),"collide activates with exact requested mask");
+        Check(WaitActive(state,KNTWR_COLLIDE),"synchronous collide activates with exact requested mask");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"collide publishes the tick task hook");
         Check(ReadState(state,snapshot) && AllCollideWordsZero(snapshot),"collide counters remain zero without a stage");
         Check(activationBoundaries-boundariesBefore==1 &&
@@ -3135,16 +3814,16 @@ int main(int argc,char** argv) {
         U* taskSlot=At(0x132e954);
         const U taskOriginal=0x5cc390+delta, stageOriginal=0x57dc30+delta, queryOriginal=0x81a790+delta;
         config.enabled_mask=KNTWR_COLLIDE_LOD; config.workers=0; config.main_thread_id=0;
-        root[0x2829c]=0;
-        Check(start(&config)==0,"collision LOD start accepted while scheduler unarmed");
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"collision LOD start accepted without a world");
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllCollideLodWordsZero(snapshot),
-              "collision LOD activation refused until asynchronous route armed; counters zero");
+              "collision LOD waits for world identity; counters zero");
         Check(siteCallee && siteCallee(5)==stageOriginal,"site 5 stays original until LOD activation");
-        Check(siteCallee && siteCallee(106)==queryOriginal,"query site remains original while unarmed");
-        root[0x2829c]=1;
-        Check(WaitActive(state,KNTWR_COLLIDE_LOD),"collision LOD activates alone without PROFILE or workers");
+        Check(siteCallee && siteCallee(106)==queryOriginal,"query site remains original before activation");
+        Put(model,0,A(root));
+        Check(WaitActive(state,KNTWR_COLLIDE_LOD),"synchronous collision LOD activates alone without PROFILE or workers");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"collision LOD owns the tick task slot");
         Check(siteCallee && siteCallee(5)!=stageOriginal && InRuntime(siteCallee(5)),"site 5 binds the host stage gate while LOD active");
         Check(siteCallee && siteCallee(106)==queryOriginal,"LOD without census never binds the pair-timed query clone");
@@ -3185,15 +3864,15 @@ int main(int argc,char** argv) {
         Check(siteCallee!=nullptr,"site callee diagnostic export present for loco");
         BindLocoScene(true);
         config.enabled_mask=KNTWR_LOCO; config.workers=0; config.main_thread_id=0; config.loco_flags=0;
-        root[0x2829c]=0;
-        Check(start(&config)==0,"loco start accepted while scheduler unarmed");
+        root[0x2829c]=0; Put(model,0,0);
+        Check(start(&config)==0,"loco start accepted without a world");
         Sleep(80);
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_WAITING_BATTLE && !snapshot.active_mask &&
               *taskSlot==taskOriginal && ReadOnly(taskSlot) && AllLocoWordsZero(snapshot),
-              "loco activation refused until the asynchronous route is armed");
+              "loco activation waits for world identity");
         Check(siteCallee && siteCallee(13)==moveOriginal,"site 13 stays the original until loco activation");
-        root[0x2829c]=1;
-        Check(WaitActive(state,KNTWR_LOCO),"loco activates alone with the exact mask and an inline-capable shared pool");
+        Put(model,0,A(root));
+        Check(WaitActive(state,KNTWR_LOCO),"synchronous loco activates alone with the exact mask and an inline-capable shared pool");
         Check(*taskSlot!=taskOriginal && ReadOnly(taskSlot),"loco owns the tick task slot");
         Check(siteCallee && siteCallee(13)!=moveOriginal && InRuntime(siteCallee(13)),"site 13 binds the host movement gate while loco is active");
         Check(ReadState(state,snapshot) && AllLocoWorkWordsZero(snapshot) && snapshot.loco_words[44]==0 &&
@@ -3429,6 +4108,7 @@ int main(int argc,char** argv) {
     if(!failures) Check(RunChild(argv[1],argv[2],"--allocator-ai-fault"),"AI allocator refusal scenario (child process) passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--allocator-free-fault"),"allocator free-side refusal scenario (child process) passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--visual-native-arenas"),"native per-worker arena scenario (child process) passed");
+    if(!failures) Check(RunChild(argv[1],argv[2],"--sync-native"),"initial synchronous activation and native CALL routing scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-completion"),"AI subordinate destruction completion barrier scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-completion-controller"),"AI controller configuration preserves subordinate completion boundary scenario passed");
     if(!failures) Check(RunChild(argv[1],argv[2],"--ai-census"),"AI mutation census gates, clone-call retarget, restore and refusals scenario passed");

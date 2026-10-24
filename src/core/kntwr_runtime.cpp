@@ -21,6 +21,7 @@
 #include "ai/kntwr_ai_ctrl_batch.h"
 #include "ai/kntwr_ai_ctrl_geometry.h"
 #include "kntwr_guard.h"
+#include "kntwr_entry_patch.h"
 #include "native_workload.h"
 #include "worker/native_worker_dispatch.h"
 #include "ballistics/native_ballistics_abi.h"
@@ -30,6 +31,7 @@
 #include "brain2/native_unit_brain.h"
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
+#include "army/native_formation_residual.h"
 #include "army/native_army_solver.h"
 #include "army/native_cavalry_runtime.h"
 #include "army/kntwr_cavalry_intent_hook.h"
@@ -64,6 +66,7 @@
 #include "brain/kntwr_target_cull.h"
 #include "army/kntwr_mounted_officer.h"
 #include "animation/kntwr_clip_picker_guard.h"
+#include "ai/kntwr_terrain_merge_guard.h"
 #include "ai/kntwr_engage_census.h"
 #include "formation/kntwr_formation_census.h"
 #include "core/kntwr_alloc_census.h"
@@ -410,6 +413,15 @@ struct TickCadence { U words[16]; ULONGLONG lastChange; U lastTick; bool armed; 
 TickCadence cadence;
 volatile U tickInProgress;
 volatile LONG gateDepth;
+// One admission envelope for the native tick entry and the resident TASK clone.
+// The native scheduler owns its mode and pending-task join; these words own only
+// our route. They never change root+2829C, root+282A0, or option 0x4B.
+constexpr U kNativeTickEntry=0x57df40u;
+constexpr unsigned char kNativeTickStock[8]={0x8b,0x44,0x24,0x08,0x83,0xec,0x14,0x53};
+constexpr unsigned char kTickRouteTail[8]={0x43,0xd7,0x8a,0x91,0x6e,0x25,0xb0,0xfc};
+volatile LONG tickRouteDepth, tickRouteInstalled;
+U nativeTickResume, nativeTickOriginalTarget;
+unsigned char tickRoutePatch[8];
 constexpr U kRouted = kSimulation | KNTWR_PROFILE; // the clone route is also taken for profiling (sub-phase timing)
 // Features whose sites live behind the MANAGER clone route (FORMATION takes its own hook; PATH and BALLISTICS are
 // bound in the TICK clone). Every other routed feature must take the clone, or its site gates are never reached.
@@ -795,7 +807,10 @@ U __fastcall ArmyPrepGate(void* unit) {
 }
 U __fastcall ArmyFormationGate(void* unit) {
     const auto native=reinterpret_cast<kntwr_army_storm::Native>(V(0x585d50));
-    return StormEpoch() ? kntwr_army_storm::Call(kntwr_army_storm::BFormation,unit,native) : native(unit);
+    // Census epoch: the residual module's exact port of 0x585D50 runs instead of the original (still one inclusive BFormation
+    // bracket of the same native work; the port brackets every [vtbl+0xC] callee, native_formation_residual.h).
+    return StormEpoch() ? kntwr_army_storm::Call(kntwr_army_storm::BFormation,unit,
+        reinterpret_cast<kntwr_army_storm::Native>(FnAddress(reinterpret_cast<const void*>(&kntwr_form_residual::Formation)))) : native(unit);
 }
 // R2 (slot 0x1325474, 0x581AE0: ECX = command C, plain ret) and R1 (slot 0x1331E74, 0x617510: ECX = state, one stack argument, ret 4).
 // --army-solver-memo/-shadow: on the tick owner inside a routed epoch the same gates enter the dedicated SOLVER clone of the target instead
@@ -814,11 +829,18 @@ U __fastcall StormRoute1Gate(void* state, void* edx, U arg) {
 }
 // Second R1 state-enter (slot 0x1332110, 0x611CF0: ECX unused, one stack argument, ret 4): 611CF0 is `ecx = arg ? arg-0x1C : 0; call 65D7D0;
 // ret 4` ([proven by disasm], pinned by the generator), so the gate performs that arithmetic and enters the SOLVER_65D7D0 clone (thiscall,
-// plain ret, EAX returned unchanged). Only installed with a solver bit; outside a solver epoch it runs the original.
-U __fastcall SolverRoute1bGate(void* state, void* edx, U arg) {
-    if (!SolverEpoch()) return reinterpret_cast<kntwr_army_storm::Native3>(V(0x611cf0))(state,edx,arg);
-    kntwr_army_solver::NoteRoute(kntwr_army_solver::RouteR1b);
+// plain ret, EAX returned unchanged). The slot is installed with a solver bit or with --army-storm-census (the census times the entry
+// inclusively so the formation residual module can split 611CF0 out of the 580990 FSM step); outside an epoch it runs the original.
+static U __fastcall Route1bSolverNative(void* state, void* edx, U arg) {
+    (void)state; (void)edx;
     return reinterpret_cast<kntwr_army_storm::Native>(clones.entries[KNTWR_CLONE_SOLVER_65D7D0])(reinterpret_cast<void*>(arg ? arg-0x1c : 0));
+}
+U __fastcall SolverRoute1bGate(void* state, void* edx, U arg) {
+    const bool solver=SolverEpoch();
+    if (solver) kntwr_army_solver::NoteRoute(kntwr_army_solver::RouteR1b);
+    if (!solver && !StormEpoch()) return reinterpret_cast<kntwr_army_storm::Native3>(V(0x611cf0))(state,edx,arg);
+    return kntwr_army_storm::Route1b(state,edx,arg,solver ? &Route1bSolverNative
+                                                          : reinterpret_cast<kntwr_army_storm::Native3>(V(0x611cf0)));
 }
 __declspec(naked) void CollisionSlot44() {
     __asm mov eax, dword ptr [ecx]
@@ -1139,8 +1161,10 @@ void TraceTick(kntwr_trace_entry& e, U tick, U tid, U duration, U interval, bool
     if (routed && !(config.enabled_mask & KNTWR_AI_ASYNC)) AttributePlanner(); // with the async think, site 34 no longer contains it
     if (routed && (config.va_watch_flags & KNTWR_ARMY_STORM_CENSUS)) { // slots 110/111 are not timed sites: four census words
         U census[4];
-        kntwr_army_storm::TickEnd(e.tick,siteUs[18],siteUs[34],census);
+        bool stormTick=false;
+        kntwr_army_storm::TickEnd(e.tick,siteUs[18],siteUs[34],census,&stormTick);
         e.site_us[110]=census[0]; e.site_calls[110]=census[1]; e.site_us[111]=census[2]; e.site_calls[111]=census[3];
+        kntwr_form_residual::TickEnd(e.tick,siteUs[18],stormTick); // same classification: the residual row's top ticks are the census's
     }
     if (routed && (config.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW))) kntwr_army_solver::TickEnd(e.tick); // closes the solver's per-tick table with the same tick id
 }
@@ -2427,6 +2451,18 @@ void __fastcall VisualApplyThunk(void* self, void* edx, U argument) {
         _InterlockedExchange(&visualOwner,0);
     }
 }
+// Exactly the three whole displaced instructions at 57DF40. The resume address
+// remains valid after stop: the DLL is pinned and the primary clones (including
+// TASK, its TLS-helper return addresses, and this binding) are process-resident.
+// Never call the patched native entry from a TickGate fallback.
+__declspec(naked) U __fastcall NativeTickOriginal(void*, void*, U, U) {
+    __asm {
+        mov eax, [esp+8]
+        sub esp, 14h
+        push ebx
+        jmp dword ptr [nativeTickResume]
+    }
+}
 bool ActivationBoundary(void* model) {
     if (Load(&activationCapture.state)!=1 || Load(&gateDepth)>1 || Load(&enabled)) return false;
     const LONG tid=static_cast<LONG>(GetCurrentThreadId());
@@ -2460,7 +2496,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         while (Load(&activationCapture.state)==2) Sleep(0);
         U result=0;
         __try {
-            result=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b);
+            result=NativeTickOriginal(model,edx,a,b);
             if (config.va_watch_flags&(KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) kntwr_alloc_census::ReclaimTick(Address(model));
         } __finally { _InterlockedDecrement(&gateDepth); }
         return result;
@@ -2483,7 +2519,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     memset(siteUs,0,sizeof(siteUs));
     memset(siteCalls,0,sizeof(siteCalls));
     if (_InterlockedCompareExchange(&tickOwner,static_cast<LONG>(tid),0)!=0) {
-        const U r=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b);
+        const U r=NativeTickOriginal(model,edx,a,b);
         QueryPerformanceCounter(&end);
         SimRecord(start.QuadPart,end.QuadPart,tid,false);
         TraceTick(trace,modelTick,tid,Micro(start.QuadPart,end.QuadPart),interval,false,start.QuadPart);
@@ -2497,7 +2533,7 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     const U currentMask=static_cast<U>(Load(&enabled));
     if (!(currentMask&kRouted) || !BoundModel(Address(model))) {
         _InterlockedExchange(&tickOwner,0);
-        const U r=reinterpret_cast<Tick>(V(0x57df40))(model,edx,a,b);
+        const U r=NativeTickOriginal(model,edx,a,b);
         QueryPerformanceCounter(&end);
         SimRecord(start.QuadPart,end.QuadPart,tid,false);
         TraceTick(trace,modelTick,tid,Micro(start.QuadPart,end.QuadPart),interval,false,start.QuadPart);
@@ -2562,6 +2598,122 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         tickInProgress=0;
     }
     return result;
+}
+// ECX/EDX and both native stack arguments are passed unchanged; the native return
+// value and ret 8 convention are preserved. Count the ENTIRE TickGate call,
+// including foreign-model fallback and its final profiling epilogue.
+//
+// A TASK may already be in its native TLS helper, or have loaded the clone slot,
+// when removal freezes peers. After the route closes, that resident continuation
+// must run only the original tick: no config, telemetry or freed module access.
+// Swap8 checks both the counter and this wrapper's entry/exit IP range while
+// peers are frozen, and closes admission in that same frozen transaction.
+__declspec(naked) U __fastcall TickRoute(void*, void*, U, U) {
+    __asm {
+        pushfd
+        lock inc dword ptr [tickRouteDepth]
+        cmp dword ptr [tickRouteInstalled], 0
+        je native_only
+        popfd
+        push ebp
+        mov ebp, esp
+        push dword ptr [ebp+0ch]
+        push dword ptr [ebp+8]
+        call TickGate
+        pop ebp
+        pushfd
+        lock dec dword ptr [tickRouteDepth]
+        popfd
+        ret 8
+    native_only:
+        lock dec dword ptr [tickRouteDepth]
+        popfd
+        jmp dword ptr [nativeTickOriginalTarget]
+        _emit 0x43
+        _emit 0xd7
+        _emit 0x8a
+        _emit 0x91
+        _emit 0x6e
+        _emit 0x25
+        _emit 0xb0
+        _emit 0xfc
+    }
+}
+bool TickRouteRange(U& begin,U& end) {
+    U entry=FnAddress(&TickRoute);
+    // Follow a linker incremental-jump thunk, if present; never infer a function
+    // extent from the order the linker happens to place neighboring functions.
+    for (U hop=0;hop<4;++hop) {
+        unsigned char opcode=0; U displacement=0;
+        if (!Read(entry,&opcode,1)) return false;
+        if (opcode!=0xe9) break;
+        if (!Read(entry+1,&displacement,4)) return false;
+        const U next=entry+5+displacement;
+        if (next<=entry || next-entry>0x10000u) return false;
+        entry=next;
+    }
+    unsigned char code[128];
+    if (!Read(entry,code,sizeof(code)) || code[0]!=0x9c) return false;
+    for (U offset=6;offset+sizeof(kTickRouteTail)<=sizeof(code);++offset) {
+        if (memcmp(code+offset,kTickRouteTail,sizeof(kTickRouteTail)) ||
+            code[offset-6]!=0xff || code[offset-5]!=0x25) continue;
+        U target=0;
+        memcpy(&target,code+offset-4,4);
+        if (target!=Address(&nativeTickOriginalTarget)) continue;
+        begin=entry; end=entry+offset;
+        return true;
+    }
+    return false;
+}
+bool InstallTickRoute() {
+    if (!(config.enabled_mask&kRouted)) return true;
+    if (Load(&tickRouteInstalled)) return true;
+    U begin=0,end=0;
+    const U site=V(kNativeTickEntry);
+    if (!TickRouteRange(begin,end) || (nativeTickResume && nativeTickResume!=site+8)) {
+        RecordError(SlotConflict,site); return false;
+    }
+    nativeTickResume=site+8;
+    nativeTickOriginalTarget=FnAddress(&NativeTickOriginal);
+    memcpy(tickRoutePatch,kNativeTickStock,8);
+    tickRoutePatch[0]=0xe9;
+    const U displacement=begin-site-5;
+    memcpy(tickRoutePatch+1,&displacement,4);
+    const kntwr_entry_patch::Guard guard(begin,end,&tickRouteDepth);
+    const ULONGLONG deadline=GetTickCount64()+kStopTimeoutMs;
+    for (;;) {
+        unsigned char current[8];
+        if (!Read(site,current,8) || memcmp(current,kNativeTickStock,8)) {
+            RecordError(SlotConflict,site); return false;
+        }
+        if (kntwr_entry_patch::Swap8(site,kNativeTickStock,tickRoutePatch,8,guard,[] {
+            _InterlockedExchange(&tickRouteInstalled,1);
+        })) return true;
+        if (GetTickCount64()>=deadline) { RecordError(StopTimeout,site); return false; }
+        Sleep(1); // no peer is held while waiting for an interior instruction
+    }
+}
+bool RemoveTickRoute() {
+    if (!Load(&tickRouteInstalled)) return true;
+    U begin=0,end=0;
+    const U site=V(kNativeTickEntry);
+    if (!TickRouteRange(begin,end)) { RecordError(SlotConflict,site); return false; }
+    const kntwr_entry_patch::Guard guard(begin,end,&tickRouteDepth);
+    const ULONGLONG deadline=GetTickCount64()+kStopTimeoutMs;
+    for (;;) {
+        unsigned char current[8];
+        if (!Read(site,current,8) || memcmp(current,tickRoutePatch,8)) {
+            RecordError(SlotConflict,site); return false;
+        }
+        // This optimistic check avoids repeatedly freezing a running tick.
+        // Guard rechecks depth AND pre-increment/post-decrement IPs under freeze.
+        if (!Load(&tickRouteDepth) &&
+            kntwr_entry_patch::Swap8(site,tickRoutePatch,kNativeTickStock,8,guard,[] {
+                _InterlockedExchange(&tickRouteInstalled,0);
+            })) return true;
+        if (GetTickCount64()>=deadline) { RecordError(StopTimeout,site); return false; }
+        Sleep(1);
+    }
 }
 bool Epoch(U feature) { return static_cast<U>(Load(&tickOwner))==GetCurrentThreadId() && (epochMask & feature)!=0; }
 struct PhaseTimer {
@@ -2629,6 +2781,10 @@ void SnapshotArmySolver() {
     kntwr_army_solver::Snapshot(words);
     for (U i=0;i<KNTWR_ARMY_SOLVER_WORDS;++i) kntwr_state.army_solver_words[i]=words[i];
 }
+// --army-storm-census: the formation residual row (all zero without the census; kntwr_form_residual::Snapshot is a memcpy).
+void SnapshotArmyResidual() {
+    kntwr_form_residual::Snapshot(const_cast<U*>(kntwr_state.army_residual_words));
+}
 // --ai-ctrl-*: A half (batch/histogram) and B half (geometry) of the status row; reads module counters only.
 void SnapshotAiCtrl() {
     volatile U* row=kntwr_state.ai_ctrl_reuse_words;
@@ -2670,7 +2826,8 @@ bool BuildClones() {
     bindings[KNTWR_BIND_ARMY_PREP]=FnAddress(&ArmyPrepGate);
     bindings[KNTWR_BIND_ARMY_FORMATION]=FnAddress(&ArmyFormationGate);
     kntwr_army_solver::Bind(delta,bindings); // solver gates (inert until Start: they forward to the originals)
-    bindings[KNTWR_BIND_TICK_ENTRY]=FnAddress(&TickGate);
+    kntwr_form_residual::Bind(delta,bindings); // CLONE_FORM_UPDATE's nine gates (inert outside a census Formation occurrence)
+    bindings[KNTWR_BIND_TICK_ENTRY]=FnAddress(&TickRoute);
     bindings[KNTWR_BIND_BAL_MANAGER]=FnAddress(&BallisticGate);
     bindings[KNTWR_BIND_FORM_MANAGER]=FnAddress(&FormationGate);
     bindings[KNTWR_BIND_FORM_ASSIGN]=Export("nfr_assign_hook");
@@ -2992,11 +3149,12 @@ bool StartModules() {
     if (config.va_watch_flags & KNTWR_ARMY_STORM_CENSUS) {
         const kntwr_army_storm::Binding binding={imageBase,(config.va_watch_flags&KNTWR_ARMY_STORM_SAMPLE_MASK)>>KNTWR_ARMY_STORM_SAMPLE_SHIFT};
         if (!kntwr_army_storm::Start(binding)) { RecordError(ModuleError,KNTWR_ARMY_STORM_CENSUS); return false; }
+        if (!kntwr_form_residual::Start(clones.entries[KNTWR_CLONE_FORM_UPDATE])) { RecordError(ModuleError,KNTWR_ARMY_STORM_CENSUS); return false; }
     }
     if (config.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)) { // clones are built: the solver forwards AssignGate to CLONE_SOLVER_18F0A00
         if (!VirtualBudget(ntw_solver::WorkspaceBytes())) return false; // the workspace is allocated by Start below, per activation
         const kntwr_army_solver::Binding binding={delta,(config.va_watch_flags&KNTWR_ARMY_SOLVER_SHADOW) ? kntwr_army_solver::ModeShadow : kntwr_army_solver::ModeMemo,
-                                                 clones.entries[KNTWR_CLONE_SOLVER_18F0A00]};
+                                                 clones.entries[KNTWR_CLONE_SOLVER_18F0A00],clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
         if (!kntwr_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)); return false; }
     }
     if (config.va_watch_flags & (KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) {
@@ -3155,8 +3313,9 @@ bool BuildSlots() {
         AddSlot(0x1325474,0x581ae0,FnAddress(&StormRoute2Gate));
         AddSlot(0x1331e74,0x617510,FnAddress(&StormRoute1Gate));
     }
-    // --army-solver-memo/-shadow: the second R1 state-enter (0x1332110 = 0x611CF0), entered through SolverRoute1bGate (SOLVER_65D7D0 clone chain).
-    if (config.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)) AddSlot(0x1332110,0x611cf0,FnAddress(&SolverRoute1bGate));
+    // --army-solver-memo/-shadow (and --army-storm-census, which times the entry): the second R1 state-enter (0x1332110 = 0x611CF0), entered
+    // through SolverRoute1bGate (SOLVER_65D7D0 clone chain with a solver bit, the original with census only).
+    if (config.va_watch_flags & (KNTWR_ARMY_STORM_CENSUS|KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)) AddSlot(0x1332110,0x611cf0,FnAddress(&SolverRoute1bGate));
     // KNTWR_AI_ASYNC2 observer LOS route: slot 16 of 0x13376FC, routed by thread (Ai2ObserverRoute).
     if (config.enabled_mask & KNTWR_AI_ASYNC2) AddSlot(0x13376fc+4*16,0x6a95a0,FnAddress(&Ai2ObserverGate));
     // --ai-poly* and --ai-prepass-census: the same slot, routed to the PS_* clone chain inside a site-34 scope (PsObserverRoute). Census-only
@@ -3444,6 +3603,7 @@ void SampleCounters() {
     kntwr_army_unit::SnapshotB0(const_cast<U*>(kntwr_state.army_b0_words));
     SnapshotArmyStorm();
     SnapshotArmySolver();
+    SnapshotArmyResidual();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
@@ -3486,8 +3646,8 @@ bool StopModules() {
             Sleep(1);
         }
     }
-    {   // Arena memory is freed only when the battle world is gone: a world that merely went dormant (the scheduler flag drops at >1x
-        // playback) keeps rendering from the same pose/scene/scratch blocks and its live per-frame mesh items point into them.
+    {   // Arena memory is freed only when the battle world is gone. A live world's
+        // render items still refer to its pose/scene/scratch blocks after stop.
         const U savedProbe=probe; World now; bool asynchronousNow=false;
         const bool worldAlive=FindWorld(now,asynchronousNow) && SameWorld(world,now);
         probe=savedProbe; // FindWorld records its failure reason; the monitor owns that word
@@ -3498,6 +3658,7 @@ bool StopModules() {
     kntwr_collide::Stop(); // tick owner and every synchronous solver dispatch have drained; counters retained
     kntwr_army_unit::Stop(); // the tick owner has drained; counters are retained (sampled above)
     kntwr_army_storm::Stop();
+    kntwr_form_residual::Stop();
     if (config.enabled_mask & KNTWR_CAVALRY_ORBIT) {
         // The flush detour must be gone before the adapter state it publishes is discarded: the detour calls
         // kntwr_cavalry::ObserveFlush on any thread. A refused removal leaves the detour live, so the adapter
@@ -3538,6 +3699,7 @@ bool Deactivate() {
     bool ok=true;
     if (!ai2Quiet) { RecordError(StopTimeout,KNTWR_AI_ASYNC2); return false; }
     if (!AiDrain()) return false; // the tick's lifetime barrier must release every native AI frame first
+    if (!RemoveTickRoute()) return false; // whole invocations drained; late TASK continuations are native-only
     for (U i=slotCount;i;--i)
         if ((slots[i-1].owned || slots[i-1].protectionDirty) && !SwapSlot(slots[i-1],false)) ok=false;
     if (!StopModules()) ok=false;
@@ -3639,7 +3801,7 @@ bool Activate(const World& candidate) {
         (config.enabled_mask&KNTWR_PROFILE) && !(config.enabled_mask&KNTWR_COLLIDE);
     siteCallees[106]=collisionCensusEnabled ? clones.entries[KNTWR_CLONE_COLLIDE_Q] : V(0x81a790);
     StateBegin(); kntwr_state.root=world.root; kntwr_state.model=world.model; kntwr_state.phase=KNTWR_ACTIVATING; StateEnd();
-    if (!BuildSlots() || !VirtualBudget(0,true) || !PrepareActivationWorkload() || !StartModules() ||
+    if (!BuildSlots() || !InstallTickRoute() || !VirtualBudget(0,true) || !PrepareActivationWorkload() || !StartModules() ||
         !VirtualBudget(0,false,true)) { Deactivate(); return false; }
     // Cavalry retained intent: the 542AE0 flush entry detour goes in after the adapter Bind (its fixed atomic
     // publication/cancel state is the detour's only payload) and strictly before this activation exposes the
@@ -3665,6 +3827,7 @@ bool Activate(const World& candidate) {
     kntwr_army_unit::SnapshotB0(const_cast<U*>(kntwr_state.army_b0_words));
     SnapshotArmyStorm();
     SnapshotArmySolver();
+    SnapshotArmyResidual();
     SnapshotBrainRow();
     SnapshotUnitPolicy();
     SnapshotAiCtrl();
@@ -3734,9 +3897,8 @@ bool Activate(const World& candidate) {
         if (!slots[i].owned && !SwapSlot(slots[i],true)) { Deactivate(); return false; }
     if (!kntwr_arena_release::Start(imageBase,config.va_watch_flags,world.root,config.main_thread_id)) { RecordError(SlotConflict,0x1340aacu); Deactivate(); return false; }
     World now; bool asynchronous=false;
-    if (!FindWorld(now,asynchronous) || !SameWorld(world,now) ||
-        ((config.enabled_mask&kSimulation) && !asynchronous)) {
-        arenaKeepHooks=FindWorld(now,asynchronous) && SameWorld(world,now); // dormant, not gone
+    if (!FindWorld(now,asynchronous) || !SameWorld(world,now)) {
+        arenaKeepHooks=FindWorld(now,asynchronous) && SameWorld(world,now);
         const bool clean=Deactivate();
         arenaKeepHooks=false;
         if (clean) Phase(KNTWR_WAITING_BATTLE);
@@ -3798,6 +3960,14 @@ DWORD WINAPI Monitor(void*) {
         if (!kntwr_clip_picker_guard::InstallRedirect(delta)) RecordError(SlotConflict,kntwr_clip_picker_guard::kEntry);
         PublishAnimGuard();
     }
+    if (!failure) {
+        // Terrain-analyser merge predicate fast rejection (always on, no switch): the displacement of the call at 0x62CA2B points at the guard, which answers only pairs the native
+        // predicate provably rejects; restored at stop. A refusal (modified bytes) leaves the native call untouched.
+        if (!kntwr_terrain_merge_guard::InstallRedirect(delta)) RecordError(SlotConflict,kntwr_terrain_merge_guard::kCallSite);
+    }
+    // A disabled generation must not retain the previous generation's profile-site bookkeeping.
+    siteGateIndex=siteGateDepth=siteInProgress=0;
+    kntwr_profile_tick_gate=kntwr_profile_main_tick_gate=nullptr;
     kntwr_profile_storm_threshold_ms=(config.va_watch_flags&KNTWR_ARMY_STORM_SAMPLE_MASK)>>KNTWR_ARMY_STORM_SAMPLE_SHIFT; // 0 unless validated with the census
     if (!failure && (config.enabled_mask&(KNTWR_PROFILE|KNTWR_GRID_CENSUS|KNTWR_AI_CENSUS))) {
         siteGateIndex=config.profile_site;
@@ -3821,23 +3991,19 @@ DWORD WINAPI Monitor(void*) {
         PublishMountedOfficer(); // the unit constructors run while loading: publish in every phase
         PublishAnimGuard();
         if (Load(&enabled)) {
-            // 0x5EE050 recomputes +0x2829C from the playback/unit rate (0x5B3210), not battle lifetime.
-            // At >1x the task route can go dormant while this same world keeps running synchronously.
-            // BRAIN2 owns only the asynchronous task route: retain hooks/counters until that route returns.
-            // AI is different: a pending think can outlive a tick, so retain its existing drain/teardown policy.
-            const bool dormantBrain2=(config.enabled_mask&KNTWR_BRAIN2) && !(config.enabled_mask&KNTWR_AI_ASYNC);
-            if (!found || !SameWorld(world,candidate) || candidate.tick<previousTick ||
-                ((config.enabled_mask&kSimulation) && !asynchronous && !dormantBrain2)) {
-                arenaKeepHooks=found && SameWorld(world,candidate) && candidate.tick>=previousTick; // the same live world went dormant: its arenas stay in use
+            // Preserve native 5F9440/5EE050 joins, scheduling and mode writes.
+            // Both synchronous calls and TASK enter the same route; +2829C
+            // selects native scheduling, not world identity. No assumption
+            // about a pending task's mode is needed for admission or teardown.
+            if (!found || !SameWorld(world,candidate) || candidate.tick<previousTick) {
+                arenaKeepHooks=found && SameWorld(world,candidate) && candidate.tick>=previousTick;
                 const bool clean=Deactivate();
                 arenaKeepHooks=false;
                 if (!clean) break;
                 Phase(KNTWR_WAITING_BATTLE);
             } else { previousTick=candidate.tick; CadenceSample(candidate.tick); SampleCounters(); continue; }
         }
-        // A world whose scheduler flag is unset (loading, paused, or a route the hooks do not own) is simply not
-        // activated; the monitor keeps waiting and re-activates once the asynchronous route is live again.
-        if (!found || ((config.enabled_mask&kSimulation) && !asynchronous)) continue;
+        if (!found) continue;
         previousTick=candidate.tick; CadenceReset();
         for (U i=0;i<16;++i) simWords[i]=0;
         for (U i=0;i<KNTWR_BRAIN_WORDS;++i) brainWords[i]=0;
@@ -3857,8 +4023,17 @@ DWORD WINAPI Monitor(void*) {
     bool clean=true;
     bool hooks=false;
     for (U i=0;i<slotCount;++i) hooks=hooks || slots[i].owned || slots[i].protectionDirty;
-    if (hooks || Load(&enabled) || formation.ready || query.ready || path.ready || poolReady || kntwr_arena_release::HooksInstalled())
+    if (hooks || Load(&tickRouteInstalled) || Load(&enabled) || formation.ready || query.ready || path.ready || poolReady || kntwr_arena_release::HooksInstalled())
         clean=Deactivate();
+    if (Load(&tickRouteInstalled)) {
+        // A refused drain/foreign entry patch is not permission to tear down
+        // a tick's borrowed modules, AI worker, sampler, or crash observer.
+        // Keep the failed runtime resident; stop reports the recorded refusal.
+        _InterlockedExchange(&quiesced,0);
+        Phase(KNTWR_FAILED);
+        _InterlockedExchange(&life,Failed);
+        return 0;
+    }
     if (!AiShutdown()) clean=false;
     if (clean && (config.enabled_mask&KNTWR_BRAIN2)) Brain2Release(); // dispatch drained; no owner occurrence can still use its context
     CrashRemove();
@@ -3875,6 +4050,7 @@ DWORD WINAPI Monitor(void*) {
     if (!kntwr_mounted_officer::RemoveVisual(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kVisualSite); clean=false; }
     PublishMountedOfficer();
     if (!kntwr_clip_picker_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_clip_picker_guard::kEntry); clean=false; } // restore the picker entry before the final publish
+    if (!kntwr_terrain_merge_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_terrain_merge_guard::kCallSite); clean=false; } // restore the merge predicate call before the final publish
     PublishAnimGuard();
     if (config.enabled_mask&KNTWR_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); kntwr_ai_census::Snapshot(kntwr_state.ai_census_words,CensusSlotsOwned()); StateEnd();
@@ -4058,7 +4234,7 @@ static U StartImpl(void* raw) {
     memset(vaWords,0,sizeof(vaWords)); vaNextSample=0; vaStart=0;
     collideSampleReady=false; // retained solver words belong to the previous start until the next activation
     locoSampleReady=false; // retained loco words belong to the previous start until the next activation
-    Brain2Reset(); kntwr_army_unit::Reset(); kntwr_army_storm::Reset(); kntwr_army_solver::Reset();
+    Brain2Reset(); kntwr_army_unit::Reset(); kntwr_army_storm::Reset(); kntwr_form_residual::Reset(); kntwr_army_solver::Reset();
     CollideLodReset();
     memset(const_cast<U*>(visualWords),0,sizeof(visualWords));
     memset(allocatorWords,0,sizeof(allocatorWords));
@@ -4103,6 +4279,7 @@ static U StartImpl(void* raw) {
     for (U i=0;i<KNTWR_ARMY_B0_WORDS;++i) kntwr_state.army_b0_words[i]=0;
     for (U i=0;i<KNTWR_ARMY_STORM_WORDS;++i) kntwr_state.army_storm_words[i]=0;
     for (U i=0;i<KNTWR_ARMY_SOLVER_WORDS;++i) kntwr_state.army_solver_words[i]=0;
+    for (U i=0;i<KNTWR_FORMATION_RESIDUAL_WORDS;++i) kntwr_state.army_residual_words[i]=0;
     for (U i=0;i<KNTWR_BRAIN_S0_WORDS;++i) kntwr_state.brain_s0_words[i]=0;
     for (U i=0;i<KNTWR_BRAIN_UNIT_POLICY_WORDS;++i) kntwr_state.brain_unit_policy_words[i]=0;
     for (U i=0;i<KNTWR_AI_CTRL_REUSE_WORDS;++i) kntwr_state.ai_ctrl_reuse_words[i]=0;

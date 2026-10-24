@@ -1689,6 +1689,9 @@ SOURCES = [
     # [node+71],0; je 676FD0`). One contiguous span through its out-of-line static-init tails (last jmp 678310, int3 padding from 678315). Pure
     # retarget copy: only `call 6671A0` (6775C4, the single caller of the tracker tick) goes to the host mirror RJ_TRACKER_TICK.
     ('STEP_676FD0', 0x676FD0, 0x678315, 'private'),
+    # --army-storm-census formation residual (src/army/native_formation_residual.h): the infantry formation update 0x580A30 (formation vtable 0x13211D8 slot +0xC; ECX = F, plain ret;
+    # ret at 0x580C0E, int3 padding from 0x580C0F). 'private': the original stays live for every other caller; the clone is entered only by the census's formation-loop port.
+    ('FORM_UPDATE', 0x580A30, 0x580C0F, 'private'),
     # --mounted-officer: the unit constructor (single caller 0x531340) through its trailing NOP, and its six-entry equipment-kind switch table. 'private': the original
     # stays live for every caller; the clone is entered only through the redirected 0x531340 call while the feature is installed.
     ('UNIT_CTOR', 0x51B7D0, 0x51CA1C, 'private'),
@@ -1737,6 +1740,11 @@ SOURCES = [
     ('SOLVER_18F1200', 0x18F1200, 0x18F12EC, 'clone'),
     ('SOLVER_65D7D0', 0x65D7D0, 0x65D883, 'clone'),
     ('SOLVER_51A9A0', 0x51A9A0, 0x51AC48, 'clone'),
+    # Complete spans are byte-identical in the pinned historical and stock images.
+    # SHA-256: 584E10 = 0c7ab40b7180fc1d0751f0348eb7b928355ac3ae89037bda13ff066be558960f;
+    # 57AC10 = 97090da53d0962304a5b5dfc3f57a768a99b12368fea798cbc81f7ca800bfb77.
+    ('SOLVER_584E10', 0x584E10, 0x585737, 'clone'),
+    ('SOLVER_57AC10', 0x57AC10, 0x57AC8A, 'clone'),
 ]
 
 # Allowed unrelocated image-looking operand fields, pinned by source, field VA and value.
@@ -1746,6 +1754,7 @@ HIDDEN_ABS_OK = {
 }
 HIDDEN_ABS_OK['SOLVER_18F1200'] = {0x18F1292: 0x00F25DB4, 0x18F129A: 0x00F25D48}   # [edx+disp]: image-base-relative offsets (edx = PIC base from 18F0200), not pointers
 HIDDEN_ABS_OK['SOLVER_51A9A0'] = {0x51AAB2: 0x01000000}   # mov dword ptr [esp+5Ah],01000000h: packed byte flags written into a stack struct (unrelocated), not a pointer
+HIDDEN_ABS_OK['SOLVER_584E10'] = {0x5852D0: 0x01000000}   # mov dword ptr [esp+0BAh],01000000h: packed stack-struct byte flags, not a pointer
 HIDDEN_ABS_OK['STEP_676FD0'] = {0x6774C5: 0x01010000}   # mov dword ptr [esp+0A0h],01010000h at 6774BE: packed byte flags of the 659520 request struct, not a pointer
 
 RET = lambda n: bytes([0xC2]) + struct.pack('<H', n)  # noqa: E731
@@ -2429,6 +2438,7 @@ def clone_configs():
         *step_configs(),
         *unit_ctor_configs(),
         *solver_configs(),
+        *form_update_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2616,6 +2626,28 @@ def step_configs():
     ]
 
 
+# --army-storm-census formation residual (src/army/native_formation_residual.h): the nine direct calls of the formation update 0x580A30 that carry the unexplained 585D50 cost go to
+# timing gates (bindings FORM_*). Every gate forwards exactly one original with the original register/stack/RET contract: 576EA0/57C9F0 (dirty rebuilds, ECX = F, plain),
+# 53C180 (ECX = F+62C, one stack argument, ret 4), 580990 (FSM step, ECX = F+480, plain), 586440 (command predicate, ECX = target, push 0, ret 4, AL result), 51A3A0
+# (command constructor, ECX = new object, three stack arguments, ret 0xC), 581E80 (command queue, ECX = F+20, plain), 551A40 (ECX = F+74C, plain, ends in a tail jmp 542AA0)
+# and DACDC0 (cdecl, five stack arguments). 555DF0, 522D70 (cdecl allocator), 53FBE0 and 80E9D0 stay the original calls; 580B60 is the member destructor `call [eax]`.
+FORM_UPDATE_SITES = {0x580A3F: 'FORM_DIRTY_A', 0x580A56: 'FORM_DIRTY_B', 0x580A7C: 'FORM_AGG', 0x580AB5: 'FORM_FSM', 0x580AFA: 'FORM_CMD_PRED',
+                     0x580B34: 'FORM_CMD_CTOR', 0x580B7A: 'FORM_QUEUE', 0x580B85: 'FORM_TAIL', 0x580C00: 'FORM_REC'}
+
+
+def form_update_configs():
+    return [
+        dict(clone='FORM_UPDATE', source='FORM_UPDATE', site_calls={site: Bind(name) for site, name in FORM_UPDATE_SITES.items()},
+             indirect_calls={0x580B60}, expect_rets={0x580C0E: b'\xc3'}),
+    ]
+
+
+FORM_EXPECT_CALLS = {'FORM_UPDATE': {0x555DF0, 0x522D70, 0x53FBE0, 0x80E9D0}}
+EXPECT_CALLS.update(FORM_EXPECT_CALLS)
+FORM_EXPECT_CENSUS = {'FORM_UPDATE': (130, 1, 4, 0)}
+EXPECT_CENSUS.update(FORM_EXPECT_CENSUS)
+
+
 STEP_EXPECT_CALLS = {'STEP_676FD0': {0x10D0900, 0x126DEF6, 0x126DF40, 0x126E299, 0x52EDB0, 0x56DE10, 0x61E9A0, 0x629240, 0x62DF10, 0x639C10,
                                      0x63BF40, 0x63CE00, 0x63E2E0, 0x6497D0, 0x654A80, 0x655B80, 0x659480, 0x659520, 0x659B70, 0x659DA0, 0x662960,
                                      0x664100, 0x6669B0, 0x66B9D0, 0x679700, 0x679750, 0x6D03B0, 0x7F6720, 0x80E9D0}}
@@ -2669,8 +2701,10 @@ EXPECT_CENSUS.update(UNIT_CTOR_EXPECT_CENSUS)
 # 65D740 -> 51A530 (ctor of the class-1325470 command) -> 576B30; second R1 slot 0x1332110 (0x611CF0, entered by the host gate, which
 # performs 611CF0's `ecx = arg ? arg-0x1C : 0` itself) -> 65D7D0 -> 51A9A0 (ctor of class 13254D8) -> 57AFC0; R2 slot 0x1325474 (0x581AE0) ->
 # 576B30.  Common tail 576B30 -> 57AFC0 -> 555CA0 -> [555CEB: SOLVER_ASSIGN gate] -> 18F0A00 clone -> {5373F0 clone -> [53765A: SOLVER_SHIM],
-# 18F1200 clone -> [18F12AA: SOLVER_SOLVE]}.  Every other call/jump stays the original instruction; 18F0A00's 18F0200 pre-step, the 18F12EC /
-# 18F1349 helpers and every original callee run unmodified at their own addresses.
+# 18F1200 clone -> [18F12AA: SOLVER_SOLVE]}. The alternate R1 51A8FD and R2 581B81 calls both enter SOLVER_584E10 ->
+# [585269: SOLVER_57AC10] -> [57AC3B: SOLVER_CACHE_ASSIGN], retaining cache/vector lifetime work. The host gate replaces 539C90,
+# selecting the verified stock 5373F0 or overlay 18F0A00 assignment clone. Every other call/jump stays original, including
+# 18F0A00's 18F0200 pre-step, the 18F12EC / 18F1349 helpers and every original callee.
 # Return-address audit (all [proven by disasm]): the only return-address-dependent code of the closure is the .aistbl trampoline 18F0D00
 # (`call+0; pop eax; sub eax,0x271` = 0x18F0A96, the return address of 18F0A00's call of 5373F0, compared with [esp+0x58]; suppression also needs
 # [[esp+0x24]-8]==1).  SOLVER_5373F0 therefore calls the SOLVER_SHIM host thunk, which replays that test against the SOLVER_18F0A00 clone's return
@@ -2682,6 +2716,11 @@ SOLVER_PINS = {
     0x18F129E: '83f001' '52' '50' 'ff75e4' '57' '8d4ddc' 'e8c114c1fe',    # xor eax,1; push edx; push eax; push [ebp-1C]; push edi; lea ecx,[ebp-24]; call 502770
     0x18F0A91: 'e85a69c4fe' '9c',                                         # call 5373F0; (return address 18F0A96:) pushfd
     0x611CF0: '8b4c2404' '8d41e4' 'f7d9' '1bc9' '23c8' 'e8ceba0400' 'c20400',   # ecx = arg ? arg-0x1C : 0; call 65D7D0; ret 4 (the host gate replays the arithmetic)
+    0x51A8FD: 'e80ea50600',                                              # R1 alternate call 584E10
+    0x581B81: 'e88a320000',                                              # R2 alternate call 584E10
+    0x585269: 'e8a259ffff',                                              # call 57AC10
+    0x57AC2C: '50' '6a01' '8d4348' 'c744242000000000' '50' 'e850f0fbff',   # push outvec; push flag=1; push cache+48; call 539C90 (ECX=cache)
+    0x58550C: '6a03' 'ffb424e8000000' '8b4008' '8b88b4000000' 'e85d6b2900',  # native receiver, record and kind=3 -> 81C080
 }
 SOLVER_SHIM_RET_VA = 0x18F0A96
 
@@ -2692,9 +2731,11 @@ def solver_configs():
              indirect_calls=set(), expect_rets={0x617522: RET(4)}),
         dict(clone='SOLVER_65D740', source='SOLVER_65D740', calls={0x51A530: (Clone('SOLVER_51A530'), 1, [0x65D7C2])},
              indirect_calls=set(), expect_rets={0x65D7CB: b'\xc3'}),
-        dict(clone='SOLVER_51A530', source='SOLVER_51A530', calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x51A8E3])},
+        dict(clone='SOLVER_51A530', source='SOLVER_51A530',
+             calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x51A8E3]), 0x584E10: (Clone('SOLVER_584E10'), 1, [0x51A8FD])},
              indirect_calls={0x51A70D, 0x51A746}, expect_rets={0x51A909: RET(0xC)}),
-        dict(clone='SOLVER_581AE0', source='SOLVER_581AE0', calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x581B38])},
+        dict(clone='SOLVER_581AE0', source='SOLVER_581AE0',
+             calls={0x576B30: (Clone('SOLVER_576B30'), 1, [0x581B38]), 0x584E10: (Clone('SOLVER_584E10'), 1, [0x581B81])},
              indirect_calls=set(), expect_rets={0x581BA7: b'\xc3'}),
         dict(clone='SOLVER_576B30', source='SOLVER_576B30', calls={0x57AFC0: (Clone('SOLVER_57AFC0'), 1, [0x576B7D])},
              indirect_calls=set(), expect_rets={0x576B9A: RET(4)}),
@@ -2713,6 +2754,10 @@ def solver_configs():
              indirect_calls=set(), expect_rets={0x65D882: b'\xc3'}),
         dict(clone='SOLVER_51A9A0', source='SOLVER_51A9A0', calls={0x57AFC0: (Clone('SOLVER_57AFC0'), 1, [0x51A9D7])},
              indirect_calls={0x51A9F9, 0x51AC08}, expect_rets={0x51AC45: RET(0xC)}),
+        dict(clone='SOLVER_584E10', source='SOLVER_584E10', calls={0x57AC10: (Clone('SOLVER_57AC10'), 1, [0x585269])},
+             indirect_calls={0x584F09, 0x5854D4, 0x58552E}, expect_rets={0x585734: RET(4)}),
+        dict(clone='SOLVER_57AC10', source='SOLVER_57AC10', calls={0x539C90: (Bind('SOLVER_CACHE_ASSIGN'), 1, [0x57AC3B])},
+             indirect_calls=set(), expect_rets={0x57AC89: b'\xc3'}),
     ]
 
 
@@ -2720,8 +2765,8 @@ SOLVER_EXPECT_CALLS = {
     'SOLVER_617510': set(),
     'SOLVER_65D740': {0x649B30, 0x659450, 0x51A910, 0x522D70, 0x51A970},
     'SOLVER_51A530': {0x519190, 0x621090, 0x7EE6E0, 0x5769D0, 0x4456D0, 0x523440, 0xFF7EF0, 0x80E9D0, 0x817CF0, 0x550EC0, 0x816E40,
-                      0x531A70, 0x584E10},
-    'SOLVER_581AE0': {0x572B00, 0x531A70, 0x4B4A50, 0x584E10, 0x53FBA0, 0x531B70},
+                      0x531A70},
+    'SOLVER_581AE0': {0x572B00, 0x531A70, 0x4B4A50, 0x53FBA0, 0x531B70},
     'SOLVER_576B30': {0x7F2D70, 0x532360, 0x623BD0, 0x126E016},
     'SOLVER_57AFC0': {0x4B4A50},
     'SOLVER_555CA0': {0x444B40, 0x557C80, 0xFF7EF0},
@@ -2730,22 +2775,33 @@ SOLVER_EXPECT_CALLS = {
     'SOLVER_18F1200': {0x18F12EC, 0x18F1349},
     'SOLVER_65D7D0': {0x655BC0, 0x649B30},
     'SOLVER_51A9A0': {0x519190, 0x56D0B0, 0x5650E0, 0x57E230, 0xFF7EF0},
+    'SOLVER_584E10': {0x462B80, 0x4B4A50, 0x5306B0, 0x53FBA0, 0x54C650, 0x5516D0, 0x565030, 0x56D0B0, 0x572B00, 0x57E230,
+                      0x623BD0, 0x63E290, 0x63F260, 0x6527B0, 0x6533E0, 0x658C20, 0x7F0790, 0x7F2D70, 0x7FF1C0, 0x80AEA0,
+                      0x80E9D0, 0x817CF0, 0x81C080, 0xFF7EF0, 0x126E016},
+    'SOLVER_57AC10': {0xFF7EF0},
 }
 # (decoded instructions, source relocations, surviving external call sites, external jump sites)
 SOLVER_EXPECT_CENSUS = {
-    'SOLVER_617510': (7, 0, 0, 0), 'SOLVER_65D740': (47, 0, 7, 0), 'SOLVER_51A530': (240, 12, 14, 0), 'SOLVER_581AE0': (53, 3, 8, 0),
+    'SOLVER_617510': (7, 0, 0, 0), 'SOLVER_65D740': (47, 0, 7, 0), 'SOLVER_51A530': (240, 12, 13, 0), 'SOLVER_581AE0': (53, 3, 7, 0),
     'SOLVER_576B30': (40, 0, 4, 0), 'SOLVER_57AFC0': (20, 0, 2, 0), 'SOLVER_555CA0': (110, 0, 5, 0), 'SOLVER_18F0A00': (73, 0, 1, 0),
-    'SOLVER_5373F0': (282, 2, 9, 0), 'SOLVER_18F1200': (82, 0, 4, 0), 'SOLVER_65D7D0': (44, 0, 2, 0), 'SOLVER_51A9A0': (167, 3, 7, 0)}
+    'SOLVER_5373F0': (282, 2, 9, 0), 'SOLVER_18F1200': (82, 0, 4, 0), 'SOLVER_65D7D0': (44, 0, 2, 0), 'SOLVER_51A9A0': (167, 3, 7, 0),
+    'SOLVER_584E10': (473, 12, 41, 0), 'SOLVER_57AC10': (45, 0, 1, 0)}
 EXPECT_CALLS.update(SOLVER_EXPECT_CALLS)
 EXPECT_CENSUS.update(SOLVER_EXPECT_CENSUS)
 
 
 def solver_extra_checks(image, plans, header_path):
-    """Pin the trampoline/frame bytes the SOLVER_SHIM replay and the two solver gates depend on, and the clone return-address offset."""
+    """Pin the trampoline/frame and route bytes used by the solver gates, and the clone return-address offset."""
     for va, want in SOLVER_PINS.items():
         got = image.read(va, len(want) // 2)
         if got != bytes.fromhex(want):
             fail(f'SOLVER: pinned bytes at {va:#x} changed: {got.hex()} != {want}')
+    # 58551E's same-thread lookup uses the original receiver and original projection scratch, not a NODE_PROJ participant.
+    # 81C080 obtains the record position through 80E9D0, then 81C050 returns the cached object or calls native 67A790.
+    # Preserve this sole native edge; pin its site/arguments above and reject added calls or jumps to the exception target.
+    lookup = plans['SOLVER_584E10']
+    if lookup.external_calls.get(0x81C080) != 1 or 0x81C080 in lookup.external_jumps:
+        fail('SOLVER_584E10: expected exactly one native 81C080 lookup call and no jump')
     # 18F0D00 computes the return address it compares with as (18F0D07 - 0x271); it must be the return address of 18F0A00's 5373F0 call.
     if 0x18F0D07 - 0x271 != SOLVER_SHIM_RET_VA or 0x18F0A91 + 5 != SOLVER_SHIM_RET_VA:
         fail('SOLVER: trampoline return-address constant no longer equals the return address of 18F0A00 call 5373F0')
@@ -3398,7 +3454,8 @@ def build_all(image, header_path):
             for lo, hi, owner in clone_spans:
                 if lo <= target < hi and not (plan.name.startswith('BRAIN_S0') and target in S0_ORIGINAL_OK) and \
                         not (plan.name.startswith('BRAIN_U') and target in U_ORIGINAL_OK) and \
-                        not (plan.name.startswith('PS_') and target in PS_ORIGINAL_OK):
+                        not (plan.name.startswith('PS_') and target in PS_ORIGINAL_OK) and \
+                        not (plan.name == 'SOLVER_584E10' and target == 0x81C080):
                     fail(f'{plan.name}: untouched call/jump to {target:#x} inside cloned original {owner}')
         if plan.source is not None and plan.source['code']:
             for r in image.span_relocs(plan.source['va'], plan.source['size']):

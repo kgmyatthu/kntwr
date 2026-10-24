@@ -180,6 +180,15 @@ enum kntwr_binding {
     /* --mounted-officer (appended; src/army/kntwr_mounted_officer.h): MO_GATE is inserted into CLONE_UNIT_CTOR before the mount-loop test 0x51C22E (`test ecx,ecx; jle 0x51C462`).
        __stdcall (unit, ctor argument 1, &entity-serial slot) -> void: runs the one-mount body for the unit's officer when the unit has no mounts and resolved mount references. */
     KNTWR_BIND_MO_GATE,
+    /* --army-storm-census formation residual (appended; src/army/native_formation_residual.h): CLONE_FORM_UPDATE's nine timed direct calls. Each gate forwards exactly one original with
+       its register/stack/RET contract. DIRTY_A 576EA0 / DIRTY_B 57C9F0 / TAIL 551A40 / QUEUE 581E80 / FSM 580990: ECX = argument object, plain ret. AGG 53C180 and CMD_PRED 586440: ECX +
+       one stack argument, ret 4 (CMD_PRED returns AL). CMD_CTOR 51A3A0: ECX + three stack arguments, ret 0xC. REC DACDC0: cdecl, five stack arguments. */
+    KNTWR_BIND_FORM_DIRTY_A, KNTWR_BIND_FORM_DIRTY_B, KNTWR_BIND_FORM_AGG, KNTWR_BIND_FORM_FSM, KNTWR_BIND_FORM_CMD_PRED,
+    KNTWR_BIND_FORM_CMD_CTOR, KNTWR_BIND_FORM_QUEUE, KNTWR_BIND_FORM_TAIL, KNTWR_BIND_FORM_REC,
+    /* --army-solver-* cache assignment route (appended): replaces 57AC3B's call of 539C90 in SOLVER_57AC10.
+       thiscall ECX = cache, three stack arguments in order (slotvec, flag, outvec), callee ret 0xC.
+       The host preserves the cache wrapper and chooses the verified stock 5373F0 or overlay 18F0A00 assignment clone. */
+    KNTWR_BIND_SOLVER_CACHE_ASSIGN,
     KNTWR_BIND_COUNT
 };
 enum kntwr_clone_id {
@@ -339,6 +348,12 @@ enum kntwr_clone_id {
     /* --mounted-officer (appended): the unit constructor 0x51B7D0..0x51CA1C with the mount gate inserted before its mount-loop test 0x51C22E (KNTWR_BIND_MO_GATE) and its
        six-entry equipment-kind switch table rebased behind the body. Entered only through the redirected call 0x531340 while --mounted-officer is installed. */
     KNTWR_CLONE_UNIT_CTOR,
+    /* --army-storm-census formation residual (appended): private copy of the infantry formation update 0x580A30..0x580C0E (ECX = formation, plain ret, void) whose nine timed calls are the
+       KNTWR_BIND_FORM_* gates. Entered only by the census's port of 0x585D50's two vtable loops (native_formation_residual.cpp). */
+    KNTWR_CLONE_FORM_UPDATE,
+    /* --army-solver-* alternate R1/R2 route (appended): 51A530@51A8FD / 581AE0@581B81 -> 584E10@585269 ->
+       57AC10@57AC3B -> SOLVER_CACHE_ASSIGN. All other calls and cache/vector lifetime operations remain original. */
+    KNTWR_CLONE_SOLVER_584E10, KNTWR_CLONE_SOLVER_57AC10,
     KNTWR_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

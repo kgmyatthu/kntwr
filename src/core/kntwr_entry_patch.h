@@ -1,12 +1,12 @@
 // Shared code-entry patch swap: kernel-enumerated thread freeze, interior-IP refusal and one atomic 8-byte compare-exchange.
-// Extracted unchanged from kntwr_mounted_officer.cpp (PlacementThreads / SwapAdjust); every entry patch that replaces the first
+// Shared with kntwr_mounted_officer.cpp (PlacementThreads / SwapAdjust); every entry patch that replaces the first
 // 8 bytes of a function with `jmp rel32` + the untouched original tail bytes goes through Swap8 (the mounted-officer slot adjust and
 // the cavalry flush-entry hook). Header-only so no build target changes; x86-32 Windows, the injected module's process.
 //
 // Contract of Swap8(site, from, to, span, guard, onSwapped):
-//   * Every other thread of the process is suspended first (NtGetNextThread enumeration: no heap, loader or CRT activity while
-//     a peer is held; the handles live in the object on the caller's stack). Enumeration repeats until a full pass finds no new
-//     thread, so a thread created during the freeze cannot escape.
+//   * Every other live thread of the process is suspended first (NtGetNextThread enumeration: no heap, loader or CRT activity
+//     while a peer is held; the handles live on the caller's stack). Only a signaled thread handle proves termination and permits
+//     skipping a peer. Enumeration repeats until a full pass finds no new thread, so a thread created during the freeze cannot escape.
 //   * A frozen thread whose EIP is strictly inside the displaced span (site, site+span) is an interior instruction boundary the
 //     rewrite would corrupt; the swap refuses instead of rewriting any thread context. `span` is the byte length of the COMPLETE
 //     displaced instructions, not of the 8-byte store (the officer displaces 8 bytes, the flush hook 10).
@@ -69,25 +69,50 @@ struct FrozenThreads {
             for (;;) {
                 HANDLE next = nullptr;
                 const LONG status = nextThread(GetCurrentProcess(),cursor,
-                    THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                    SYNCHRONIZE | THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
                     0,0,&next);
                 if (cursor && !retained) CloseHandle(cursor);
                 cursor = next; retained = false;
                 if (status == static_cast<LONG>(0x8000001Au)) break;
                 if (status < 0) return false;
+                // NtGetNextThread can still enumerate a terminated thread while
+                // somebody retains its handle. It cannot execute, but suspending
+                // it fails with access denied. Never treat that error alone as
+                // proof: only the signaled kernel thread object permits a skip.
+                const DWORD exited = WaitForSingleObject(cursor,0);
+                if (exited == WAIT_OBJECT_0) continue;
+                if (exited != WAIT_TIMEOUT) { CloseHandle(cursor); return false; }
                 const DWORD id = GetThreadId(cursor);
                 if (!id) { CloseHandle(cursor); return false; }
                 bool known = id == self;
-                for (U i = 0; !known && i < count; ++i) known = ids[i] == id;
+                for (U i = 0; !known && i < count; ++i) {
+                    if (ids[i] != id) continue;
+                    // A reused ID must not let a new live thread inherit a dead
+                    // peer's frozen status. Refuse and retry with fresh handles.
+                    if (WaitForSingleObject(handles[i],0) != WAIT_TIMEOUT) {
+                        CloseHandle(cursor); return false;
+                    }
+                    known = true;
+                }
                 if (known) continue;
-                if (count == 512 || SuspendThread(cursor) == static_cast<DWORD>(-1)) {
+                if (count == 512) { CloseHandle(cursor); return false; }
+                if (SuspendThread(cursor) == static_cast<DWORD>(-1)) {
+                    // It may have terminated after the initial wait.
+                    if (WaitForSingleObject(cursor,0) == WAIT_OBJECT_0) continue;
                     CloseHandle(cursor); return false;
                 }
                 handles[count] = cursor; ids[count++] = id; retained = true;
                 CONTEXT context{};
                 context.ContextFlags = CONTEXT_CONTROL;
-                if (!GetThreadContext(cursor,&context) ||
-                    (context.Eip > site && context.Eip < site + span) ||
+                if (!GetThreadContext(cursor,&context)) {
+                    if (WaitForSingleObject(cursor,0) != WAIT_OBJECT_0) return false;
+                    // This last retained peer terminated during suspension.
+                    // Leave its handle as the enumeration cursor; the next
+                    // iteration closes it once, without attempting a resume.
+                    --count; retained = false;
+                    continue;
+                }
+                if ((context.Eip > site && context.Eip < site + span) ||
                     (guard.begin != guard.end && context.Eip >= guard.begin && context.Eip < guard.end)) return false;
             }
             if (count == previousCount) return guard.busy == nullptr ||

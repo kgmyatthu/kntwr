@@ -50,6 +50,7 @@
 #include "brain2/native_unit_posture_engage.h"
 #include "army/native_army_unit.h"
 #include "army/native_army_storm.h"
+#include "army/native_formation_residual.h"
 #include "collision/native_contact.h"
 
 #include "kntwr_runtime.h"
@@ -296,10 +297,12 @@ typedef struct Options {
     BOOL brain_unit_engage_shadow;  /* --brain-unit-engage-shadow. */
     BOOL collide_contact_shadow;  /* --collide-contact-shadow: plan contact callbacks on workers, owner runs and compares the original. */
     BOOL collide_contact_workers; /* --collide-contact-workers: same-team contact decisions on workers, owner replays effects in order. */
+    BOOL no_collide_contact_workers; /* Explicit opt-out; never changes the feature mask. */
     BOOL va_watch;           /* --va-watch: opt-in 1 Hz process-VA sampler on the monitor thread (kntwr_config::va_watch_flags); load-crash forensics only. */
     BOOL army_storm_census;  /* --army-storm-census: opt-in site-18 storm census (kntwr_config::va_watch_flags KNTWR_ARMY_STORM_CENSUS) */
     uint32_t army_storm_sample_ms; /* --army-storm-sample-ms N, 1..255 (0 = off): storm-gated sampler threshold, bits 8..15 of va_watch_flags */
     BOOL tick_pcore;         /* --tick-pcore: pin the routed tick body to P cores on a hybrid CPU (va_watch_flags KNTWR_TICK_PCORE) */
+    BOOL no_tick_pcore;      /* --no-tick-pcore: opt out of tick placement under --features all */
     BOOL tick_core_ab;       /* --tick-core-ab: measurement; even ticks on P, odd ticks on E cores (va_watch_flags KNTWR_TICK_CORE_AB) */
     BOOL army_solver_memo;   /* --army-solver-memo: bit-exact memoised flag=1 slot solver (kntwr_config::va_watch_flags KNTWR_ARMY_SOLVER_MEMO) */
     BOOL army_solver_shadow; /* --army-solver-shadow: same chain, native authoritative, kernel compared (KNTWR_ARMY_SOLVER_SHADOW); exclusive with memo */
@@ -338,6 +341,7 @@ typedef struct Options {
     BOOL loco_relink_workers;/* --loco-relink-workers: live cell-partitioned relink apply on the pool; exclusive with shadow */
     BOOL loco_cw_shadow;     /* --loco-cw-shadow: class-wrapper phase 2 computed on workers, native wrapper still runs and is compared; requires --loco-owned-services */
     BOOL loco_cw_workers;    /* --loco-cw-workers: class-wrapper phase 2 live (owner replays child relocations natively); exclusive with shadow */
+    BOOL no_loco_cw_workers; /* Explicit opt-out of live class-wrapper workers. */
     BOOL ai_deferred;        /* --ai-deferred: ai_async2 deferred sliced thinks (kntwr_config::ai_deferred) */
     uint32_t ai_deferred_k;  /* --ai-deferred-k K, 1..KNTWR_AI_DEFERRED_MAX_K (default KNTWR_AI_DEFERRED_DEFAULT_K) */
     uint32_t ai_deferred_budget; /* --ai-deferred-budget B, 1..65535 (default KNTWR_AI_DEFERRED_DEFAULT_BUDGET) */
@@ -2420,10 +2424,55 @@ static void print_army_storm(const uint32_t *w)
             (unsigned long)(e[10] & 0x3FFu), (unsigned long)((e[10] >> 10) & 0x3FFu), (unsigned long)((e[10] >> 20) & 0x3FFu));
     }
 }
-/* Army solver (native_army_solver.h): header 55 words (KNTWR_ARMY_SOLVER_LABELS), top-16 tick table at 55 (13 words each) and top-16 solve table
-   at 263 (16 words each), longest solver time first, 519 words in all. Prints nothing when the module is off (version word 0). */
-#define SOLVER_TICK_TABLE 55u
-#define SOLVER_SOLVE_TABLE 263u
+/* --army-storm-census formation residual (kntwr_status::army_residual_words; layout in src/army/native_formation_residual.h).
+   Prints the header, the [vtbl+0xC] callee table, both aggregates and the top storm ticks; all times inclusive us.
+   Residue of the formation update 0x580A30 = form_us - (dirty_a+dirty_b+agg+fsm+cmdpred+cmdctor+queue+tail+rec) us. */
+static void print_army_residual(const uint32_t *w)
+{
+    unsigned i;
+    static const char *const gates[9] = { "dirty_a(576EA0)", "dirty_b(57C9F0)", "agg(53C180)", "fsm(580990)",
+        "cmdpred(586440)", "cmdctor(51A3A0)", "queue(581E80)", "tail(551A40)", "rec(DACDC0)" };
+    if (!w[1]) return;
+    say(L"army_residual v%lu: ticks=%lu storm_ticks=%lu form_calls=%lu clone_forms=%lu other_forms=%lu member_calls=%lu "
+        L"observer_us=%lu qpc_read_cost_q16=%lu gate_outside=%lu callee_overflow=%lu\n",
+        (unsigned long)w[0], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
+        (unsigned long)w[6], (unsigned long)w[7], (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[10],
+        (unsigned long)w[11]);
+    for (i = 0; i < 6; ++i) {
+        const uint32_t *c = w + 12 + i * 4;
+        if (!c[2]) continue;
+        say(L"  callee %08lX: loops=%c%c calls=%lu us=%lu\n", (unsigned long)c[0],
+            (c[1] & 1) ? '1' : '-', (c[1] & 2) ? '2' : '-', (unsigned long)c[2], (unsigned long)c[3]);
+    }
+    for (i = 0; i < 2; ++i) {
+        const uint32_t *a = w + (i ? 76 : 36);
+        unsigned g;
+        say(L"  %ls forms=%lu form=%lu us (max %lu us, %lu members, gate sum max %lu us) members_sum=%lu ge1ms=%lu "
+            L"loop1=%lu loop2=%lu us loop_calls=%lu r1=%lu r1b=%lu r2=%lu queue_r2=%lu us\n",
+            i ? L"calm: " : L"storm:", (unsigned long)a[0], (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3],
+            (unsigned long)a[31], (unsigned long)a[4], (unsigned long)a[5], (unsigned long)a[6], (unsigned long)a[7],
+            (unsigned long)a[8], (unsigned long)a[27], (unsigned long)a[28], (unsigned long)a[29], (unsigned long)a[30]);
+        for (g = 0; g < 9; ++g)
+            say(L"    %hs calls=%lu us=%lu\n", gates[g], (unsigned long)a[9 + g * 2], (unsigned long)a[10 + g * 2]);
+    }
+    for (i = 0; i < 8; ++i) {
+        const uint32_t *e = w + 116 + i * 24;
+        if (!e[0] && !e[3]) continue;
+        say(L"  top%lu: tick=%lu site18=%lu us forms=%lu form=%lu us (max %lu us %lu members) loop1=%lu loop2=%lu us "
+            L"members=%lu loop_calls=%lu | dirtyA=%lu dirtyB=%lu agg=%lu fsm=%lu cmdpred=%lu cmdctor=%lu queue=%lu tail=%lu "
+            L"rec=%lu r1=%lu r1b=%lu r2=%lu queue_r2=%lu us dirty_ab_calls=%lu/%lu\n",
+            (unsigned long)i, (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3],
+            (unsigned long)e[4], (unsigned long)e[5], (unsigned long)e[6], (unsigned long)e[7], (unsigned long)e[8],
+            (unsigned long)e[9], (unsigned long)e[10], (unsigned long)e[11], (unsigned long)e[12], (unsigned long)e[13],
+            (unsigned long)e[14], (unsigned long)e[15], (unsigned long)e[16], (unsigned long)e[17], (unsigned long)e[18],
+            (unsigned long)e[19], (unsigned long)e[20], (unsigned long)e[21], (unsigned long)e[22],
+            (unsigned long)(e[23] & 0xFFFFu), (unsigned long)(e[23] >> 16));
+    }
+}
+/* Army solver (native_army_solver.h): header 57 words (KNTWR_ARMY_SOLVER_LABELS), top-16 tick table at 57 (13 words each) and top-16 solve table
+   at 265 (16 words each), longest solver time first, 521 words in all. Prints nothing when the module is off (version word 0). */
+#define SOLVER_TICK_TABLE 57u
+#define SOLVER_SOLVE_TABLE 265u
 #define SOLVER_ENTRY_WORDS 13u
 #define SOLVER_SOLVE_WORDS 16u
 static void print_army_solver(const uint32_t *w)
@@ -2446,6 +2495,8 @@ static void print_army_solver(const uint32_t *w)
         (unsigned long)w[36], (unsigned long)w[37], (unsigned long)w[38], (unsigned long)w[39], (unsigned long)w[40], (unsigned long)w[41]);
     say(L"  phases (timed kernel solves=%lu, kernel total %lu us): scans=%I64u cost_phase=%lu us (gather+table fill) loop_phase=%lu us | gather=%lu us | fallbacks fpenv=%lu ctx=%lu empty_native=%lu | solves via 18F12AA direct=%lu (via 53765A shim = solves - this)\n",
         (unsigned long)w[48], (unsigned long)w[49], ((unsigned __int64)w[45] << 32) | w[44], (unsigned long)w[46], (unsigned long)w[47], (unsigned long)w[50], (unsigned long)w[52], (unsigned long)w[53], (unsigned long)w[54], (unsigned long)w[51]);
+    say(L"  cache route: assignments=%lu solved_kernel=%lu (solve flags bit9 marks cache origin)\n",
+        (unsigned long)w[55], (unsigned long)w[56]);
     for (i = 0; i < 16; ++i) {
         const uint32_t *e = w + SOLVER_TICK_TABLE + i * SOLVER_ENTRY_WORDS;
         if (!e[0] && !e[1]) continue;
@@ -2778,6 +2829,7 @@ static void print_module_words(const kntwr_status *s, uint32_t brain_flags, uint
     }
     if (s->requested_mask & KNTWR_ARMY_UNIT_SHADOW) { print_army_unit(s->army_unit_words); print_army_b0(s->army_unit_words, s->army_b0_words); }
     print_army_storm(s->army_storm_words);
+    print_army_residual(s->army_residual_words);
     print_army_solver(s->army_solver_words);
     print_alloc_census(s->alloc_census_words);
     print_arena(s->arena_words);
@@ -4396,10 +4448,26 @@ static void sb_army_storm(Sb *b, const Run *r)
     for (i = 0; i < KNTWR_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
+/* army_residual (KNTWR_ARMY_STORM_CENSUS): every labelled word of army_residual_words (native_formation_residual.h, 320 words). */
+static void sb_army_residual(Sb *b, const Run *r)
+{
+    static const char *const labels[KNTWR_FORMATION_RESIDUAL_WORDS] = { KNTWR_FORMATION_RESIDUAL_LABELS };
+    const uint32_t *w = r->last.army_residual_words;
+    unsigned i;
+    if (!(r->cfg.va_watch_flags & KNTWR_ARMY_STORM_CENSUS) || !r->have_status || !w[1]) {
+        sb_fmt(b, "  \"army_residual\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"army_residual\": {\"words\": {");
+    for (i = 0; i < KNTWR_FORMATION_RESIDUAL_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    sb_fmt(b, "}, \"raw\": [");
+    for (i = 0; i < KNTWR_FORMATION_RESIDUAL_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
+    sb_fmt(b, "]},\n");
+}
 /* army_solver (KNTWR_ARMY_SOLVER_MEMO/SHADOW): every labelled header word of army_solver_words (native_army_solver.h) plus the decoded top-16 tick and solve tables. */
 static void sb_army_solver(Sb *b, const Run *r)
 {
-    static const char *const labels[55] = { KNTWR_ARMY_SOLVER_LABELS };
+    static const char *const labels[SOLVER_TICK_TABLE] = { KNTWR_ARMY_SOLVER_LABELS };
     static const char *const tick_labels[13] = { KNTWR_ARMY_SOLVER_TICK_LABELS };
     static const char *const solve_labels[16] = { KNTWR_ARMY_SOLVER_SOLVE_LABELS };
     const uint32_t *w = r->last.army_solver_words;
@@ -4409,7 +4477,7 @@ static void sb_army_solver(Sb *b, const Run *r)
         return;
     }
     sb_fmt(b, "  \"army_solver\": {\"mode\": \"%s\", \"words\": {", w[1] == 1u ? "memo" : "shadow");
-    for (i = 0; i < 55; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
+    for (i = 0; i < SOLVER_TICK_TABLE; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"ticks\": [");
     for (i = 0, first = 1; i < 16; ++i) {
         const uint32_t *e = w + SOLVER_TICK_TABLE + i * SOLVER_ENTRY_WORDS;
@@ -5357,6 +5425,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_ai_census(&b, r);
     sb_army_unit(&b, r);
     sb_army_storm(&b, r);
+    sb_army_residual(&b, r);
     sb_army_solver(&b, r);
     sb_alloc_census(&b, r);
     sb_arena(&b, r);
@@ -6925,12 +6994,14 @@ static void usage(void)
         L"                        a launch that finds nothing interactively opens a folder picker and remembers the choice)\n"
         L"  --replay FILE         start the game on a replay (game_startup_mode replay \"FILE\")\n"
         L"  --features LIST       default: all,cavalry_orbit; an explicit list replaces it (all selects accepted optimizations only)\n"
-        L"                        all = batch64,ai,visual,profile,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
+        L"                        all = batch64,ai,visual,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
         L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --brain-target-cull --tick-pcore\n"
-        L"                        --army-solver-memo); any explicit\n"
-        L"                        --loco-*/--collide-contact-* (resp. --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census, --brain-target-cull-shadow,\n"
-        L"                        --tick-core-ab, --army-solver-shadow) switch replaces those defaults; shipping set: all,cavalry_orbit\n"
+        L"                        --army-solver-memo). Positive-only --loco-*/--collide-contact-* options replace their default bundle.\n"
+        L"                        --no-tick-pcore, --no-loco-cw-workers and --no-collide-contact-workers retain unrelated defaults,\n"
+        L"                        including alongside independent positive options; explicit positives conflicting with an opt-out are errors.\n"
+        L"                        --ai-poly*/--ai-prepass-census, --ai-record-test-shadow, --ai-claim-once-census, --brain-target-cull-shadow,\n"
+        L"                        --tick-core-ab and --army-solver-shadow retain their existing overrides; shipping set: all,cavalry_orbit\n"
         L"                        ai_ctrl = experimental controller offload (not in all); requires ai\n"
         L"                        ai_census = opt-in observation of AI planner mutators (vtable-slot gates, one clone-call gate, EIP ranges); requires ai (not in all)\n"
         L"                        ai_async2 = experimental: site 34 queues the planner; the AI worker runs it between ticks on private clones;\n"
@@ -6939,10 +7010,13 @@ static void usage(void)
         L"                        requires ai, excludes ai_ctrl/ai_census; experimental (non-tick direct-call owner teardown is not covered)\n"
         L"                        collide = Phase B soft-collision solver; overrides the PROFILE collision census\n"
         L"                        collide_lod = half-rate far-unit queries (not in all); cannot combine with collide or formation\n"
-        L"                        (~200 all-thread rounds/s, <=10%% measured duty)\n"
+        L"                        profile = opt-in instrumentation and statistical sampler (~200 all-thread rounds/s, <=10%% measured duty)\n"
         L"                        brain (needs profile) publishes the 23 vtable slots +0x0C as timed entries and prints/records the\n"
         L"                        per-callee 'brain sites' table of the per-agent brain step, per class family\n"
         L"                        brain2 v2 observes native per-soldier steps on the owner in exact worklist order; --brain-parallel adds the guarded worker path\n"
+        L"  --profile            enable profiling and its sampler (default off); additive regardless of --features position\n"
+        L"                        --features all,profile also enables it; all/default retain tick logging without profiling\n"
+        L"                        explicit grid_census or ai_census may start their diagnostic sampler without profile\n"
         L"  --brain-census        requires brain2: run serial gated clones; count active/inactive/unknown services (QPC stays off)\n"
         L"  --brain-timing        requires brain2: opt-in QPC for original/serial-clone comparison; independent of census\n"
         L"  --brain-node-shadow   requires brain2: compare owned reference node and private projection on owner; never install fake nodes\n"
@@ -6992,6 +7066,7 @@ static void usage(void)
         L"                        plan is compared with the original callback the owner still runs (collide.contact)\n"
         L"  --collide-contact-workers requires collide; excludes the shadow: same-team contact decisions on pool workers, owner replays\n"
         L"                        tracker/+0x13C/avoidance effects in contact order; other contacts run the original callback in place\n"
+        L"  --no-collide-contact-workers  disable live contact workers only; independent contact shadow remains available\n"
         L"  --va-watch            diagnostic: sample process VA (avail, largest free region, VirtualQuery walk) once a second in every\n"
         L"                        phase incl. battle loading; printed every 10 s and as a ring after a crash (va_watch_words). Default off.\n"
         L"  --va-floor-mib N      total free VA floor in MiB (64..512 in 32 MiB steps, or 1024; default 256). Latches LOCO/COLLIDE fallback.\n"
@@ -7057,6 +7132,7 @@ static void usage(void)
         L"                        loco_cw_words cw_*); exclusive with --loco-cw-workers\n"
         L"  --loco-cw-workers     same requirements: live; the worker result is committed and each child relocation is replayed\n"
         L"                        through native 0x80BAC0 on the owner in worklist order\n"
+        L"  --no-loco-cw-workers  disable live class-wrapper workers only; independent CW shadow remains available\n"
         L"  --grid-probation      requires loco + --loco-grid (not ballistic): native cell-head array PAGE_NOACCESS outside the\n"
         L"                        owner's site-13 relink window; every trapping reader is logged (EIP/caller/thread/site),\n"
         L"                        its page restored and resumed (grid_probation_words, receipt loco.grid_probation)\n"
@@ -7080,11 +7156,12 @@ static void usage(void)
         L"                        route, sub-brackets the preparation/FSM/formation calls, and keeps the top-8 storm ticks (site 18\n"
         L"                        > 3 x its running 256-tick median) in army_storm_words (receipt army_storm); the longest unit,\n"
         L"                        route-unit count/us and >=5 ms units per tick go to tick-log slots 110/111. Default off.\n"
-        L"  --army-storm-sample-ms N  with --army-storm-census, --features profile and --profile-site 18: the sampler admits a\n"
+        L"  --army-storm-sample-ms N  with --army-storm-census, --profile and --profile-site 18: the sampler admits a\n"
         L"                        sample only once site 18 has been in progress for N ms (1..255), profiling just the storm tails.\n"
         L"  --tick-pcore          requires profile or a simulation feature: on a hybrid CPU the thread executing a routed tick is\n"
         L"                        hard-pinned to the P cores (highest efficiency class) for the tick body and restored afterwards.\n"
         L"                        Placement only; inert on a non-hybrid host. Every tick-log entry carries the core census (flags).\n"
+        L"  --no-tick-pcore       opt out of tick P-core placement only; conflicts with --tick-pcore and --tick-core-ab\n"
         L"  --tick-core-ab        measurement only, exclusive with --tick-pcore: even model ticks pinned to P, odd ticks to E cores,\n"
         L"                        so neighbouring ticks measure the in-run E-core penalty (tick-log flags bits 6/7).\n"
         L"  --army-solver-memo    requires profile or a simulation feature (manager-routed tick), exclusive with --army-solver-shadow,\n"
@@ -7154,17 +7231,17 @@ static void usage(void)
         L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
         L"  --workers N           worker threads 1..16 (default 8; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
         L"  --poll-ms N           runtime monitor poll interval 10..1000 (default 100)\n"
-        L"  --profile-site N      with profile or grid-census: restrict sampling to timed site N (see trace sites)\n"
+        L"  --profile-site N      with profile, grid_census or ai_census: restrict sampling to timed site N (does not enable sampling)\n"
         L"  --collide-lod-m N      far-unit surface separation in world metres, 1..100000 (default 40)\n");
     say(L"%ls",
-        L"  --collide-census      with profile: enable costly per-pair collision timers (default off; site 5 always timed)\n"
+        L"  --collide-census      with profile: enable costly per-pair collision timers (default off; profile times site 5 without it)\n"
         L"  --observe-seconds N   stop monitoring after N seconds (default: until exit)\n"
         L"  --exit-game-after-observe  after the bound, stop the runtime (confirmed STOPPED, up to 60 s while it\n"
         L"                        progresses), then close ONLY this launch (WM_CLOSE, kill after 10 s); if the stop\n"
         L"                        is not confirmed, no WM_CLOSE is sent: the launched game is terminated (exit 11)\n"
         L"  --inject-timeout N    seconds to wait for the game loader (default 120)\n"
         L"  --receipt FILE        JSON status every second and final outcome (atomic replace)\n"
-        L"                        profile or grid-census also writes FILE.profile.bin at observation end (before exit/stop)\n"
+        L"                        profile, grid_census or ai_census also writes FILE.profile.bin at observation end (before exit/stop)\n"
         L"  --tick-log FILE       retain every observed tick (10 ms launcher polls, maximum 200000 entries)\n"
         L"                        write KNTWRTLOG binary at observation end; receipt includes summary and loss count\n"
         L"  --no-activate         launch the game without installing the runtime\n"
@@ -7272,6 +7349,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--no-console")) { /* consumed in wmain before any console is acquired */ }
         else if (!wcscmp(name, L"--no-activate")) o->activate = FALSE;
         else if (!wcscmp(name, L"--collide-census")) o->collide_census = TRUE;
+        else if (!wcscmp(name, L"--profile")) feature_options |= KNTWR_PROFILE;
         else if (!wcscmp(name, L"--grid-census")) feature_options |= KNTWR_GRID_CENSUS;
         else if (!wcscmp(name, L"--army-unit-shadow")) feature_options |= KNTWR_ARMY_UNIT_SHADOW;
         else if (!wcscmp(name, L"--cavalry-orbit")) feature_options |= KNTWR_CAVALRY_ORBIT;
@@ -7311,9 +7389,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--ai-spiral-census")) o->ai_prepass_flags |= KNTWR_AI_SPIRAL_CENSUS;
         else if (!wcscmp(name, L"--collide-contact-shadow")) o->collide_contact_shadow = TRUE;
         else if (!wcscmp(name, L"--collide-contact-workers")) o->collide_contact_workers = TRUE;
+        else if (!wcscmp(name, L"--no-collide-contact-workers")) o->no_collide_contact_workers = TRUE;
         else if (!wcscmp(name, L"--va-watch")) o->va_watch = TRUE;
         else if (!wcscmp(name, L"--army-storm-census")) o->army_storm_census = TRUE;
         else if (!wcscmp(name, L"--tick-pcore")) o->tick_pcore = TRUE;
+        else if (!wcscmp(name, L"--no-tick-pcore")) o->no_tick_pcore = TRUE;
         else if (!wcscmp(name, L"--tick-core-ab")) o->tick_core_ab = TRUE;
         else if (!wcscmp(name, L"--army-solver-memo")) o->army_solver_memo = TRUE;
         else if (!wcscmp(name, L"--army-solver-shadow")) o->army_solver_shadow = TRUE;
@@ -7386,6 +7466,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--loco-relink-workers")) o->loco_relink_workers = TRUE;
         else if (!wcscmp(name, L"--loco-cw-shadow")) o->loco_cw_shadow = TRUE;
         else if (!wcscmp(name, L"--loco-cw-workers")) o->loco_cw_workers = TRUE;
+        else if (!wcscmp(name, L"--no-loco-cw-workers")) o->no_loco_cw_workers = TRUE;
         else if (!wcscmp(name, L"--loco-shadow")) o->loco_shadow = TRUE;
         else if (!wcscmp(name, L"--ai-ctrl")) feature_options |= KNTWR_AI_CTRL;
         else if (!wcscmp(name, L"--check") || !wcscmp(name, L"--validate-only")) o->validate_only = TRUE;
@@ -7460,17 +7541,33 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 #undef NEEDVAL
     }
     o->mask |= feature_options; /* independent of the position of --features */
-    /* The shipping set implies its verified default switches (dn-cwlive2 reference stack): loco
-       clone+parallel+owned+quiet+grid+incremental+cw workers and collide contact workers. Any explicit
-       --loco-* / --grid-* / --collide-contact-* switch opts out and keeps the previous behavior. */
+    /* Check explicit contradictions before adding defaults, independent of argument order. */
+    if (o->no_tick_pcore && (o->tick_pcore || o->tick_core_ab)) {
+        errsay(L"--no-tick-pcore conflicts with --tick-pcore and --tick-core-ab.\n");
+        return -1;
+    }
+    if (o->no_loco_cw_workers && o->loco_cw_workers) {
+        errsay(L"--loco-cw-workers and --no-loco-cw-workers are exclusive.\n");
+        return -1;
+    }
+    if (o->no_collide_contact_workers && o->collide_contact_workers) {
+        errsay(L"--collide-contact-workers and --no-collide-contact-workers are exclusive.\n");
+        return -1;
+    }
+    /* The shipping set implies its verified default switches (dn-cwlive2 reference stack).
+       Positive-only CLI keeps its legacy all-or-explicit bundle. New diagnostic opt-outs
+       retain the bundle even alongside independent positives; explicit shadow modes replace
+       only their live counterpart. No feature-mask changes are needed. */
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL &&
-        !o->loco_clone && !o->loco_parallel && !o->loco_shadow && !o->loco_owned && !o->loco_quiet &&
-        !o->loco_grid && !o->loco_grid_verify && !o->loco_grid_incremental && !o->grid_probation &&
-        !o->loco_relink_shadow && !o->loco_relink_workers && !o->loco_cw_shadow && !o->loco_cw_workers &&
-        !o->collide_contact_shadow && !o->collide_contact_workers) {
+        (o->no_tick_pcore || o->no_loco_cw_workers || o->no_collide_contact_workers ||
+         (!o->loco_clone && !o->loco_parallel && !o->loco_shadow && !o->loco_owned && !o->loco_quiet &&
+          !o->loco_grid && !o->loco_grid_verify && !o->loco_grid_incremental && !o->grid_probation &&
+          !o->loco_relink_shadow && !o->loco_relink_workers && !o->loco_cw_shadow && !o->loco_cw_workers &&
+          !o->collide_contact_shadow && !o->collide_contact_workers))) {
         o->loco_clone = TRUE; o->loco_parallel = TRUE; o->loco_owned = TRUE; o->loco_quiet = TRUE;
-        o->loco_grid = TRUE; o->loco_grid_incremental = TRUE; o->loco_cw_workers = TRUE;
-        o->collide_contact_workers = TRUE;
+        o->loco_grid = TRUE; o->loco_grid_incremental = TRUE;
+        if (!o->no_loco_cw_workers && !o->loco_cw_shadow) o->loco_cw_workers = TRUE;
+        if (!o->no_collide_contact_workers && !o->collide_contact_shadow) o->collide_contact_workers = TRUE;
     }
     /* The shipping set also implies the live polygon kernel (--ai-poly; dp-polylive2 S=2.98, 0 mismatches).
        An explicit --ai-poly-shadow / --ai-prepass-census or the ai_async2 feature opts out. */
@@ -7478,8 +7575,8 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         !(o->ai_prepass_flags & (KNTWR_AI_POLY_SHADOW | KNTWR_AI_POLY | KNTWR_AI_PREPASS_CENSUS)))
         o->ai_prepass_flags |= KNTWR_AI_POLY;
     /* The shipping set also implies P-core placement of the tick thread (--tick-pcore; ta-pc: perf bad mean tick
-       61.5 -> 54.6 ms, p90 97 -> 74, borodino p99 -30 ms; inert on a non-hybrid host). --tick-core-ab opts out. */
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->tick_core_ab) o->tick_pcore = TRUE;
+       61.5 -> 54.6 ms, p90 97 -> 74, borodino p99 -30 ms; inert on a non-hybrid host). --tick-core-ab / --no-tick-pcore opt out. */
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->tick_core_ab && !o->no_tick_pcore) o->tick_pcore = TRUE;
     /* The shipping set also implies the bit-exact slot solver kernel (--army-solver-memo; sv-memo4: perf bad storm-tick
        site 18 2306 -> 473 ms, ticks >300 ms 5 -> 1; 0 mismatches over 2132 live shadow solves). --army-solver-shadow opts out. */
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->army_solver_shadow) o->army_solver_memo = TRUE;
@@ -7605,7 +7702,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
        (with the storm census) and site 34 (planner think tails, no census needed). */
     if (o->army_storm_sample_ms &&
         (!(o->mask & KNTWR_PROFILE) || (o->profile_site != 7u && o->profile_site != 19u && o->profile_site != 35u) || (o->profile_site == 19u && !o->army_storm_census))) {
-        errsay(L"--army-storm-sample-ms requires --features profile and --profile-site 18 (with --army-storm-census) , --profile-site 34 or --profile-site 6.\n");
+        errsay(L"--army-storm-sample-ms requires --profile (or a feature list containing profile) and --profile-site 18 (with --army-storm-census), --profile-site 34 or --profile-site 6.\n");
         return -1;
     }
     if ((o->tick_pcore || o->tick_core_ab) &&
@@ -7652,7 +7749,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if ((o->mask & KNTWR_BRAIN) && !(o->mask & KNTWR_PROFILE)) {
-        errsay(L"--features brain requires profile (brain sites exist only inside the profiling epoch).\n");
+        errsay(L"--features brain requires --profile (or a feature list containing profile); brain sites exist only inside the profiling epoch.\n");
         return -1;
     }
     if ((o->mask & KNTWR_AI_CTRL) && !(o->mask & KNTWR_AI_ASYNC)) {
@@ -7660,7 +7757,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         return -1;
     }
     if (o->collide_census && !(o->mask & KNTWR_PROFILE)) {
-        errsay(L"--collide-census requires --features profile (or a feature list containing profile).\n");
+        errsay(L"--collide-census requires --profile (or a feature list containing profile).\n");
         return -1;
     }
     if ((o->mask & KNTWR_COLLIDE_LOD) && (o->mask & (KNTWR_COLLIDE | KNTWR_FORMATION))) {
@@ -7889,6 +7986,9 @@ static int run_main(Run *r, int argc, wchar_t **argv)
                            (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
+    say(L"Effective config: mask=0x%08lX workers=%lu loco_flags=0x%08lX collide_flags=0x%08lX va_watch_flags=0x%08lX\n",
+        (unsigned long)r->cfg.enabled_mask, (unsigned long)r->cfg.workers, (unsigned long)r->cfg.loco_flags,
+        (unsigned long)r->cfg.collide_flags, (unsigned long)r->cfg.va_watch_flags);
 
     if (r->opt.replay[0]) {
         wchar_t full[MAXP];

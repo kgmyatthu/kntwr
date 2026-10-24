@@ -976,7 +976,38 @@ int DeterministicCases(ntw_solver::Workspace& ws, Stats& st, int& printed) {
                 expect(r.outcome == ntw_solver::kSolved && r.ctr.swaps >= 1, f.label, "reversed line must accept swaps");
             }
         }
-    std::printf("deterministic cases: %d fixtures (NaN-lane, worst-scan ties, reversed line) compared\n", cases);
+
+    // (4) paired tournament updates: sibling, cousin, distant and rotation patterns across power-of-two boundaries,
+    //     with null men / slots, exact-cost ties, and inf / NaN eligibility cases. CompareCase checks native against
+    //     the kernel modes for final pairing, cost bits, counters and allocator logs, not a step-by-step swap trace.
+    static const uint32_t usizes[] = {2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 65, 129, 256, 257, 404};
+    for (uint32_t m : usizes)
+        for (uint32_t pattern = 0; pattern < 9; ++pattern) {
+            Fixture f = Blank(m, "tour/m" + std::to_string(m) + "/p" + std::to_string(pattern), (uint16_t)angle);
+            const float sp = (pattern & 1) ? 3.0f : 10.0f;
+            for (uint32_t i = 0; i < m; ++i) {
+                uint32_t target = i;                                               // slot whose position this man should take
+                switch (pattern) {
+                    case 0: case 1: target = i ^ 1u; break;                        // sibling leaves swap
+                    case 2: case 3: target = i ^ 2u; break;                        // cousins (share a grandparent)
+                    case 4: target = (i + m / 2) % m; break;                       // distant halves
+                    case 5: target = (i + 1) % m; break;                           // rotation
+                    case 6: target = i < m / 2 ? m - 1 - i : i; break;             // far swaps only in the first half
+                    case 7: target = (i ^ 1u) < m ? (i ^ 1u) : i; break;           // sibling swaps with the equal-cost tie
+                    default: target = (i % 4 == 0) ? (i + m - 1) % m : i; break;   // sparse long moves
+                }
+                if (target >= m) target = i;
+                f.mx[i] = sp * (float)i;
+                f.px[i] = sp * (float)target;
+            }
+            if (pattern == 7) for (uint32_t i = 0; i < m; i += 3) f.entMan[i] = -1;      // null men: eligible-key -inf leaves
+            if (pattern == 8 && m > 3) { f.entSlot[m / 2] = -1; f.entMan[1] = -1; f.thr = 16.0f; }
+            if (pattern == 3 && m > 2) f.mx[m - 1] = std::numeric_limits<float>::infinity();   // inf cost leaf
+            if (pattern == 2 && m > 2) f.px[0] = nanv;                                          // NaN cost leaf, never eligible
+            bad += CompareCase(f, ws, st, printed);
+            ++cases;
+        }
+    std::printf("deterministic cases: %d fixtures (NaN-lane, worst-scan ties, reversed line, tournament-update patterns) compared\n", cases);
     return bad;
 }
 

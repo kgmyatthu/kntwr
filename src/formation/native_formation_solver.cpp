@@ -411,6 +411,22 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
             tree[i] = lkey[r] > lkey[l] ? r : l;
         }
     };
+    // Both leaf keys are final. Fold the equal-depth paths bottom-up, then fold their shared ancestors once.
+    // Each node uses Update's strict comparison, preserving the first maximal position on ties.
+    auto Update2 = [&](uint32_t a, uint32_t b) [[msvc::forceinline]] {
+        uint32_t ia = (P + a) >> 1, ib = (P + b) >> 1;
+        while (ia != ib) {
+            const uint16_t la = tree[2 * ia], ra = tree[2 * ia + 1];
+            tree[ia] = lkey[ra] > lkey[la] ? ra : la;
+            const uint16_t lb = tree[2 * ib], rb = tree[2 * ib + 1];
+            tree[ib] = lkey[rb] > lkey[lb] ? rb : lb;
+            ia >>= 1; ib >>= 1;
+        }
+        for (uint32_t i = ia; i >= 1; i >>= 1) {
+            const uint16_t l = tree[2 * i], r = tree[2 * i + 1];
+            tree[i] = lkey[r] > lkey[l] ? r : l;
+        }
+    };
 
     const __m128i lane01 = _mm_set_epi32(3, 2, 1, 0);
     const __m128i four = _mm_set1_epi32(4);
@@ -467,8 +483,7 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
                 lhasMan[widx] = omNon ? 0xFFFFFFFFu : 0u;  lhasMan[oPos] = wmNon ? 0xFFFFFFFFu : 0u;
                 lcost[widx] = t1; leff[widx] = wSlot ? t1 : def; lkey[widx] = (omNon && thr > t1) ? t1 : kNegInf;
                 lcost[oPos] = t2; leff[oPos] = oSlot ? t2 : def; lkey[oPos] = (wmNon && thr > t2) ? t2 : kNegInf;
-                Update(widx);
-                Update(oPos);
+                Update2(widx, oPos);
                 swapped = true;
                 break;
             }
@@ -482,10 +497,9 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
             if (widx != last) {
                 lslot[widx] = lslot[last]; lcost[widx] = lcost[last]; leff[widx] = leff[last]; lkey[widx] = lkey[last];
                 lman[widx] = lman[last]; lhasMan[widx] = lhasMan[last]; lhasSlot[widx] = lhasSlot[last];
-                Update(widx);
             }
             lkey[last] = kNegInf; lhasMan[last] = 0u; lhasSlot[last] = 0u; lman[last] = m;
-            Update(last);
+            if (widx != last) Update2(widx, last); else Update(last);
             --ln;
             ++removals;
         }

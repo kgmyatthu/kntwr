@@ -12,6 +12,8 @@
 //   617510 -> 65D740 -> 51A530 -> 576B30 ;  611CF0 (host gate) -> 65D7D0 -> 51A9A0 -> 57AFC0 ;  581AE0 -> 576B30
 //   576B30 -> 57AFC0 -> 555CA0 -> [555CEB: AssignGate] -> 18F0A00 clone -> { 5373F0 clone -> [53765A: SolveShim],
 //                                                                            18F1200 clone -> [18F12AA: SolveGate] }
+//   51A530 / 581AE0 -> 584E10 -> 57AC10 -> [57AC3B: CacheAssignGate] -> the same assignment scope. The byte-pinned 539C90 wrapper selects
+//   SOLVER_18F0A00 when gameplay overlay run 15 is present, or SOLVER_5373F0 when run 15 is filtered out; the cache vector writeback/free stays native.
 // AssignGate records the formation (ECX = F, [F+0x18] = member count) and forwards to the SOLVER_18F0A00 clone. SolveGate replaces the 0x502770
 // call: limit != 0 (flag = 0) always runs the native solver; flag = 1 either re-solves a pre-call copy with ntw_solver::SolveCopy and compares it
 // with the authoritative native result (shadow) or runs ntw_solver::Solve (memo; kFallback runs the native solver, counted). SolveShim replays the
@@ -22,7 +24,7 @@
 // Not covered (native, exact): 0x581200 slot-command route (zero commands seen on perf bad), 57AFC0 callers 583185, the 648994 / 66E983 callers of
 // 51A9A0 (slots 0x1333DA0 / 0x1333DA4), the formation runtime's own FORM_* chain. Any flag=0 solve is native.
 //
-// Row layout (kntwr_status::army_solver_words, KNTWR_ARMY_SOLVER_WORDS == 519), version 1: header 55 words (Word enum, labels
+// Row layout (kntwr_status::army_solver_words, KNTWR_ARMY_SOLVER_WORDS == 521), version 2: header 57 words (Word enum, labels
 // KNTWR_ARMY_SOLVER_LABELS; scans = sum over outer iterations of the candidate-list length; for every solve the KERNEL produced (memo solves and
 // shadow re-solves; timed_solves of them): cost_us = gather + table fill, loop_us = the rest of the loop, kernel_total_us = whole kernel call,
 // gather_us = gather alone; rdtsc ticks are converted with a QPC-calibrated rate measured at Start). Counters.profile is always 0 (census mode
@@ -33,10 +35,10 @@
 #ifdef __cplusplus
 namespace kntwr_army_solver {
 using U = uint32_t;
-constexpr U kVersion = 1;
-constexpr U kHeaderWords = 55, kTop = 16, kTickWords = 13, kSolveWords = 16;
-constexpr U kWords = kHeaderWords + kTop * kTickWords + kTop * kSolveWords;
-static_assert(kWords == 519, "army solver status row geometry (KNTWR_ARMY_SOLVER_WORDS)");
+constexpr U kVersion = 2;
+constexpr U kHeaderWords = 57, kTop = 16, kTickWords = 13, kSolveWords = 16;
+constexpr U kWords = kHeaderWords + kTop * kTickWords + kSolveWords * kTop;
+static_assert(kWords == 521, "army solver status row geometry (KNTWR_ARMY_SOLVER_WORDS)");
 enum Mode : U { ModeOff = 0, ModeMemo = 1, ModeShadow = 2, ModeForward = 3 /* tests/native_army_solver_chain_oracle.cpp only: clone chain + shim active, every solve runs the native solver */ };
 enum Route : U { RouteR1, RouteR1b, RouteR2 };
 enum Word : U {
@@ -48,11 +50,12 @@ enum Word : U {
     MHist4, MHist5, ObserverUs, AssignMembersSum, ScansLo, ScansHi, CostUs, LoopUs,
     TimedSolves, KernelTotalUs, GatherUs, Direct18F12AA,   // Direct18F12AA: gate entries from 18F12AA (seen - shim forwards)
     FbFpEnv, FbCtx, EmptyNative,   // EmptyNative: flag=1 solves over an empty entry range (begin == end, possibly null): nothing to solve, native runs
+    CacheAssignCalls, CacheSolvedKernel, // assignments admitted through 57AC3B; their flag=1 solves completed by the memo kernel
     TickTable = kHeaderWords, SolveTable = kHeaderWords + kTop * kTickWords
 };
-enum TickWord : U { TTick, TSolves, TFormations, TNativeUs, TKernelUs, TEvals, TDistinct, TIterations, TMaxM, TSolvedKernel, TFallbacks, TSwaps, TAssignFormations };   // TFormations: distinct formations among the flag=1 solves of the tick; TAssignFormations: distinct formations through 555CEB
+enum TickWord : U { TTick, TSolves, TFormations, TNativeUs, TKernelUs, TEvals, TDistinct, TIterations, TMaxM, TSolvedKernel, TFallbacks, TSwaps, TAssignFormations };   // TAssignFormations includes ordinary and cache assignments.
 // SolveWord::flags: bit0 flag=1 (limit 0), bit1 solved by the kernel (memo), bit2 shadow compared, bit3 kernel fallback, bit4..7 fallback reason,
-// bit8 shadow mismatch (entries or EAX).
+// bit8 shadow mismatch (entries or EAX), bit9 cache-origin assignment (57AC3B).
 enum SolveWord : U { STick, SFormation, SM, SEvals, SDistinct, SIterations, SNativeUs, SKernelUs, SSwaps, SFlags, SMembers, SEax,
                      SScans, SCostUs, SLoopUs, SSpare };
 
@@ -60,8 +63,9 @@ struct Binding {
     U delta;               // relocation of the preferred-base image (V(a) = a + delta)
     Mode mode;             // ModeMemo or ModeShadow
     U cloneAssign;         // CLONE_SOLVER_18F0A00 entry: AssignGate's forward target and the SolveShim return-address base
+    U cloneStockAssign;    // CLONE_SOLVER_5373F0 entry for the exact stock 539C90 wrapper (run 15 omitted)
 };
-// Fills the three bindings KNTWR_BIND_SOLVER_ASSIGN / _SOLVE / _SHIM with the host gate addresses and records the native targets; the
+// Fills KNTWR_BIND_SOLVER_ASSIGN / _SOLVE / _SHIM / _CACHE_ASSIGN with host gate addresses and records the native targets; the
 // gates run the native originals until Start. Called before kntwr_build_clones.
 void Bind(U delta, uint32_t* bindings /*[KNTWR_BIND_COUNT]*/);
 // Verifies the constant bit patterns and the image symbols the kernel reads, allocates the workspace; false leaves the module off.

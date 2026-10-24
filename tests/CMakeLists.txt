@@ -225,7 +225,7 @@ kntwr_harness(native_formation_solver_oracle STD 20 FP strict
   INCLUDES "${KNTWR_SRC}/formation" LIBS bcrypt)
 kntwr_harness(native_army_solver_chain_oracle STD 20 FP strict
   SOURCES native_army_solver_chain_oracle.cpp "${KNTWR_SRC}/clones/kntwr_clones.cpp" "${KNTWR_SRC}/army/native_army_solver.cpp"
-          "${KNTWR_SRC}/formation/native_formation_solver.cpp"
+          "${KNTWR_SRC}/formation/native_formation_solver.cpp" "${KNTWR_GAMEPLAY_PATCH_SOURCE}"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 kntwr_harness(native_formation_layout_oracle STD 20 FP strict
   SOURCES native_formation_layout_oracle.cpp OBJECTS kntwr_formation_layout LIBS bcrypt)
@@ -302,6 +302,9 @@ kntwr_note_registered(kntwr_cavalry_runtime)
 kntwr_harness(native_clip_picker_guard_oracle STD 20 FP strict
   SOURCES native_clip_picker_guard_oracle.cpp "${KNTWR_SRC}/animation/kntwr_clip_picker_guard.cpp"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+kntwr_harness(native_terrain_merge_guard_oracle STD 20 FP strict
+  SOURCES native_terrain_merge_guard_oracle.cpp "${KNTWR_SRC}/ai/kntwr_terrain_merge_guard.cpp"
+  INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 kntwr_harness(native_collision_solver_oracle STD 20 FP strict
   SOURCES native_collision_solver_oracle.cpp "${KNTWR_SRC}/collision/native_collision_solver.cpp"
           "${KNTWR_SRC}/collision/native_contact.cpp"
@@ -327,6 +330,12 @@ kntwr_harness(native_brain_workers_oracle STD 20 FP strict
           "${KNTWR_SRC}/brain2/native_move_node.cpp"
           "${KNTWR_SRC}/brain2/native_idle_node.cpp" "${KNTWR_SRC}/brain2/native_action_node.cpp"
   INCLUDES "${KNTWR_SRC}" "${KNTWR_SRC}/brain2" DEFINES KNTWR_BRAIN_WORKERS_ORACLE LIBS bcrypt)
+# Untouched mapped 585D50 versus the production two-loop port, plain and inside the real census occurrence.
+kntwr_harness(native_formation_residual_oracle STD 20 FP strict
+  SOURCES native_formation_residual_oracle.cpp
+          "${KNTWR_SRC}/army/native_formation_residual.cpp"
+          "${KNTWR_SRC}/army/native_army_storm.cpp"
+  INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 # Per-unit brain Stage A: synthetic soldiers/units (no image); links kntwr_brain2::RunWorklist for the observer seam.
 kntwr_harness(native_unit_brain_oracle STD 20 FP strict
   SOURCES native_unit_brain_oracle.cpp "${KNTWR_SRC}/brain2/native_unit_brain.cpp"
@@ -407,6 +416,25 @@ kntwr_harness(native_gameplay_patch_oracle STD 20 FP strict
   SOURCES native_gameplay_patch_oracle.cpp "${KNTWR_GAMEPLAY_PATCH_SOURCE}"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 
+# The chain oracle maps stock and applies the production overlay itself; no historical patched image is required.
+kntwr_asset(_solver_table native-formation-angle-table-28252.bin)
+if(NOT _solver_table)
+  kntwr_note_skipped(kntwr_army_solver_chain "missing native-formation-angle-table-28252.bin")
+  kntwr_note_skipped(kntwr_army_solver_chain_stock_cache "missing native-formation-angle-table-28252.bin")
+elseif(KNTWR_STOCK_IMAGE AND EXISTS "${KNTWR_STOCK_IMAGE}")
+  file(TO_NATIVE_PATH "${KNTWR_STOCK_IMAGE}" _solver_stock_arg)
+  add_test(NAME kntwr_army_solver_chain
+    COMMAND native_army_solver_chain_oracle --image "${_solver_stock_arg}" --table "${_solver_table}" --cases 300 --seed 20261018)
+  add_test(NAME kntwr_army_solver_chain_stock_cache
+    COMMAND native_army_solver_chain_oracle --image "${_solver_stock_arg}" --table "${_solver_table}" --cases 300 --seed 20261018 --skip-cache-overlay 1)
+  set_tests_properties(kntwr_army_solver_chain kntwr_army_solver_chain_stock_cache PROPERTIES LABELS "image;assets" TIMEOUT 3600)
+  kntwr_note_registered(kntwr_army_solver_chain)
+  kntwr_note_registered(kntwr_army_solver_chain_stock_cache)
+else()
+  kntwr_note_skipped(kntwr_army_solver_chain "KNTWR_STOCK_IMAGE not set to the stock Napoleon.exe")
+  kntwr_note_skipped(kntwr_army_solver_chain_stock_cache "KNTWR_STOCK_IMAGE not set to the stock Napoleon.exe")
+endif()
+
 if(KNTWR_HAVE_IMAGE)
   kntwr_asset(_table native-formation-angle-table-28252.bin)
   kntwr_asset(_clones native-ballistics-query-clones.bin)
@@ -447,16 +475,11 @@ if(KNTWR_HAVE_IMAGE)
               --cases 2000 --seed 20261018 --bench 0)
     set_tests_properties(kntwr_formation_solver PROPERTIES LABELS "image;assets" TIMEOUT 3600)
     kntwr_note_registered(kntwr_formation_solver)
-    add_test(NAME kntwr_army_solver_chain
-      COMMAND native_army_solver_chain_oracle --image "${KNTWR_IMAGE_ARG}" --table "${_table}" --cases 300 --seed 20261018)
-    set_tests_properties(kntwr_army_solver_chain PROPERTIES LABELS "image;assets" TIMEOUT 3600)
-    kntwr_note_registered(kntwr_army_solver_chain)
   else()
     kntwr_note_skipped(kntwr_formation_slot "missing native-formation-angle-table-28252.bin")
     kntwr_note_skipped(kntwr_formation_batch "missing native-formation-angle-table-28252.bin")
     kntwr_note_skipped(kntwr_formation_runtime "missing native-formation-angle-table-28252.bin")
     kntwr_note_skipped(kntwr_formation_solver "missing native-formation-angle-table-28252.bin")
-    kntwr_note_skipped(kntwr_army_solver_chain "missing native-formation-angle-table-28252.bin")
   endif()
 
   set(_layout_args "${KNTWR_IMAGE_ARG}" cases=300 seed=20240601)
@@ -516,6 +539,9 @@ if(KNTWR_HAVE_IMAGE)
   add_test(NAME kntwr_clip_picker_guard COMMAND native_clip_picker_guard_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_clip_picker_guard PROPERTIES LABELS "image" TIMEOUT 300)
   kntwr_note_registered(kntwr_clip_picker_guard)
+  add_test(NAME kntwr_terrain_merge_guard COMMAND native_terrain_merge_guard_oracle "${KNTWR_IMAGE_ARG}")
+  set_tests_properties(kntwr_terrain_merge_guard PROPERTIES LABELS "image" TIMEOUT 300)
+  kntwr_note_registered(kntwr_terrain_merge_guard)
   add_test(NAME kntwr_collision_solver COMMAND native_collision_solver_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_collision_solver PROPERTIES LABELS "image" TIMEOUT 300)
   add_test(NAME kntwr_contact_oracle COMMAND native_contact_oracle "${KNTWR_IMAGE_ARG}")
@@ -527,6 +553,9 @@ if(KNTWR_HAVE_IMAGE)
   add_test(NAME kntwr_brain_workers_oracle COMMAND native_brain_workers_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_brain_workers_oracle PROPERTIES LABELS "image" TIMEOUT 600)
   kntwr_note_registered(kntwr_brain_workers_oracle)
+  add_test(NAME kntwr_formation_residual_oracle COMMAND native_formation_residual_oracle "${KNTWR_IMAGE_ARG}")
+  set_tests_properties(kntwr_formation_residual_oracle PROPERTIES LABELS "image" TIMEOUT 300)
+  kntwr_note_registered(kntwr_formation_residual_oracle)
   add_test(NAME kntwr_node_oracle COMMAND native_node_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_node_oracle PROPERTIES LABELS "image;shadow" TIMEOUT 300)
   kntwr_note_registered(kntwr_node_oracle)
@@ -578,6 +607,7 @@ if(KNTWR_HAVE_IMAGE)
   endif()
 else()
   foreach(_t ballistics_query_cache ballistics_runtime_integration formation_slot formation_batch formation_runtime
+             formation_residual_oracle
              formation_layout path_workspace path_runtime animation_pose animation_render_batch walk_memo ai_ctrl_geometry ai_ctrl_oracle planner_prepass planner_search record_test collision_solver contact_oracle brain2_oracle brain_workers_oracle node_oracle fire_oracle loco_oracle resolve_oracle)
     kntwr_note_skipped(kntwr_${_t} "KNTWR_TEST_IMAGE not set to an existing Napoleon.exe")
   endforeach()

@@ -38,7 +38,7 @@ struct TickState {
     U maxOrdinal, maxSide;
 };
 TickState g_t;
-struct Occurrence { u64 bracketQ[kBrackets], bracketCalls[kBrackets], r2Q, r2Reached, r2Full, r1Entries; LONGLONG observerQ; };
+struct Occurrence { u64 bracketQ[kBrackets], bracketCalls[kBrackets], r2Q, r2Reached, r2Full, r1Entries, r1Q, r1bQ; LONGLONG observerQ; };
 Occurrence g_occ;
 u64 g_observerQ, g_unreadable;
 // Median ring of the site-18 us of routed ticks that ran site 18.
@@ -207,14 +207,39 @@ U Route1(void* state, void* edx, U arg, Native3 native) {
     if (!g_s) return native(state, edx, arg);
     if (!g_inUnit) { ++g_words[RouteOutside]; return native(state, edx, arg); }
     ++g_occ.r1Entries;
-    return native(state, edx, arg);
+    const LONGLONG a = Now();
+    const U result = native(state, edx, arg);
+    const LONGLONG b = Now();
+    g_occ.r1Q += static_cast<u64>(b - a);
+    g_occ.observerQ += Now() - b; // exit bookkeeping; the entry overhead (a is read inside the gate) is one QPC read
+    return result;
 }
 
-void TickEnd(U tick, U site18Us, U site34Us, U out[4]) {
+U Route1b(void* state, void* edx, U arg, Native3 native) {
+    if (!g_s) return native(state, edx, arg);
+    if (!g_inUnit) { ++g_words[RouteOutside]; return native(state, edx, arg); }
+    const LONGLONG a = Now();
+    const U result = native(state, edx, arg);
+    const LONGLONG b = Now();
+    g_occ.r1bQ += static_cast<u64>(b - a);
+    g_occ.observerQ += Now() - b;
+    return result;
+}
+
+bool InUnit() { return g_s && g_inUnit != 0; }
+void OccurrenceRouteQ(unsigned long long* r1Q, unsigned long long* r1bQ, unsigned long long* r2Q) {
+    if (r1Q) *r1Q = g_occ.r1Q;
+    if (r1bQ) *r1bQ = g_occ.r1bQ;
+    if (r2Q) *r2Q = g_occ.r2Q;
+}
+void AddObserverQ(unsigned long long q) { if (g_s && g_inUnit) g_occ.observerQ += static_cast<LONGLONG>(q); }
+
+void TickEnd(U tick, U site18Us, U site34Us, U out[4], bool* stormOut) {
     TickState& t = g_t;
     ++g_ticks;
     const bool ran = site18Us != 0;
     const bool storm = ran && g_ringCount >= kWarmup && site18Us > kStormFactor * g_median;
+    if (stormOut) *stormOut = storm;
     if (ran || t.units) {
         Aggregate& agg = g_agg[storm ? 0 : 1];
         if (t.maxQ > agg.maxQ) agg.maxQ = t.maxQ;

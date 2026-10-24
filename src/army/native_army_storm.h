@@ -117,11 +117,24 @@ U Unit(void* unit, U root, Native native);
 U Route2(void* command, Native native);
 using Native3 = U (__fastcall*)(void*, void*, U);
 U Route1(void* state, void* edx, U arg, Native3 native);
+// Route1b: second R1 state-enter (slot 0x1332110, 0x611CF0, ret 4). Inclusive us only, like Route1, so the formation residual
+// module can separate 611CF0 from the rest of 580990 (kntwr_runtime.cpp SolverRoute1bGate passes the original or the solver clone).
+U Route1b(void* state, void* edx, U arg, Native3 native);
 // Tick owner, inside a Unit occurrence: inclusive QPC bracket of one ECX-only callee of the ARMY_UNIT clone; runs `native` once.
 U Call(Bracket which, void* ecx, Native native);
+// True on the tick owner inside a Unit occurrence (census epoch): the formation residual gates forward the native directly
+// whenever this is false.
+bool InUnit();
+// Current Unit-occurrence inclusive QPC deltas (same clock as the brackets): R1 entries, R1b entries and R2 gate entries. The
+// formation residual module reads them around its per-formation clone calls and attributes the deltas to the formation.
+void OccurrenceRouteQ(unsigned long long* r1Q, unsigned long long* r1bQ, unsigned long long* r2Q);
+// Tick owner, inside a Unit occurrence: adds the QPC cost the formation residual module spent in its own gates so the Unit cost
+// subtraction (observer) treats the combined instrumentation consistently. No effect outside an occurrence.
+void AddObserverQ(unsigned long long q);
 // Tick owner, tick trace writer: closes the tick (classification, aggregates, top table) and returns the four trace words
 // {site_us[110], site_calls[110], site_us[111], site_calls[111]}. site18_us/site34_us are the tick's timed-site totals.
-void TickEnd(U tick, U site18Us, U site34Us, U out[4]);
+// stormOut (optional) receives this tick's storm classification so the formation residual row classifies the same ticks.
+void TickEnd(U tick, U site18Us, U site34Us, U out[4], bool* stormOut = nullptr);
 // Copies the row; the sampler counters (profile gate admissions/rejections) come from the profile module.
 void Snapshot(U* words /*[kWords]*/, U sampleAdmitted, U sampleRejected);
 } // namespace kntwr_army_storm

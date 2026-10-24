@@ -1,7 +1,7 @@
 // Chain oracle for the --army-solver-memo / --army-solver-shadow SOLVER_* clone family (src/army/native_army_solver.{h,cpp}).
 //
-// Inside a private relocated copy of the pinned Napoleon.exe it builds the REAL production clone set (kntwr_build_clones, same specs, same
-// source-hash pins), binds KNTWR_BIND_SOLVER_ASSIGN/_SOLVE/_SHIM to the REAL host code (AssignGate / SolveGate / SolveShim, bound through
+// Maps the SHA-pinned STOCK Napoleon.exe and applies the REAL production gameplay overlay (ALL or SKIP{15}) before
+// building the REAL production clone set (kntwr_build_clones, same source-hash pins). Binds the real host gates through
 // kntwr_army_solver::Bind and activated through kntwr_army_solver::Start with the private image's delta), and runs twin fixtures:
 //   twin A: the ORIGINAL 0x18F0A00 (+ 0x18F0200 / 0x5373F0 / 0x18F0D00 trampoline / 0x502770 / 0x18F1200) of the same image;
 //   twin B: AssignGate -> CLONE_SOLVER_18F0A00 -> {CLONE_SOLVER_5373F0 -> SolveShim, CLONE_SOLVER_18F1200 -> SolveGate} in the module modes
@@ -21,8 +21,14 @@
 // (game heap) -> logging host malloc/free, 0x0054C8B0 (unit predicate used by 0x5373F0) -> `mov eax, <case flag>; ret`, [0x14A40B0] = INT_MIN,
 // [0x1841BB8] = this process' _tls_index, angle table at 0x176CFF8.
 // Not covered: slot records with a parent pose (0x7F4950 transform path), covered by the kernel oracle (native_formation_solver_oracle).
+// Cache extension: native 57AC10 vs CLONE_SOLVER_57AC10 includes the real 539C90/4B4A50 assignment
+// path and native map writeback/free, in off/forward/memo/shadow. Direct 539C90 twins test finite flags.
+// 584E10's enclosing update is not executed: it needs the wider live cache/update object graph. Its
+// incoming calls and 585269 -> 57AC10 edge are checked below and its production clone hash is pinned.
+// Cache solver context is natively fixed to {0, FLT_MAX}; hostile-context kernel fallback coverage
+// remains in native_formation_solver_oracle, not a patched/artificial cache instruction stream.
 //
-// Run: native_army_solver_chain_oracle.exe --image "<Napoleon.exe>" --table native-formation-angle-table-28252.bin [--cases 300] [--seed 1]
+// Run: native_army_solver_chain_oracle.exe --image "<stock Napoleon.exe>" --table native-formation-angle-table-28252.bin [--cases 300] [--seed 1] [--skip-cache-overlay 1]
 #include <windows.h>
 #include <bcrypt.h>
 #include <intrin.h>
@@ -41,6 +47,7 @@
 #include "formation/native_formation_solver.h"
 #include "clones/kntwr_clones.h"
 #include "native_image_relocation.h"
+#include "core/kntwr_gameplay_patch.h"
 
 #pragma comment(lib, "bcrypt.lib")
 static_assert(sizeof(void*) == 4, "x86 build required: the native code is 32-bit");
@@ -52,11 +59,12 @@ namespace as = kntwr_army_solver;
 using U = uint32_t;
 
 constexpr U kImageBase = 0x400000;
-constexpr const char* kImageSha = "13fcab6298cd5e0072b3598a83cf02627c58f944edbee5258b637655c82cbad4";
+constexpr const char* kImageSha = "44880ec1770f600163a336eec83b4366901484c5cceec83dc326e2932f02a054";
 constexpr const char* kTableSha = "405383e324f986ad1972b9da231b2bb6d1d496c23067af8de60faf359e2a3581";
 constexpr U kAngleTableVa = 0x176CFF8;
 uintptr_t g_delta;
 uint8_t* g_base;
+bool g_skipCacheOverlay;
 U NativeAddress(U preferred) { return preferred + static_cast<U>(g_delta); }
 U Addr(const void* p) { return static_cast<U>(reinterpret_cast<uintptr_t>(p)); }
 
@@ -112,21 +120,79 @@ void PatchJump(U va, const void* target) {
 U g_bindings[KNTWR_BIND_COUNT];
 kntwr_clone_set g_clones;
 
+bool CheckCall(U site, U target) {
+    const uint8_t* p = (const uint8_t*)(uintptr_t)NativeAddress(site);
+    int32_t rel = 0;
+    std::memcpy(&rel, p + 1, 4);
+    if (p[0] == 0xE8 && NativeAddress(site + 5) + rel == NativeAddress(target)) return true;
+    std::fprintf(stderr, "call identity mismatch at %#x (expected %#x)\n", site, target);
+    return false;
+}
 bool MapImage(const std::vector<uint8_t>& file, const std::vector<uint8_t>& table) {
     auto* dos = (const IMAGE_DOS_HEADER*)file.data();
     auto* nt = (const IMAGE_NT_HEADERS32*)(file.data() + dos->e_lfanew);
     if (nt->OptionalHeader.ImageBase != kImageBase) return false;
     const SIZE_T size = nt->OptionalHeader.SizeOfImage;
-    g_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
-    if (!g_base) return false;
+    constexpr U patchedSize = 0x14F5000;
+    const U tailOffset = (static_cast<U>(size) + 0xFFFFu) & ~0xFFFFu;
+    const U reservedSize = (patchedSize + 0xFFFFu) & ~0xFFFFu;
+    if (tailOffset >= reservedSize) return false;
+    // Keep the appended extent owned throughout relocation and overlay preparation. Merely probing
+    // then releasing it allows this process's later allocations to occupy the remapper's required tail.
+    void* probe = VirtualAlloc(nullptr, reservedSize, MEM_RESERVE, PAGE_NOACCESS);
+    if (!probe) return false;
+    if (!VirtualFree(probe, 0, MEM_RELEASE)) return false;
+    void* tailAddress = static_cast<uint8_t*>(probe) + tailOffset;
+    const U tailSize = reservedSize - tailOffset;
+    void* tail = VirtualAlloc(tailAddress, tailSize, MEM_RESERVE, PAGE_NOACCESS);
+    if (!tail) return false; // No retries and no release of somebody else's reservation.
+    g_base = static_cast<uint8_t*>(VirtualAlloc(probe, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+    if (!g_base) { VirtualFree(tail, 0, MEM_RELEASE); return false; }
     g_delta = reinterpret_cast<uintptr_t>(g_base) - kImageBase;
     std::memcpy(g_base, file.data(), nt->OptionalHeader.SizeOfHeaders);
     auto* sec = IMAGE_FIRST_SECTION(nt);
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        U n = sec[i].SizeOfRawData < sec[i].Misc.VirtualSize ? sec[i].SizeOfRawData : sec[i].Misc.VirtualSize;
+        const U mapped = (sec[i].Misc.VirtualSize + 0xFFFu) & ~0xFFFu;
+        U n = sec[i].SizeOfRawData < mapped ? sec[i].SizeOfRawData : mapped;
         std::memcpy(g_base + sec[i].VirtualAddress, file.data() + sec[i].PointerToRawData, n);
     }
     if (!RelocateNativeImage(g_base, size, nt, g_delta)) return false;
+    if (!CheckCall(0x539CA5, 0x5373F0) || !CheckCall(0x53765A, 0x502770)) return false;
+    U blobSize = 0;
+    const uint8_t* blob = kntwr_gp_napoleon_blob(&blobSize);
+    kntwr_gp_blob_info info{};
+    if (kntwr_gp_blob_describe(blob, blobSize, &info) != 0 || std::strcmp(info.stock_sha256, kImageSha) != 0) return false;
+    kntwr_gp_pm pm;
+    kntwr_gp_pm_init(&pm, GetCurrentProcess());
+    // Same guarded owned-reservation contract as native_gameplay_patch_oracle's process fixture.
+    // The backend rechecks ownership and releases it only at the actual remap, never at preflight.
+    MEMORY_BASIC_INFORMATION tailInfo{};
+    if (VirtualQuery(tail, &tailInfo, sizeof(tailInfo)) != sizeof(tailInfo) ||
+        tail != tailAddress || tailInfo.BaseAddress != tail || tailInfo.AllocationBase != tail ||
+        tailInfo.RegionSize != tailSize || tailInfo.State != MEM_RESERVE || tailInfo.Type != MEM_PRIVATE) return false;
+    pm.owned_reserve_base = Addr(tail);
+    pm.owned_reserve_size = tailSize;
+    kntwr_gp_memory memory = kntwr_gp_pm_memory(&pm);
+    kntwr_gp_filter filter{};
+    if (g_skipCacheOverlay) { filter.mode = KNTWR_GP_SKIP; filter.runs[0] = 1u << 15; }
+    kntwr_gp_report report{};
+    if (kntwr_gp_apply_filtered(&memory, Addr(g_base), kImageBase, blob, blobSize, &filter, &report) != 0) {
+        std::fprintf(stderr, "production overlay failed: %s (run %u va %#x)\n", report.error, report.fail_run, report.fail_va);
+        return false;
+    }
+    if (pm.owned_reserve_base != 0 || pm.owned_reserve_size != 0) return false;
+    if (report.runs_skipped != (g_skipCacheOverlay ? 1u : 0u) ||
+        !CheckCall(0x539CA5, g_skipCacheOverlay ? 0x5373F0 : 0x18F0A00) ||
+        !CheckCall(0x53765A, 0x18F0D00) || !CheckCall(0x555CEB, 0x18F0A00) ||
+        !CheckCall(0x57AC3B, 0x539C90) || !CheckCall(0x585269, 0x57AC10) ||
+        !CheckCall(0x51A8FD, 0x584E10) || !CheckCall(0x581B81, 0x584E10)) return false;
+    static const uint8_t getter[] = {0x8B, 0x41, 0x04, 0xC3};
+    if (std::memcmp((const void*)(uintptr_t)NativeAddress(0x4B4A50), getter, sizeof(getter)) != 0) return false;
+    DWORD oldProtect;
+    // The production remapper replaces the reservation with a SEC_IMAGE view; glue writes must be COW.
+    if (!VirtualProtect(g_base, patchedSize, PAGE_EXECUTE_WRITECOPY, &oldProtect)) return false;
+    std::printf("baseline: stock SHA %s + production overlay (%s); cache assignment target %#x\n",
+                kImageSha, g_skipCacheOverlay ? "SKIP{15}" : "ALL", g_skipCacheOverlay ? 0x5373F0 : 0x18F0A00);
     std::memcpy((void*)(uintptr_t)NativeAddress(kAngleTableVa), table.data(), table.size());
     // Production clones from the pristine relocated image (all source-span hash pins), BEFORE any glue patch.
     for (U& b : g_bindings) b = NativeAddress(0x6dca08); // unreached bindings: valid image addresses, never executed here
@@ -249,6 +315,8 @@ struct Mock {
     U assignVec[4] = {};
     uint8_t* tickObj = nullptr;
     uint8_t* tickObj2 = nullptr;
+    uint8_t cache[0x80] = {};
+    std::vector<U> cacheMap;
     U n = 0, m = 0;
     Mock() = default;
     Mock(const Mock&) = delete;
@@ -305,6 +373,11 @@ void Build(const Case& c, Mock& k) {
     }
     k.slotVec[1] = c.m; k.slotVec[2] = c.m;
     k.slotVec[3] = Addr(k.slotRecs);
+    k.cacheMap.assign(c.n + 2, 0xCACECAFEu);
+    Put<U>(k.cache, 4, Addr(k.formation));
+    std::memcpy(k.cache + 0x48, k.slotVec, sizeof(k.slotVec));
+    Put<U>(k.cache, 0x68, Addr(k.cacheMap.data() + 1));
+    for (U i = 0; i < c.n; ++i) Put<U>(k.men[i], 0x1F4, i);
 }
 
 // ---- normalised dump: object pointers become (region, offset) tags, everything else raw
@@ -324,6 +397,7 @@ struct DumpResult {
     std::vector<uint64_t> entries;                           // assignment entries, normalised words (man, slot, cost bits)
     uint64_t eax = 0;
     U listCap = 0, listCount = 0; bool listData = false;
+    size_t liveAllocations = 0;
     std::vector<HeapEvent> heap;
     U ebx = 0, esi = 0, edi = 0, ebp = 0, espDelta = 0, csr = 0, cw = 0;
     bool faulted = false;
@@ -343,6 +417,8 @@ void MakeDumper(const Mock& k, Dumper& d) {
     d.Add(k.layout, 0x40, 5); d.Add(k.layoutVtbl, 0x100, 6); d.Add(k.slotRecs, (k.m ? k.m : 1) * 36, 7);
     d.Add(k.tickObj, 0x100, 8); d.Add(k.tickObj2, 0x100, 9); d.Add(k.slotVec, sizeof(k.slotVec), 10); d.Add(k.assignVec, sizeof(k.assignVec), 11);
     if (k.assignVec[3]) d.Add((void*)(uintptr_t)k.assignVec[3], std::max<U>(k.assignVec[1], k.assignVec[2]) * 12 + 4, 12);
+    d.Add(k.cache, sizeof(k.cache), 13);
+    d.Add(k.cacheMap.data(), static_cast<U>(k.cacheMap.size() * sizeof(U)), 14);
 }
 void Capture(const Mock& k, DumpResult& r) {
     Dumper d; MakeDumper(k, d);
@@ -358,6 +434,8 @@ void Capture(const Mock& k, DumpResult& r) {
     r.hashes.push_back({"tickObj2", HashWords(d, k.tickObj2, 0x100)});
     r.hashes.push_back({"slotVec", HashWords(d, (const uint8_t*)k.slotVec, sizeof(k.slotVec))});
     r.hashes.push_back({"assignVec", HashWords(d, (const uint8_t*)k.assignVec, sizeof(k.assignVec))});
+    r.hashes.push_back({"cache", HashWords(d, k.cache, sizeof(k.cache))});
+    r.hashes.push_back({"cacheMap", HashWords(d, reinterpret_cast<const uint8_t*>(k.cacheMap.data()), static_cast<U>(k.cacheMap.size() * sizeof(U)))});
     const U cnt = k.assignVec[2];
     const uint8_t* data = (const uint8_t*)(uintptr_t)k.assignVec[3];
     for (U i = 0; data && i < cnt; ++i) {
@@ -368,10 +446,12 @@ void Capture(const Mock& k, DumpResult& r) {
     const U* l = (const U*)(uintptr_t)NativeAddress(0x14A40A4);
     r.listCap = l[0]; r.listCount = l[1]; r.listData = l[2] != 0;
     r.heap = g_heapLog;
+    r.liveAllocations = g_heapOrdinal.size();
 }
 
 // ---- call stub: callee-saved sentinels, four stack arguments, callee pops 16
 U s_fn, s_F, s_a[4], s_eax, s_ebx, s_esi, s_edi, s_ebp, s_espBefore, s_espAfter;
+U s_argCount = 4;
 __declspec(naked) void ChainStub() {
     __asm {
         push ebp
@@ -383,10 +463,16 @@ __declspec(naked) void ChainStub() {
         mov esi, 0x0BADBEE5
         mov edi, 0x0BADD00D
         mov ebp, 0x0BADFACE
+        cmp dword ptr [s_argCount], 0
+        je arguments_done
+        cmp dword ptr [s_argCount], 3
+        je three_arguments
         push dword ptr [s_a + 12]
+    three_arguments:
         push dword ptr [s_a + 8]
         push dword ptr [s_a + 4]
         push dword ptr [s_a]
+    arguments_done:
         mov ecx, dword ptr [s_F]
         mov edx, 0x0DEDEDED
         call dword ptr [s_fn]
@@ -407,9 +493,12 @@ __declspec(naked) void ChainStub() {
 bool GuardedStub() {                    // no C++ objects here: __try needs a function without unwinding
     __try { ChainStub(); return true; } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-bool RunStub(U fn, Mock& k, const Case& c, DumpResult& r) {
+// route 0: ordinary assignment; 1: complete cache writeback; 2: the cache assignment wrapper alone.
+bool RunStub(U fn, Mock& k, const Case& c, DumpResult& r, U route = 0) {
     s_fn = fn; s_F = Addr(k.formation);
     s_a[0] = Addr(k.slotVec); s_a[1] = c.flagParam; s_a[2] = Addr(k.assignVec); s_a[3] = (U)c.layoutIndex;
+    s_argCount = route == 1 ? 0 : route == 2 ? 3 : 4;
+    if (route) { s_F = Addr(k.cache); s_a[0] = Addr(k.cache + 0x48); }
     const U csrBefore = _mm_getcsr() & ~0x3Fu, cwBefore = _control87(0, 0);
     const bool ok = GuardedStub();
     if (!ok) { r.faulted = true; return false; }
@@ -524,6 +613,7 @@ std::string Diff(const DumpResult& a, const DumpResult& b) {
         std::snprintf(buf, sizeof buf, "global list native cap/count %u/%u data %d, chain %u/%u data %d", a.listCap, a.listCount, a.listData, b.listCap, b.listCount, b.listData);
         return buf;
     }
+    if (a.liveAllocations != b.liveAllocations) return "native allocation lifetime differs";
     if (a.heap.size() != b.heap.size()) return "allocator call sequence length differs";
     for (size_t i = 0; i < a.heap.size(); ++i)
         if (a.heap[i].kind != b.heap[i].kind || a.heap[i].value != b.heap[i].value) {
@@ -539,7 +629,7 @@ const char* ModeName(as::Mode m) { return m == as::ModeForward ? "forward" : m =
 
 struct NativeRun { DumpResult r; int pre = -1; bool preOk = true; U sup = 0, fwd = 0, solverEntries = 0; };   // sup/fwd: exits of the ORIGINAL trampoline 0x18F0D00 observed in the native twin
 
-bool CheckCounters(const Case& c, as::Mode mode, const NativeRun& nat, const U* w, std::string& why, Stats& st) {
+bool CheckCounters(const Case& c, as::Mode mode, const NativeRun& nat, const U* w, std::string& why, Stats& st, bool cache = false) {
     char buf[320];
     const U seen = w[as::SolvesSeen], flag1 = w[as::SolvesFlag1], flag0 = w[as::Flag0Native], sup = w[as::ShimSuppressed], fwd = w[as::ShimForwarded];
     const U direct = w[as::Direct18F12AA];
@@ -548,6 +638,8 @@ bool CheckCounters(const Case& c, as::Mode mode, const NativeRun& nat, const U* 
     const U fb = w[as::FbTooLarge] + w[as::FbRange] + w[as::FbListState] + w[as::FbGuard] + w[as::FbEnv] + w[as::FbFpEnv] + w[as::FbCtx];
     st.fallbacks += fb;
     if (w[as::AssignCalls] != 1) { why = "assign_calls != 1"; return false; }
+    if (w[as::CacheAssignCalls] != (cache ? 1u : 0u) ||
+        w[as::CacheSolvedKernel] != (cache ? w[as::SolvedKernel] : 0u)) { why = "cache-origin counters disagree with assignment/solve scope"; return false; }
     if (w[as::ForeignNative] != 0) { why = "foreign_native != 0 inside the occurrence"; return false; }
     if (seen != flag0 + flag1 || seen != direct + fwd) {
         std::snprintf(buf, sizeof buf, "gate entry accounting: seen %u flag0 %u flag1 %u direct %u forwarded %u", seen, flag0, flag1, direct, fwd);
@@ -588,6 +680,137 @@ bool CheckCounters(const Case& c, as::Mode mode, const NativeRun& nat, const U* 
     return true;
 }
 
+bool RefuseUnknownCacheWrapper() {
+    // Both accepted forms are tested by the two ctest invocations. Every byte of the 29-byte wrapper is
+    // admission-critical, not only the call displacement. No fixture or native allocation is allowed here.
+    auto* wrapper = (uint8_t*)(uintptr_t)NativeAddress(0x539C90);
+    const as::Binding b = {static_cast<U>(g_delta), as::ModeMemo,
+                          g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00], g_clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
+    for (U i = 0; i < 0x1D; ++i) {
+        const uint8_t saved = wrapper[i];
+        wrapper[i] ^= 0x80;
+        const bool admitted = as::Start(b);
+        wrapper[i] = saved;
+        if (admitted || as::Started() || as::StorageBytes() != 0) {
+            as::Stop();
+            std::fprintf(stderr, "FAIL unknown cache wrapper byte +%#x was admitted or retained workspace\n", i);
+            return false;
+        }
+    }
+    return FlushInstructionCache(GetCurrentProcess(), wrapper, 0x1D) != 0;
+}
+// Complete native cache consumer: stack-local assignment vector, indexed writeback and final free.
+// Wrapper-only cases exercise finite flags that 57AC10 (always flag 1) cannot supply.
+int RunCacheCases() {
+    struct Scenario { Case c; U route; bool duplicateIndex; };
+    std::vector<Scenario> scenarios;
+    scenarios.push_back({HandCase("cache-normal", {kNormal, kNormal, kNormal}, 0, 1, -1, 0), 1, false});
+    scenarios.push_back({HandCase("cache-overlay-prestep", {kOfficer, kNormal, kNormal}, 0, 1, -1, 0), 1, false});
+    scenarios.push_back({HandCase("cache-duplicate-index", {kNormal, kNormal, kNormal}, 0, 1, -1, 0), 1, true});
+    scenarios.push_back({HandCase("cache-all-anchored", {kOfficer, kAnchored}, 0, 1, -1, 0), 1, false});
+    scenarios.push_back({HandCase("cache-empty", {}, 0, 1, -1, 1), 1, false});
+    scenarios.push_back({HandCase("cache-wrapper-finite", {kNormal, kNormal, kNormal}, 0, 0, -1, 0), 2, false});
+    scenarios.push_back({HandCase("cache-wrapper-nonboolean-finite", {kNormal, kNormal, kNormal}, 0, 2, -1, 0), 2, false});
+    // No officers or anchored rows: all kMaxM+1 entries reach the native unlimited solver.
+    // Broken pre-step eligibility keeps the overlay and SKIP{15} cases on the same full-size solve.
+    scenarios.push_back({HandCase("cache-overbound-native", std::vector<uint8_t>(ntw_solver::kMaxM + 1, kNormal),
+                                  0, 1, -1, 1), 1, false});
+    auto build = [](const Scenario& s, Mock& k) {
+        Build(s.c, k);
+        if (s.duplicateIndex) for (auto* man : k.men) Put<U>(man, 0x1F4, 0);
+        SetUnitPredicate(s.c.unitFlag);
+        ResetList();
+    };
+    std::vector<NativeRun> native(scenarios.size());
+    int failures = 0;
+    if (!InstallHooks(true)) return 1;
+    for (size_t i = 0; i < scenarios.size(); ++i) {
+        const Scenario& s = scenarios[i];
+        NativeRun& n = native[i];
+        if (!g_skipCacheOverlay && !ProbePrestep(s.c, &n.pre)) {
+            n.r.faulted = true; ++failures; continue;
+        }
+        Mock k; build(s, k);
+        g_nativeSuppress = g_nativeForward = g_nativeSolverEntries = 0;
+        if (!RunStub(NativeAddress(s.route == 1 ? 0x57AC10 : 0x539C90), k, s.c, n.r, s.route)) {
+            ++failures; std::fprintf(stderr, "FAIL native %s faulted\n", s.c.label.c_str()); continue;
+        }
+        n.sup = g_nativeSuppress; n.fwd = g_nativeForward; n.solverEntries = g_nativeSolverEntries;
+        if (s.route == 1) {
+            const bool guards = k.cacheMap.front() == 0xCACECAFEu && k.cacheMap.back() == 0xCACECAFEu;
+            U writes = 0;
+            for (U j = 1; j <= k.n; ++j) writes += k.cacheMap[j] != 0xCACECAFEu;
+            const bool freed = n.r.liveAllocations == (n.r.listData ? 1u : 0u);
+            if (!guards || !freed || (k.n && !writes) || (s.duplicateIndex && writes != 1)) {
+                ++failures;
+                std::fprintf(stderr, "FAIL native %s: cache guards=%d writes=%u assignment freed=%d\n", s.c.label.c_str(), guards, writes, freed);
+            }
+        }
+    }
+    if (!InstallHooks(false)) return failures + 1;
+    for (as::Mode mode : {as::ModeOff, as::ModeForward, as::ModeMemo, as::ModeShadow}) {
+        if (mode != as::ModeOff) {
+            const as::Binding binding{static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00],
+                                      g_clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
+            if (!as::Start(binding)) return failures + 1;
+        }
+        Stats st;
+        U finite = 0;
+        for (size_t i = 0; i < scenarios.size(); ++i) {
+            if (native[i].r.faulted) continue;
+            const Scenario& s = scenarios[i];
+            Mock k; build(s, k);
+            as::Reset();
+            DumpResult result;
+            const U fn = s.route == 1 ? g_clones.entries[KNTWR_CLONE_SOLVER_57AC10] : g_bindings[KNTWR_BIND_SOLVER_CACHE_ASSIGN];
+            if (!RunStub(fn, k, s.c, result, s.route)) {
+                ++failures; std::fprintf(stderr, "FAIL cache mode %u %s faulted\n", static_cast<U>(mode), s.c.label.c_str()); continue;
+            }
+            std::string why = Diff(native[i].r, result);
+            as::TickEnd(777); // publish top-solve rows before checking their cache-origin flags
+            U w[as::kWords]; as::Snapshot(w);
+            if (mode == as::ModeOff) {
+                if (w[as::AssignCalls] || w[as::CacheAssignCalls] || w[as::SolvesSeen] || w[as::CacheSolvedKernel] || as::StorageBytes())
+                    why = "off-state cache passthrough acquired counters or workspace";
+            } else if (why.empty()) {
+                if (!CheckCounters(s.c, mode, native[i], w, why, st, true)) why = "counters: " + why;
+                if (s.route == 2) {
+                    finite += w[as::Flag0Native];
+                    if (!w[as::Flag0Native] || w[as::SolvesFlag1] || w[as::SolvedKernel] || w[as::ShadowCompares])
+                        why = "finite-limit cache wrapper did not stay entirely native";
+                }
+                if (s.route == 1 && s.c.n > ntw_solver::kMaxM) {
+                    const U expectedFallback = mode == as::ModeForward ? 0u : 1u;
+                    if (w[as::CacheAssignCalls] != 1 || w[as::CacheSolvedKernel] != 0 ||
+                        w[as::SolvedKernel] != 0 || w[as::ShadowCompares] != 0 ||
+                        w[as::SolvesFlag1] != 1 || w[as::FbTooLarge] != expectedFallback ||
+                        (mode != as::ModeForward && w[as::MaxM] != s.c.n))
+                        why = "overbound cache assignment did not preserve native-only solve/fallback accounting";
+                }
+                if ((w[as::SolvedKernel] || w[as::ShadowCompares] || w[as::FbTooLarge]) && !(w + as::SolveTable)[as::SFlags])
+                    why = "cache solve missing from published receipt";
+                for (U row = 0; row < as::kTop; ++row) {
+                    const U* e = w + as::SolveTable + row * as::kSolveWords;
+                    if (e[as::SFlags] && !(e[as::SFlags] & (1u << 9))) why = "cache solve lacks origin bit 9";
+                }
+            }
+            if (!why.empty()) {
+                ++failures; std::fprintf(stderr, "FAIL cache mode %u %s: %s\n", static_cast<U>(mode), s.c.label.c_str(), why.c_str());
+            }
+        }
+        if (mode != as::ModeOff && finite != 2) { ++failures; std::fprintf(stderr, "FAIL cache finite-limit cases were not exercised\n"); }
+        if ((mode == as::ModeMemo && !st.kernel) || (mode == as::ModeShadow && !st.shadowCompares)) {
+            ++failures; std::fprintf(stderr, "FAIL cache kernel coverage is vacuous in mode %u\n", static_cast<U>(mode));
+        }
+        std::printf("cache mode %u: kernel=%d shadow_compares=%d fallbacks=%d finite_native=%u\n",
+                    static_cast<U>(mode), st.kernel, st.shadowCompares, st.fallbacks, finite);
+        as::Stop();
+    }
+    std::printf("cache chain: %zu scenarios x off/forward/memo/shadow, overlay=%s, failures=%d\n",
+                scenarios.size(), g_skipCacheOverlay ? "SKIP{15}" : "ALL", failures);
+    return failures;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -602,16 +825,18 @@ int main(int argc, char** argv) {
         else if (a == "--table") tablePath = argv[i + 1];
         else if (a == "--cases") cases = std::atoi(argv[i + 1]);
         else if (a == "--seed") seed = (U)std::strtoul(argv[i + 1], nullptr, 10);
+        else if (a == "--skip-cache-overlay") g_skipCacheOverlay = std::atoi(argv[i + 1]) != 0;
         else if (a == "--overbound") overbound = (U)std::strtoul(argv[i + 1], nullptr, 10);
     }
     std::vector<uint8_t> file, table;
     if (image.empty() || tablePath.empty() || !ReadAll(image, file) || !ReadAll(tablePath, table)) {
-        std::fprintf(stderr, "usage: --image Napoleon.exe --table angle-table.bin [--cases N] [--seed S] [--overbound N]\n");
+        std::fprintf(stderr, "usage: --image <stock Napoleon.exe> --table angle-table.bin [--cases N] [--seed S] [--overbound N] [--skip-cache-overlay 1]\n");
         return 2;
     }
     if (Sha256(file.data(), file.size()) != kImageSha) { std::fprintf(stderr, "image SHA-256 mismatch\n"); return 2; }
     if (table.size() != 65536 * 8 || Sha256(table.data(), table.size()) != kTableSha) { std::fprintf(stderr, "angle table mismatch\n"); return 2; }
     if (!MapImage(file, table)) return 2;
+    if (!RefuseUnknownCacheWrapper()) return 2;
 
     // case list: a size/flag/layout/mod matrix (including m > kMaxM) plus random cases
     Rng rng{seed ? seed : 1};
@@ -683,7 +908,8 @@ int main(int argc, char** argv) {
     }
 
     for (as::Mode mode : {as::ModeForward, as::ModeMemo, as::ModeShadow}) {
-        as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00]};
+        as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00],
+                         g_clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
         if (!as::Start(b)) { std::fprintf(stderr, "kntwr_army_solver::Start refused (%s)\n", ModeName(mode)); return 2; }
         Stats st;
         for (size_t i = 0; i < all.size(); ++i) {
@@ -718,6 +944,7 @@ int main(int argc, char** argv) {
     }
     std::printf("original trampoline 0x18F0D00 in the native twin: %d suppress exits, %d forward exits over %zu cases; pre-step returned 1 in %d cases, %d of them never entered the trampoline; image delta %#llx\n",
                 expectedSuppress, expectedForward, all.size(), pre1, pre1NoTrampoline, (unsigned long long)g_delta);
+    failures += RunCacheCases();
     std::printf("army solver chain oracle: failures=%d\n", failures);
     return failures ? 1 : 0;
 }

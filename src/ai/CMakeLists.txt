@@ -11,5 +11,6 @@ kntwr_runtime_sources(
   kntwr_planner_search.cpp
   kntwr_record_test.cpp
   kntwr_spiral.cpp
+  kntwr_terrain_merge_guard.cpp
   kntwr_walk_memo.cpp
 )

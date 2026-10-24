@@ -14,7 +14,7 @@ extern "C" {
 #define KNTWR_BALLISTICS 0x04u
 #define KNTWR_AI_ASYNC 0x08u /* Whole native planner calls run in a single worker slot and join before site 34 returns. */
 #define KNTWR_BATCH64 0x10u
-#define KNTWR_PROFILE 0x20u /* Instrumentation; part of the shipping set KNTWR_ALL (receipt/tick readout). */
+#define KNTWR_PROFILE 0x20u /* Opt-in instrumentation and statistical sampler (--profile); outside KNTWR_ALL. Tick logging is independent. */
 #define KNTWR_BRAIN 0x40u /* Opt-in, requires KNTWR_PROFILE: times every level-1 callee of the per-agent brain step per class family (see brain_words). Not part of KNTWR_ALL. */
 #define KNTWR_BRAIN2 0x80u /* Opt-in BRAIN2 v2: owner-ordered observation or serial gated clones at site 6 (Stage 1); with KNTWR_BRAIN_PARALLEL (+census) the per-soldier step also runs speculatively on pool workers over private receiver copies with guarded owner-ordered commit (Stage 2). Outside KNTWR_ALL. */
 #define KNTWR_VISUAL 0x100u /* Main-thread 0x779E60 loop-1 sharding; part of the shipping set. */
@@ -234,9 +234,9 @@ enum kntwr_memory_word {
 #define KNTWR_ERROR_ALLOCATOR 14u
 #define KNTWR_ERROR_VA_BUDGET 15u
 /* Accepted optimization selection (`--features all`); launcher default additionally enables CAVALRY_ORBIT.
-   Reference stack (dn-cwlive/dn-cwlive2): loco owned+grid incremental+cw workers, collide Phase B + contact workers, profile.
-   PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE_LOD, AI_CTRL and BRAIN remain opt-in. */
-#define KNTWR_ALL (KNTWR_AI_ASYNC | KNTWR_BATCH64 | KNTWR_VISUAL | KNTWR_PROFILE | KNTWR_LOCO | KNTWR_COLLIDE)
+   Reference stack (dn-cwlive/dn-cwlive2): loco owned+grid incremental+cw workers, collide Phase B + contact workers.
+   Profiling/sampling, PATH, FORMATION, BALLISTICS, BRAIN2, COLLIDE_LOD, AI_CTRL and BRAIN remain opt-in. */
+#define KNTWR_ALL (KNTWR_AI_ASYNC | KNTWR_BATCH64 | KNTWR_VISUAL | KNTWR_LOCO | KNTWR_COLLIDE)
 /* Every feature bit the runtime accepts in kntwr_config::enabled_mask. */
 #define KNTWR_VALID_MASK (KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BATCH64 | KNTWR_BRAIN2 | KNTWR_VISUAL | KNTWR_PROFILE | KNTWR_BRAIN | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_AI_CTRL | KNTWR_LOCO | KNTWR_GRID_CENSUS | KNTWR_AI_CENSUS | KNTWR_AI_ASYNC2 | KNTWR_ARMY_UNIT_SHADOW | KNTWR_CAVALRY_ORBIT)
 /* ai_async2_words labels, word order (histogram buckets: <=125us, <=250us, ... <=128ms, >128ms; gate kinds: site 34
@@ -338,6 +338,7 @@ enum kntwr_memory_word {
    asked for a man stance, reachable with --mounted-officer) is answered differently: the clip of the first non-empty category 1..863 (rand % n_k + k*6), or table[0]
    when all 864 are empty. Publishes anim_guard_words (hot-path-free counters; a run with no hits shows only calls_cold/patch_installed/version). */
 #define KNTWR_ANIM_GUARD_WORDS 8u /* anim_guard_words (kntwr_clip_picker_guard::Word, labels KNTWR_ANIM_GUARD_LABELS; table_last/cat_last are last-value words, not counters) */
+#define KNTWR_FORMATION_RESIDUAL_WORDS 320u /* army_residual_words (appended after anim_guard_words; owner module src/army/native_formation_residual.*, labels KNTWR_FORMATION_RESIDUAL_LABELS; --army-storm-census only, all zero without it) */
 #define KNTWR_ANIM_GUARD_LABELS \
     "calls_cold", "guarded", "scanned_max", "empty_tables", "table_last", "cat_last", "patch_installed", "version"
 #define KNTWR_AI_CTRL_FLAGS_VALID (KNTWR_AI_CTRL_MODE_MASK | KNTWR_AI_CLAIM_BITS | KNTWR_AI_BRAIN_STEP_BITS)
@@ -381,7 +382,7 @@ enum kntwr_memory_word {
 #define KNTWR_AI_SPIRAL_CAP_MIN_M 20u
 #define KNTWR_AI_SPIRAL_BITS (KNTWR_AI_SPIRAL_CENSUS | KNTWR_AI_SPIRAL_CAP_MASK)
 #define KNTWR_AI_SPIRAL_WORDS 32u /* ai_spiral_words (src/ai/kntwr_spiral.h row layout, version 1) */
-#define KNTWR_ARMY_SOLVER_WORDS 519u /* army_solver_words (src/army/native_army_solver.h row layout, version 1): 55 header + 16 x 13 tick table + 16 x 16 solve table */
+#define KNTWR_ARMY_SOLVER_WORDS 521u /* army_solver_words (src/army/native_army_solver.h row layout, version 2): 57 header + 16 x 13 tick table + 16 x 16 solve table */
 #define KNTWR_ARMY_SOLVER_LABELS \
     "version", "mode", "started", "ticks", "solves_seen", "solves_flag1", "solved_kernel", "flag0_native", "foreign_native", \
     "fb_too_large", "fb_range", "fb_list_state", "fb_guard", "fb_env", "shadow_compares", "shadow_mismatch_solves", \
@@ -389,7 +390,7 @@ enum kntwr_memory_word {
     "native_us", "kernel_us", "evals_lo", "evals_hi", "distinct_lo", "distinct_hi", "iterations_lo", "iterations_hi", \
     "swaps", "removals", "max_m", "max_formation_members", "m_1_16", "m_17_64", "m_65_128", "m_129_256", \
     "m_257_512", "m_gt_512", "observer_us", "assign_members_sum", "scans_lo", "scans_hi", "cost_us", "loop_us", \
-    "timed_solves", "kernel_total_us", "gather_us", "direct_18f12aa", "fb_fpenv", "fb_ctx", "empty_native"
+    "timed_solves", "kernel_total_us", "gather_us", "direct_18f12aa", "fb_fpenv", "fb_ctx", "empty_native", "cache_assign_calls", "cache_solved_kernel"
 #define KNTWR_ARMY_SOLVER_TICK_LABELS \
     "tick", "solves", "formations", "native_us", "kernel_us", "evals", "distinct", "iterations", "max_m", "solved_kernel", "fallbacks", "swaps", "assign_formations"
 #define KNTWR_ARMY_SOLVER_SOLVE_LABELS \
@@ -1095,9 +1096,9 @@ typedef struct kntwr_status {
        Written by the thread executing the think; a poll is a non-atomic snapshot. Reset at activation, retained after stop. */
     uint32_t ai_spiral_words[KNTWR_AI_SPIRAL_WORDS];
     /* --army-solver-memo / --army-solver-shadow (appended after ai_spiral_words; src/army/native_army_solver.h, labels KNTWR_ARMY_SOLVER_LABELS,
-       KNTWR_ARMY_SOLVER_TICK_LABELS, KNTWR_ARMY_SOLVER_SOLVE_LABELS): bit-exact flag=1 slot-solver counters. Header 55 words (version,
-       mode, solve/fallback/shadow-mismatch counts, native/kernel us, evals/iterations/scans, phase split, m histogram), then the top-16 ticks
-       (13 words each, at word 55) and the top-16 single solves (16 words each, at word 263) ordered by solver us; 519 words in all. Written by the tick owner; a poll is a non-atomic snapshot. All zero without
+       KNTWR_ARMY_SOLVER_TICK_LABELS, KNTWR_ARMY_SOLVER_SOLVE_LABELS): bit-exact flag=1 slot-solver counters. Header 57 words (version,
+       mode, solve/fallback/shadow-mismatch counts, native/kernel us, evals/iterations/scans, phase split, m histogram, cache-origin coverage), then the top-16 ticks
+       (13 words each, at word 57) and the top-16 single solves (16 words each, at word 265) ordered by solver us; 521 words in all. Written by the tick owner; a poll is a non-atomic snapshot. All zero without
        the bits; reset at activation, retained after stop. */
     uint32_t army_solver_words[KNTWR_ARMY_SOLVER_WORDS];
     /* --alloc-census (appended after army_solver_words; owner module src/core/kntwr_alloc_census.*, labels KNTWR_ALLOC_CENSUS_LABELS):
@@ -1120,6 +1121,9 @@ typedef struct kntwr_status {
     uint32_t engage_census_words[KNTWR_ENGAGE_CENSUS_WORDS];
     /* Clip picker crash guard (appended after engage_census_words; owner module src/animation/kntwr_clip_picker_guard.*, labels KNTWR_ANIM_GUARD_LABELS). Reset at monitor start, retained after stop. */
     uint32_t anim_guard_words[KNTWR_ANIM_GUARD_WORDS];
+    /* Formation residual census (appended after anim_guard_words; owner module src/army/native_formation_residual.*, labels KNTWR_FORMATION_RESIDUAL_LABELS): runs with
+       --army-storm-census. Reset at monitor start, retained after stop; all zero without KNTWR_ARMY_STORM_CENSUS. */
+    uint32_t army_residual_words[KNTWR_FORMATION_RESIDUAL_WORDS];
 } kntwr_status;
 
 /* DATA export "kntwr_profile", separate from the sequence-locked lifecycle status.
@@ -1585,13 +1589,15 @@ static_assert(offsetof(kntwr_status,ai_prepass_census_words) + KNTWR_AI_PREPASS_
               offsetof(kntwr_status,overlay_words) + KNTWR_OVERLAY_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,mounted_officer_words) &&
               offsetof(kntwr_status,mounted_officer_words) + KNTWR_MOUNTED_OFFICER_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,engage_census_words) &&
               offsetof(kntwr_status,engage_census_words) + KNTWR_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,anim_guard_words) &&
-              offsetof(kntwr_status,anim_guard_words) + KNTWR_ANIM_GUARD_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) && KNTWR_ANIM_GUARD_WORDS == 8u &&
+              offsetof(kntwr_status,anim_guard_words) + KNTWR_ANIM_GUARD_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,army_residual_words) &&
+              offsetof(kntwr_status,army_residual_words) + KNTWR_FORMATION_RESIDUAL_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) && KNTWR_ANIM_GUARD_WORDS == 8u &&
+              KNTWR_FORMATION_RESIDUAL_WORDS == 320u &&
               KNTWR_ENGAGE_CENSUS_WORDS == 6832u &&
               KNTWR_ENGAGE_CENSUS == 0x80000u &&
               KNTWR_ALLOC_CENSUS_WORDS == 1056u && KNTWR_ARENA_WORDS == 32u && KNTWR_OVERLAY_WORDS == 16u && KNTWR_MOUNTED_OFFICER_WORDS == 16u &&
               KNTWR_ALLOC_CENSUS == 0x40u && KNTWR_ARENA_RELEASE == 0x80u && KNTWR_HEAP_OPTIMIZE == 0x10000u && KNTWR_ALLOC_FIX == 0x200000u &&
               KNTWR_MOUNTED_OFFICER == 0x20000u && KNTWR_MOUNTED_OFFICER_WIDEN == 0x40000u &&
-              KNTWR_ARMY_SOLVER_WORDS == 519u && KNTWR_ARMY_SOLVER_MEMO == 0x10u && KNTWR_ARMY_SOLVER_SHADOW == 0x20u &&
+              KNTWR_ARMY_SOLVER_WORDS == 521u && KNTWR_ARMY_SOLVER_MEMO == 0x10u && KNTWR_ARMY_SOLVER_SHADOW == 0x20u &&
               KNTWR_AI_PREPASS_CENSUS_WORDS == 82u && KNTWR_AI_POLY_WORDS == 32u && KNTWR_AI_RECORD_TEST_WORDS == 28u && KNTWR_AI_PREPASS_WORDS == 60u &&
               KNTWR_AI_PREPASS_CENSUS == 0x1u && KNTWR_AI_PRESIZE == 0x2u &&
               KNTWR_AI_POLY_SHADOW == 0x4u && KNTWR_AI_POLY == 0x8u && KNTWR_AI_SPIRAL_CENSUS == 0x10u && KNTWR_AI_SPIRAL_WORDS == 32u &&
