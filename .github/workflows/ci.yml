@@ -35,7 +35,7 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure -LE 'image|assets'
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kntwr-windows-x86
           if-no-files-found: error
