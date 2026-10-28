@@ -67,7 +67,7 @@ jobs:
         run: ./tools/package_release.ps1 -Version '${{ steps.ver.outputs.version }}' -BuildDir build -OutputDir artifacts
 
       - name: Attest release archive
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/KNTWR-${{ steps.ver.outputs.version }}-windows-x86.zip
 
