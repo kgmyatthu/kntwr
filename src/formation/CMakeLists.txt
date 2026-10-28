@@ -11,3 +11,4 @@ endforeach()
 # Compiled straight into kntwr_runtime.
 kntwr_runtime_sources(native_formation_solver.cpp)
 kntwr_runtime_sources(kntwr_formation_census.cpp)
+kntwr_runtime_sources(kntwr_drag_ladder_hook.cpp)

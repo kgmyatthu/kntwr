@@ -69,7 +69,9 @@
 #include "ai/kntwr_terrain_merge_guard.h"
 #include "ai/kntwr_engage_census.h"
 #include "formation/kntwr_formation_census.h"
+#include "formation/kntwr_drag_ladder_hook.h"
 #include "core/kntwr_alloc_census.h"
+#include "core/kntwr_topology.h"
 #include "render/kntwr_arena_release.h"
 
 using U = uint32_t;
@@ -95,6 +97,9 @@ void __fastcall bal_worker(bal_job*, U);
 namespace {
 constexpr U kPreferred = 0x400000, kSimulation = KNTWR_PATH | KNTWR_FORMATION | KNTWR_BALLISTICS | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT;
 constexpr U kProjectileCapacity = 65536, kStopTimeoutMs = 15000;
+// Activation capture waits for the first tick to run the capture task. Battle load on slow or affinity-restricted machines (6 LPs
+// observed) can delay that tick beyond kStopTimeoutMs, which permanently failed activation (StorageError); stop paths keep 15 s.
+constexpr U kActivationCaptureTimeoutMs = 60000;
 enum Error : U { BadConfig=1, BadImage=2, MissingExport=3, CloneError=4, ModuleError=5,
                  SlotConflict=6, SlotProtection=7, StopTimeout=8, PoolError=9, ThreadError=10,
                  StorageError=12, VisualSlotCount=13, AllocatorError=KNTWR_ERROR_ALLOCATOR,
@@ -441,10 +446,14 @@ volatile U siteInProgress; U siteGateIndex; U siteGateDepth;
 volatile U brainScopeTid; // --brain-target-cull* / --brain-retarget-jitter: the tick thread's id while it executes site 6 (the soldier-brain stage), else 0
 U siteCallees[KNTWR_TIMED_SITES];
 // Tick core census + placement (trace flags bits 3..31; KNTWR_TICK_PCORE / KNTWR_TICK_CORE_AB). The topology is read once per start
-// from the CPU set information (group 0, processor numbers 0..31: a 32-bit affinity mask); the census state is tick-owner only.
+// from the CPU set information. Masks are group 0, processor numbers 0..31 (a 32-bit affinity mask in this WOW64 process); the
+// census table covers group-0 processor numbers 0..63. Decision rules live in kntwr_topology.h: a CPU-set entry in another group or
+// at an index >= 32 makes the read partial (placement inert, cpuHybrid=false); another group also turns the census off because
+// GetCurrentProcessorNumber is group-relative; fewer than kMinPinnedP usable P processors, or an empty P/E mask, is also inert.
+// The census state is tick-owner only.
 unsigned char cpuECore[64]; // 1: processor number is in a lower efficiency class than the highest one present
 DWORD_PTR cpuPMask, cpuEMask; // highest-class / lower-class processors, intersected with the process affinity
-bool cpuTopology, cpuHybrid;  // topology read; both classes present and usable
+bool cpuTopology, cpuHybrid;  // topology read; both classes present, fully covered and usable
 struct CoreCensus { LONGLONG last, all, e, s6All, s6E; U lastE, changes, owner; bool inSite6, active; } coreCensus;
 void CpuTopologyInit() {
     memset(cpuECore,0,sizeof(cpuECore)); cpuPMask=cpuEMask=0; cpuTopology=cpuHybrid=false;
@@ -453,29 +462,38 @@ void CpuTopologyInit() {
     if (!GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer),sizeof(buffer),&length,GetCurrentProcess(),0) ||
         length>sizeof(buffer)) return;
     BYTE minClass=0xff, maxClass=0;
+    bool sawGroup0=false, sawOtherGroup=false, sawHighIndex=false;
     DWORD_PTR classMask[2]={}; // [0]: processors of the highest class (second pass), [1]: all lower classes
     for (int pass=0; pass<2; ++pass) {
         for (ULONG offset=0; offset+sizeof(DWORD)*2<=length;) {
             const auto* info=reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer+offset);
             if (!info->Size || offset+info->Size>length) return;
-            if (info->Type==CpuSetInformation && info->CpuSet.Group==0 && info->CpuSet.LogicalProcessorIndex<32) {
-                const BYTE cls=info->CpuSet.EfficiencyClass;
-                if (!pass) { if (cls<minClass) minClass=cls; if (cls>maxClass) maxClass=cls; }
+            if (info->Type==CpuSetInformation) {
+                const BYTE index=info->CpuSet.LogicalProcessorIndex;
+                if (info->CpuSet.Group!=0) sawOtherGroup=true;
+                else if (index>=kntwr_topology::kCensusSlots) sawHighIndex=true;
                 else {
-                    const BYTE index=info->CpuSet.LogicalProcessorIndex;
-                    classMask[cls==maxClass ? 0 : 1]|=static_cast<DWORD_PTR>(1)<<index;
-                    cpuECore[index]=cls==maxClass ? 0 : 1;
+                    sawGroup0=true;
+                    if (index>=kntwr_topology::kMaskBits) sawHighIndex=true;
+                    const BYTE cls=info->CpuSet.EfficiencyClass;
+                    if (!pass) { if (cls<minClass) minClass=cls; if (cls>maxClass) maxClass=cls; }
+                    else {
+                        cpuECore[index]=cls==maxClass ? 0 : 1;
+                        if (index<kntwr_topology::kMaskBits) classMask[cls==maxClass ? 0 : 1]|=static_cast<DWORD_PTR>(1)<<index;
+                    }
                 }
             }
             offset+=info->Size;
         }
         if (!pass && minClass>maxClass) return; // no group-0 processor reported
     }
+    if (!kntwr_topology::CensusUsable(sawGroup0,sawOtherGroup)) { memset(cpuECore,0,sizeof(cpuECore)); return; }
     DWORD_PTR process=0, system=0;
     if (!GetProcessAffinityMask(GetCurrentProcess(),&process,&system)) return;
     cpuPMask=classMask[0]&process; cpuEMask=classMask[1]&process;
     cpuTopology=true;
-    cpuHybrid=minClass!=maxClass && cpuPMask && cpuEMask;
+    cpuHybrid=kntwr_topology::PinUsable(kntwr_topology::PartialCoverage(sawOtherGroup,sawHighIndex),minClass,maxClass,
+                                        static_cast<uint32_t>(cpuPMask),static_cast<uint32_t>(cpuEMask));
 }
 // One census sample: the gap since the previous sample counts for their class (half each when they differ). Inert outside a
 // census tick (CoreBegin .. CoreFlags) and on any other thread: the AI worker also reaches timed sites (e.g. site 40 under the
@@ -609,12 +627,14 @@ bool PlannerScopeThread(U tid) {
     const bool workerRoute=(config.ai_prepass_flags&(KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_POLY_SHADOW|KNTWR_AI_POLY))!=0;
     return walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)));
 }
+bool Ai2WalkRouted(U tid);
 // The PS_* observer chain's sibling rule: the same scope, but the worker also joins for the --ai-spiral-* bits (the planner's R2 walk
-// routing via PlannerScopeThread stays unchanged for them).
+// routing via PlannerScopeThread stays unchanged for them), and --ai-claim-once[-census] also joins on the AI_ASYNC2 worker think route.
 bool PsScopeThread(U tid) {
     const bool workerRoute=(config.ai_prepass_flags&(KNTWR_AI_PREPASS_CENSUS|KNTWR_AI_POLY_SHADOW|KNTWR_AI_POLY|KNTWR_AI_SPIRAL_BITS))!=0 ||
                            (config.ai_ctrl_flags&KNTWR_AI_CLAIM_BITS)!=0; // --ai-claim-once[-census]: the claim loop runs inside the worker's site-34 scope
-    return walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)));
+    return (walkScopeThread && (walkScopeThread==tid || (workerRoute && tid==aiThreadId && Load(&aiBusy)))) ||
+           ((config.ai_ctrl_flags&KNTWR_AI_CLAIM_BITS)!=0 && Ai2WalkRouted(tid));
 }
 void BeginWalkScope(U planner) {
     if (walkScopeDepth++) return;
@@ -1164,7 +1184,7 @@ void TraceTick(kntwr_trace_entry& e, U tick, U tid, U duration, U interval, bool
         bool stormTick=false;
         kntwr_army_storm::TickEnd(e.tick,siteUs[18],siteUs[34],census,&stormTick);
         e.site_us[110]=census[0]; e.site_calls[110]=census[1]; e.site_us[111]=census[2]; e.site_calls[111]=census[3];
-        kntwr_form_residual::TickEnd(e.tick,siteUs[18],stormTick); // same classification: the residual row's top ticks are the census's
+        kntwr_form_residual::TickEnd(e.tick,siteUs[18],stormTick,static_cast<unsigned long long>(start),duration); // same classification: the residual row's top ticks are the census's; start = this invocation's QPC identity
     }
     if (routed && (config.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW))) kntwr_army_solver::TickEnd(e.tick); // closes the solver's per-tick table with the same tick id
 }
@@ -2557,12 +2577,14 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
     DWORD_PTR priorAffinity=0;
     if (cpuHybrid && (config.va_watch_flags&(KNTWR_TICK_PCORE|KNTWR_TICK_CORE_AB))) {
         const bool toE=(config.va_watch_flags&KNTWR_TICK_CORE_AB) && (modelTick&1u);
-        priorAffinity=SetThreadAffinityMask(GetCurrentThread(),toE ? cpuEMask : cpuPMask);
+        const DWORD_PTR target=toE ? cpuEMask : cpuPMask;
+        if (target) priorAffinity=SetThreadAffinityMask(GetCurrentThread(),target); // never SetThreadAffinityMask(0)
         if (priorAffinity) placed=toE ? 2u : 1u;
     }
     if (census) { LARGE_INTEGER now; QueryPerformanceCounter(&now); CoreBegin(now.QuadPart); }
     U result=0;
     bool traced=false, ai2Published=false;
+    if (config.va_watch_flags&KNTWR_ARMY_STORM_CENSUS) kntwr_form_residual::TickBegin(); // owner + model guards passed: scope of this one invocation (closed by TraceTick's TickEnd or aborted below)
     __try {
         Ai2TickStart(); // one effect seam: service a posted worker call; join only an already-complete batch
         AiBarrier(); // no previous tick is permitted to retain native AI frames
@@ -2583,7 +2605,9 @@ U __fastcall TickGate(void* model, void* edx, U a, U b) {
         coreCensus.active=false;
         if (placed) SetThreadAffinityMask(GetCurrentThread(),priorAffinity);
         if (!ai2Published) Ai2TickAbort();
-        AiBarrier(); epochMask=0; _InterlockedExchange(&tickOwner,0);
+        AiBarrier();
+        if (!traced && (config.va_watch_flags&KNTWR_ARMY_STORM_CENSUS)) kntwr_form_residual::TickAbort(); // TraceTick never closed this invocation: discard + account its limited/formation work before the next owner can begin
+        epochMask=0; _InterlockedExchange(&tickOwner,0);
         if(Load(&budgetReleasePending)) {
             // Yield this completed tick to the monitor exactly once instead of
             // hoping a polling sample lands in a tiny gap between busy ticks.
@@ -3149,12 +3173,14 @@ bool StartModules() {
     if (config.va_watch_flags & KNTWR_ARMY_STORM_CENSUS) {
         const kntwr_army_storm::Binding binding={imageBase,(config.va_watch_flags&KNTWR_ARMY_STORM_SAMPLE_MASK)>>KNTWR_ARMY_STORM_SAMPLE_SHIFT};
         if (!kntwr_army_storm::Start(binding)) { RecordError(ModuleError,KNTWR_ARMY_STORM_CENSUS); return false; }
-        if (!kntwr_form_residual::Start(clones.entries[KNTWR_CLONE_FORM_UPDATE])) { RecordError(ModuleError,KNTWR_ARMY_STORM_CENSUS); return false; }
+        if (!kntwr_form_residual::Start(clones.entries[KNTWR_CLONE_FORM_UPDATE],clones.entries[KNTWR_CLONE_CMD_581CA0],clones.entries[KNTWR_CLONE_CMD_4F84C0])) { RecordError(ModuleError,KNTWR_ARMY_STORM_CENSUS); return false; } // the private command-split chain is armed only when both of its entries exist
     }
     if (config.va_watch_flags & (KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)) { // clones are built: the solver forwards AssignGate to CLONE_SOLVER_18F0A00
         if (!VirtualBudget(ntw_solver::WorkspaceBytes())) return false; // the workspace is allocated by Start below, per activation
         const kntwr_army_solver::Binding binding={delta,(config.va_watch_flags&KNTWR_ARMY_SOLVER_SHADOW) ? kntwr_army_solver::ModeShadow : kntwr_army_solver::ModeMemo,
-                                                 clones.entries[KNTWR_CLONE_SOLVER_18F0A00],clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
+                                                 clones.entries[KNTWR_CLONE_SOLVER_18F0A00],clones.entries[KNTWR_CLONE_SOLVER_5373F0],
+                                                 (config.va_watch_flags&KNTWR_ARMY_STORM_CENSUS) ? &kntwr_form_residual::NoteLimitedSolve : nullptr, // limited-solve timing only while the census runs (residual Start above)
+                                                 clones.entries[KNTWR_CLONE_SOLVER_555CA0],&tickOwner,&epochMask,kRouted}; // command route: native 57B000's call 555CA0 is rewritten while started (the SolverEpoch test)
         if (!kntwr_army_solver::Start(binding)) { RecordError(ModuleError,config.va_watch_flags&(KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW)); return false; }
     }
     if (config.va_watch_flags & (KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) {
@@ -3432,7 +3458,7 @@ bool CaptureAtTick(void (*capture)(void*), void* context) {
         return false;
     }
     _InterlockedExchange(&activationCapture.state,1);
-    const ULONGLONG deadline=GetTickCount64()+kStopTimeoutMs;
+    const ULONGLONG deadline=GetTickCount64()+kActivationCaptureTimeoutMs;
     bool completed=false;
     for (;;) {
         const LONG state=Load(&activationCapture.state);
@@ -3668,7 +3694,7 @@ bool StopModules() {
         else { RecordError(SlotConflict,0x542ae0u); all=false; }
     }
     if (config.va_watch_flags&KNTWR_FORMATION_CENSUS) kntwr_formation_census::Stop(); // tick owner drained: flush the buffered rows, rewrite the summary
-    kntwr_army_solver::Stop(); // same drain: the final counters stay published
+    if (!kntwr_army_solver::Stop()) { RecordError(SlotConflict,0x57b021u); all=false; } // same drain: the final counters stay published; a refused restore of the 57B000 call site fails this stop closed
     if (config.va_watch_flags&(KNTWR_ALLOC_CENSUS|KNTWR_ALLOC_FIX)) {
         kntwr_alloc_census::ReclaimTick(world.model);
         kntwr_alloc_census::Stop();
@@ -3940,6 +3966,11 @@ void PublishAnimGuard() { // monitor thread: hot-path-free counters of the clip 
     static_assert(kntwr_clip_picker_guard::kWords==KNTWR_ANIM_GUARD_WORDS, "guard words fill anim_guard_words");
     StateBegin(); kntwr_clip_picker_guard::Snapshot(kntwr_state.anim_guard_words); StateEnd();
 }
+void PublishDragLadder() { // monitor thread: counters of the --drag-ladder FilesPerRow detour (plain increments in the hot path)
+    if (!(config.gameplay_flags&KNTWR_DRAG_LADDER)) return; // the row stays zero without the flag
+    static_assert(kntwr_drag_ladder_hook::kWords==KNTWR_DRAG_LADDER_WORDS, "hook words fill drag_ladder_words");
+    StateBegin(); kntwr_drag_ladder_hook::Snapshot(kntwr_state.drag_ladder_words); StateEnd();
+}
 DWORD WINAPI Monitor(void*) {
     if (!LoadEntries()) RecordError(MissingExport,0);
     if (!failure) BuildClones();
@@ -3959,6 +3990,11 @@ DWORD WINAPI Monitor(void*) {
         // Clip picker crash guard (always on, no switch): the entry 0xE5F760 jumps into the guarded copy; restored at stop. A refusal (modified bytes) leaves the native picker untouched.
         if (!kntwr_clip_picker_guard::InstallRedirect(delta)) RecordError(SlotConflict,kntwr_clip_picker_guard::kEntry);
         PublishAnimGuard();
+    }
+    if (!failure && (config.gameplay_flags&KNTWR_DRAG_LADDER)) {
+        // --drag-ladder (opt-in gameplay change): one detour at stock FilesPerRow 0x642C90 floors files>60 to a 60-multiple at the source. The site verifies stock bytes first; a refusal is a silent no-op reported only in the words row (WInstalled), never a runtime failure.
+        (void)kntwr_drag_ladder_hook::Install(imageBase);
+        PublishDragLadder();
     }
     if (!failure) {
         // Terrain-analyser merge predicate fast rejection (always on, no switch): the displacement of the call at 0x62CA2B points at the guard, which answers only pairs the native
@@ -3990,6 +4026,7 @@ DWORD WINAPI Monitor(void*) {
         VaWatchSample(); // no-op unless --va-watch; rate-limited to 1 Hz
         PublishMountedOfficer(); // the unit constructors run while loading: publish in every phase
         PublishAnimGuard();
+        PublishDragLadder();
         if (Load(&enabled)) {
             // Preserve native 5F9440/5EE050 joins, scheduling and mode writes.
             // Both synchronous calls and TASK enter the same route; +2829C
@@ -4045,6 +4082,7 @@ DWORD WINAPI Monitor(void*) {
         if (kntwr_cavalry_intent_hook::Remove()) kntwr_cavalry::Reset();
         else { RecordError(SlotConflict,0x542ae0u); clean=false; }
     }
+    if (kntwr_army_solver::CommandRouteInstalled() && !kntwr_army_solver::Stop()) { RecordError(SlotConflict,0x57b021u); clean=false; } // final retry: the native 57B000 must not keep a call into this module
     if (!kntwr_mounted_officer::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kCallSite); clean=false; } // restore the constructor call before the final publish
     if (!kntwr_mounted_officer::RemovePlacement(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kSlotAdjust); clean=false; }
     if (!kntwr_mounted_officer::RemoveVisual(delta)) { RecordError(SlotConflict,kntwr_mounted_officer::kVisualSite); clean=false; }
@@ -4052,6 +4090,10 @@ DWORD WINAPI Monitor(void*) {
     if (!kntwr_clip_picker_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_clip_picker_guard::kEntry); clean=false; } // restore the picker entry before the final publish
     if (!kntwr_terrain_merge_guard::RemoveRedirect(delta)) { RecordError(SlotConflict,kntwr_terrain_merge_guard::kCallSite); clean=false; } // restore the merge predicate call before the final publish
     PublishAnimGuard();
+    if (config.gameplay_flags&KNTWR_DRAG_LADDER) {
+        if (!kntwr_drag_ladder_hook::Remove()) { RecordError(SlotConflict,0x642c90u); clean=false; } // restore the FilesPerRow entry bytes before the final publish
+        PublishDragLadder();
+    }
     if (config.enabled_mask&KNTWR_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); kntwr_ai_census::Snapshot(kntwr_state.ai_census_words,CensusSlotsOwned()); StateEnd();
     }
@@ -4142,9 +4184,11 @@ static U StartImpl(void* raw) {
         // --brain-target-cull-shadow / --brain-target-cull exclude each other; the brain-step levers share the status words 16..23 with the geometry mode.
         (next.ai_ctrl_flags&(KNTWR_AI_TARGET_CULL_SHADOW|KNTWR_AI_TARGET_CULL))==(KNTWR_AI_TARGET_CULL_SHADOW|KNTWR_AI_TARGET_CULL) ||
         ((next.ai_ctrl_flags&KNTWR_AI_BRAIN_STEP_BITS) && (next.ai_ctrl_flags&KNTWR_AI_CTRL_GEOMETRY)) ||
-        (next.ai_ctrl_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&(KNTWR_AI_CTRL|KNTWR_AI_ASYNC2)) ||
+        (next.ai_ctrl_flags && (!(next.enabled_mask&kManagerRouted) || (next.enabled_mask&KNTWR_AI_CTRL) ||
+                                ((next.enabled_mask&KNTWR_AI_ASYNC2) && ((next.ai_ctrl_flags&KNTWR_AI_CTRL_MODE_MASK) || (next.ai_deferred && (next.ai_ctrl_flags&KNTWR_AI_CLAIM_BITS)))) ||
                                 ((next.ai_ctrl_flags&KNTWR_AI_CTRL_CENSUS) && (next.ai_ctrl_flags&(KNTWR_AI_CTRL_HISTOGRAM|KNTWR_AI_CTRL_GEOMETRY))) ||
                                 ((next.ai_ctrl_flags&KNTWR_AI_CTRL_VERIFY) && !(next.ai_ctrl_flags&(KNTWR_AI_CTRL_HISTOGRAM|KNTWR_AI_CTRL_GEOMETRY))))) ||
+        (next.gameplay_flags&~KNTWR_GAMEPLAY_FLAGS_VALID) || // --drag-ladder: stands alone (no manager route needed: its two seams are installed at monitor start)
         // --ai-prepass-*: the census hooks live behind the routed MANAGER tick and run on the thread executing site 34; the async2
         // schedule (private clones, no site-34 scope on the executing thread) is excluded. CENSUS combines only with PRESIZE.
         (next.ai_prepass_flags&~KNTWR_AI_PREPASS_FLAGS_VALID) ||
@@ -4203,6 +4247,11 @@ static U StartImpl(void* raw) {
         _InterlockedExchange(&life,before); return ThreadError;
     }
     config=next;
+    // Worker pool (shared by loco class-wrapper workers, collide contact workers, path, formation, ...): never more workers than
+    // max(1, usable logical processors - 2), usable = process affinity at start. Published as kntwr_state.workers below.
+    { DWORD_PTR affinity=0, systemAffinity=0;
+      if (GetProcessAffinityMask(GetCurrentProcess(),&affinity,&systemAffinity))
+          config.workers=kntwr_topology::ClampWorkers(config.workers,kntwr_topology::PopCount(static_cast<uint32_t>(affinity))); }
     const U preAllocMode=kntwr_state.alloc_census_words[KNTWR_ALLOC_CENSUS_MODE];
     U reqAllocMode=((config.va_watch_flags&KNTWR_ALLOC_CENSUS) ? kntwr_alloc_census::kModeCensus : 0u) |
                    ((config.va_watch_flags&KNTWR_ALLOC_FIX) ? kntwr_alloc_census::kModeFix : 0u);
@@ -4298,6 +4347,8 @@ static U StartImpl(void* raw) {
     for (U i=0;i<KNTWR_MOUNTED_OFFICER_WORDS;++i) kntwr_state.mounted_officer_words[i]=0;
     kntwr_clip_picker_guard::ResetRow();
     for (U i=0;i<KNTWR_ANIM_GUARD_WORDS;++i) kntwr_state.anim_guard_words[i]=0;
+    kntwr_drag_ladder_hook::ResetRow();
+    for (U i=0;i<KNTWR_DRAG_LADDER_WORDS;++i) kntwr_state.drag_ladder_words[i]=0;
     kntwr_engage_census::Snapshot(kntwr_state.engage_census_words); // zero row (Reset above) or the armed header
     for (U cls=0;cls<KNTWR_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<KNTWR_NODE_WORDS;++i) kntwr_state.idle_node_words[cls][i]=0;

@@ -391,14 +391,6 @@ uint32_t EmitColumn(Gen& g, const Entry& e, uint32_t rowLen, uint32_t count, flo
     return rem;
 }
 
-// ---- 0x642C90 ----
-uint32_t FilesPerRow(float w, float l8, float l10) {
-    float x = Add(w, kFileSlack);
-    x = x - l8;
-    x = x / l10;
-    const uint32_t r = static_cast<uint32_t>(X87Trunc(x)) + 1u;
-    return r < 1u ? 1u : r;
-}
 
 // ---- 0x65A410 (ctx vfn0) + 0x65A3F0 (counter++) ----
 uint32_t StepEntry(Gen& g, const Entry& e) {
@@ -558,6 +550,15 @@ bool Validate(const Input& in) {
 }
 
 }  // namespace
+// ---- 0x642C90 (public; anonymous helpers Add / X87Trunc stay the only math) ----
+uint32_t FilesPerRow(float w, float l8, float l10) {
+    float x = Add(w, kFileSlack);
+    x = x - l8;
+    x = x / l10;
+    const uint32_t r = static_cast<uint32_t>(X87Trunc(x)) + 1u;
+    return r < 1u ? 1u : r;
+}
+
 
 static int GenerateImpl(const Input& in, Slot* out, uint32_t capacity, Result* result) {
     if (!result || (!out && capacity)) return kBadInput;

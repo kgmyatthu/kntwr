@@ -315,6 +315,7 @@ typedef struct Options {
     BOOL mounted_officer;    /* --mounted-officer: gameplay feature, one mount for the officer of units with resolved mount columns (KNTWR_MOUNTED_OFFICER); implied by --features all unless --no-mounted-officer */
     BOOL no_mounted_officer; /* --no-mounted-officer: opt out of --mounted-officer under --features all */
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
+    BOOL drag_ladder;        /* --drag-ladder: opt-in GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); never implied by --features all */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
@@ -2433,6 +2434,11 @@ static void print_army_residual(const uint32_t *w)
     static const char *const gates[9] = { "dirty_a(576EA0)", "dirty_b(57C9F0)", "agg(53C180)", "fsm(580990)",
         "cmdpred(586440)", "cmdctor(51A3A0)", "queue(581E80)", "tail(551A40)", "rec(DACDC0)" };
     if (!w[1]) return;
+    if (w[0] != KNTWR_FORMATION_RESIDUAL_VERSION) {
+        say(L"army_residual: row version %lu is not the version %lu this launcher decodes; layout not printed\n",
+            (unsigned long)w[0], (unsigned long)KNTWR_FORMATION_RESIDUAL_VERSION);
+        return;
+    }
     say(L"army_residual v%lu: ticks=%lu storm_ticks=%lu form_calls=%lu clone_forms=%lu other_forms=%lu member_calls=%lu "
         L"observer_us=%lu qpc_read_cost_q16=%lu gate_outside=%lu callee_overflow=%lu\n",
         (unsigned long)w[0], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5],
@@ -2454,25 +2460,84 @@ static void print_army_residual(const uint32_t *w)
             (unsigned long)a[8], (unsigned long)a[27], (unsigned long)a[28], (unsigned long)a[29], (unsigned long)a[30]);
         for (g = 0; g < 9; ++g)
             say(L"    %hs calls=%lu us=%lu\n", gates[g], (unsigned long)a[9 + g * 2], (unsigned long)a[10 + g * 2]);
+        say(L"    limited-solve (inclusive wall us inside tick/site18/formation buckets, never additive): ticks=%lu calls=%lu us=%lu (max call %lu us, max tick %lu us) limited-only ticks=%lu calls=%lu us=%lu\n",
+            (unsigned long)a[32], (unsigned long)a[33], (unsigned long)a[34], (unsigned long)a[35], (unsigned long)a[36],
+            (unsigned long)a[37], (unsigned long)a[38], (unsigned long)a[39]);
     }
-    for (i = 0; i < 8; ++i) {
-        const uint32_t *e = w + 116 + i * 24;
-        if (!e[0] && !e[3]) continue;
-        say(L"  top%lu: tick=%lu site18=%lu us forms=%lu form=%lu us (max %lu us %lu members) loop1=%lu loop2=%lu us "
+    for (i = 0; i < KNTWR_FORMATION_RESIDUAL_TOP_ROWS; ++i) {
+        const uint32_t *e = w + KNTWR_FORMATION_RESIDUAL_TOP_OFFSET + i * KNTWR_FORMATION_RESIDUAL_ENTRY_WORDS;
+        if (!e[0] && !e[3] && !e[24] && !e[25]) continue;
+        say(L"  top%lu: tick=%lu qpc_start=%I64u tick_us=%lu site18=%lu us forms=%lu form=%lu us (max %lu us %lu members) loop1=%lu loop2=%lu us "
             L"members=%lu loop_calls=%lu | dirtyA=%lu dirtyB=%lu agg=%lu fsm=%lu cmdpred=%lu cmdctor=%lu queue=%lu tail=%lu "
-            L"rec=%lu r1=%lu r1b=%lu r2=%lu queue_r2=%lu us dirty_ab_calls=%lu/%lu\n",
-            (unsigned long)i, (unsigned long)e[0], (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3],
+            L"rec=%lu r1=%lu r1b=%lu r2=%lu queue_r2=%lu us dirty_ab_calls=%lu/%lu | limited calls=%lu us=%lu max=%lu us flags=%lu | "
+            L"queue_cmds=%lu us=%lu slowest vtable=%08lX slot=%lu us=%lu\n",
+            (unsigned long)i, (unsigned long)e[0], ((unsigned long long)e[25] << 32) | e[24], (unsigned long)e[26],
+            (unsigned long)e[1], (unsigned long)e[2], (unsigned long)e[3],
             (unsigned long)e[4], (unsigned long)e[5], (unsigned long)e[6], (unsigned long)e[7], (unsigned long)e[8],
             (unsigned long)e[9], (unsigned long)e[10], (unsigned long)e[11], (unsigned long)e[12], (unsigned long)e[13],
             (unsigned long)e[14], (unsigned long)e[15], (unsigned long)e[16], (unsigned long)e[17], (unsigned long)e[18],
             (unsigned long)e[19], (unsigned long)e[20], (unsigned long)e[21], (unsigned long)e[22],
-            (unsigned long)(e[23] & 0xFFFFu), (unsigned long)(e[23] >> 16));
+            (unsigned long)(e[23] & 0xFFFFu), (unsigned long)(e[23] >> 16),
+            (unsigned long)e[27], (unsigned long)e[28], (unsigned long)e[29], (unsigned long)e[30],
+            (unsigned long)e[31], (unsigned long)e[32], (unsigned long)e[33], (unsigned long)e[34], (unsigned long)e[35]);
+        if (!e[36])
+            say(L"    route: no routed callback this tick (coverage none: the private 581CA0 chain did not run, so zero nested counts here are NOT zero native work; the slowest callback above ran native)\n");
+        else
+            say(L"    route: callbacks=%lu us=%lu | enter(4F84C0 transition)=%lu/%lu us other_enter=%lu/%lu us assign(57B000)=%lu/%lu us perman(55F160)=%lu/%lu us | "
+                L"slowest routed vtable=%08lX slot=%lu us=%lu enter=%lu/%lu us other_enter=%lu/%lu us assign=%lu/%lu us perman=%lu/%lu us%ls\n",
+                (unsigned long)e[36], (unsigned long)e[37], (unsigned long)e[38], (unsigned long)e[39], (unsigned long)e[40], (unsigned long)e[41],
+                (unsigned long)e[42], (unsigned long)e[43], (unsigned long)e[44], (unsigned long)e[45],
+                (unsigned long)e[46], (unsigned long)e[47], (unsigned long)e[48], (unsigned long)e[49], (unsigned long)e[50],
+                (unsigned long)e[51], (unsigned long)e[52], (unsigned long)e[53], (unsigned long)e[54], (unsigned long)e[55], (unsigned long)e[56],
+                (e[30] & 4u) ? L" (= the slowest queue callback of the tick)" : L" (not the slowest queue callback of the tick)");
+        if (e[36])
+            say(L"    assign split (census; assign scope = solver-clone scopes inside the routed 57B000, inner = solver chain deltas over the same span): "
+                L"scope=%lu us/%lu scopes kernel=%lu us solves=%lu lim=%lu us/%lu calls suppressed=%lu assign_entries=%lu | "
+                L"slowest routed: scope=%lu us/%lu scopes kernel=%lu us solves=%lu lim=%lu us/%lu calls suppressed=%lu assign_entries=%lu\n",
+                (unsigned long)e[57], (unsigned long)e[58], (unsigned long)e[59], (unsigned long)e[60],
+                (unsigned long)e[61], (unsigned long)e[62], (unsigned long)e[63], (unsigned long)e[64],
+                (unsigned long)e[65], (unsigned long)e[66], (unsigned long)e[67], (unsigned long)e[68],
+                (unsigned long)e[69], (unsigned long)e[70], (unsigned long)e[71], (unsigned long)e[72]);
+    }
+    {
+        const uint32_t *l = w + KNTWR_FORMATION_RESIDUAL_LEDGER_OFFSET;
+        say(L"  ledger: top_capacity=%lu entry_words=%lu offered=%lu retained=%lu rejected=%lu evicted=%lu | limited ticks=%lu retained=%lu omitted=%lu | sink_calls=%lu folded=%lu aborted=%lu outside=%lu pending=%lu | aborted_ticks=%lu aborted_lim_us=%lu aborted_form_calls=%lu | queue_calls=%lu folded=%lu aborted=%lu outside=%lu pending=%lu aborted_queue_us=%lu | route_begun=%lu folded=%lu aborted=%lu discarded=%lu pending=%lu refused_scope=%lu refused_depth=%lu unscoped_gates=%lu aborted_route_us=%lu\n",
+            (unsigned long)l[0], (unsigned long)l[1], (unsigned long)l[2], (unsigned long)l[3], (unsigned long)l[4], (unsigned long)l[5],
+            (unsigned long)l[6], (unsigned long)l[7], (unsigned long)l[8], (unsigned long)l[9], (unsigned long)l[10],
+            (unsigned long)l[11], (unsigned long)l[12], (unsigned long)(l[9] - l[10] - l[11] - l[12]),
+            (unsigned long)l[13], (unsigned long)l[14], (unsigned long)l[15],
+            (unsigned long)l[16], (unsigned long)l[17], (unsigned long)l[18], (unsigned long)l[19],
+            (unsigned long)(l[16] - l[17] - l[18] - l[19]), (unsigned long)l[20],
+            (unsigned long)l[21], (unsigned long)l[22], (unsigned long)l[23], (unsigned long)l[24],
+            (unsigned long)(l[21] - l[22] - l[23] - l[24]), (unsigned long)l[25], (unsigned long)l[26], (unsigned long)l[27], (unsigned long)l[28]);
+    }
+    {
+        const uint32_t *q = w + KNTWR_FORMATION_RESIDUAL_QUEUE_OFFSET;
+        say(L"  queue commands (cumulative over every observed returned callback, aborted ticks included; inclusive us): overflow calls=%lu us=%lu\n",
+            (unsigned long)q[0], (unsigned long)q[1]);
+        for (i = 0; i < KNTWR_FORMATION_RESIDUAL_QUEUE_CLASSES; ++i) {
+            const uint32_t *c = q + 2 + i * 5;
+            if (!c[2]) continue;
+            say(L"    class vtable=%08lX slot=%lu calls=%lu us=%lu max=%lu us\n",
+                (unsigned long)c[0], (unsigned long)c[1], (unsigned long)c[2], (unsigned long)c[3], (unsigned long)c[4]);
+        }
+    }
+    {
+        const uint32_t *t = w + KNTWR_FORMATION_RESIDUAL_ROUTE_OFFSET;
+        say(L"  command-split route (cumulative over every routed 581CA0 callback that ended normally in an owner invocation; inclusive us): armed=%lu calls=%lu us=%lu max=%lu us no_enter_calls=%lu | "
+            L"enter(4F84C0 transition)=%lu/%lu us other_enter=%lu/%lu us assign(57B000)=%lu/%lu us perman(55F160)=%lu/%lu us\n",
+            (unsigned long)t[0], (unsigned long)t[1], (unsigned long)t[2], (unsigned long)t[3], (unsigned long)t[4],
+            (unsigned long)t[5], (unsigned long)t[6], (unsigned long)t[7], (unsigned long)t[8], (unsigned long)t[9],
+            (unsigned long)t[10], (unsigned long)t[11], (unsigned long)t[12]);
+        say(L"  assign split (cumulative; census): scope=%lu us/%lu scopes kernel=%lu us solves=%lu lim=%lu us/%lu calls suppressed=%lu assign_entries=%lu\n",
+            (unsigned long)t[13], (unsigned long)t[14], (unsigned long)t[15], (unsigned long)t[16],
+            (unsigned long)t[17], (unsigned long)t[18], (unsigned long)t[19], (unsigned long)t[20]);
     }
 }
-/* Army solver (native_army_solver.h): header 57 words (KNTWR_ARMY_SOLVER_LABELS), top-16 tick table at 57 (13 words each) and top-16 solve table
-   at 265 (16 words each), longest solver time first, 521 words in all. Prints nothing when the module is off (version word 0). */
-#define SOLVER_TICK_TABLE 57u
-#define SOLVER_SOLVE_TABLE 265u
+/* Army solver (native_army_solver.h): header 60 words (KNTWR_ARMY_SOLVER_LABELS), top-16 tick table at 60 (13 words each) and top-16 solve table
+   at 268 (16 words each), longest solver time first, 524 words in all. Prints nothing when the module is off (version word 0). */
+#define SOLVER_TICK_TABLE 60u
+#define SOLVER_SOLVE_TABLE 268u
 #define SOLVER_ENTRY_WORDS 13u
 #define SOLVER_SOLVE_WORDS 16u
 static void print_army_solver(const uint32_t *w)
@@ -2497,6 +2562,8 @@ static void print_army_solver(const uint32_t *w)
         (unsigned long)w[48], (unsigned long)w[49], ((unsigned __int64)w[45] << 32) | w[44], (unsigned long)w[46], (unsigned long)w[47], (unsigned long)w[50], (unsigned long)w[52], (unsigned long)w[53], (unsigned long)w[54], (unsigned long)w[51]);
     say(L"  cache route: assignments=%lu solved_kernel=%lu (solve flags bit9 marks cache origin)\n",
         (unsigned long)w[55], (unsigned long)w[56]);
+    say(L"  command route (57B021 rewrite): assignments=%lu solved_kernel=%lu gate_native=%lu (solve flags bit10 marks command origin)\n",
+        (unsigned long)w[57], (unsigned long)w[58], (unsigned long)w[59]);
     for (i = 0; i < 16; ++i) {
         const uint32_t *e = w + SOLVER_TICK_TABLE + i * SOLVER_ENTRY_WORDS;
         if (!e[0] && !e[1]) continue;
@@ -2594,6 +2661,19 @@ static void print_anim_guard(const uint32_t *w)
     if (!w[7] || !w[0]) return;
     say(L"  anim_guard:");
     for (i = 0; i < KNTWR_ANIM_GUARD_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
+    say(L"\n");
+}
+/* --drag-ladder (src/formation/kntwr_drag_ladder_hook.h): printed only when the runtime published the row (word 0 = version). */
+static void print_drag_ladder(const uint32_t *w)
+{
+    static const char *const names[KNTWR_DRAG_LADDER_WORDS] = { KNTWR_DRAG_LADDER_LABELS };
+    unsigned i;
+    if (!w[0]) return;
+    say(L"  drag_ladder: files-per-row laddered at source (FilesPerRow 0x642C90) applied_this_run=%ls calls=%lu laddered=%lu passthrough=%lu faults=%lu last_files=%lu->%lu\n",
+        w[2] ? L"APPLIED" : L"NOT-APPLIED", (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6],
+        (unsigned long)w[7], (unsigned long)w[8]);
+    say(L"  drag_ladder words:");
+    for (i = 0; i < KNTWR_DRAG_LADDER_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
     say(L"\n");
 }
 static void print_engage_census(const uint32_t *w)
@@ -2836,6 +2916,7 @@ static void print_module_words(const kntwr_status *s, uint32_t brain_flags, uint
     print_overlay(s->overlay_words);
     print_mounted_officer(s->mounted_officer_words);
     print_anim_guard(s->anim_guard_words);
+    print_drag_ladder(s->drag_ladder_words);
     print_engage_census(s->engage_census_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
@@ -4448,21 +4529,78 @@ static void sb_army_storm(Sb *b, const Run *r)
     for (i = 0; i < KNTWR_ARMY_STORM_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
     sb_fmt(b, "]},\n");
 }
-/* army_residual (KNTWR_ARMY_STORM_CENSUS): every labelled word of army_residual_words (native_formation_residual.h, 320 words). */
+/* army_residual (KNTWR_ARMY_STORM_CENSUS): every labelled word of army_residual_words (native_formation_residual.h, 832 words) plus the decoded
+   top rows with their 64-bit QPC start identity ("top": retained rows in table order; "ledger" in the words map counts what was offered/omitted;
+   "route" of a row = the routed command-split callbacks of that invocation and "route_slow" the slowest routed callback's own nested counts,
+   valid only when route.calls != 0), the decoded queue class table ("queue_classes": cumulative over every observed normally-returned callback,
+   aborted ticks included) and the cumulative "route_table". */
 static void sb_army_residual(Sb *b, const Run *r)
 {
     static const char *const labels[KNTWR_FORMATION_RESIDUAL_WORDS] = { KNTWR_FORMATION_RESIDUAL_LABELS };
     const uint32_t *w = r->last.army_residual_words;
-    unsigned i;
+    unsigned i, n = 0;
     if (!(r->cfg.va_watch_flags & KNTWR_ARMY_STORM_CENSUS) || !r->have_status || !w[1]) {
         sb_fmt(b, "  \"army_residual\": null,\n");
         return;
     }
-    sb_fmt(b, "  \"army_residual\": {\"words\": {");
+    if (w[0] != KNTWR_FORMATION_RESIDUAL_VERSION) {
+        sb_fmt(b, "  \"army_residual\": {\"unsupported_version\": %lu, \"expected_version\": %lu},\n",
+               (unsigned long)w[0], (unsigned long)KNTWR_FORMATION_RESIDUAL_VERSION);
+        return;
+    }
+    sb_fmt(b, "  \"army_residual\": {\"version\": %lu, \"words\": {", (unsigned long)w[0]);
     for (i = 0; i < KNTWR_FORMATION_RESIDUAL_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", labels[i], (unsigned long)w[i]);
     sb_fmt(b, "}, \"raw\": [");
     for (i = 0; i < KNTWR_FORMATION_RESIDUAL_WORDS; ++i) sb_fmt(b, "%s%lu", i ? "," : "", (unsigned long)w[i]);
-    sb_fmt(b, "]},\n");
+    sb_fmt(b, "], \"top\": [");
+    for (i = 0; i < KNTWR_FORMATION_RESIDUAL_TOP_ROWS; ++i) {
+        const uint32_t *e = w + KNTWR_FORMATION_RESIDUAL_TOP_OFFSET + i * KNTWR_FORMATION_RESIDUAL_ENTRY_WORDS;
+        if (!e[0] && !e[3] && !e[24] && !e[25]) continue;
+        sb_fmt(b, "%s{\"tick\": %lu, \"qpc_start\": %I64u, \"tick_us\": %lu, \"site18_us\": %lu, \"form_us\": %lu, \"member_calls\": %lu, "
+                  "\"loop_calls\": %lu, \"lim_calls\": %lu, \"lim_us\": %lu, \"lim_max_us\": %lu, \"flags\": %lu, "
+                  "\"queue_cmd_calls\": %lu, \"queue_cmd_us\": %lu, \"slow_vtable\": %lu, \"slow_slot\": %lu, \"slow_us\": %lu, "
+                  "\"slow_routed\": %s, \"route\": {\"calls\": %lu, \"us\": %lu, \"enter_calls\": %lu, \"enter_us\": %lu, \"other_enter_calls\": %lu, \"other_enter_us\": %lu, "
+                  "\"assign_calls\": %lu, \"assign_us\": %lu, \"perman_calls\": %lu, \"perman_us\": %lu, "
+                  "\"assign_scope_us\": %lu, \"assign_scope_calls\": %lu, \"inner_kernel_us\": %lu, \"inner_solves\": %lu, "
+                  "\"inner_lim_us\": %lu, \"inner_lim_calls\": %lu, \"inner_suppressed\": %lu, \"inner_assign_entries\": %lu}, "
+                  "\"route_slow\": {\"vtable\": %lu, \"slot\": %lu, \"us\": %lu, \"enter_calls\": %lu, \"enter_us\": %lu, \"other_enter_calls\": %lu, \"other_enter_us\": %lu, "
+                  "\"assign_calls\": %lu, \"assign_us\": %lu, \"perman_calls\": %lu, \"perman_us\": %lu, "
+                  "\"assign_scope_us\": %lu, \"assign_scope_calls\": %lu, \"inner_kernel_us\": %lu, \"inner_solves\": %lu, "
+                  "\"inner_lim_us\": %lu, \"inner_lim_calls\": %lu, \"inner_suppressed\": %lu, \"inner_assign_entries\": %lu}}",
+               n++ ? ", " : "", (unsigned long)e[0], ((unsigned long long)e[25] << 32) | e[24],
+               (unsigned long)e[26], (unsigned long)e[1], (unsigned long)e[3], (unsigned long)e[8], (unsigned long)e[9],
+               (unsigned long)e[27], (unsigned long)e[28], (unsigned long)e[29], (unsigned long)e[30],
+               (unsigned long)e[31], (unsigned long)e[32], (unsigned long)e[33], (unsigned long)e[34], (unsigned long)e[35],
+               (e[30] & 4u) ? "true" : "false",
+               (unsigned long)e[36], (unsigned long)e[37], (unsigned long)e[38], (unsigned long)e[39], (unsigned long)e[40], (unsigned long)e[41],
+               (unsigned long)e[42], (unsigned long)e[43], (unsigned long)e[44], (unsigned long)e[45],
+               (unsigned long)e[57], (unsigned long)e[58], (unsigned long)e[59], (unsigned long)e[60],
+               (unsigned long)e[61], (unsigned long)e[62], (unsigned long)e[63], (unsigned long)e[64],
+               (unsigned long)e[46], (unsigned long)e[47], (unsigned long)e[48], (unsigned long)e[49], (unsigned long)e[50],
+               (unsigned long)e[51], (unsigned long)e[52], (unsigned long)e[53], (unsigned long)e[54], (unsigned long)e[55], (unsigned long)e[56],
+               (unsigned long)e[65], (unsigned long)e[66], (unsigned long)e[67], (unsigned long)e[68],
+               (unsigned long)e[69], (unsigned long)e[70], (unsigned long)e[71], (unsigned long)e[72]);
+    }
+    sb_fmt(b, "], \"queue_classes\": [");
+    for (i = 0, n = 0; i < KNTWR_FORMATION_RESIDUAL_QUEUE_CLASSES; ++i) {
+        const uint32_t *c = w + KNTWR_FORMATION_RESIDUAL_QUEUE_OFFSET + 2 + i * 5;
+        if (!c[2]) continue;
+        sb_fmt(b, "%s{\"vtable\": %lu, \"slot\": %lu, \"calls\": %lu, \"us\": %lu, \"max_us\": %lu}",
+               n++ ? ", " : "", (unsigned long)c[0], (unsigned long)c[1], (unsigned long)c[2], (unsigned long)c[3], (unsigned long)c[4]);
+    }
+    {
+        const uint32_t *t = w + KNTWR_FORMATION_RESIDUAL_ROUTE_OFFSET;
+        sb_fmt(b, "], \"route_table\": {\"armed\": %lu, \"calls\": %lu, \"us\": %lu, \"max_us\": %lu, \"no_enter_calls\": %lu, "
+                  "\"enter_calls\": %lu, \"enter_us\": %lu, \"other_enter_calls\": %lu, \"other_enter_us\": %lu, "
+                  "\"assign_calls\": %lu, \"assign_us\": %lu, \"perman_calls\": %lu, \"perman_us\": %lu, "
+                  "\"assign_scope_us\": %lu, \"assign_scope_calls\": %lu, \"inner_kernel_us\": %lu, \"inner_solves\": %lu, "
+                  "\"inner_lim_us\": %lu, \"inner_lim_calls\": %lu, \"inner_suppressed\": %lu, \"inner_assign_entries\": %lu}},\n",
+               (unsigned long)t[0], (unsigned long)t[1], (unsigned long)t[2], (unsigned long)t[3], (unsigned long)t[4],
+               (unsigned long)t[5], (unsigned long)t[6], (unsigned long)t[7], (unsigned long)t[8], (unsigned long)t[9],
+               (unsigned long)t[10], (unsigned long)t[11], (unsigned long)t[12],
+               (unsigned long)t[13], (unsigned long)t[14], (unsigned long)t[15], (unsigned long)t[16],
+               (unsigned long)t[17], (unsigned long)t[18], (unsigned long)t[19], (unsigned long)t[20]);
+    }
 }
 /* army_solver (KNTWR_ARMY_SOLVER_MEMO/SHADOW): every labelled header word of army_solver_words (native_army_solver.h) plus the decoded top-16 tick and solve tables. */
 static void sb_army_solver(Sb *b, const Run *r)
@@ -4585,6 +4723,19 @@ static void sb_anim_guard(Sb *b, const Run *r)
     sb_fmt(b, "  \"anim_guard\": {");
     for (i = 0; i < KNTWR_ANIM_GUARD_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.anim_guard_words[i]);
     sb_fmt(b, "},\n");
+}
+/* --drag-ladder (src/formation/kntwr_drag_ladder_hook.h): the hook counters; null unless requested. installed is sticky applied-this-run (1 after a successful Install until ResetRow), not live hook presence. */
+static void sb_drag_ladder(Sb *b, const Run *r)
+{
+    static const char *const names[KNTWR_DRAG_LADDER_WORDS] = { KNTWR_DRAG_LADDER_LABELS };
+    unsigned i;
+    if (!r->opt.drag_ladder) {
+        sb_fmt(b, "  \"drag_ladder\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"drag_ladder\": {\"have_status\": %s, \"words\": {", r->have_status ? "true" : "false");
+    for (i = 0; i < KNTWR_DRAG_LADDER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.drag_ladder_words[i]);
+    sb_fmt(b, "}},\n");
 }
 static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
 {
@@ -5365,6 +5516,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"heap_optimize_requested\": %s,\n", r->opt.heap_optimize ? "true" : "false");
     sb_fmt(&b, "  \"mounted_officer_requested\": %s,\n  \"mounted_officer_widen_requested\": %s,\n", r->opt.mounted_officer ? "true" : "false",
            r->opt.mounted_officer_widen ? "true" : "false");
+    sb_fmt(&b, "  \"drag_ladder_requested\": %s,\n", r->opt.drag_ladder ? "true" : "false");
     sb_fmt(&b, "  \"engage_census_requested\": %s,\n", r->opt.engage_census ? "true" : "false");
     sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
            (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (KNTWR_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
@@ -5432,6 +5584,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_overlay(&b, r);
     sb_mounted_officer(&b, r);
     sb_anim_guard(&b, r);
+    sb_drag_ladder(&b, r);
     sb_engage_census(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
@@ -6341,6 +6494,7 @@ static int install_runtime(Run *r)
                            (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
+    r->cfg.gameplay_flags = r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u;
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + sizeof r->cfg, r->dll_path, plen_bytes);
     {
@@ -6835,6 +6989,7 @@ static BOOL launch_game(Run *r)
         say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
+    if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
     if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
     if (r->opt.formation_census)
         say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
@@ -7087,6 +7242,12 @@ static void usage(void)
         L"                        0x531340 to a private constructor clone and the unit visual constructor test at 0x72C9D2 to a gate that still builds the bayonet\n"
         L"                        attachment list for infantry that carry the officer's horse (all restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
         L"  --no-mounted-officer  opt out of --mounted-officer under --features all\n"
+        L"  --drag-ladder         GAMEPLAY feature (opt-in; NEVER implied by --features all; changes the simulation: every multiplayer peer must run the same setting): the player's\n"
+        L"                        drag-out formation frontage snaps DOWN to 60-file steps once it exceeds 60 files (<= 60 files is untouched). One detour at the engine's\n"
+        L"                        files-per-row function (FilesPerRow 0x642C90) floors its result to a 60-multiple above 60 files, so the blue preview markers, the placement\n"
+        L"                        records, the slot generator, the issued order and the formation solver all read the same laddered count by construction. Needs no routed\n"
+        L"                        tick. The site verifies the stock bytes first; restored at stop. Words: drag_ladder_words (installed, calls, laddered, passthrough, last files),\n"
+        L"                        receipt drag_ladder.\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
@@ -7213,7 +7374,7 @@ static void usage(void)
         L"  --ai-claim-once       AI-ONLY GAMEPLAY DEVIATION. One 0x82F3A0 placement recompute per planner fallback claim call instead of one per claimed\n"
         L"                        unit: every unit is still claimed in the same think as native (none is left without owner/orders across a tick), but\n"
         L"                        the controller's placement score (+0x720/+0x758) is recomputed only for the last claimed unit (earlier units hit the\n"
-        L"                        native memo gate). Needs a routed tick (e.g. --features all), excludes ai_ctrl/ai_async2/--ai-deferred; combines with\n"
+        L"                        native memo gate). Needs a routed tick (e.g. --features all), excludes ai_ctrl/--ai-deferred; combines with\n"
         L"                        --ai-poly and --ai-spiral-census (ai_claim_once row: entries, masked recomputes, refusals, controller-state hash)\n"
         L"  --ai-claim-once-census  the same claim loop WITHOUT the elision (native recomputes) publishing the same controller-state hash: the native\n"
         L"                        reference for comparing hashes against a --ai-claim-once run of the same replay; excludes --ai-claim-once\n");
@@ -7223,10 +7384,10 @@ static void usage(void)
         L"                        search cooldown is set to (agent+0x2C & 0xF) ticks (the engine's own per-man jitter, 0..15), so a target-loss\n"
         L"                        wave of searches spreads over 16 ticks; meanwhile the man has no target (walks to its slot or stands, as in the\n"
         L"                        native 40..55-tick failed-search wait). Forced melee targets (enemy within 3 m), the periodic 64-tick clear and the\n"
-        L"                        failed-search cooldown stay native. Needs a routed tick (e.g. --features all) and excludes ai_ctrl/ai_async2 and\n"
+        L"                        failed-search cooldown stay native. Needs a routed tick (e.g. --features all) and excludes ai_ctrl and\n"
         L"                        --ai-ctrl-geometry (brain_retarget_jitter row: tracker_calls, losses, jittered, delay_sum)\n"
         L"  --brain-target-cull   bit-exact host mirror of soldier-brain melee target search 0x553420 (src/brain/kntwr_target_cull.h); no gameplay\n"
-        L"                        change. Needs a routed tick, excludes ai_ctrl/ai_async2/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
+        L"                        change. Needs a routed tick, excludes ai_ctrl/--ai-ctrl-geometry and --brain-target-cull-shadow\n"
         L"  --brain-target-cull-shadow  native answers every target search while the host replacement runs beside it and is compared (mismatch\n"
         L"                        counters in the brain_target_cull row); excludes --brain-target-cull\n"
         L"  --workers N           worker threads 1..16 (default 8; pool supports 31, keep <= hardware threads - 2 for the tick and render threads)\n"
@@ -7438,6 +7599,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             g_game_exe = o->game_exe;
         }
         else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
+        else if (!wcscmp(name, L"--drag-ladder")) o->drag_ladder = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -7585,16 +7747,16 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
        - --ai-record-test: the alternate placement delegate 0x13376AC routed into the bit-exact poly kernel (rt-shadow: 304,318 compares,
          0 mismatches). Needs the poly kernel live, so it follows --ai-poly; --ai-record-test-shadow opts out.
        - --ai-claim-once (AI-only deviation, user-approved): one placement recompute per fallback claim call (controller-state hash equal
-         to the native-recompute census over 3000 multi-entry calls). --ai-claim-once-census, ai_ctrl, ai_async2 opt out. */
+         to the native-recompute census over 3000 multi-entry calls). --ai-claim-once-census, ai_ctrl, --ai-deferred opt out. */
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL && (o->ai_prepass_flags & KNTWR_AI_POLY) && !(o->ai_prepass_flags & KNTWR_AI_RECORD_TEST_SHADOW))
         o->ai_prepass_flags |= KNTWR_AI_RECORD_TEST;
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) && !o->ai_claim_once_census && !o->ai_deferred)
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & KNTWR_AI_CTRL) && !o->ai_claim_once_census && !o->ai_deferred)
         o->ai_claim_once = TRUE;
     /* The shipping set also implies the bit-exact melee target-search replacement (--brain-target-cull; tc-shadow/tc-shadow2:
        4.7 M compares, 0 mismatches; frontier: brain >80 ms 21 ticks -> 0, brain max 168 -> 49 ms, mean brain -2.4 ms/tick;
-       perf bad / waterloo unchanged at p50). --brain-target-cull-shadow, --ai-ctrl-geometry, ai_ctrl and ai_async2 opt out.
+       perf bad / waterloo unchanged at p50). --brain-target-cull-shadow, --ai-ctrl-geometry and ai_ctrl opt out.
        --brain-retarget-jitter (NO-GO as a lever, behaviour change) is never implied. */
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) && !o->brain_target_cull_shadow &&
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(o->mask & KNTWR_AI_CTRL) && !o->brain_target_cull_shadow &&
         !(o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY))
         o->brain_target_cull = TRUE;
     /* The shipping set also implies pathfinder +0x17C waypoint subnode leak reclamation
@@ -7661,17 +7823,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
                L"every --ai-ctrl-* excludes the ai_ctrl and ai_async2 features.\n");
         return -1;
     }
-    if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
+    if ((o->ai_claim_once || o->ai_claim_once_census) && ((o->ai_claim_once && o->ai_claim_once_census) || (o->mask & KNTWR_AI_CTRL) || o->ai_deferred ||
                              !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT)))) {
         errsay(L"--ai-claim-once / --ai-claim-once-census are exclusive, need a routed tick (add profile or a simulation feature, e.g. --features all) "
-               L"and exclude the ai_ctrl and ai_async2 features (--ai-deferred is an ai_async2 schedule).\n");
+               L"and exclude the ai_ctrl feature and --ai-deferred.\n");
         return -1;
     }
     if ((o->brain_target_cull || o->brain_target_cull_shadow || o->brain_retarget_jitter) &&
-        ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY) || (o->mask & (KNTWR_AI_CTRL | KNTWR_AI_ASYNC2)) ||
+        ((o->brain_target_cull && o->brain_target_cull_shadow) || (o->ai_ctrl_flags & KNTWR_AI_CTRL_GEOMETRY) || (o->mask & KNTWR_AI_CTRL) ||
          !(o->mask & (KNTWR_PROFILE | KNTWR_AI_ASYNC | KNTWR_BRAIN2 | KNTWR_COLLIDE | KNTWR_COLLIDE_LOD | KNTWR_LOCO | KNTWR_CAVALRY_ORBIT)))) {
         errsay(L"--brain-target-cull / --brain-target-cull-shadow / --brain-retarget-jitter need a routed tick (add profile or a simulation feature, e.g. --features all), "
-               L"exclude the ai_ctrl and ai_async2 features and --ai-ctrl-geometry; --brain-target-cull and --brain-target-cull-shadow are exclusive.\n");
+               L"exclude the ai_ctrl feature and --ai-ctrl-geometry; --brain-target-cull and --brain-target-cull-shadow are exclusive.\n");
         return -1;
     }
     if (o->ai_prepass_flags && (o->mask & KNTWR_AI_ASYNC2)) {
@@ -7986,6 +8148,7 @@ static int run_main(Run *r, int argc, wchar_t **argv)
                            (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
+    r->cfg.gameplay_flags = r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u;
     say(L"Effective config: mask=0x%08lX workers=%lu loco_flags=0x%08lX collide_flags=0x%08lX va_watch_flags=0x%08lX\n",
         (unsigned long)r->cfg.enabled_mask, (unsigned long)r->cfg.workers, (unsigned long)r->cfg.loco_flags,
         (unsigned long)r->cfg.collide_flags, (unsigned long)r->cfg.va_watch_flags);
@@ -8023,6 +8186,7 @@ static int run_main(Run *r, int argc, wchar_t **argv)
             say(L"  alloc: %ls\n", (r->opt.alloc_census && r->opt.alloc_fix) ? L"FIX + CENSUS (mode=3)" :
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
+        if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
         if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
         if (r->opt.allow_concurrent) say(L"  concurrent: ALLOWED (a second game instance may run; timings are not comparable between concurrent runs)\n");
         say(L"Validation complete; nothing was started.\n");

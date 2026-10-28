@@ -113,6 +113,8 @@ enum Status : int { kOk = 0, kCapacity = 1, kBadInput = 2 };
 
 // out must hold in.men Slot entries.  Records never exceed men (remaining is decremented per record).
 int Generate(const Input& in, Slot* out, uint32_t capacity, Result* result);
+// Exact port of stock cdecl 0x642C90 (x87 trunc). Hook and oracles call this; do not copy the math.
+uint32_t FilesPerRow(float w, float l8, float l10);
 
 // Adapter to ntw_formation::SlotInput (native_formation_slot.h): slotX = worldX, slotZ = worldZ, slotAngle = angle.
 void ToSlotArrays(const Slot* slots, uint32_t count, float* slotX, float* slotZ, uint16_t* slotAngle);

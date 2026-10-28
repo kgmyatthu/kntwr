@@ -189,6 +189,11 @@ enum kntwr_binding {
        thiscall ECX = cache, three stack arguments in order (slotvec, flag, outvec), callee ret 0xC.
        The host preserves the cache wrapper and chooses the verified stock 5373F0 or overlay 18F0A00 assignment clone. */
     KNTWR_BIND_SOLVER_CACHE_ASSIGN,
+    /* --army-storm-census command split route (appended; src/army/native_formation_residual.h): the private 581CA0 -> 10FC370 -> 10FBBD0 -> 4F84C0 -> 5736B0 chain's three timed seams.
+       CMD_ENTER replaces 10FBBF3's `call [eax+4]` (ECX = state, one stack argument W, callee ret 4; the gate loads the vtable and slot itself). CMD_ASSIGN replaces 5736E0's call of 57B000
+       (thiscall ECX = command, four stack arguments, callee ret 0x10). CMD_PERMAN replaces 573727's call of 55F160 (thiscall ECX = command, five stack arguments, callee ret 0x14).
+       Each gate forwards exactly one original with its register/stack/RET contract. */
+    KNTWR_BIND_CMD_ENTER, KNTWR_BIND_CMD_ASSIGN, KNTWR_BIND_CMD_PERMAN,
     KNTWR_BIND_COUNT
 };
 enum kntwr_clone_id {
@@ -354,6 +359,10 @@ enum kntwr_clone_id {
     /* --army-solver-* alternate R1/R2 route (appended): 51A530@51A8FD / 581AE0@581B81 -> 584E10@585269 ->
        57AC10@57AC3B -> SOLVER_CACHE_ASSIGN. All other calls and cache/vector lifetime operations remain original. */
     KNTWR_CLONE_SOLVER_584E10, KNTWR_CLONE_SOLVER_57AC10,
+    /* --army-storm-census command split route (appended): private copies of the formation command callback 0x581CA0 (class 1325428 slot +4; ECX = command, EDX = vtable, plain ret), its FSM
+       wrapper 0x10FC370 (ECX = command + 0x18, AL result) and step 0x10FBBD0 (ECX = wrapper, AL result; the state-enter virtual call is KNTWR_BIND_CMD_ENTER), the state-enter thunk 0x4F84C0 (one
+       stack argument, ret 4) and 0x5736B0 (ECX = command; 57B000 / 55F160 are KNTWR_BIND_CMD_ASSIGN / CMD_PERMAN). Entered only by the census queue port's routed dispatch. */
+    KNTWR_CLONE_CMD_581CA0, KNTWR_CLONE_CMD_10FC370, KNTWR_CLONE_CMD_10FBBD0, KNTWR_CLONE_CMD_4F84C0, KNTWR_CLONE_CMD_5736B0,
     KNTWR_CLONE_COUNT
 };
 /* Offset inside CLONE_BAL_ITEM of original 0x6F5936 (the BAL_PREFIX tail entry; BAL_ITEM spans 0x6F54E0..0x6F6617 and

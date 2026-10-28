@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
 #include <string>
 #include <map>
 #include <malloc.h>
@@ -302,6 +303,20 @@ uint8_t* AllocZ(size_t n) {
 template <typename T> void Put(uint8_t* base, U off, T v) { std::memcpy(base + off, &v, sizeof(T)); }
 template <typename T> T Get(const uint8_t* base, U off) { T v; std::memcpy(&v, base + off, sizeof(T)); return v; }
 
+// Host slot generator standing in for the layout object of 0x555CA0's `call [layout->vtbl+0x24]`:
+// thiscall(layout; out*, container, float, memberCount), callee pops 0x10. It fills the case's slot records into a HostAlloc'd block that
+// 0x555CA0 frees through the (host) game heap, exactly as the real generator hands over a heap-owned vector.
+const uint8_t* g_genRecs;
+U g_genM;
+void* g_genBlock;                             // the block of the latest generated slot vector (null outside the command route)
+U __fastcall GenSlots(void*, void*, U* out, void*, float, U) {
+    uint8_t* p = (uint8_t*)HostAlloc((size_t)g_genM * 36, nullptr);
+    g_genBlock = p;
+    if (g_genM) std::memcpy(p, g_genRecs, (size_t)g_genM * 36);
+    out[0] = 0; out[1] = g_genM; out[2] = g_genM; out[3] = Addr(p); out[4] = 0;
+    return 0;
+}
+
 struct Mock {
     std::vector<uint8_t*> men;
     uint8_t* menArray = nullptr;
@@ -317,14 +332,23 @@ struct Mock {
     uint8_t* tickObj2 = nullptr;
     uint8_t cache[0x80] = {};
     std::vector<U> cacheMap;
+    uint8_t* cmdObj = nullptr;                 // command object `this` of 0x57B000 ([+4] = formation, read by 0x4B4A50)
+    uint8_t* genLayout = nullptr;              // arg0 of 0x555CA0; its vtable [+0x24] is GenSlots
+    U* genVtbl = nullptr;
     U n = 0, m = 0;
     Mock() = default;
     Mock(const Mock&) = delete;
     ~Mock() {
         for (auto* p : men) _aligned_free(p);
+        if (formation) {                       // blocks the native code left in the formation (rebuilt man array, assignment entries)
+            const U fm = Get<U>(formation, 0x1C), fd = Get<U>(formation, 0x524);
+            if (fm && fm != Addr(menArray)) std::free((void*)(uintptr_t)fm);
+            if (fd) std::free((void*)(uintptr_t)fd);
+        }
         std::free(menArray);
         _aligned_free(formation); _aligned_free(unit); _aligned_free(side); _aligned_free(layout);
         std::free(layoutVtbl); std::free(slotRecs); _aligned_free(tickObj); _aligned_free(tickObj2);
+        _aligned_free(cmdObj); _aligned_free(genLayout); std::free(genVtbl);
         if (assignVec[3]) std::free((void*)(uintptr_t)assignVec[3]);
     }
 };
@@ -360,6 +384,12 @@ void Build(const Case& c, Mock& k) {
     Put<U>(k.formation, 0x628, Addr(k.layout));
     Put<U>(k.layout, 0, Addr(k.layoutVtbl));
     k.layoutVtbl[0x24 / 4] = NativeAddress((c.modBreak == 1) ? 0x62FD60u : 0x18ED200u);
+    k.cmdObj = AllocZ(0x100);
+    Put<U>(k.cmdObj, 4, Addr(k.formation));
+    k.genLayout = AllocZ(0x40);
+    k.genVtbl = (U*)std::calloc(0x40, 4);
+    k.genVtbl[0x24 / 4] = Addr((const void*)&GenSlots);
+    Put<U>(k.genLayout, 0, Addr(k.genVtbl));
     if (c.modBreak != 3) Put<U>(k.unit, 0x2C, Addr(k.side));
     Put<U>(k.side, 0x1C, c.modBreak == 2 ? 1u : 2u);
     k.slotRecs = (uint8_t*)std::calloc(c.m ? c.m : 1, 36);
@@ -419,6 +449,12 @@ void MakeDumper(const Mock& k, Dumper& d) {
     if (k.assignVec[3]) d.Add((void*)(uintptr_t)k.assignVec[3], std::max<U>(k.assignVec[1], k.assignVec[2]) * 12 + 4, 12);
     d.Add(k.cache, sizeof(k.cache), 13);
     d.Add(k.cacheMap.data(), static_cast<U>(k.cacheMap.size() * sizeof(U)), 14);
+    {                                          // formation-owned blocks (zero in every non-command case)
+        const U fcnt = Get<U>(k.formation, 0x520), fdata = Get<U>(k.formation, 0x524), fmen = Get<U>(k.formation, 0x1C);
+        if (fdata && fdata != k.assignVec[3]) d.Add((void*)(uintptr_t)fdata, fcnt * 12 + 4, 15);
+        if (fmen && fmen != Addr(k.menArray)) d.Add((void*)(uintptr_t)fmen, (std::max<U>)(Get<U>(k.formation, 0x14), Get<U>(k.formation, 0x18)) * 4 + 4, 16);
+        if (g_genBlock) d.Add(g_genBlock, g_genM * 36 + 1, 17);     // the (already freed) slot block of the command route: entries point into it
+    }
 }
 void Capture(const Mock& k, DumpResult& r) {
     Dumper d; MakeDumper(k, d);
@@ -436,12 +472,22 @@ void Capture(const Mock& k, DumpResult& r) {
     r.hashes.push_back({"assignVec", HashWords(d, (const uint8_t*)k.assignVec, sizeof(k.assignVec))});
     r.hashes.push_back({"cache", HashWords(d, k.cache, sizeof(k.cache))});
     r.hashes.push_back({"cacheMap", HashWords(d, reinterpret_cast<const uint8_t*>(k.cacheMap.data()), static_cast<U>(k.cacheMap.size() * sizeof(U)))});
+    if (Get<U>(k.formation, 0x1C)) r.hashes.push_back({"formationMen", HashWords(d, (const uint8_t*)(uintptr_t)Get<U>(k.formation, 0x1C), Get<U>(k.formation, 0x18) * 4)});
     const U cnt = k.assignVec[2];
     const uint8_t* data = (const uint8_t*)(uintptr_t)k.assignVec[3];
     for (U i = 0; data && i < cnt; ++i) {
         r.entries.push_back(d.Norm(Get<U>(data, 12 * i)));
         r.entries.push_back(d.Norm(Get<U>(data, 12 * i + 4)));
         r.entries.push_back(Get<U>(data, 12 * i + 8));
+    }
+    if (!data) {                               // command route: the assignment vector is the formation's own (0x520 count, 0x524 data)
+        const U fc = Get<U>(k.formation, 0x520);
+        const uint8_t* fd = (const uint8_t*)(uintptr_t)Get<U>(k.formation, 0x524);
+        for (U i = 0; fd && i < fc; ++i) {
+            r.entries.push_back(d.Norm(Get<U>(fd, 12 * i)));
+            r.entries.push_back(d.Norm(Get<U>(fd, 12 * i + 4)));
+            r.entries.push_back(Get<U>(fd, 12 * i + 8));
+        }
     }
     const U* l = (const U*)(uintptr_t)NativeAddress(0x14A40A4);
     r.listCap = l[0]; r.listCount = l[1]; r.listData = l[2] != 0;
@@ -497,8 +543,13 @@ bool GuardedStub() {                    // no C++ objects here: __try needs a fu
 bool RunStub(U fn, Mock& k, const Case& c, DumpResult& r, U route = 0) {
     s_fn = fn; s_F = Addr(k.formation);
     s_a[0] = Addr(k.slotVec); s_a[1] = c.flagParam; s_a[2] = Addr(k.assignVec); s_a[3] = (U)c.layoutIndex;
+    g_genBlock = nullptr;
     s_argCount = route == 1 ? 0 : route == 2 ? 3 : 4;
-    if (route) { s_F = Addr(k.cache); s_a[0] = Addr(k.cache + 0x48); }
+    if (route == 3) {                          // the command entry 0x57B000 (thiscall, ECX = command object): layout, container, float, flag
+        s_F = Addr(k.cmdObj); s_a[0] = Addr(k.genLayout); s_a[1] = Addr(k.tickObj2);
+        const float one = 1.0f; std::memcpy(&s_a[2], &one, 4); s_a[3] = c.flagParam;
+        g_genRecs = k.slotRecs; g_genM = k.m;
+    } else if (route) { s_F = Addr(k.cache); s_a[0] = Addr(k.cache + 0x48); }
     const U csrBefore = _mm_getcsr() & ~0x3Fu, cwBefore = _control87(0, 0);
     const bool ok = GuardedStub();
     if (!ok) { r.faulted = true; return false; }
@@ -625,6 +676,10 @@ std::string Diff(const DumpResult& a, const DumpResult& b) {
 
 struct Stats { int cases = 0, runs = 0, failures = 0, suppressed = 0, forwarded = 0, kernel = 0, shadowCompares = 0, fallbacks = 0, flag0 = 0, flag1 = 0, direct = 0, skipped = 0; };
 
+// Limited-solve timing sink under test: counts calls only (never compares elapsed time).
+U g_sinkCalls = 0;
+void LimitedSink(unsigned long long) { ++g_sinkCalls; }
+
 const char* ModeName(as::Mode m) { return m == as::ModeForward ? "forward" : m == as::ModeMemo ? "memo" : "shadow"; }
 
 struct NativeRun { DumpResult r; int pre = -1; bool preOk = true; U sup = 0, fwd = 0, solverEntries = 0; };   // sup/fwd: exits of the ORIGINAL trampoline 0x18F0D00 observed in the native twin
@@ -748,10 +803,13 @@ int RunCacheCases() {
         }
     }
     if (!InstallHooks(false)) return failures + 1;
-    for (as::Mode mode : {as::ModeOff, as::ModeForward, as::ModeMemo, as::ModeShadow}) {
+    for (int pass = 0; pass < 8; ++pass) {   // passes 0-3: sink null (Off/Forward/Memo/Shadow); 4-7: sink wired
+        const as::Mode mode = std::array<as::Mode, 4>{as::ModeOff, as::ModeForward, as::ModeMemo, as::ModeShadow}[pass % 4];
+        const bool wired = pass >= 4;
+        U sinkTotal = 0;
         if (mode != as::ModeOff) {
             const as::Binding binding{static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00],
-                                      g_clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
+                                      g_clones.entries[KNTWR_CLONE_SOLVER_5373F0], wired ? &LimitedSink : nullptr};
             if (!as::Start(binding)) return failures + 1;
         }
         Stats st;
@@ -761,6 +819,7 @@ int RunCacheCases() {
             const Scenario& s = scenarios[i];
             Mock k; build(s, k);
             as::Reset();
+            g_sinkCalls = 0;
             DumpResult result;
             const U fn = s.route == 1 ? g_clones.entries[KNTWR_CLONE_SOLVER_57AC10] : g_bindings[KNTWR_BIND_SOLVER_CACHE_ASSIGN];
             if (!RunStub(fn, k, s.c, result, s.route)) {
@@ -776,6 +835,8 @@ int RunCacheCases() {
                 if (!CheckCounters(s.c, mode, native[i], w, why, st, true)) why = "counters: " + why;
                 if (s.route == 2) {
                     finite += w[as::Flag0Native];
+                    if (g_sinkCalls != (wired ? w[as::Flag0Native] : 0u)) why = "cache limited sink call count disagrees with flag0 solves";
+                    sinkTotal += g_sinkCalls;
                     if (!w[as::Flag0Native] || w[as::SolvesFlag1] || w[as::SolvedKernel] || w[as::ShadowCompares])
                         why = "finite-limit cache wrapper did not stay entirely native";
                 }
@@ -799,6 +860,7 @@ int RunCacheCases() {
             }
         }
         if (mode != as::ModeOff && finite != 2) { ++failures; std::fprintf(stderr, "FAIL cache finite-limit cases were not exercised\n"); }
+        if (sinkTotal != (wired ? finite : 0u)) { ++failures; std::fprintf(stderr, "FAIL cache mode %u limited sink calls %u != %u\n", static_cast<U>(mode), sinkTotal, wired ? finite : 0u); }
         if ((mode == as::ModeMemo && !st.kernel) || (mode == as::ModeShadow && !st.shadowCompares)) {
             ++failures; std::fprintf(stderr, "FAIL cache kernel coverage is vacuous in mode %u\n", static_cast<U>(mode));
         }
@@ -810,6 +872,135 @@ int RunCacheCases() {
                 scenarios.size(), g_skipCacheOverlay ? "SKIP{15}" : "ALL", failures);
     return failures;
 }
+
+// ---- command route: native 0x57B000 -> (call site 0x57B021) -> 0x555CA0 -> 0x555CEB -> 0x18F0A00.
+// Twin A is the unpatched native entry (observation hooks on the original trampoline / 0x502770). Twin B is the same entry with 0x57B021
+// rewritten onto the gate, which tail-jumps to CLONE_SOLVER_555CA0 (whose 0x555CEB call is the AssignGate) on the tick owner in a routed epoch
+// and to native 0x555CA0 otherwise. Both run the real 0x555CA0 body (slot generation by the host stub, entry rebuild of the man array, 0x557C80)
+// on the same fixtures; the whole man/formation/entry state, callee-saved registers, ESP discipline and the allocator call sequence must match.
+volatile long g_cmdTickOwner;
+volatile U g_cmdEpochMask;
+constexpr U kCmdRouted = 0x10;
+const uint8_t kCmdSiteOriginal[8] = {0xE8, 0x7A, 0xAC, 0xFD, 0xFF, 0xC2, 0x10, 0x00};   // 0x57B021: call 0x555CA0 ; ret 0x10
+
+as::Binding CommandBinding(as::Mode mode, bool command) {
+    as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00], g_clones.entries[KNTWR_CLONE_SOLVER_5373F0], nullptr};
+    if (command) {
+        b.cloneCommandAssign = g_clones.entries[KNTWR_CLONE_SOLVER_555CA0];
+        b.tickOwner = &g_cmdTickOwner; b.epochMask = &g_cmdEpochMask; b.routedMask = kCmdRouted;
+    }
+    return b;
+}
+bool SiteIsOriginal() { return std::memcmp((const void*)(uintptr_t)NativeAddress(0x57B021), kCmdSiteOriginal, 8) == 0; }
+
+int RunCommandCases(const std::vector<Case>& all) {
+    int failures = 0;
+    std::vector<size_t> sel;                   // 0x57B000 always passes layout index -1; its callers push flag = 1 (flag 0 is covered too)
+    for (size_t i = 0; i < all.size(); ++i) if (all[i].layoutIndex == -1 && all[i].flagParam <= 1) sel.push_back(i);
+    if (!SiteIsOriginal()) { std::fprintf(stderr, "FAIL command route: 0x57B021 is not the pinned stock call before the test\n"); return 1; }
+    std::vector<NativeRun> nat(sel.size());
+    size_t withEntries = 0;
+    if (!InstallHooks(true)) { std::fprintf(stderr, "command oracle: native hooks refused\n"); return 1; }
+    for (size_t k = 0; k < sel.size(); ++k) {
+        const Case& c = all[sel[k]];
+        NativeRun& n = nat[k];
+        int pre = 0; n.preOk = ProbePrestep(c, &pre); n.pre = n.preOk ? pre : -1;
+        if (!n.preOk) { ++failures; std::fprintf(stderr, "FAIL command pre-step probe faulted: %s\n", c.label.c_str()); n.r.faulted = true; continue; }
+        Mock m; Build(c, m);
+        SetUnitPredicate(c.unitFlag);
+        ResetList();
+        g_nativeSuppress = 0; g_nativeForward = 0; g_nativeSolverEntries = 0;
+        if (!RunStub(NativeAddress(0x57B000), m, c, n.r, 3)) { ++failures; std::fprintf(stderr, "FAIL command native twin faulted: %s\n", c.label.c_str()); continue; }
+        n.sup = g_nativeSuppress; n.fwd = g_nativeForward; n.solverEntries = g_nativeSolverEntries;
+        if (!n.r.entries.empty()) ++withEntries;
+    }
+    if (!InstallHooks(false)) return failures + 1;
+    if (withEntries == 0) { ++failures; std::fprintf(stderr, "FAIL command oracle is vacuous: no native case produced assignment entries\n"); }
+
+    for (int pass = 0; pass < 3; ++pass) {
+        const as::Mode mode = pass == 0 ? as::ModeForward : pass == 1 ? as::ModeMemo : as::ModeShadow;
+        g_cmdTickOwner = (long)GetCurrentThreadId(); g_cmdEpochMask = kCmdRouted | 1u;
+        if (!as::Start(CommandBinding(mode, true))) { std::fprintf(stderr, "FAIL command route: Start refused (%s)\n", ModeName(mode)); return failures + 1; }
+        const uint8_t* site = (const uint8_t*)(uintptr_t)NativeAddress(0x57B021);
+        int32_t rel = 0; std::memcpy(&rel, site + 1, 4);
+        if (!as::CommandRouteInstalled() || site[0] != 0xE8 || site[5] != 0xC2 || site[6] != 0x10 || site[7] != 0x00 || SiteIsOriginal() ||
+            NativeAddress(0x57B026) + rel == NativeAddress(0x555CA0)) { ++failures; std::fprintf(stderr, "FAIL [%s] command route: 0x57B021 was not rewritten onto the gate\n", ModeName(mode)); }
+        Stats st;
+        int eaxDiffs = 0;
+        U cmdSolved = 0;
+        for (size_t k = 0; k < sel.size(); ++k) {
+            const Case& c = all[sel[k]];
+            if (nat[k].r.faulted) continue;
+            ++st.cases; ++st.runs;
+            Mock m; Build(c, m);
+            SetUnitPredicate(c.unitFlag);
+            ResetList();
+            as::Reset();
+            g_sinkCalls = 0;
+            DumpResult r;
+            if (!RunStub(NativeAddress(0x57B000), m, c, r, 3)) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command chain faulted: %s\n", ModeName(mode), c.label.c_str()); continue; }
+            std::string why = Diff(nat[k].r, r);
+            U w[as::kWords];
+            as::Snapshot(w);
+            if (why.empty()) { std::string cw; if (!CheckCounters(c, mode, nat[k], w, cw, st)) why = "counters: " + cw; }
+            if (why.empty() && (w[as::CmdAssignCalls] != 1 || w[as::CmdSolvedKernel] != w[as::SolvedKernel] || w[as::CmdGateNative] != 0))
+                why = "command-route counters: cmd_assign_calls != 1, cmd_solved_kernel != solved_kernel or gate_native != 0";
+            if (why.empty() && nat[k].r.eax != r.eax) { ++eaxDiffs; why = "EAX of 0x57B000 differs from native"; }
+            cmdSolved += w[as::CmdSolvedKernel];
+            if (!why.empty()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command %s: %s\n", ModeName(mode), c.label.c_str(), why.c_str()); }
+        }
+        // Foreign thread / unrouted epoch: the gate must forward to the NATIVE 0x555CA0 (native result, not counted as an assignment).
+        U foreignRuns = 0;
+        for (int variant = 0; variant < 2; ++variant) {
+            g_cmdTickOwner = variant == 0 ? 0 : (long)GetCurrentThreadId();
+            g_cmdEpochMask = variant == 1 ? 0 : (kCmdRouted | 1u);
+            size_t used = 0;
+            for (size_t k = 0; k < sel.size() && used < 8; ++k) {
+                const Case& c = all[sel[k]];
+                if (nat[k].r.faulted || c.n < 3) continue;
+                ++used; ++foreignRuns;
+                Mock m; Build(c, m);
+                SetUnitPredicate(c.unitFlag);
+                ResetList();
+                as::Reset();
+                DumpResult r;
+                if (!RunStub(NativeAddress(0x57B000), m, c, r, 3)) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command (foreign %d) faulted: %s\n", ModeName(mode), variant, c.label.c_str()); continue; }
+                std::string why = Diff(nat[k].r, r);
+                U w[as::kWords];
+                as::Snapshot(w);
+                if (why.empty() && (w[as::CmdGateNative] != 1 || w[as::CmdAssignCalls] != 0 || w[as::AssignCalls] != 0 || w[as::SolvesSeen] != 0))
+                    why = "foreign entry was not forwarded to the native 0x555CA0 (gate_native != 1 or the solver chain counted it)";
+                if (why.empty() && nat[k].r.eax != r.eax) why = "EAX of the forwarded 0x57B000 differs from native";
+                if (!why.empty()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command (foreign %d) %s: %s\n", ModeName(mode), variant, c.label.c_str(), why.c_str()); }
+            }
+        }
+        g_cmdTickOwner = (long)GetCurrentThreadId(); g_cmdEpochMask = kCmdRouted | 1u;
+        if (!as::Stop()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command route: Stop refused the restore\n", ModeName(mode)); }
+        if (as::CommandRouteInstalled() || !SiteIsOriginal()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] command route: 0x57B021 bytes were not restored exactly\n", ModeName(mode)); }
+        std::printf("command %-7s: cases=%d failures=%d cmd_solved_kernel=%u kernel=%d shadow_compares=%d fallbacks=%d eax_diffs=%d foreign_runs=%u\n",
+                    ModeName(mode), st.cases, st.failures, cmdSolved, st.kernel, st.shadowCompares, st.fallbacks, eaxDiffs, foreignRuns);
+        failures += st.failures;
+        if (mode == as::ModeMemo && st.kernel == 0) { ++failures; std::fprintf(stderr, "FAIL command memo never reached the kernel (oracle would be vacuous)\n"); }
+        if (mode == as::ModeShadow && st.shadowCompares == 0) { ++failures; std::fprintf(stderr, "FAIL command shadow never compared a solve\n"); }
+    }
+
+    // Admission: every pinned byte of 0x57B000 and the call displacement gate the rewrite; a refusal leaves the image and the module untouched.
+    for (U off : {0x03u, 0x0Au, 0x12u, 0x21u, 0x22u, 0x26u, 0x28u}) {
+        uint8_t* p = (uint8_t*)(uintptr_t)NativeAddress(0x57B000 + off);
+        const uint8_t saved = *p;
+        *p ^= 0x40;
+        const bool admitted = as::Start(CommandBinding(as::ModeMemo, true));
+        const bool untouched = *p == (uint8_t)(saved ^ 0x40) && !as::CommandRouteInstalled() && !as::Started();
+        *p = saved;
+        if (admitted || !untouched) { ++failures; std::fprintf(stderr, "FAIL command route: altered 0x57B000+%#x was admitted or left state behind\n", off); as::Stop(); }
+    }
+    if (!SiteIsOriginal()) { ++failures; std::fprintf(stderr, "FAIL command route: image not pristine after the admission probes\n"); }
+    if (!as::Start(CommandBinding(as::ModeMemo, false)) || as::CommandRouteInstalled() || !SiteIsOriginal()) { ++failures; std::fprintf(stderr, "FAIL command route: a binding without cloneCommandAssign touched 0x57B021\n"); }
+    as::Stop();
+    std::printf("command route oracle: %zu cases, native cases with entries %zu, failures=%d\n", sel.size(), withEntries, failures);
+    return failures;
+}
+
 
 }  // namespace
 
@@ -907,9 +1098,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    for (as::Mode mode : {as::ModeForward, as::ModeMemo, as::ModeShadow}) {
+    for (int pass = 0; pass < 6; ++pass) {
+        const as::Mode mode = pass % 3 == 0 ? as::ModeForward : pass % 3 == 1 ? as::ModeMemo : as::ModeShadow;
+        const bool wired = pass >= 3;   // passes 0-2: sink null (no QPC path); 3-5: sink wired
+        U sinkTotal = 0;
         as::Binding b = {static_cast<U>(g_delta), mode, g_clones.entries[KNTWR_CLONE_SOLVER_18F0A00],
-                         g_clones.entries[KNTWR_CLONE_SOLVER_5373F0]};
+                         g_clones.entries[KNTWR_CLONE_SOLVER_5373F0], wired ? &LimitedSink : nullptr};
         if (!as::Start(b)) { std::fprintf(stderr, "kntwr_army_solver::Start refused (%s)\n", ModeName(mode)); return 2; }
         Stats st;
         for (size_t i = 0; i < all.size(); ++i) {
@@ -920,6 +1114,7 @@ int main(int argc, char** argv) {
             SetUnitPredicate(c.unitFlag);
             ResetList();
             as::Reset();
+            g_sinkCalls = 0;
             DumpResult r;
             ++st.runs;
             if (!RunStub(g_bindings[KNTWR_BIND_SOLVER_ASSIGN], k, c, r)) { ++st.failures; std::fprintf(stderr, "FAIL [%s] chain faulted: %s\n", ModeName(mode), c.label.c_str()); continue; }
@@ -927,11 +1122,14 @@ int main(int argc, char** argv) {
             U w[as::kWords];
             as::Snapshot(w);
             if (why.empty()) { std::string cw; if (!CheckCounters(c, mode, nat[i], w, cw, st)) why = "counters: " + cw; }
+            // The sink fires exactly once per eligible limited native call and never when unwired; Diff above proves output/order/EAX equal the native twin either way.
+            if (why.empty() && g_sinkCalls != (wired ? w[as::Flag0Native] : 0u)) why = "limited sink call count disagrees with flag0 solves";
+            sinkTotal += g_sinkCalls;
             if (!why.empty()) { ++st.failures; std::fprintf(stderr, "FAIL [%s] %s: %s\n", ModeName(mode), c.label.c_str(), why.c_str()); }
         }
         as::Stop();
-        std::printf("%-7s: cases=%d failures=%d suppressed=%d forwarded=%d direct_18f12aa=%d solves flag1=%d flag0=%d kernel=%d shadow_compares=%d fallbacks=%d\n",
-                    ModeName(mode), st.cases, st.failures, st.suppressed, st.forwarded, st.direct, st.flag1, st.flag0, st.kernel, st.shadowCompares, st.fallbacks);
+        std::printf("%-7s sink=%s: cases=%d failures=%d suppressed=%d forwarded=%d direct_18f12aa=%d solves flag1=%d flag0=%d kernel=%d shadow_compares=%d fallbacks=%d sink_calls=%u\n",
+                    ModeName(mode), wired ? "wired" : "null", st.cases, st.failures, st.suppressed, st.forwarded, st.direct, st.flag1, st.flag0, st.kernel, st.shadowCompares, st.fallbacks, sinkTotal);
         failures += st.failures;
         if (st.suppressed != expectedSuppress || st.forwarded != expectedForward) {
             ++failures;
@@ -941,10 +1139,12 @@ int main(int argc, char** argv) {
         if (mode == as::ModeMemo && st.kernel == 0) { ++failures; std::fprintf(stderr, "FAIL memo never reached the kernel (oracle would be vacuous)\n"); }
         if (mode == as::ModeShadow && st.shadowCompares == 0) { ++failures; std::fprintf(stderr, "FAIL shadow never compared a solve\n"); }
         if (st.suppressed == 0 || st.forwarded == 0 || st.direct == 0) { ++failures; std::fprintf(stderr, "FAIL [%s] suppression/forward/direct paths not all exercised\n", ModeName(mode)); }
+        if (sinkTotal != (wired ? static_cast<U>(st.flag0) : 0u)) { ++failures; std::fprintf(stderr, "FAIL [%s] limited sink calls %u != %s\n", ModeName(mode), sinkTotal, wired ? "eligible limited solves" : "0 (sink unwired)"); }
     }
     std::printf("original trampoline 0x18F0D00 in the native twin: %d suppress exits, %d forward exits over %zu cases; pre-step returned 1 in %d cases, %d of them never entered the trampoline; image delta %#llx\n",
                 expectedSuppress, expectedForward, all.size(), pre1, pre1NoTrampoline, (unsigned long long)g_delta);
     failures += RunCacheCases();
+    failures += RunCommandCases(all);
     std::printf("army solver chain oracle: failures=%d\n", failures);
     return failures ? 1 : 0;
 }

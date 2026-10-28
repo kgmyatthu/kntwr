@@ -469,15 +469,30 @@ Fixture MakeStorm(Rng& r, uint32_t m, int scenario) {
 }
 
 // ---- one run -----------------------------------------------------------------------------------------------------------------
-enum Kind { kNative, kSolveCensus, kSolveDirect, kSolveSimd, kSolveDefault, kCopyCensus, kCopyDirect, kCopySimd, kCopyDefault };
+// Solve* = replicating entry point (list growth like the native), Copy* = SolveCopy.  Simd = SolveWith(kSimd) (best ISA), Sse / Avx2 =
+// SolveWith(kSimdSse / kSimdAvx2), Default = the shipping Solve()/SolveCopy() entry, *Quiet = telemetry flag 0 (evals / scans read 0
+// whenever the packed loop ran; everything else must be identical).  Every non-Quiet kind runs with Counters::telemetry = 1.
+enum Kind { kNative, kSolveCensus, kSolveDirect, kSolveSimd, kSolveSse, kSolveAvx2, kSolveDefault, kSolveSseQuiet, kSolveAvx2Quiet,
+            kCopyCensus, kCopyDirect, kCopySimd, kCopySse, kCopyAvx2, kCopyDefault, kCopyQuiet };
 const char* KindName(Kind k) {
-    static const char* n[] = {"native", "Solve/direct+census", "Solve/direct", "Solve/simd", "Solve/default",
-                              "SolveCopy/direct+census", "SolveCopy/direct", "SolveCopy/simd", "SolveCopy/default"};
+    static const char* n[] = {"native", "Solve/direct+census", "Solve/direct", "Solve/simd", "Solve/sse", "Solve/avx2", "Solve/default",
+                              "Solve/sse+quiet", "Solve/avx2+quiet", "SolveCopy/direct+census", "SolveCopy/direct", "SolveCopy/simd",
+                              "SolveCopy/sse", "SolveCopy/avx2", "SolveCopy/default", "SolveCopy/default+quiet"};
     return n[k];
 }
-bool Replicates(Kind k) { return k == kSolveCensus || k == kSolveDirect || k == kSolveSimd || k == kSolveDefault; }
+bool Replicates(Kind k) { return k >= kSolveCensus && k <= kSolveAvx2Quiet; }
 bool Census(Kind k) { return k == kSolveCensus || k == kCopyCensus; }      // Counters.profile = 1
 bool HasDistinct(Kind k) { return Census(k); }
+bool Quiet(Kind k) { return k == kSolveSseQuiet || k == kSolveAvx2Quiet || k == kCopyQuiet; }   // Counters.telemetry = 0
+bool Packed(Kind k) { return k != kNative && k != kSolveDirect && k != kCopyDirect && !Census(k); }   // may run the packed kSimd loop
+ntw_solver::Policy PolicyOf(Kind k) {
+    switch (k) {
+        case kSolveSse: case kCopySse: case kSolveSseQuiet: return ntw_solver::kSimdSse;
+        case kSolveAvx2: case kCopyAvx2: case kSolveAvx2Quiet: return ntw_solver::kSimdAvx2;
+        case kSolveSimd: case kCopySimd: case kSolveDefault: case kCopyDefault: case kCopyQuiet: return ntw_solver::kSimd;
+        default: return ntw_solver::kDirect;
+    }
+}
 
 struct Run {
     std::vector<Entry12> entries;
@@ -543,13 +558,13 @@ void Execute(Kind k, const Fixture& f, const World& w, ntw_solver::Workspace& ws
     } else {
         const bool replicate = Replicates(k);
         out.ctr.profile = Census(k) ? 1u : 0u;
+        out.ctr.telemetry = Quiet(k) ? 0u : 1u;
         if (k == kSolveDefault) {
             out.outcome = ntw_solver::Solve(ws, env, ctx, b, e, f.limit, f.thr, &out.eax, &out.ctr);
-        } else if (k == kCopyDefault) {
+        } else if (k == kCopyDefault || k == kCopyQuiet) {
             out.outcome = ntw_solver::SolveCopy(ws, env, ctx, b, e, f.limit, f.thr, &out.eax, &out.ctr);
         } else {
-            const ntw_solver::Policy pol = (k == kSolveSimd || k == kCopySimd) ? ntw_solver::kSimd : ntw_solver::kDirect;
-            out.outcome = ntw_solver::SolveWith(pol, replicate, ws, env, ctx, b, e, f.limit, f.thr, &out.eax, &out.ctr);
+            out.outcome = ntw_solver::SolveWith(PolicyOf(k), replicate, ws, env, ctx, b, e, f.limit, f.thr, &out.eax, &out.ctr);
         }
     }
     out.fpAfter = CaptureFp();
@@ -590,7 +605,8 @@ int CompareCase(const Fixture& f, ntw_solver::Workspace& ws, Stats& st, int& pri
     if (nat.faulted) { fail("native faulted"); return bad; }
     if (!SameFp(nat.fpBefore, nat.fpAfter)) fail("native changed the FP environment (harness assumption)");
     Run first;
-    for (Kind k : {kSolveCensus, kSolveDirect, kSolveSimd, kSolveDefault, kCopyCensus, kCopyDirect, kCopySimd, kCopyDefault}) {
+    for (Kind k : {kSolveCensus, kSolveDirect, kSolveSimd, kSolveSse, kSolveAvx2, kSolveDefault, kSolveSseQuiet, kSolveAvx2Quiet,
+                   kCopyCensus, kCopyDirect, kCopySimd, kCopySse, kCopyAvx2, kCopyDefault, kCopyQuiet}) {
         Run r;
         Execute(k, f, w, ws, r, false);
         ++st.runs;
@@ -622,8 +638,16 @@ int CompareCase(const Fixture& f, ntw_solver::Workspace& ws, Stats& st, int& pri
             if (r.cap != f.cap0 || r.count != 0 || r.data != 1u || !r.events.empty())
                 fail("SolveCopy touched the global list / allocator");
         }
-        // counters self-check against the instrumented native 0x5281D0 calls: every policy is native-exact in `evals`
-        if (r.ctr.evals != nat.hookEvals) {
+        // counters self-check against the instrumented native 0x5281D0 calls: every policy is native-exact in `evals`; the packed loop with
+        // telemetry off (quiet) reports 0 evals / 0 scans instead and must have changed nothing else
+        const bool quietPacked = Quiet(k) && f.limit == 0;
+        if (r.ctr.telemetry != (Quiet(k) ? 0u : 1u)) fail("counters: telemetry input not preserved");
+        if (quietPacked) {
+            if (r.ctr.evals != 0 || r.ctr.scans != 0) {
+                std::snprintf(msg, sizeof msg, "%s: telemetry off but evals %u scans %u", KindName(k), r.ctr.evals, r.ctr.scans);
+                fail(msg);
+            }
+        } else if (r.ctr.evals != nat.hookEvals) {
             std::snprintf(msg, sizeof msg, "%s: counters: evals kernel %u native hook %u", KindName(k), r.ctr.evals, nat.hookEvals);
             fail(msg);
         }
@@ -647,13 +671,12 @@ int CompareCase(const Fixture& f, ntw_solver::Workspace& ws, Stats& st, int& pri
             st.evals += r.ctr.evals; st.distinct += r.ctr.distinct; st.swaps += r.ctr.swaps; st.removals += r.ctr.removals;
         }
         if (k != kSolveCensus && first.ctr.m == f.m && first.ctr.evals != 0 &&
-            (r.ctr.evals != first.ctr.evals || r.ctr.scans != first.ctr.scans || r.ctr.swaps != first.ctr.swaps ||
+            ((!quietPacked && (r.ctr.evals != first.ctr.evals || r.ctr.scans != first.ctr.scans)) || r.ctr.swaps != first.ctr.swaps ||
              r.ctr.removals != first.ctr.removals || r.ctr.iterations != first.ctr.iterations ||
              (HasDistinct(k) && r.ctr.distinct != first.ctr.distinct)))
             fail("counters: policy disagrees with the census run");
         if (r.ctr.totalTicks < r.ctr.gatherTicks + r.ctr.loopTicks) fail("counters: totalTicks < gather + loop");
-        const bool fills = k == kSolveSimd || k == kCopySimd || k == kSolveDefault || k == kCopyDefault;   // default policy = kSimd
-        if (!fills && r.ctr.fillTicks != 0) fail("counters: fillTicks set outside kSimd / default");
+        if (!Packed(k) && r.ctr.fillTicks != 0) fail("counters: fillTicks set outside the packed kSimd loop");
         if (r.ctr.fillTicks > r.ctr.loopTicks) fail("counters: fillTicks > loopTicks");
         if (r.ctr.scans > r.ctr.iterations * f.m) fail("counters: scans > iterations * m");
         if (k == kSolveCensus) first = r;
@@ -867,6 +890,83 @@ void Bench(Rng& r, ntw_solver::Workspace& ws) {
     }
 }
 
+// ---- --bench 2: in-process policy A/B (timing report only; results are cross-checked bit-for-bit against kDirect) ----------------
+// Deterministic inputs: MakeStorm fixtures, three fixed seeds (ring / col2line / turn) at m = 300, 600, 800.  Every policy solves the
+// same fixture with a non-null Counters (as the army caller does); "+tel" rows set Counters::telemetry = 1.  ns/it = wall ns per outer
+// kernel iteration (Counters::iterations), table fill and gather included.  Returns the number of mismatches.
+int BenchPolicies(ntw_solver::Workspace& ws, int reps) {
+    const ntw_solver::Env env = MakeEnv();
+    const std::string pin = PinToBestCore();
+    const double tsc = TscPerUs();
+    struct Pol { const char* name; ntw_solver::Policy pol; uint32_t tel; };
+    const Pol pols[] = {{"direct", ntw_solver::kDirect, 0}, {"sse", ntw_solver::kSimdSse, 0}, {"sse+tel", ntw_solver::kSimdSse, 1},
+                        {"avx2", ntw_solver::kSimdAvx2, 0}, {"avx2+tel", ntw_solver::kSimdAvx2, 1}};
+    constexpr int kN = sizeof pols / sizeof pols[0];
+    static const int kScenario[3] = {6, 4, 0};
+    static const char* kScenarioName[3] = {"ring", "col2line", "turn"};
+    static const uint32_t kSeed[3] = {0x1001u, 0x2002u, 0x3003u};
+    std::printf("\npolicy bench: us/solve (median of %d, direct %d) and ns per kernel iteration; TSC %.0f MHz; %s; AVX2 %s; Release x86 /O2 /fp:strict\n",
+                reps, reps / 3 < 3 ? 3 : reps / 3, tsc, pin.c_str(), ntw_solver::Avx2Supported() ? "supported" : "NOT supported (avx2 rows run the SSE loop)");
+    std::printf("%-5s %-9s %7s %6s |", "m", "shape", "iters", "swaps");
+    for (const Pol& p : pols) std::printf(" %9s %7s |", p.name, "ns/it");
+    std::printf("\n");
+    int bad = 0;
+    for (uint32_t m : {300u, 600u, 800u}) {
+        double sumUs[kN] = {}, sumIt = 0.0;
+        for (int si = 0; si < 3; ++si) {
+            Rng r{kSeed[si]};
+            Fixture f = MakeStorm(r, m, kScenario[si]);
+            World w; BuildWorld(f, w);
+            float ctx[2] = {f.def, f.nos};
+            SetupList(2048);   // final capacity: no timed run includes list growth
+            std::vector<Entry12> ref;
+            uint32_t refEax = 0, iters = 0, swaps = 0;
+            double us[kN];
+            double telEvals = 0.0, telScans = 0.0;   // telemetry-on avx2 run: candidate evaluations / scanned entries per kernel iteration
+            for (int pi = 0; pi < kN; ++pi) {
+                const int n = pols[pi].pol == ntw_solver::kDirect ? (reps / 3 < 3 ? 3 : reps / 3) : reps;
+                std::vector<double> t;
+                uint32_t eax = 0;
+                std::vector<Entry12> last;
+                ntw_solver::Counters ctr{};
+                for (int i = -1; i < n; ++i) {   // i = -1: untimed warm-up
+                    std::vector<Entry12> e = w.init;
+                    ctr = {};
+                    ctr.telemetry = pols[pi].tel;
+                    const double a = NowUs();
+                    const ntw_solver::Outcome o = ntw_solver::SolveWith(pols[pi].pol, true, ws, env, ctx, e.data(), e.data() + m, 0, FLT_MAX, &eax, &ctr);
+                    const double b = NowUs();
+                    if (o != ntw_solver::kSolved) { ++bad; std::fprintf(stderr, "FAIL bench: %s kFallback %u\n", pols[pi].name, ctr.fallback); break; }
+                    if (i >= 0) t.push_back(b - a);
+                    last = e;
+                }
+                if (t.empty()) { us[pi] = 0.0; continue; }
+                us[pi] = Median(t);
+                if (pols[pi].tel && pols[pi].pol == ntw_solver::kSimdAvx2 && ctr.iterations) {
+                    telEvals = (double)ctr.evals / ctr.iterations;
+                    telScans = (double)ctr.scans / ctr.iterations;
+                }
+                if (pi == 0) { ref = last; refEax = eax; iters = ctr.iterations; swaps = ctr.swaps; }
+                else if (last.size() != ref.size() || std::memcmp(last.data(), ref.data(), ref.size() * sizeof(Entry12)) != 0 || eax != refEax ||
+                         ctr.iterations != iters || ctr.swaps != swaps) {
+                    ++bad;
+                    std::fprintf(stderr, "FAIL bench: %s differs from direct (m %u %s)\n", pols[pi].name, m, kScenarioName[si]);
+                }
+            }
+            std::printf("%-5u %-9s %7u %6u |", m, kScenarioName[si], iters, swaps);
+            for (int pi = 0; pi < kN; ++pi) std::printf(" %9.1f %7.1f |", us[pi], iters ? us[pi] * 1000.0 / (double)iters : 0.0);
+            std::printf(" evals/it %.0f scans/it %.0f\n", telEvals, telScans);
+            for (int pi = 0; pi < kN; ++pi) sumUs[pi] += us[pi];
+            sumIt += (double)iters;
+            TeardownList();
+        }
+        std::printf("%-5u %-9s %7.0f %6s |", m, "ALL", sumIt, "");
+        for (int pi = 0; pi < kN; ++pi) std::printf(" %9.1f %7.1f |", sumUs[pi], sumIt > 0.0 ? sumUs[pi] * 1000.0 / sumIt : 0.0);
+        std::printf("\n");
+    }
+    return bad;
+}
+
 // ---- hand-built deterministic cases ----------------------------------------------------------------------------------------------
 // Geometry is translation-invariant (men on x = 100 * i or a line) and every man uses an angle whose table sine/cosine pair has
 // t0 == 0 exactly, so entries with identical (dx, dz) have BIT-IDENTICAL costs: that makes ties in the worst-cost scan exact.
@@ -1007,6 +1107,74 @@ int DeterministicCases(ntw_solver::Workspace& ws, Stats& st, int& printed) {
             bad += CompareCase(f, ws, st, printed);
             ++cases;
         }
+    // (5) AVX2 8-lane scan (every CompareCase also runs the SSE, AVX2, default and telemetry-off policies against the native):
+    //     tails m % 8 != 0 for every m = 1 .. 40 (the padding lanes of the last 8-lane block must never be eligible), all-reject
+    //     blocks (every candidate active but nothing improves; removals rotate the list), and the FIRST improving candidate at every
+    //     lane k = 0 .. 7 of block 0 / 1 / the last block, with MORE improving candidates right behind it (the first one in list order
+    //     must win, not the best) and null men / null slots / inf-cost lanes next to it.
+    {
+        std::vector<uint32_t> ms;
+        for (uint32_t m = 1; m <= 40; ++m) ms.push_back(m);
+        for (uint32_t m : {47u, 48u, 49u, 55u, 56u, 57u, 63u, 64u, 65u, 71u, 72u, 73u, 127u, 128u, 129u, 200u}) ms.push_back(m);
+        const float inf = std::numeric_limits<float>::infinity();
+        int laneCases = 0, laneSwapCases = 0;
+        for (uint32_t m : ms) {
+            for (int v = 0; v < 3; ++v) {   // all-reject: every candidate is active (thr = FLT_MAX) and none improves
+                Fixture f = Blank(m, "avx2/reject/m" + std::to_string(m) + "/v" + std::to_string(v), (uint16_t)angle);
+                for (uint32_t i = 0; i < m; ++i) {
+                    f.mx[i] = 100.0f * (float)i;
+                    f.px[i] = f.mx[i] + (v == 0 ? 1.0f : 1.0f + 0.25f * (float)((i * 7u) % 5u));
+                }
+                if (v == 2 && m > 1) { f.entMan[m - 1] = -1; f.entSlot[0] = -1; }
+                bad += CompareCase(f, ws, st, printed);
+                ++laneCases;
+            }
+            std::vector<uint32_t> wps = {m / 2};
+            if (m > 1) { wps.push_back(0); wps.push_back(m - 1); }
+            std::vector<uint32_t> ips;
+            if (m <= 40) for (uint32_t i = 0; i < m; ++i) ips.push_back(i);
+            else {
+                for (uint32_t b : {0u, 1u, (m - 1) / 8})
+                    for (uint32_t k = 0; k < 8; ++k) if (8 * b + k < m) ips.push_back(8 * b + k);
+                std::sort(ips.begin(), ips.end());
+                ips.erase(std::unique(ips.begin(), ips.end()), ips.end());
+            }
+            for (uint32_t wp : wps)
+                for (uint32_t ip : ips) {
+                    if (ip == wp) continue;
+                    for (int mode = 0; mode < 3; ++mode) {
+                        if (mode != 0 && wp != m / 2) continue;
+                        char buf[112];
+                        std::snprintf(buf, sizeof buf, "avx2/lane/m%u/w%u/i%u/mode%d", m, wp, ip, mode);
+                        Fixture f = Blank(m, buf, (uint16_t)angle);
+                        for (uint32_t i = 0; i < m; ++i) { f.mx[i] = 100.0f * (float)i; f.px[i] = f.mx[i] + 1.0f; }
+                        const float xw = 100.0f * (float)wp;
+                        f.px[wp] = xw + 10.0f;                                   // the worst entry (distance 10)
+                        f.mx[ip] = xw + 9.0f; f.px[ip] = xw;                     // first improving candidate
+                        if (ip + 1 < m && ip + 1 != wp) { f.mx[ip + 1] = xw + 9.5f; f.px[ip + 1] = xw; }    // more improving, right behind
+                        if (ip + 2 < m && ip + 2 != wp) { f.mx[ip + 2] = xw + 9.75f; f.px[ip + 2] = xw; }
+                        if (mode == 1) {                                         // null man / null slot lanes around the improving one
+                            if (ip >= 1 && ip - 1 != wp) f.entMan[ip - 1] = -1;
+                            if (ip + 1 < m && ip + 1 != wp) f.entSlot[ip + 1] = -1;
+                        } else if (mode == 2) {                                  // an inf-cost (inactive) lane before the improving one
+                            if (ip >= 1 && ip - 1 != wp) f.mx[ip - 1] = inf;
+                            if (ip >= 2 && ip - 2 != wp) f.px[ip - 2] = nanv;
+                        }
+                        bad += CompareCase(f, ws, st, printed);
+                        ++laneCases;
+                        if (mode == 0 && (ip % 8 == 3 || m <= 9)) {              // the improving lane really is accepted by the kernel
+                            World w; BuildWorld(f, w);
+                            Run r; Execute(kSolveCensus, f, w, ws, r, false);
+                            ++laneSwapCases;
+                            expect(r.outcome == ntw_solver::kSolved && r.ctr.swaps >= 1, f.label, "avx2 lane fixture never accepted a swap");
+                        }
+                    }
+                }
+        }
+        cases += laneCases;
+        std::printf("deterministic cases: %d avx2 lane fixtures (tails m=1..40.., all-reject, first-accept lanes 0..7, null/inf neighbours; %d swap-checked)\n",
+                    laneCases, laneSwapCases);
+    }
     std::printf("deterministic cases: %d fixtures (NaN-lane, worst-scan ties, reversed line, tournament-update patterns) compared\n", cases);
     return bad;
 }
@@ -1016,7 +1184,7 @@ int DeterministicCases(ntw_solver::Workspace& ws, Stats& st, int& printed) {
 int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     std::string image, tablePath;
-    int cases = 2000, bench = 1;
+    int cases = 2000, bench = 1, reps = 15;
     uint32_t seed = 20261018;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string a = argv[i];
@@ -1024,11 +1192,12 @@ int main(int argc, char** argv) {
         else if (a == "--table") tablePath = argv[i + 1];
         else if (a == "--cases") cases = std::atoi(argv[i + 1]);
         else if (a == "--seed") seed = (uint32_t)std::strtoul(argv[i + 1], nullptr, 10);
-        else if (a == "--bench") bench = std::atoi(argv[i + 1]);
+        else if (a == "--bench") bench = std::atoi(argv[i + 1]);   // 0 none, 1 legacy micro-benchmark (default), 2 ONLY the policy A/B bench (no suite), 3 suite + both
+        else if (a == "--reps") reps = std::atoi(argv[i + 1]) < 3 ? 3 : std::atoi(argv[i + 1]);
     }
     std::vector<uint8_t> file, table;
     if (image.empty() || tablePath.empty() || !ReadAll(image, file) || !ReadAll(tablePath, table)) {
-        std::fprintf(stderr, "usage: --image Napoleon.exe --table angle-table.bin [--cases N] [--seed S] [--bench 0|1]\n");
+        std::fprintf(stderr, "usage: --image Napoleon.exe --table angle-table.bin [--cases N] [--seed S] [--bench 0|1|2|3] [--reps N]\n");
         return 2;
     }
     if (Sha256(file.data(), file.size()) != kImageSha) { std::fprintf(stderr, "image SHA-256 mismatch\n"); return 2; }
@@ -1043,6 +1212,8 @@ int main(int argc, char** argv) {
         std::memcpy(&z, &e.zero, 4); std::memcpy(&o, &e.one, 4); std::memcpy(&p, &e.pairWeight, 4);
         std::printf("Env constants: zero %08x one %08x pairWeight %08x\n", z, o, p);
     }
+    std::printf("AVX2 packed scan: %s\n", ntw_solver::Avx2Supported() ? "supported (kSimdAvx2 / default run the 8-lane loop)" : "NOT supported (kSimdAvx2 and the default run the SSE loop)");
+    if (bench == 2) { const int bad = BenchPolicies(*ws, reps); ntw_solver::DestroyWorkspace(ws); return bad ? 1 : 0; }
     std::printf("solver oracle: seed=%u cases=%d kMaxM=%u workspace=%llu bytes\n", seed, cases, ntw_solver::kMaxM,
                 (unsigned long long)ntw_solver::WorkspaceBytes());
     Rng rng{seed ? seed : 1};
@@ -1079,9 +1250,9 @@ int main(int argc, char** argv) {
         failures += CompareCase(f, *ws, st, printed);
     }
     failures += DeterministicCases(*ws, st, printed);
-    {   // small formations: every list length 1..16 (partial 4-lane blocks, improving lane 0..3, ties, NaN / inf / denormal lanes), limit 0
-        for (int i = 0; i < 3000; ++i) {
-            Fixture f = MakeFixture(rng, 500000 + (uint32_t)i, 1 + (i % 16));
+    {   // small formations: every list length 1..40 (partial 4- and 8-lane blocks, improving lane 0..7, ties, NaN / inf / denormal lanes), limit 0
+        for (int i = 0; i < 6000; ++i) {
+            Fixture f = MakeFixture(rng, 500000 + (uint32_t)i, 1 + (i % 40));
             f.limit = 0;
             if (i % 4 == 0 && f.m) {
                 const bool nan = (i % 8) == 0;
@@ -1135,7 +1306,8 @@ int main(int argc, char** argv) {
                 (unsigned long long)st.distinct, (unsigned long long)st.swaps, (unsigned long long)st.removals,
                 (unsigned long long)st.selfChecked, (unsigned long long)st.distinctChecked,
                 st.evals ? 100.0 * (1.0 - (double)st.distinct / (double)st.evals) : 0.0);
-    if (bench && failures == 0) Bench(rng, *ws);
+    if (bench == 3 && failures == 0) failures += BenchPolicies(*ws, reps);
+    if ((bench == 1 || bench == 3) && failures == 0) Bench(rng, *ws);
     ntw_solver::DestroyWorkspace(ws);
     return failures ? 1 : 0;
 }

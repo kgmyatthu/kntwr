@@ -32,10 +32,20 @@
 //       - thread currently executing a marshalled call: pass-through.
 //       - 0x83FD00 is the same marshalled kind, reached by call gate AI2_UNROUTED_83FD00 from AI2_POSITION_UPDATE: its
 //         23-function closure reaches original walk owners AND owner transactions, so it is never run on the worker.
-//   * residual (not gateable without .text patches, documented in the report): owner teardown executed by a non-tick
-//     thread through direct calls (0x8254D0 from 0x739240 <- 0x73DCC3, 0x739460 <- 0x73930C/0x739344/0x7CB02E/0x7D31BE,
-//     0x76B870; 0x69C720 from the 0x825AE0.. family; battle exit) while a think runs in the inter-tick window. The
-//     feature stays experimental for this.
+//   * direct-call owner teardown (no vtable slot on the path): the inner destructor bodies 0x8254D0 (operation, vtable
+//     0x1349C18; called from 0x739240 <- 0x73DCC3, 0x739460 <- 0x73930C/0x739344/0x7CB02E/0x7D31BE, 0x76B870, the
+//     pinned 0x73E050/0x73E0E0/0x826290 bodies and 0x85DC1A) and 0x69C720 (delegate, vtable 0x1337C30; the 0x825AE0..
+//     0x825D30 family, the pinned 0x69E170 body, and the tail jump inside 0x8254D0) are reached through 19 `E8/E9 rel32`
+//     sites (10 + 9, a complete static census of the stock image: no absolute or vtable reference exists). Reset(true)
+//     retargets each rel32 at the naked gate of pin 25 / pin 26 (vtable == 0 pins, kDirectPinFirst..), which runs the
+//     same destructor protocol as the slot gates above (tick owner: staged calls of this tick are published first, then
+//     the join; worker: marshalled; non-tick: owner teardown lease; serving/leased thread: pass-through). Quiesce/Drain
+//     restore the sites. The gates bound their own range with an 8-byte tail marker so the restore can prove no peer is
+//     inside them; every gate entry is counted by the busy counter the Swap8 guard reads.
+//   * staged teardown order: a think staged at site 34 earlier in the same tick holds a raw pointer into the graph a
+//     later same-tick owner teardown frees, and the batch is published only at tick end. The tick-owner destructor gate
+//     therefore publishes the staged calls first and joins them (synchronous order: the think ran before the teardown),
+//     counted in staged_teardown_publishes. This is a function of call order only, never of timing.
 //   * stop (Quiesce, generation still enabled): admission closes (site 34 runs synchronously), the next tick start
 //     drains the batch; if no tick comes within the grace period the stopping thread services each posted call itself
 //     while the receivers are still bound, otherwise it aborts the call (EAX = 0, the original is NOT executed) so the
@@ -47,7 +57,9 @@
 // indices head <= published <= tail; the publish and the worker's idle transition are serialized by one lock, so a join
 // never observes "drained" while a published call is outstanding. The lease and the worker's call start use a
 // store-then-check handshake on both sides (interlocked, sequentially consistent): no native call starts under a lease.
-// Nothing here suspends a thread, patches .text or copies native frames.
+// Nothing here suspends a thread or copies native frames. The only .text bytes it writes are the rel32 of the 19
+// direct-call owner-teardown sites (kntwr_entry_patch::Swap8: peers frozen, interior IP refused, 8-byte CAS), installed by
+// Reset(true) and restored by Quiesce/Drain; the stock functions themselves are never modified.
 //
 // Deferred schedule (--ai-deferred, kntwr_config::ai_deferred = K | B << 8; analysis/native-ai-deferred-think.md):
 //   * site 34 of tick N admits (planner, flag) as a deferred think unless that planner already has an outstanding
@@ -70,7 +82,8 @@
 namespace kntwr_ai_async2 {
 using U = uint32_t;
 
-constexpr U kVersion = 3, kWords = 96, kBuckets = 12, kKinds = 8, kPinCount = 25, kWatchdogMs = 5000;
+constexpr U kVersion = 3, kWords = 96, kBuckets = 12, kKinds = 8, kPinCount = 27, kWatchdogMs = 5000;
+constexpr U kDirectPinFirst = 25; // pins [kDirectPinFirst, kPinCount): call-site gates (vtable == 0), see the .cpp
 constexpr U kRoutePins = 13, kUnroutedPin = 12; // pins with a route-row marshal counter; the 83FD00 clone-call gate
 constexpr U kMaxQueued = 64; // staged + published-not-run + running native calls, FIFO across ticks
 constexpr U kRouteWords = 65, kRouteFunctions = 21, kRouteSlots = 2, kRouteClasses = 4;
@@ -85,9 +98,11 @@ enum Word : U {
     WKindEntries = WKindWaits + 2 * kKinds,     // gate/join entries per kind
     WKindMarshal = WKindEntries + kKinds,       // worker calls marshalled to the tick per kind
     WSpottingUnresolved = WKindMarshal + kKinds, WLeaseHolds, WRouteEntries, WScratchReady,
-    WStopServed, WStopAborted, WOwnerLeases, WReserved
+    WStopServed, WStopAborted, WOwnerLeases,
+    WStagedTeardownPublishes // same-tick staged thinks published before a tick-owner owner teardown (blocking, deterministic)
 };
-static_assert(WSpottingUnresolved == 88 && WStopServed == 92 && WReserved == 95 && kWords == 96, "ai_async2 word layout");
+static_assert(WSpottingUnresolved == 88 && WStopServed == 92 && WStagedTeardownPublishes == 95 && kWords == 96,
+              "ai_async2 word layout");
 
 // Appended route/boundary row kntwr_status::ai_async2_route_words (labels KNTWR_AI_ASYNC2_ROUTE_LABELS).
 enum RouteWord : U {
@@ -158,9 +173,13 @@ void NotePrivate(U word, U value); // RLookupCapacity + word, word < 4
 void NoteGate(U slot, bool routedPrivate);
 // Address of the kRouteFunctions entry counters (AI2_ROUTE_COUNTS binding; the private clones increment them).
 U FunctionCounters();
-// Stopping thread, BEFORE the generation stops routing ticks: close admission and drain (see the stop rule above).
-// receiversValid() is re-evaluated before each self-serviced call. False: not drained within timeoutMs.
+// Stopping thread, BEFORE the generation stops routing ticks: close admission and drain (see the stop rule above), then
+// restore every direct-call owner-teardown site (Swap8, refused while a peer is inside a site gate; a refusal that outlives
+// the timeout returns false and leaves the generation resident). receiversValid() is re-evaluated before each
+// self-serviced call. False: not drained / not restored within timeoutMs.
 bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)());
+// Final drain (no published or staged call outstanding). Also restores the direct-call sites again: it is the one stop
+// path every shutdown crosses, even when the generation never reached Quiesce. False: not drained / not restored.
 bool Drain(U timeoutMs);
 void Snapshot(volatile U* out);
 void RouteSnapshot(volatile U* out);

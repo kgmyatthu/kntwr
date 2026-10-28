@@ -1745,6 +1745,13 @@ SOURCES = [
     # 57AC10 = 97090da53d0962304a5b5dfc3f57a768a99b12368fea798cbc81f7ca800bfb77.
     ('SOLVER_584E10', 0x584E10, 0x585737, 'clone'),
     ('SOLVER_57AC10', 0x57AC10, 0x57AC8A, 'clone'),
+    # --army-storm-census command split route (src/army/native_formation_residual.h): the formation command callback 0x581CA0 (vtable 0x1325428 slot +4; ECX = command, EDX = vtable,
+    # plain ret at 0x581CC7, trailing tail jmp 557D80 stays original) and the state-enter thunk 0x4F84C0 (ret 4 at 0x4F84D2) and 0x5736B0 (ret at 0x573743). 'private': the originals
+    # stay live for every other caller; the copies are entered only by the census queue port's routed dispatch. The 10FC370 / 10FBBD0 chain reuses the S0_POSTURE / S0_POSTURE_STEP spans.
+    # The spans are byte-identical in the pinned historical image and stock Napoleon.exe 44880ec1... (compared in full).
+    ('CMD_581CA0', 0x581CA0, 0x581CC8, 'private'),
+    ('CMD_4F84C0', 0x4F84C0, 0x4F84D5, 'private'),
+    ('CMD_5736B0', 0x5736B0, 0x573744, 'private'),
 ]
 
 # Allowed unrelocated image-looking operand fields, pinned by source, field VA and value.
@@ -2439,6 +2446,7 @@ def clone_configs():
         *unit_ctor_configs(),
         *solver_configs(),
         *form_update_configs(),
+        *cmd_split_configs(),
     ]
 # External call targets that stay original (RELATIVE IMAGE fixups); each clone must match exactly.
 EXPECT_CALLS = {
@@ -2648,6 +2656,59 @@ FORM_EXPECT_CENSUS = {'FORM_UPDATE': (130, 1, 4, 0)}
 EXPECT_CENSUS.update(FORM_EXPECT_CENSUS)
 
 
+# --army-storm-census command split route (src/army/native_formation_residual.h): private copy of the observed formation command callback
+# 581CA0 (vtable 0x1325428 slot +4) -> 10FC370 (FSM wrapper, = S0_POSTURE) -> 10FBBD0 (FSM step, = S0_POSTURE_STEP) -> state-enter virtual -> 4F84C0 -> 5736B0.
+# The state-enter `call [eax+4]` at 10FBBF3 (run 8bcf 8b07 56 ff5004: mov ecx,edi; mov eax,[edi]; push esi; call [eax+4]) becomes `mov ecx,edi; push esi;
+# call CMD_ENTER` (same length; the host gate loads the vtable and slot itself and forwards ECX, EDX and the one stack argument, ret 4). The next-state call [eax]
+# at 10FBBDA, the leave call [eax+0xC] at 10FBBE8 and the null-next-state calls at 10FBBFB / 10FBC02 stay the original indirect calls. 5736B0's 57B000 (5736E0,
+# thiscall ECX = command, four stack arguments, ret 0x10) and per-man 55F160 (573727, thiscall ECX = command, five stack arguments, ret 0x14) calls go to CMD_ASSIGN
+# / CMD_PERMAN; the three 4B4A50 calls (5736E9 / 573702 / 573732) and the tail jmp 557D80 of 581CA0 stay original.
+CMD_ENTER_RUN = bytes.fromhex('8bcf8b0756ff5004')   # 10FBBEE mov ecx,edi; mov eax,[edi]; push esi; call [eax+4]
+CMD_SPLIT_CALL_SITES = {0x581CA6: 0x10FC370, 0x10FC389: 0x10FBBD0, 0x4F84CD: 0x5736B0, 0x5736E0: 0x57B000, 0x573727: 0x55F160}
+
+
+def cmd_split_configs():
+    return [
+        dict(clone='CMD_581CA0', source='CMD_581CA0', calls={0x10FC370: (Clone('CMD_10FC370'), 1, [0x581CA6])},
+             indirect_calls=set(), expect_rets={0x581CC7: b'\xc3'}),
+        dict(clone='CMD_10FC370', source='S0_POSTURE', calls={0x10FBBD0: (Clone('CMD_10FBBD0'), 1, [0x10FC389])},
+             indirect_calls=set(), expect_rets={0x10FC39F: b'\xc3', 0x10FC3A5: b'\xc3'}),
+        dict(clone='CMD_10FBBD0', source='S0_POSTURE_STEP',
+             run_rewrites={0x10FBBEE: (CMD_ENTER_RUN, [bytes.fromhex('8bcf56'), b'\xe8', Fix('rel', Bind('CMD_ENTER'))])},
+             indirect_calls={0x10FBBDA, 0x10FBBE8, 0x10FBBFB, 0x10FBC02}, expect_rets={0x10FBBFA: b'\xc3', 0x10FBC0E: b'\xc3'}),
+        dict(clone='CMD_4F84C0', source='CMD_4F84C0', calls={0x5736B0: (Clone('CMD_5736B0'), 1, [0x4F84CD])},
+             indirect_calls=set(), expect_rets={0x4F84D2: RET(4)}),
+        dict(clone='CMD_5736B0', source='CMD_5736B0', site_calls={0x5736E0: Bind('CMD_ASSIGN'), 0x573727: Bind('CMD_PERMAN')},
+             indirect_calls=set(), expect_rets={0x573743: b'\xc3'}),
+    ]
+
+
+def cmd_split_extra_checks(image, plans):
+    """Every redirected edge is pinned to its original callee, and the replaced state-enter run and the shared S0 spans are exactly the proven bytes."""
+    for site, callee in CMD_SPLIT_CALL_SITES.items():
+        if image.read(site, 5) != b'\xe8' + u32((callee - site - 5) & 0xFFFFFFFF):
+            fail(f'CMD split: call at {site:#x} no longer targets {callee:#x}')
+    if image.read(0x10FBBEE, 8) != CMD_ENTER_RUN or image.read(0x10FBBDA, 2) != bytes.fromhex('ff10'):
+        fail('CMD split: 10FBBD0 state-enter run / next-state call changed')
+    if (image.read(0x581CA0, 6) != bytes.fromhex('568bf18d4e18') or image.read(0x581CC1, 5) != bytes.fromhex('e9ba60fdff') or
+            image.read(0x581CC1, 5) != b'\xe9' + u32((0x557D80 - 0x581CC1 - 5) & 0xFFFFFFFF)):
+        fail('CMD split: 581CA0 prologue, FSM receiver (ECX+0x18) or tail jmp 557D80 changed')
+    if image.read(0x4F84C0, 21) != bytes.fromhex('8b4c24048d41e8f7d91bc923c8e8deb10700c20400'):
+        fail('CMD split: 4F84C0 thunk changed')
+    for name, ret_site, ret_bytes in (('CMD_581CA0', 0x581CC7, b'\xc3'), ('CMD_4F84C0', 0x4F84D2, RET(4)), ('CMD_5736B0', 0x573743, b'\xc3')):
+        by_addr = {i.address: i for i, _, _ in plans[name].instructions}
+        if by_addr[ret_site].bytes != ret_bytes:
+            fail(f'CMD split: {name} return at {ret_site:#x} changed')
+
+
+CMD_EXPECT_CALLS = {'CMD_581CA0': {0x4B4A50}, 'CMD_10FC370': set(), 'CMD_10FBBD0': set(), 'CMD_4F84C0': set(), 'CMD_5736B0': {0x4B4A50}}
+EXPECT_CALLS.update(CMD_EXPECT_CALLS)
+EXPECT_JUMPS['CMD_581CA0'] = {0x557D80}
+CMD_EXPECT_CENSUS = {'CMD_581CA0': (16, 0, 1, 1), 'CMD_10FC370': (30, 0, 0, 0), 'CMD_10FBBD0': (33, 0, 0, 0), 'CMD_4F84C0': (7, 0, 0, 0),
+                     'CMD_5736B0': (53, 0, 3, 0)}
+EXPECT_CENSUS.update(CMD_EXPECT_CENSUS)
+
+
 STEP_EXPECT_CALLS = {'STEP_676FD0': {0x10D0900, 0x126DEF6, 0x126DF40, 0x126E299, 0x52EDB0, 0x56DE10, 0x61E9A0, 0x629240, 0x62DF10, 0x639C10,
                                      0x63BF40, 0x63CE00, 0x63E2E0, 0x6497D0, 0x654A80, 0x655B80, 0x659480, 0x659520, 0x659B70, 0x659DA0, 0x662960,
                                      0x664100, 0x6669B0, 0x66B9D0, 0x679700, 0x679750, 0x6D03B0, 0x7F6720, 0x80E9D0}}
@@ -2721,6 +2782,9 @@ SOLVER_PINS = {
     0x585269: 'e8a259ffff',                                              # call 57AC10
     0x57AC2C: '50' '6a01' '8d4348' 'c744242000000000' '50' 'e850f0fbff',   # push outvec; push flag=1; push cache+48; call 539C90 (ECX=cache)
     0x58550C: '6a03' 'ffb424e8000000' '8b4008' '8b88b4000000' 'e85d6b2900',  # native receiver, record and kind=3 -> 81C080
+    # Command route: the whole native 57B000 body (identical in the stock and the live-patched exe); the runtime rewrites its call 57B021 (`e8 7a acfdff` = call 555CA0, followed by ret 0x10)
+    # to a gate that tail-jumps to CLONE_SOLVER_555CA0 (src/army/native_army_solver.cpp kCmdBodyBytes mirrors these bytes, Start refuses any other body).
+    0x57B000: 'e84b9af3ff' 'f30f1044240c' '6aff' 'ff742414' '51' 'f30f110424' '8bc8' 'ff742414' 'ff742414' 'e87aacfdff' 'c21000',   # call 4B4A50 (F=[this+4]); push -1 ...; call 555CA0; ret 10
 }
 SOLVER_SHIM_RET_VA = 0x18F0A96
 
@@ -3341,6 +3405,7 @@ def build_all(image, header_path):
     loco_extra_checks(image, plans, header_path)
     node_projection_extra_checks(image, plans, header_clones, header_path)
     solver_extra_checks(image, plans, header_path)
+    cmd_split_extra_checks(image, plans)
     manager = plans['MANAGER']
     by_addr = {i.address: i for i, _, _ in manager.instructions}
     if (by_addr[MANAGER_TABLE_JMP].bytes != bytes.fromhex('ff24b5') + u32(MANAGER_TABLE_VA) or

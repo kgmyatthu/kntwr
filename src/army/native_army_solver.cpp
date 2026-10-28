@@ -3,6 +3,7 @@
 #include "native_army_solver.h"
 #include "formation/native_formation_solver.h"
 #include "clones/kntwr_clones.h"
+#include "core/kntwr_entry_patch.h"
 #include <windows.h>
 #include <intrin.h>
 #include <string.h>
@@ -21,20 +22,32 @@ using NativeFormation = void* (__fastcall*)(void* cache, void* edx);
 bool g_started;
 Mode g_mode;
 U g_delta, g_nativeSolve, g_nativeAssign, g_cloneAssign, g_cacheCloneAssign;
+LimitedSink g_limitedSink;   // nullable: set from Binding::limitedSink at Start, cleared at Stop
 ntw_solver::Workspace* g_ws;
 ntw_solver::Env g_env;
 LARGE_INTEGER g_frequency;
 u64 g_tscPerSecond;      // rdtsc ticks per second, calibrated against QPC at Start
 U g_ownerTid, g_assignDepth, g_curFormation, g_curMembers;
-bool g_cacheOrigin;
+enum class Origin : U { Ordinary, Cache, Command };
+Origin g_origin;
 volatile U g_shimExpected, g_shimSuppressed, g_shimForwarded, g_viaShim;
+// Command route (57B021 rewrite): the gate's operands are plain 32-bit words so the naked gate can read them without a frame.
+volatile U g_commandClone;     // CLONE_SOLVER_555CA0 entry; 0 = the gate runs the native 555CA0 (set LAST at install, cleared FIRST at stop)
+volatile U g_commandNative;    // V(0x555CA0)
+volatile U g_tickOwnerPtr, g_epochMaskPtr, g_routedMask;
+volatile U g_pendingCommand;   // set by the gate on the tick owner right before the clone chain, consumed by AssignGate (555CEB)
+volatile U g_cmdGateNative;    // gate entries that ran the native 555CA0
+volatile LONG g_cmdInstalled;
+U g_cmdSite;
+unsigned char g_cmdPatch[8];
 volatile U g_gateAddress;
 Entry12 g_shadowCopy[ntw_solver::kMaxM];
 
 struct Totals {
     u64 ticks, seen, flag1, kernel, flag0, foreign, fallback[8], compares, mismatchSolves, mismatchEntries, mismatchEax, assignCalls,
         r1, r1b, r2, nativeQ, kernelQ, evals, distinct, iterations, swaps, removals, observerQ, membersSum, hist[6],
-        scans, gatherQ, profN, profCostQ, profLoopQ, profTotalQ, direct, empty, cacheAssignCalls, cacheSolvedKernel;   // gather/cost/loop/total are raw rdtsc ticks
+        scans, gatherQ, profN, profCostQ, profLoopQ, profTotalQ, direct, empty, cacheAssignCalls, cacheSolvedKernel, cmdAssignCalls, cmdSolvedKernel;   // gather/cost/loop/total are raw rdtsc ticks
+    u64 limitedQ, assignScopeQ, assignScopeCalls;   // census-only (CensusSnapshot): armed only under a limitedSink / CensusProbeEnter
     U maxM, maxMembers;
 };
 struct TickAcc {
@@ -50,6 +63,7 @@ SolveRec g_curSolves[kTop];  U g_curCount;   // top solves of the open tick (tic
 SolveRec g_topSolves[kTop];  U g_topSolveCount;
 TickRec g_topTicks[kTop];    U g_topTickCount;
 
+__declspec(thread) U t_censusProbe;   // calling thread's CensusProbeEnter depth; non-zero only inside the residual's routed GateAssign (census)
 LONGLONG Now() { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 U Sat(u64 v) { return v > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<U>(v); }
 U Us(u64 q) { return g_frequency.QuadPart ? Sat(q * 1000000ull / static_cast<u64>(g_frequency.QuadPart)) : 0; }
@@ -76,9 +90,12 @@ void NoteDistinct(U* list, U& count, U formation) {
 void NoteFormation(U formation) { NoteDistinct(g_tick.formations, g_tick.formationCount, formation); }
 // Folds one flag=1 solve into the totals, the tick accumulator and the open tick's top-solve list.
 void Record(U m, const ntw_solver::Counters& c, u64 nativeQ, u64 kernelQ, U flags, U eax) {
-    if (g_cacheOrigin) {
+    if (g_origin == Origin::Cache) {
         flags |= 0x200u;
         if (flags & 2u) ++g_total.cacheSolvedKernel;
+    } else if (g_origin == Origin::Command) {
+        flags |= 0x400u;
+        if (flags & 2u) ++g_total.cmdSolvedKernel;
     }
     g_total.nativeQ += nativeQ; g_total.kernelQ += kernelQ;
     g_total.evals += c.evals; g_total.distinct += c.distinct; g_total.iterations += c.iterations;
@@ -108,6 +125,19 @@ void Record(U m, const ntw_solver::Counters& c, u64 nativeQ, u64 kernelQ, U flag
 void CountFallback(U reason) {
     if (reason >= 1 && reason <= 7) ++g_total.fallback[reason];
 }
+// The single exact native call of an eligible limited (limit != 0) solve. With a sink bound (storm census wired) it is timed with
+// two local QPC reads and the elapsed QPC ticks are handed to the sink; without one it is the plain forward. Same arguments, same
+// EAX; the time never enters Record / nativeQ / kernelQ or any other solver table.
+U NativeLimited(NativeSolve native, const float* ctx, void* edx, Entry12* begin, Entry12* end, U limit, float thr) {
+    const LimitedSink sink = g_limitedSink;
+    if (!sink) return native(ctx, edx, begin, end, limit, thr);
+    const LONGLONG t0 = Now();
+    const U eax = native(ctx, edx, begin, end, limit, thr);
+    const LONGLONG t1 = Now();
+    g_total.limitedQ += static_cast<u64>(t1 - t0); // census-only: reached only with a bound sink
+    sink(static_cast<u64>(t1 - t0));
+    return eax;
+}
 } // namespace
 
 // ---- host gates (bound into the SOLVER clones)
@@ -122,8 +152,8 @@ U __fastcall SolveGate(const float* ctx, void* edx, Entry12* begin, Entry12* end
     }
     ++g_total.seen;
     if (!viaShim) ++g_total.direct;
-    if (g_mode == ModeForward) { if (limit != 0) ++g_total.flag0; else ++g_total.flag1; return native(ctx, edx, begin, end, limit, thr); } // oracle only: chain + shim live, every solve native
-    if (limit != 0) { ++g_total.flag0; return native(ctx, edx, begin, end, limit, thr); }
+    if (g_mode == ModeForward) { if (limit != 0) { ++g_total.flag0; return NativeLimited(native, ctx, edx, begin, end, limit, thr); } ++g_total.flag1; return native(ctx, edx, begin, end, limit, thr); } // oracle only: chain + shim live, every solve native
+    if (limit != 0) { ++g_total.flag0; return NativeLimited(native, ctx, edx, begin, end, limit, thr); }
     ++g_total.flag1;
     if (begin == end) { ++g_total.empty; return native(ctx, edx, begin, end, limit, thr); } // empty range (data may be null): nothing to solve, no kernel call
     const uintptr_t b = reinterpret_cast<uintptr_t>(begin), e = reinterpret_cast<uintptr_t>(end);
@@ -131,6 +161,7 @@ U __fastcall SolveGate(const float* ctx, void* edx, Entry12* begin, Entry12* end
     const U m = rangeOk ? static_cast<U>((e - b) / sizeof(Entry12)) : 0;
     ntw_solver::Counters c = {};
     c.profile = 0; // census mode forces the scalar loop; shadow and memo both run the shipping (kSimd) path, so distinct stays 0 (evals/scans/swaps/iterations are native-exact)
+    c.telemetry = g_limitedSink ? 1u : 0u; // exact packed-loop evals/scans only when the storm census is wired; default ships the fast loop (both read 0)
     if (!rangeOk || m > ntw_solver::kMaxM) { // out of the kernel contract before any work: the native solver runs, counted
         c.fallback = rangeOk ? ntw_solver::kReasonTooLarge : ntw_solver::kReasonRange;
         CountFallback(c.fallback);
@@ -189,35 +220,41 @@ U __fastcall SolveGate(const float* ctx, void* edx, Entry12* begin, Entry12* end
     return eax;
 }
 // Common assignment scope: both the ordinary 555CEB route and the formerly native cache assignment use the same solver gates.
-U RunAssign(void* formation, void* edx, U a1, U a2, U a3, U a4, U target, bool cacheOrigin) {
+U RunAssign(void* formation, void* edx, U a1, U a2, U a3, U a4, U target, Origin origin) {
     const U f = static_cast<U>(reinterpret_cast<uintptr_t>(formation));
     const U members = Bits(f + kMembersOffset);
     ++g_total.assignCalls; g_total.membersSum += members;
-    if (cacheOrigin) ++g_total.cacheAssignCalls;
+    if (origin == Origin::Cache) ++g_total.cacheAssignCalls;
+    else if (origin == Origin::Command) ++g_total.cmdAssignCalls;
     if (members > g_total.maxMembers) g_total.maxMembers = members;
     NoteFormation(f);
     const U savedFormation = g_curFormation, savedMembers = g_curMembers;
-    const bool savedCacheOrigin = g_cacheOrigin;
-    g_cacheOrigin = cacheOrigin;
+    const Origin savedOrigin = g_origin;
+    g_origin = origin;
+    const bool censusTimed = t_censusProbe && !g_assignDepth; // census only: outermost scope inside the routed GateAssign (default: one TLS load + test, no QPC)
     if (!g_assignDepth++) g_ownerTid = GetCurrentThreadId();
     g_curFormation = f; g_curMembers = members;
+    const LONGLONG scopeT0 = censusTimed ? Now() : 0;
     const U r = reinterpret_cast<NativeAssign>(target)(formation, edx, a1, a2, a3, a4);
+    if (censusTimed) { g_total.assignScopeQ += static_cast<u64>(Now() - scopeT0); ++g_total.assignScopeCalls; }
     if (g_assignDepth) --g_assignDepth; // saturates: Stop()/Reset() may have cleared the depth while the occurrence was live
     g_curFormation = savedFormation; g_curMembers = savedMembers;
-    g_cacheOrigin = savedCacheOrigin;
+    g_origin = savedOrigin;
     return r;
 }
 // 555CEB: ECX = formation, four stack arguments, ret 0x10.
 U __fastcall AssignGate(void* formation, void* edx, U a1, U a2, U a3, U a4) {
+    const bool command = g_pendingCommand != 0;   // set by CommandAssignGate on this thread for exactly the 555CA0 that is entered next
+    g_pendingCommand = 0;
     if (!g_started) return reinterpret_cast<NativeAssign>(g_nativeAssign)(formation, edx, a1, a2, a3, a4);
-    return RunAssign(formation, edx, a1, a2, a3, a4, g_cloneAssign, false);
+    return RunAssign(formation, edx, a1, a2, a3, a4, g_cloneAssign, command ? Origin::Command : Origin::Ordinary);
 }
 // 57AC3B: replay the fully pinned 539C90 wrapper. Run 15 selects its stock 5373F0 or overlaid 18F0A00 target.
 // Keep the native 4B4A50 call and argument order; neither the cache vector nor its allocation/free lifetime is changed here.
 U __fastcall CacheAssignGate(void* cache, void* edx, U slots, U flag, U entries) {
     if (!g_started) return reinterpret_cast<NativeCacheAssign>(V(0x539C90))(cache, edx, slots, flag, entries);
     void* formation = reinterpret_cast<NativeFormation>(V(0x4B4A50))(cache, edx);
-    return RunAssign(formation, edx, slots, flag, entries, 0xFFFFFFFFu, g_cacheCloneAssign, true);
+    return RunAssign(formation, edx, slots, flag, entries, 0xFFFFFFFFu, g_cacheCloneAssign, Origin::Cache);
 }
 // 53765A: the call of the .aistbl trampoline 18F0D00, replayed instruction for instruction (same pushes, same frame offsets); only the
 // compared return address differs: the SOLVER_18F0A00 clone's. Suppression returns with EAX and EFLAGS restored; otherwise the registers,
@@ -245,6 +282,117 @@ __declspec(naked) void SolveShim() {
     }
 }
 
+// 57B021 (rewritten call site inside the native 57B000): ECX = formation, five stack arguments (a0, a1, float, flag, -1), ret 0x14 to 57B026.
+// Registers, flags and arguments are untouched on both paths: the gate only tail-jumps. Tick owner inside a routed epoch (the SolverEpoch test,
+// supplied by the runtime) -> CLONE_SOLVER_555CA0 (its 555CEB AssignGate consumes g_pendingCommand); any other thread or epoch -> native 555CA0.
+__declspec(naked) void CommandAssignGate() {
+    __asm {
+        cmp dword ptr [g_commandClone], 0
+        je native
+        push eax
+        push edx
+        mov eax, dword ptr [g_tickOwnerPtr]
+        mov edx, dword ptr fs:[0x24]
+        cmp edx, dword ptr [eax]
+        jne foreign
+        mov eax, dword ptr [g_epochMaskPtr]
+        mov eax, dword ptr [eax]
+        test eax, dword ptr [g_routedMask]
+        jz foreign
+        mov dword ptr [g_pendingCommand], 1
+        pop edx
+        pop eax
+        jmp dword ptr [g_commandClone]
+    foreign:
+        pop edx
+        pop eax
+        lock inc dword ptr [g_cmdGateNative]
+    native:
+        jmp dword ptr [g_commandNative]   // 6 bytes: FF 25 <g_commandNative>
+        _emit 0x4B                        // tail marker (never executed)
+        _emit 0xD1
+        _emit 0x92
+        _emit 0x6E
+        _emit 0x35
+        _emit 0xA8
+        _emit 0x07
+        _emit 0xF2
+    }
+}
+
+constexpr U kCmdSite = 0x57B021u, kCmdBody = 0x57B000u, kCmdSpan = 5;
+constexpr unsigned char kCmdBodyBytes[0x29] = {   // 57B000..57B028: call 4B4A50; movss xmm0,[esp+c]; push -1; push [esp+14]; push ecx; movss [esp],xmm0; mov ecx,eax; push [esp+14] x2; call 555CA0; ret 0x10
+    0xE8,0x4B,0x9A,0xF3,0xFF, 0xF3,0x0F,0x10,0x44,0x24,0x0C, 0x6A,0xFF, 0xFF,0x74,0x24,0x14, 0x51,
+    0xF3,0x0F,0x11,0x04,0x24, 0x8B,0xC8, 0xFF,0x74,0x24,0x14, 0xFF,0x74,0x24,0x14,
+    0xE8,0x7A,0xAC,0xFD,0xFF, 0xC2,0x10,0x00};
+constexpr unsigned char kCmdTailMarker[8] = {0x4B,0xD1,0x92,0x6E,0x35,0xA8,0x07,0xF2};
+
+U ResolveThunk(U fn) {
+    for (U hop = 0; hop < 4; ++hop) {
+        const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(fn));
+        if (p[0] != 0xE9) return fn;
+        U displacement; memcpy(&displacement, p + 1, 4);
+        const U next = fn + 5 + displacement;
+        if (next <= fn || next - fn > 0x10000u) return 0;
+        fn = next;
+    }
+    return 0;
+}
+// [begin, end) = every gate byte a frozen thread could still execute, including the final 6-byte jmp; the marker is accepted only right behind
+// `FF 25 &g_commandNative`. begin == 0 on failure.
+bool CommandGateRange(U& begin, U& end) {
+    begin = end = 0;
+    const U gate = ResolveThunk(FnAddress(reinterpret_cast<const void*>(&CommandAssignGate)));
+    if (!gate) return false;
+    const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(gate));
+    const U native = FnAddress(const_cast<const U*>(&g_commandNative));
+    for (U offset = 6; offset + 8 <= 160; ++offset) {
+        if (memcmp(p + offset, kCmdTailMarker, 8) != 0) continue;
+        U target; memcpy(&target, p + offset - 4, 4);
+        if (p[offset - 6] != 0xFF || p[offset - 5] != 0x25 || target != native) continue;
+        begin = gate; end = gate + offset;
+        return true;
+    }
+    return false;
+}
+bool BytesAre(U address, const unsigned char* want, U bytes) {
+    __try { return memcmp(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), want, bytes) == 0; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+// Installs `call 555CA0` -> `call CommandAssignGate` at 57B021 (8 bytes swapped atomically; the three bytes of `ret 0x10` are rewritten with themselves).
+// Everything is pinned first: the complete 57B000 body (including the call's original rel32, hence its 555CA0 target).
+bool InstallCommandRoute(const Binding& b) {
+    if (!b.cloneCommandAssign || !b.tickOwner || !b.epochMask || !b.routedMask) return false;
+    const U body = V(kCmdBody), site = V(kCmdSite);
+    if (!BytesAre(body, kCmdBodyBytes, sizeof(kCmdBodyBytes))) return false;
+    U gateBegin, gateEnd;
+    if (!CommandGateRange(gateBegin, gateEnd)) return false;
+    unsigned char to[8];
+    memcpy(to, kCmdBodyBytes + (kCmdSite - kCmdBody), 8);
+    to[0] = 0xE8;
+    const U rel = gateBegin - (site + 5);
+    memcpy(to + 1, &rel, 4);
+    memcpy(g_cmdPatch, to, 8);
+    g_cmdSite = site;
+    g_commandNative = V(0x555CA0);
+    g_tickOwnerPtr = static_cast<U>(reinterpret_cast<uintptr_t>(b.tickOwner));
+    g_epochMaskPtr = static_cast<U>(reinterpret_cast<uintptr_t>(b.epochMask));
+    g_routedMask = b.routedMask;
+    g_pendingCommand = 0; g_cmdGateNative = 0;
+    const kntwr_entry_patch::Guard drain(gateBegin, gateEnd, nullptr);
+    if (!kntwr_entry_patch::Swap8(site, kCmdBodyBytes + (kCmdSite - kCmdBody), to, kCmdSpan, drain, [] { _InterlockedExchange(&g_cmdInstalled, 1); })) return false;
+    g_commandClone = b.cloneCommandAssign;   // armed last: until now the patched call ran the native 555CA0
+    return true;
+}
+bool RemoveCommandRoute() {
+    g_commandClone = 0;                      // disarmed first: a thread still inside the gate runs the native 555CA0
+    if (!_InterlockedCompareExchange(&g_cmdInstalled, 0, 0)) return true;
+    U gateBegin, gateEnd;
+    if (!CommandGateRange(gateBegin, gateEnd)) return false;
+    const kntwr_entry_patch::Guard drain(gateBegin, gateEnd, nullptr);
+    return kntwr_entry_patch::Swap8(g_cmdSite, g_cmdPatch, kCmdBodyBytes + (kCmdSite - kCmdBody), kCmdSpan, drain, [] { _InterlockedExchange(&g_cmdInstalled, 0); });
+}
+
 void Bind(U delta, uint32_t* bindings) {
     g_delta = delta;
     g_nativeSolve = V(0x502770);
@@ -257,7 +405,7 @@ void Bind(U delta, uint32_t* bindings) {
 }
 
 bool Start(const Binding& binding) {
-    Stop();
+    if (!Stop()) return false;   // a previous command route that could not be restored stays armed for the retry; never start over it
     if (binding.mode != ModeMemo && binding.mode != ModeShadow && binding.mode != ModeForward) return false; // ModeForward: oracle only (the runtime never passes it)
     g_delta = binding.delta;
     g_mode = binding.mode;
@@ -294,6 +442,7 @@ bool Start(const Binding& binding) {
     g_ws = ntw_solver::CreateWorkspace();
     if (!g_ws) return false;
     g_cloneAssign = binding.cloneAssign;
+    g_limitedSink = binding.limitedSink;
     g_shimExpected = binding.cloneAssign + KNTWR_SOLVER_ASSIGN_RET_OFFSET;
     QueryPerformanceFrequency(&g_frequency);
     { // TSC rate: ~20 ms spin against QPC (the kernel's phase counters are raw rdtsc ticks)
@@ -307,16 +456,22 @@ bool Start(const Binding& binding) {
     }
     Reset();
     g_started = true;
+    if (binding.cloneCommandAssign && !InstallCommandRoute(binding)) { Stop(); return false; }
     return true;
 }
-void Stop() {
+bool CommandRouteInstalled() { return _InterlockedCompareExchange(&g_cmdInstalled, 0, 0) != 0; }
+bool Stop() {
     // Called from StopModules (src/core/kntwr_runtime.cpp), which first waits until tickOwner == 0, so no gate/assign occurrence is live here.
+    const bool restored = RemoveCommandRoute();   // first: the native bytes return before the clone chain's gates are retired
     g_started = false;
+    g_limitedSink = nullptr;
     if (g_ws) ntw_solver::DestroyWorkspace(g_ws);
     g_ws = nullptr;
     g_assignDepth = 0;
-    g_cacheOrigin = false;
+    g_origin = Origin::Ordinary;
     g_cacheCloneAssign = 0;
+    g_pendingCommand = 0;
+    return restored;
 }
 void Reset() {
     memset(&g_total, 0, sizeof(g_total));
@@ -326,9 +481,19 @@ void Reset() {
     memset(g_topTicks, 0, sizeof(g_topTicks)); g_topTickCount = 0;
     g_shimSuppressed = g_shimForwarded = g_viaShim = 0;
     g_curFormation = g_curMembers = 0;
-    g_cacheOrigin = false;
+    g_origin = Origin::Ordinary;
+    g_pendingCommand = 0; g_cmdGateNative = 0;
 }
 bool Started() { return g_started; }
+void ReadCensus(CensusSnapshot* out) {
+    const Totals& t = g_total;
+    out->assignEntries = t.assignCalls; out->solvesSeen = t.seen; out->solvedKernel = t.kernel; out->flag0Native = t.flag0;
+    out->shimSuppressed = g_shimSuppressed; out->kernelQ = t.kernelQ; out->limitedQ = t.limitedQ;
+    out->assignScopeQ = t.assignScopeQ; out->assignScopeCalls = t.assignScopeCalls;
+}
+void CensusProbeEnter() { ++t_censusProbe; }
+void CensusProbeLeave() { if (t_censusProbe) --t_censusProbe; }
+void CensusProbeReset() { t_censusProbe = 0; }
 unsigned long long StorageBytes() { return g_ws ? ntw_solver::WorkspaceBytes() : 0ull; }
 void NoteRoute(Route route) {
     if (!g_started) return;
@@ -370,6 +535,7 @@ void Snapshot(U* w) {
     w[ScansLo] = static_cast<U>(t.scans); w[ScansHi] = static_cast<U>(t.scans >> 32); w[CostUs] = TscUs(t.profCostQ); w[LoopUs] = TscUs(t.profLoopQ);
     w[TimedSolves] = Sat(t.profN); w[KernelTotalUs] = TscUs(t.profTotalQ); w[GatherUs] = TscUs(t.gatherQ); w[Direct18F12AA] = Sat(t.direct);
     w[CacheAssignCalls] = Sat(t.cacheAssignCalls); w[CacheSolvedKernel] = Sat(t.cacheSolvedKernel);
+    w[CmdAssignCalls] = Sat(t.cmdAssignCalls); w[CmdSolvedKernel] = Sat(t.cmdSolvedKernel); w[CmdGateNative] = g_cmdGateNative;
     for (U i = 0; i < g_topTickCount; ++i) {
         const TickRec& r = g_topTicks[i];
         U* e = w + TickTable + i * kTickWords;

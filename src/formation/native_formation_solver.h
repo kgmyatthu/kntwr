@@ -14,8 +14,9 @@
 // native 0x80E9D0 pose function, Env::pose), then runs the identical outer-iteration / first- or best-improvement /
 // swap-remove algorithm with the exact 0x5281D0 SSE operation order (man index = entry position at solve start, carried
 // along swaps; slot index = entry position, slots never move).  Two loops exist:
-//   kSimd   (default; limit == 0, i.e. flag = 1 storms): two eager cost tables, list-order SoA arrays scanned four lanes at
-//           a time and a tournament tree for the worst-cost scan.
+//   kSimd   (default; limit == 0, i.e. flag = 1 storms): two eager cost tables, list-order SoA arrays scanned eight (AVX2 with
+//           runtime dispatch, see Avx2Supported / Policy) or four (SSE) lanes at a time and a tournament tree for the worst-cost
+//           scan.  Packed-loop telemetry (Counters::evals / scans) is OFF unless Counters::telemetry != 0 (see there).
 //   kDirect (limit != 0, census mode, and the oracle's reference): scalar loop recomputing each cost from the gathered SoA.
 //
 // Preconditions (the caller owns them; violating the first three crashes the native solver too):
@@ -65,16 +66,19 @@ struct Env {                   // every address already relocated
 
 struct Counters {              // all per call; evals = native-equivalent 0x5281D0 calls
     uint32_t m;                // entries
-    uint32_t evals;            // 0x5281D0 calls the native solver would make
+    uint32_t evals;            // 0x5281D0 calls the native solver would make.  kSimd packed loops: counted ONLY when telemetry != 0, else 0
     uint32_t distinct;         // distinct (man index, slot index) pairs among them; census mode (profile != 0) only, else 0
     uint32_t iterations;       // native `iter` at exit (outer iterations incl. the terminal "done" one)
     uint32_t swaps;            // accepted swaps
     uint32_t removals;         // swap-removed worst entries (outer iterations without a swap)
     uint32_t fallback;         // FallbackReason when Solve returned kFallback, else 0
-    uint32_t scans;            // W = sum over outer iterations of the list length scanned in the worst-candidate pass
+    uint32_t scans;            // W = sum over outer iterations of the list length scanned in the worst-candidate pass (kSimd: telemetry != 0 only, else 0)
     uint32_t profile;          // INPUT (preserved): non-zero = census mode: count `distinct` pairs (bitset, ~10-15% slower)
                                // and run the scalar kDirect loop even for limit == 0, so census solves do NOT exercise kSimd
-    uint32_t spare;            // keeps the u64 block 8-byte aligned
+    uint32_t telemetry;        // INPUT (preserved): non-zero = the packed kSimd loops also count `evals` / `scans` exactly (measured +16..26% loop
+                               // time at m 300..800, oracle --bench 2); zero (the default of a zero-initialised Counters, and of counters == nullptr)
+                               // = both read 0.  The scalar loops (kDirect, census) always count them.  Nothing else depends on this flag: entries,
+                               // EAX, iterations, swaps and removals are identical either way.
     uint64_t gatherTicks;      // rdtsc: man gather + per-slot native pose calls
     uint64_t fillTicks;        // rdtsc: kSimd eager cost-table fill (INCLUDED in loopTicks), else 0
     uint64_t loopTicks;        // rdtsc: the solver loop (kSimd: including its table fill)
@@ -114,9 +118,13 @@ Outcome Solve(Workspace&, const Env&, const float* ctx, Entry12* begin, Entry12*
 Outcome SolveCopy(Workspace&, const Env&, const float* ctx, Entry12* copyBegin, Entry12* copyEnd, uint32_t limit, float thr,
                   uint32_t* eax, Counters*);
 
-// Oracle/benchmark hook: force the loop policy.  kDirect = scalar loop (any limit), kSimd = packed loop for limit == 0
-// (limit != 0 and census mode still run the scalar loop).  Results are bit-identical by construction; only speed differs.
-enum Policy : int { kDirect = 0, kSimd = 1 };
+// Oracle/benchmark hook: force the loop policy.  kDirect = scalar loop (any limit), kSimd = packed loop for limit == 0 (limit != 0 and
+// census mode still run the scalar loop) with the best ISA of this CPU (AVX2 when Avx2Supported(), else SSE); kSimdSse / kSimdAvx2 force
+// the packed loop's ISA (kSimdAvx2 on a CPU without AVX2 runs SSE).  Results are bit-identical by construction; only speed differs.
+enum Policy : int { kDirect = 0, kSimd = 1, kSimdSse = 2, kSimdAvx2 = 3 };
+// True when this CPU and OS support the AVX2 packed scan: CPUID.1:ECX OSXSAVE + AVX, XGETBV XCR0 XMM+YMM state, CPUID.7:EBX AVX2.
+// The 4-lane SSE scan is the fallback.  Pure query (a few CPUID instructions); Workspace creation caches the answer.
+bool Avx2Supported();
 Outcome SolveWith(Policy, bool replicateList, Workspace&, const Env&, const float* ctx, Entry12* begin, Entry12* end,
                   uint32_t limit, float thr, uint32_t* eax, Counters*);
 

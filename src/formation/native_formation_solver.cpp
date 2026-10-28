@@ -2,8 +2,8 @@
 // (native_formation_slot.cpp, bit-exact against the original machine code in tests/native_formation_slot_harness.cpp)
 // re-expressed over a one-shot gather, with the 0x5281D0 cost inlined in its exact SSE operation order.  Loops:
 //   RunScalar  scalar loop, cost recomputed per call (limit != 0, census mode, oracle reference)
-//   RunSimd    limit == 0 first-improvement solver over eager cost tables, list-order SoA, packed-SSE scans and a
-//              tournament tree for the worst-cost scan
+//   RunSimd    limit == 0 first-improvement solver over eager cost tables, list-order SoA, packed candidate scans (AVX2 8 lanes with
+//              runtime dispatch, else SSE 4 lanes) and a tournament tree for the worst-cost scan
 #include "native_formation_solver.h"
 
 #include <cfloat>
@@ -13,6 +13,7 @@
 #include <intrin.h>
 #include <limits>
 #include <malloc.h>
+#include <immintrin.h>
 #include <xmmintrin.h>
 
 namespace ntw_solver {
@@ -78,24 +79,26 @@ __forceinline __m128 PairCostPs(__m128 sx, __m128 sz, __m128 mx, __m128 mz, __m1
 }
 
 constexpr uint8_t kPop4[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
+inline uint32_t Pop8(uint32_t b) { return kPop4[b & 15u] + kPop4[(b >> 4) & 15u]; }
 
 }  // namespace
 
-constexpr uint32_t kPad = kMaxM + 8;            // list-order arrays: whole 4-lane blocks readable past the live length
+constexpr uint32_t kPad = kMaxM + 8;            // list-order arrays: whole 8-lane blocks readable past the live length
 constexpr uint32_t kS = (kMaxM + 1u + 3u) & ~3u;   // stride == rows of the kSimd tables (>= kMaxM + 1, multiple of 4)
 constexpr uint32_t kP = 2048;                   // leaves of the worst-scan tournament tree (power of two >= kMaxM)
 static_assert(kP >= kMaxM && (kP & (kP - 1)) == 0, "tournament tree capacity");
 static_assert(kMaxM < 65535u, "list positions / tournament-tree entries are uint16_t");
 
 struct Workspace {
-    // kSimd list-order SoA (position u of the private 0x14A40AC list), 16-byte aligned for packed loads.
-    alignas(16) float lcost[kPad];       // raw cost of the entry at list position u
-    alignas(16) float leff[kPad];        // slot != null ? cost : def
-    alignas(16) float lkey[kP];          // worst-scan key: cost when (man != null && thr > cost), else -inf (kP leaves)
-    alignas(16) uint32_t lman[kPad];     // current man id at the entry (the null man is id m)
-    alignas(16) uint32_t lslot[kPad];    // slot index (== entry position at solve start) of the entry at list position u
-    alignas(16) uint32_t lhasMan[kPad];  // all-ones when the entry's man is non-null
-    alignas(16) uint32_t lhasSlot[kPad]; // all-ones when the entry's slot is non-null
+    uint32_t avx2;                       // Avx2Supported() at CreateWorkspace
+    // kSimd list-order SoA (position u of the private 0x14A40AC list), 32-byte aligned for the 8-lane packed loads.
+    alignas(32) float lcost[kPad];       // raw cost of the entry at list position u
+    alignas(32) float leff[kPad];        // slot != null ? cost : def; +inf at dead / padding positions (and at the worst while it is scanned)
+    alignas(32) float lkey[kP];          // worst-scan key: cost when (man != null && thr > cost), else -inf (kP leaves)
+    alignas(32) uint32_t lman[kPad];     // current man id at the entry (the null man is id m)
+    alignas(32) uint32_t lslot[kPad];    // slot index (== entry position at solve start) of the entry at list position u
+    alignas(32) uint32_t lhasMan[kPad];  // all-ones when the entry's man is non-null
+    alignas(32) uint32_t lhasSlot[kPad]; // all-ones when the entry's slot is non-null
     uint16_t tree[2 * kP];               // worst-scan tournament tree over list positions
     // kSimd gather SoA: by man id and by slot
     alignas(16) float gmx[kS], gmz[kS], gt0[kS], gt1[kS];
@@ -116,9 +119,23 @@ struct Workspace {
 };
 static_assert(sizeof(Workspace) <= 12u * 1024u * 1024u, "workspace budget");
 
+bool Avx2Supported() {
+    int r[4] = {0, 0, 0, 0};
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    if ((r[2] & (1 << 27)) == 0 || (r[2] & (1 << 28)) == 0) return false;   // OSXSAVE (XGETBV usable) and AVX
+    if ((_xgetbv(0) & 6u) != 6u) return false;                               // the OS saves XMM and YMM state
+    __cpuidex(r, 7, 0);
+    return (r[1] & (1 << 5)) != 0;                                           // AVX2
+}
+
 Workspace* CreateWorkspace() {
     void* p = _aligned_malloc(sizeof(Workspace), 64);
-    return static_cast<Workspace*>(p);
+    if (!p) return nullptr;
+    Workspace* w = static_cast<Workspace*>(p);
+    w->avx2 = Avx2Supported() ? 1u : 0u;
+    return w;
 }
 void DestroyWorkspace(Workspace* w) { _aligned_free(w); }
 uint64_t WorkspaceBytes() { return sizeof(Workspace); }
@@ -315,21 +332,95 @@ void RunScalar(Workspace& w, const Env& env, const float def, const float nos, c
     tot.scans = scans;
 }
 
+constexpr uint32_t kNoAccept = 0xFFFFFFFFu;
+
+// First-improvement candidate scan of 0x502910 (the worst entry W at list position widx against every later/earlier list entry o):
+// returns the list position of the FIRST candidate in list order that is eligible (thr > cB) and improves the pair
+// (cB + cA > nB + nA), or kNoAccept.  Eligibility needs no index masking: leff holds +inf at every dead / padding position and at the
+// worst's own position (RunSimd writes the sentinel before the scan), and thr > +inf is false for every thr.  With Tel it also adds the
+// native-equivalent 0x5281D0 call count of every scanned candidate up to and including the accepted one.  Per-lane IEEE ops only (add,
+// ordered signalling greater-than == CMPPS lt with swapped operands, the same predicate _mm_cmpgt_ps compiles to); no FMA, no
+// reassociation: the decision is bit-for-bit the scalar `orig > nB + nA`.
+template <bool Tel>
+__forceinline uint32_t ScanSse(const Workspace& w, const float* rowT, const float* rowTT, uint32_t ln, float thr, float cA, bool wSlot,
+                               bool wmNon, uint32_t& evals) {
+    const __m128 vthr = _mm_set1_ps(thr), vcA = _mm_set1_ps(cA);
+    for (uint32_t u0 = 0; u0 < ln; u0 += 4) {
+        const __m128 cB = _mm_load_ps(w.leff + u0);
+        const __m128 act = _mm_cmpgt_ps(vthr, cB);
+        const int actBits = _mm_movemask_ps(act);
+        if (!actBits) continue;
+        const uint32_t* const ps = w.lslot + u0;
+        const uint32_t* const pm = w.lman + u0;
+        const __m128 nB = _mm_set_ps(rowT[ps[3]], rowT[ps[2]], rowT[ps[1]], rowT[ps[0]]);     // worst's man at slot o
+        const __m128 nA = _mm_set_ps(rowTT[pm[3]], rowTT[pm[2]], rowTT[pm[1]], rowTT[pm[0]]); // man o at the worst's slot
+        const __m128 orig = _mm_add_ps(cB, vcA);      // cB + cA
+        const __m128 sum = _mm_add_ps(nB, nA);        // nB + nA
+        const int accBits = _mm_movemask_ps(_mm_and_ps(act, _mm_cmpgt_ps(orig, sum)));
+        unsigned long kk = 0;
+        if (accBits) _BitScanForward(&kk, static_cast<unsigned long>(accBits));
+        if constexpr (Tel) {                              // native-equivalent 5281D0 calls: every scanned o up to and including the accepted one
+            const uint32_t counted = static_cast<uint32_t>(accBits ? (actBits & ((2 << kk) - 1)) : actBits);
+            if (wSlot) evals += kPop4[counted & static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i*>(w.lhasMan + u0)))))];
+            if (wmNon) evals += kPop4[counted & static_cast<uint32_t>(_mm_movemask_ps(_mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i*>(w.lhasSlot + u0)))))];
+        }
+        if (accBits) return u0 + static_cast<uint32_t>(kk);
+    }
+    return kNoAccept;
+}
+
+// The same scan eight lanes at a time with AVX2 (masked 32-bit gathers for nB / nA: only the eligible lanes touch the tables).  Runtime
+// dispatched (Workspace::avx2).  Not inlined on purpose: the 256-bit state is dirtied only inside, and the explicit VZEROUPPER keeps the
+// legacy-SSE scalar PairCost code of the caller free of transition penalties.  Needs 32-byte aligned SoA arrays and eight readable lanes
+// past ln (kPad; RunSimd pads to a multiple of eight).
+template <bool Tel>
+__declspec(noinline) uint32_t ScanAvx2(const Workspace& w, const float* rowT, const float* rowTT, uint32_t ln, float thr, float cA,
+                                       bool wSlot, bool wmNon, uint32_t& evals) {
+    const __m256 vthr = _mm256_set1_ps(thr), vcA = _mm256_set1_ps(cA), vzero = _mm256_setzero_ps();
+    uint32_t found = kNoAccept, ev = 0;
+    for (uint32_t u0 = 0; u0 < ln; u0 += 8) {
+        const __m256 cB = _mm256_load_ps(w.leff + u0);
+        const __m256 act = _mm256_cmp_ps(vthr, cB, _CMP_GT_OS);
+        const int actBits = _mm256_movemask_ps(act);
+        if (!actBits) continue;
+        const __m256 nB = _mm256_mask_i32gather_ps(vzero, rowT, _mm256_load_si256(reinterpret_cast<const __m256i*>(w.lslot + u0)), act, 4);
+        const __m256 nA = _mm256_mask_i32gather_ps(vzero, rowTT, _mm256_load_si256(reinterpret_cast<const __m256i*>(w.lman + u0)), act, 4);
+        const __m256 orig = _mm256_add_ps(cB, vcA);   // cB + cA
+        const __m256 sum = _mm256_add_ps(nB, nA);     // nB + nA
+        const int accBits = _mm256_movemask_ps(_mm256_and_ps(act, _mm256_cmp_ps(orig, sum, _CMP_GT_OS)));
+        unsigned long kk = 0;
+        if (accBits) _BitScanForward(&kk, static_cast<unsigned long>(accBits));
+        if constexpr (Tel) {
+            const uint32_t counted = static_cast<uint32_t>(accBits ? (actBits & ((2 << kk) - 1)) : actBits);
+            if (wSlot) ev += Pop8(counted & static_cast<uint32_t>(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_load_si256(reinterpret_cast<const __m256i*>(w.lhasMan + u0))))));
+            if (wmNon) ev += Pop8(counted & static_cast<uint32_t>(_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_load_si256(reinterpret_cast<const __m256i*>(w.lhasSlot + u0))))));
+        }
+        if (accBits) { found = u0 + static_cast<uint32_t>(kk); break; }
+    }
+    _mm256_zeroupper();
+    if constexpr (Tel) evals += ev;
+    (void)wSlot; (void)wmNon;
+    return found;
+}
+
 // RunSimd = the first-improvement solver (limit == 0) re-expressed over
 //   * two eager cost tables T[man id][slot] and TT[slot][man id] (cost, or `def` for a null man / null slot, so a pair's
 //     nA / nB values are plain lookups; the man id of a null man is `m`, a row/column that is all `def`), filled with the
 //     packed PairCostPs (the same IEEE operations per lane as the scalar cost),
-//   * list-order SoA arrays (position u of the private 0x14A40AC list) scanned four lanes at a time, and
+//   * list-order SoA arrays (position u of the private 0x14A40AC list) scanned eight (Avx2) or four lanes at a time, and
 //   * a tournament tree over the list positions for the worst-cost scan (first maximal key in list order).
 // Accept/reject decisions only compare VALUES (NaN compares false exactly like COMISS); every cost that is STORED is
 // recomputed with the scalar PairCost so NaN payload bits match the native x87 round trip.
+// Tel = count Totals::evals / scans (hoisted out of the loop at compile time: two instantiations, no per-iteration branch).
 // Preconditions (checked by the caller): limit == 0, all MXCSR exception masks set, def/nos >= -FLT_MAX (so -inf is a safe
 // "not eligible" key), pairWeight >= 0 (so every PairCost >= 0 or NaN).  Writes w.curMan / w.cost (entry indexed) and Totals.
+template <bool Avx2, bool Tel>
 void RunSimd(Workspace& w, const Env& env, const float def, const float nos, const uint32_t m, const float thr, Totals& tot) {
     const float kNegInf = -std::numeric_limits<float>::infinity();
+    const float kPosInf = std::numeric_limits<float>::infinity();
     const __m128 vzs = _mm_set_ss(env.zero), vos = _mm_set_ss(env.one), vws = _mm_set_ss(env.pairWeight);   // scalar PairCost
     const __m128 vz = _mm_set1_ps(env.zero), vo = _mm_set1_ps(env.one), vw = _mm_set1_ps(env.pairWeight);   // packed PairCost
-    const __m128 vthr = _mm_set1_ps(thr), vdef = _mm_set1_ps(def);
+    const __m128 vdef = _mm_set1_ps(def);
     const ManRec* const man = w.man;
     const SlotRec* const slot = w.slot;
     float* const lcost = w.lcost; float* const leff = w.leff; float* const lkey = w.lkey;
@@ -380,7 +471,7 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
         const bool mnNon = w.curMan[i] >= 0, hs = w.hasSlot[i] != 0;
         float c = def;
         if (mnNon) {
-            if (hs) { ++evals; c = PairCost(man[w.curMan[i]], slot[i], vzs, vos, vws); }
+            if (hs) { if constexpr (Tel) ++evals; c = PairCost(man[w.curMan[i]], slot[i], vzs, vos, vws); }
             else c = nos;
         }
         lcost[i] = c;
@@ -391,9 +482,9 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
         lhasMan[i] = mnNon ? 0xFFFFFFFFu : 0u;
         lhasSlot[i] = hs ? 0xFFFFFFFFu : 0u;
     }
-    const uint32_t m4 = (m + 3u) & ~3u;
-    for (uint32_t i = m; i < m4; ++i) {                      // padding of the last 4-lane block: never eligible, indices stay valid
-        lcost[i] = 0.0f; leff[i] = 0.0f; lkey[i] = kNegInf; lman[i] = m; lslot[i] = 0; lhasMan[i] = 0u; lhasSlot[i] = 0u;
+    const uint32_t m8 = (m + 7u) & ~7u;
+    for (uint32_t i = m; i < m8; ++i) {                      // padding of the last 8-lane block: never eligible (+inf leff), indices stay valid
+        lcost[i] = 0.0f; leff[i] = kPosInf; lkey[i] = kNegInf; lman[i] = m; lslot[i] = 0; lhasMan[i] = 0u; lhasSlot[i] = 0u;
     }
 
     // ---- tournament tree over list positions (leaves tree[P + u]); winner = greater key, ties -> smaller position ----
@@ -428,12 +519,10 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
         }
     };
 
-    const __m128i lane01 = _mm_set_epi32(3, 2, 1, 0);
-    const __m128i four = _mm_set1_epi32(4);
     uint32_t ln = m, iter = 0, done = 0, swaps = 0, removals = 0, scans = 0;
     for (;;) {                                               // 0x502887 with limit == 0
         if (ln == 0) { done = 1; ++iter; break; }            // 0x502BC2
-        scans += ln;
+        if constexpr (Tel) scans += ln;
         // 0x5028C0 worst scan: first maximal eligible key in list order == tournament-tree root
         const uint32_t widx = tree[1];
         if (!(lkey[widx] > kNegInf)) { done = 1; ++iter; break; }   // 0x502BBE: no eligible worst
@@ -443,49 +532,37 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
         const float cA = leff[widx];
         bool swapped = false;
         if (thr > cA) {                                      // 0x502910 first-improvement pass
-            const __m128 vcA = _mm_set1_ps(cA);
+            leff[widx] = kPosInf;                            // the worst is not its own candidate; rewritten below however the iteration ends
             const float* const rowT = T + static_cast<size_t>(wm) * S;     // man wm at slot s (row of def when wm is the null id)
             const float* const rowTT = TT + static_cast<size_t>(W) * S;    // man a at slot W (row of def when W has no slot)
-            const __m128i lnv = _mm_set1_epi32(static_cast<int>(ln));
-            const __m128i widxv = _mm_set1_epi32(static_cast<int>(widx));
-            __m128i idxv = lane01;
-            for (uint32_t u0 = 0; u0 < ln; u0 += 4, idxv = _mm_add_epi32(idxv, four)) {
-                const __m128 cB = _mm_load_ps(leff + u0);
-                const __m128i vld = _mm_andnot_si128(_mm_cmpeq_epi32(idxv, widxv), _mm_cmplt_epi32(idxv, lnv));   // u < ln && u != widx
-                const __m128 act = _mm_and_ps(_mm_cmpgt_ps(vthr, cB), _mm_castsi128_ps(vld));                    // + thr > cB
-                const int actBits = _mm_movemask_ps(act);
-                if (!actBits) continue;
-                const uint32_t* const ps = lslot + u0;
-                const uint32_t* const pm = lman + u0;
-                const __m128 nB = _mm_set_ps(rowT[ps[3]], rowT[ps[2]], rowT[ps[1]], rowT[ps[0]]);     // worst's man at slot o
-                const __m128 nA = _mm_set_ps(rowTT[pm[3]], rowTT[pm[2]], rowTT[pm[1]], rowTT[pm[0]]); // man o at the worst's slot
-                const __m128 orig = _mm_add_ps(cB, vcA);      // cB + cA
-                const __m128 sum = _mm_add_ps(nB, nA);        // nB + nA
-                const int accBits = _mm_movemask_ps(_mm_and_ps(act, _mm_cmpgt_ps(orig, sum)));
-                // native-equivalent 5281D0 calls: every scanned o up to and including the accepted one
-                unsigned long kk = 0;
-                int counted = actBits;
-                if (accBits) { _BitScanForward(&kk, static_cast<unsigned long>(accBits)); counted = actBits & ((2 << kk) - 1); }
-                if (wSlot) evals += kPop4[counted & _mm_movemask_ps(_mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i*>(lhasMan + u0))))];
-                if (wmNon) evals += kPop4[counted & _mm_movemask_ps(_mm_castsi128_ps(_mm_load_si128(reinterpret_cast<const __m128i*>(lhasSlot + u0))))];
-                if (!accBits) continue;
-                // 0x5029DF accept: exchange the men, recost both entries with the scalar (native-exact) cost
-                const uint32_t oPos = u0 + kk;
+            uint32_t oPos;
+            if constexpr (Avx2) oPos = ScanAvx2<Tel>(w, rowT, rowTT, ln, thr, cA, wSlot, wmNon, evals);
+            else oPos = ScanSse<Tel>(w, rowT, rowTT, ln, thr, cA, wSlot, wmNon, evals);
+            if (oPos != kNoAccept) {
+                // 0x5029DF accept: exchange the men and recost both entries.  The recost values ARE the table entries the scan just compared
+                // (T[wm][O] = rowT[O], T[om][W] = rowTT[om]; the packed fill executes the scalar PairCost's IEEE operations per lane), so
+                // non-NaN values are read back instead of re-running the sqrt/div chain; a NaN entry is recomputed with the scalar cost so
+                // its payload bits match the native x87 round trip.
                 const uint32_t O = lslot[oPos];
                 const uint32_t om = lman[oPos];
                 const bool omNon = lhasMan[oPos] != 0, oSlot = lhasSlot[oPos] != 0;
                 float t1 = def;
-                if (omNon) t1 = wSlot ? PairCost(man[om], slot[W], vzs, vos, vws) : nos;
+                if (omNon) {
+                    if (wSlot) { t1 = rowTT[om]; if (t1 != t1) t1 = PairCost(man[om], slot[W], vzs, vos, vws); }
+                    else t1 = nos;
+                }
                 float t2 = def;
-                if (wmNon) t2 = oSlot ? PairCost(man[wm], slot[O], vzs, vos, vws) : nos;
-                evals += (omNon && wSlot ? 1u : 0u) + (wmNon && oSlot ? 1u : 0u);   // native recost calls 5281D0 again
+                if (wmNon) {
+                    if (oSlot) { t2 = rowT[O]; if (t2 != t2) t2 = PairCost(man[wm], slot[O], vzs, vos, vws); }
+                    else t2 = nos;
+                }
+                if constexpr (Tel) evals += (omNon && wSlot ? 1u : 0u) + (wmNon && oSlot ? 1u : 0u);   // native recost calls 5281D0 again
                 lman[widx] = om;  lman[oPos] = wm;
                 lhasMan[widx] = omNon ? 0xFFFFFFFFu : 0u;  lhasMan[oPos] = wmNon ? 0xFFFFFFFFu : 0u;
                 lcost[widx] = t1; leff[widx] = wSlot ? t1 : def; lkey[widx] = (omNon && thr > t1) ? t1 : kNegInf;
                 lcost[oPos] = t2; leff[oPos] = oSlot ? t2 : def; lkey[oPos] = (wmNon && thr > t2) ? t2 : kNegInf;
                 Update2(widx, oPos);
                 swapped = true;
-                break;
             }
         }
         if (swapped) {
@@ -498,7 +575,7 @@ void RunSimd(Workspace& w, const Env& env, const float def, const float nos, con
                 lslot[widx] = lslot[last]; lcost[widx] = lcost[last]; leff[widx] = leff[last]; lkey[widx] = lkey[last];
                 lman[widx] = lman[last]; lhasMan[widx] = lhasMan[last]; lhasSlot[widx] = lhasSlot[last];
             }
-            lkey[last] = kNegInf; lhasMan[last] = 0u; lhasSlot[last] = 0u; lman[last] = m;
+            lkey[last] = kNegInf; leff[last] = kPosInf; lhasMan[last] = 0u; lhasSlot[last] = 0u; lman[last] = m;
             if (widx != last) Update2(widx, last); else Update(last);
             --ln;
             ++removals;
@@ -558,9 +635,11 @@ Outcome SolveImpl(Policy policy, bool replicate, Workspace& w, const Env& env, c
                   Entry12* end, uint32_t limit, float thr, uint32_t* eax, Counters* counters) {
     const uint64_t t0 = __rdtsc();
     const bool census = counters && counters->profile != 0;
+    const bool tel = counters && counters->telemetry != 0;   // INPUT flag: survives the clear below
     if (counters) {
         std::memset(counters, 0, sizeof(*counters));
         counters->profile = census ? 1u : 0u;
+        counters->telemetry = tel ? 1u : 0u;
     }
     uint32_t m = 0;
     if (!eax) return Fail(counters, kReasonEnv);
@@ -572,7 +651,8 @@ Outcome SolveImpl(Policy policy, bool replicate, Workspace& w, const Env& env, c
         if (!ListInitialized(env)) return Fail(counters, kReasonGuard);
     }
     const float def = ctx[0], nos = ctx[1];
-    const bool simd = policy == kSimd && limit == 0 && !census;
+    const bool simd = (policy == kSimd || policy == kSimdSse || policy == kSimdAvx2) && limit == 0 && !census;
+    const bool useAvx2 = w.avx2 != 0 && policy != kSimdSse;
     if (simd) {                                              // packed path preconditions: nothing written yet on failure
         if ((_mm_getcsr() & 0x1F80u) != 0x1F80u) return Fail(counters, kReasonFpEnv);   // an unmasked exception could trap in garbage lanes
         if (!(def >= -FLT_MAX) || !(nos >= -FLT_MAX) || !(env.pairWeight >= 0.0f)) return Fail(counters, kReasonCtx);
@@ -581,7 +661,10 @@ Outcome SolveImpl(Policy policy, bool replicate, Workspace& w, const Env& env, c
     Gather(w, env, begin, m);
     const uint64_t t1 = __rdtsc();
     Totals tot;
-    if (simd) RunSimd(w, env, def, nos, m, thr, tot);
+    if (simd) {
+        if (useAvx2) { if (tel) RunSimd<true, true>(w, env, def, nos, m, thr, tot); else RunSimd<true, false>(w, env, def, nos, m, thr, tot); }
+        else { if (tel) RunSimd<false, true>(w, env, def, nos, m, thr, tot); else RunSimd<false, false>(w, env, def, nos, m, thr, tot); }
+    }
     else if (census) RunScalar<true>(w, env, def, nos, m, limit, thr, tot);
     else RunScalar<false>(w, env, def, nos, m, limit, thr, tot);
     const uint64_t t2 = __rdtsc();

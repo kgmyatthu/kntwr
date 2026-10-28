@@ -13,6 +13,7 @@
 #include "native_image_relocation.h"
 #include "clones/kntwr_clones.h"
 #include "core/kntwr_entry_patch.h"
+#include "core/kntwr_topology.h"
 
 static_assert(KNTWR_TRACE_ABI==8u && KNTWR_TRACE_ENTRIES==1024u, "trace ABI 8 ring contract");
 static_assert(KNTWR_TRACE_SITES==112u && KNTWR_TIMED_SITES==110u, "trace site capacity and populated range");
@@ -55,7 +56,7 @@ static_assert(KNTWR_COLLIDE_LOD==0x400u && !(KNTWR_ALL&KNTWR_COLLIDE_LOD) &&
 static_assert(KNTWR_ALL==(KNTWR_AI_ASYNC|KNTWR_BATCH64|KNTWR_VISUAL|KNTWR_LOCO|KNTWR_COLLIDE), "KNTWR_ALL is exactly the optimization set batch64,ai,visual,loco,collide");
 static_assert(!(KNTWR_ALL&KNTWR_PROFILE) && (KNTWR_VALID_MASK&KNTWR_PROFILE), "profiling stays available only by explicit selection");
 static_assert(KNTWR_BRAIN_SLOTS==23u && KNTWR_BRAIN_FAMILIES==5u && KNTWR_BRAIN_SITE_FIRST==46u && KNTWR_BRAIN_SITES==49u && KNTWR_BRAIN_WORDS==512u, "brain profiling geometry");
-static_assert(sizeof(kntwr_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+KNTWR_ALLOCATOR_WORDS+2+KNTWR_BRAIN_STATE_WORDS+KNTWR_COLLISION_WORDS+KNTWR_COLLIDE_WORDS+KNTWR_BRAIN2_WORDS+KNTWR_COLLIDE_LOD_WORDS+16+KNTWR_AI_SLICE_BUDGET_WORDS+8+KNTWR_LOCO_WORDS+KNTWR_LOCO_GATE_WORDS+KNTWR_LOCO_SERVICE_WORDS+KNTWR_LOCO_GRID_WORDS+KNTWR_LOCO_PARALLEL_WORDS+KNTWR_SWEEP_WORDS+KNTWR_RESOLVE_WORDS+KNTWR_ENV_WORDS+KNTWR_ENV_TARGET_WORDS+KNTWR_RESOLVE_FRAME_WORDS+KNTWR_LOCO_OWNED_WORDS+KNTWR_LOCO_OWNED_DETAIL_WORDS+KNTWR_LOCO_OWNED_PHASE_WORDS+KNTWR_LOCO_OWNED_LOAD_WORDS+KNTWR_LOCO_GRID_V2_WORDS+KNTWR_COLLIDE_SOURCE_WORDS+KNTWR_MEMORY_WORDS+KNTWR_AI_COMPLETION_WORDS+KNTWR_AI_CENSUS_WORDS+KNTWR_BRAIN2_CENSUS_WORDS+KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS+KNTWR_FIRE_WORDS+KNTWR_BRAIN2_ROUTE_WORDS+KNTWR_FIRE_COMMIT_WORDS+KNTWR_MOVE_NODE_WORDS+KNTWR_MOVE_NODE_EVENT_WORDS+KNTWR_BRAIN2_NODE_TARGET_WORDS+(KNTWR_IDLE_NODE_CLASSES+KNTWR_ACTION_NODE_CLASSES)*(KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS+KNTWR_BRAIN_WORKER_WORDS+KNTWR_AI_ASYNC2_WORDS+KNTWR_BRAIN_WORKER_PHASE_WORDS+KNTWR_BRAIN_UNIT_WORDS+KNTWR_COLLIDE_CONTACT_WORDS+KNTWR_GRID_PROBATION_WORDS+KNTWR_AI_ASYNC2_ROUTE_WORDS+KNTWR_ARMY_UNIT_WORDS+KNTWR_VA_WATCH_WORDS+KNTWR_ARMY_B0_WORDS+KNTWR_ARMY_STORM_WORDS+KNTWR_BRAIN_S0_WORDS+KNTWR_AI_DEFERRED_WORDS+KNTWR_AI_CTRL_REUSE_WORDS+KNTWR_LOCO_RELINK_WORDS+KNTWR_LOCO_CW_WORDS+KNTWR_LOCO_GRID_BUILD_WORDS+KNTWR_BRAIN_UNIT_POLICY_WORDS+KNTWR_AI_PREPASS_CENSUS_WORDS+KNTWR_AI_PREPASS_WORDS+KNTWR_AI_SPIRAL_WORDS+KNTWR_ARMY_SOLVER_WORDS+KNTWR_ALLOC_CENSUS_WORDS+KNTWR_ARENA_WORDS+KNTWR_OVERLAY_WORDS+KNTWR_MOUNTED_OFFICER_WORDS+KNTWR_ENGAGE_CENSUS_WORDS+KNTWR_ANIM_GUARD_WORDS+KNTWR_FORMATION_RESIDUAL_WORDS)+sizeof(kntwr_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census, anim guard and army residual words without changing existing words");
+static_assert(sizeof(kntwr_status)==4*(29+16+16+24+8+192+16+16+64+16+16+32+32+512+32+80+8+8+32+KNTWR_ALLOCATOR_WORDS+2+KNTWR_BRAIN_STATE_WORDS+KNTWR_COLLISION_WORDS+KNTWR_COLLIDE_WORDS+KNTWR_BRAIN2_WORDS+KNTWR_COLLIDE_LOD_WORDS+16+KNTWR_AI_SLICE_BUDGET_WORDS+8+KNTWR_LOCO_WORDS+KNTWR_LOCO_GATE_WORDS+KNTWR_LOCO_SERVICE_WORDS+KNTWR_LOCO_GRID_WORDS+KNTWR_LOCO_PARALLEL_WORDS+KNTWR_SWEEP_WORDS+KNTWR_RESOLVE_WORDS+KNTWR_ENV_WORDS+KNTWR_ENV_TARGET_WORDS+KNTWR_RESOLVE_FRAME_WORDS+KNTWR_LOCO_OWNED_WORDS+KNTWR_LOCO_OWNED_DETAIL_WORDS+KNTWR_LOCO_OWNED_PHASE_WORDS+KNTWR_LOCO_OWNED_LOAD_WORDS+KNTWR_LOCO_GRID_V2_WORDS+KNTWR_COLLIDE_SOURCE_WORDS+KNTWR_MEMORY_WORDS+KNTWR_AI_COMPLETION_WORDS+KNTWR_AI_CENSUS_WORDS+KNTWR_BRAIN2_CENSUS_WORDS+KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS+KNTWR_FIRE_WORDS+KNTWR_BRAIN2_ROUTE_WORDS+KNTWR_FIRE_COMMIT_WORDS+KNTWR_MOVE_NODE_WORDS+KNTWR_MOVE_NODE_EVENT_WORDS+KNTWR_BRAIN2_NODE_TARGET_WORDS+(KNTWR_IDLE_NODE_CLASSES+KNTWR_ACTION_NODE_CLASSES)*(KNTWR_NODE_WORDS+KNTWR_NODE_EVENT_WORDS)+KNTWR_BRAIN2_UNKNOWN_SITE_WORDS+KNTWR_BRAIN_WORKER_WORDS+KNTWR_AI_ASYNC2_WORDS+KNTWR_BRAIN_WORKER_PHASE_WORDS+KNTWR_BRAIN_UNIT_WORDS+KNTWR_COLLIDE_CONTACT_WORDS+KNTWR_GRID_PROBATION_WORDS+KNTWR_AI_ASYNC2_ROUTE_WORDS+KNTWR_ARMY_UNIT_WORDS+KNTWR_VA_WATCH_WORDS+KNTWR_ARMY_B0_WORDS+KNTWR_ARMY_STORM_WORDS+KNTWR_BRAIN_S0_WORDS+KNTWR_AI_DEFERRED_WORDS+KNTWR_AI_CTRL_REUSE_WORDS+KNTWR_LOCO_RELINK_WORDS+KNTWR_LOCO_CW_WORDS+KNTWR_LOCO_GRID_BUILD_WORDS+KNTWR_BRAIN_UNIT_POLICY_WORDS+KNTWR_AI_PREPASS_CENSUS_WORDS+KNTWR_AI_PREPASS_WORDS+KNTWR_AI_SPIRAL_WORDS+KNTWR_ARMY_SOLVER_WORDS+KNTWR_ALLOC_CENSUS_WORDS+KNTWR_ARENA_WORDS+KNTWR_OVERLAY_WORDS+KNTWR_MOUNTED_OFFICER_WORDS+KNTWR_ENGAGE_CENSUS_WORDS+KNTWR_ANIM_GUARD_WORDS+KNTWR_FORMATION_RESIDUAL_WORDS+KNTWR_DRAG_LADDER_WORDS)+sizeof(kntwr_grid_census_status), "status ABI appends class shadow, target, unknown-site, brain worker, ai_async2, brain worker phase, army unit, reserved (former puppet), army B0, reserved (former puppet motion, divert, mover, select), brain S0, ai_deferred and ai_ctrl_reuse words, loco relink, class-wrapper census, grid build, brain unit policy, ai prepass census, ai prepass, ai spiral, army solver, alloc census, arena, overlay, mounted officer, engage census, anim guard, army residual words without changing existing words");
 static_assert(KNTWR_AI_SLICE_BUDGET_WORDS==8u && offsetof(kntwr_status,ai_slice_budget_words)==offsetof(kntwr_status,ai_ctrl_words)+16*sizeof(uint32_t), "slice budget words retain their shipped offset");
 static_assert(offsetof(kntwr_status,ai_park_words)==offsetof(kntwr_status,ai_slice_budget_words)+KNTWR_AI_SLICE_BUDGET_WORDS*sizeof(uint32_t) &&
               offsetof(kntwr_status,ai_park_words)+8*sizeof(uint32_t)==offsetof(kntwr_status,loco_words), "parking refusal histogram keeps its shipped offset");
@@ -130,14 +131,15 @@ static_assert(offsetof(kntwr_status,memory_words)+KNTWR_MEMORY_WORDS*sizeof(uint
               offsetof(kntwr_status,ai_prepass_census_words)+KNTWR_AI_PREPASS_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_prepass_words) && KNTWR_AI_PREPASS_CENSUS_WORDS==82u &&
               offsetof(kntwr_status,ai_prepass_words)+KNTWR_AI_PREPASS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,ai_spiral_words) && KNTWR_AI_PREPASS_WORDS==60u && KNTWR_AI_POLY_WORDS==32u && KNTWR_AI_RECORD_TEST_WORDS==28u &&
               offsetof(kntwr_status,ai_spiral_words)+KNTWR_AI_SPIRAL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_solver_words) && KNTWR_AI_SPIRAL_WORDS==32u &&
-              offsetof(kntwr_status,army_solver_words)+KNTWR_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,alloc_census_words) && KNTWR_ARMY_SOLVER_WORDS==521u &&
+              offsetof(kntwr_status,army_solver_words)+KNTWR_ARMY_SOLVER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,alloc_census_words) && KNTWR_ARMY_SOLVER_WORDS==524u &&
               offsetof(kntwr_status,alloc_census_words)+KNTWR_ALLOC_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,arena_words) && KNTWR_ALLOC_CENSUS_WORDS==1056u &&
               offsetof(kntwr_status,arena_words)+KNTWR_ARENA_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,overlay_words) && KNTWR_ARENA_WORDS==32u &&
               offsetof(kntwr_status,overlay_words)+KNTWR_OVERLAY_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,mounted_officer_words) && KNTWR_OVERLAY_WORDS==16u &&
               offsetof(kntwr_status,mounted_officer_words)+KNTWR_MOUNTED_OFFICER_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,engage_census_words) && KNTWR_MOUNTED_OFFICER_WORDS==16u &&
               offsetof(kntwr_status,engage_census_words)+KNTWR_ENGAGE_CENSUS_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,anim_guard_words) && KNTWR_ENGAGE_CENSUS_WORDS==6832u && KNTWR_ENGAGE_CENSUS==0x80000u &&
               offsetof(kntwr_status,anim_guard_words)+KNTWR_ANIM_GUARD_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,army_residual_words) && KNTWR_ANIM_GUARD_WORDS==8u &&
-              offsetof(kntwr_status,army_residual_words)+KNTWR_FORMATION_RESIDUAL_WORDS*sizeof(uint32_t)==sizeof(kntwr_status) && KNTWR_FORMATION_RESIDUAL_WORDS==320u &&
+              offsetof(kntwr_status,army_residual_words)+KNTWR_FORMATION_RESIDUAL_WORDS*sizeof(uint32_t)==offsetof(kntwr_status,drag_ladder_words) && KNTWR_FORMATION_RESIDUAL_WORDS==832u &&
+              offsetof(kntwr_status,drag_ladder_words)+KNTWR_DRAG_LADDER_WORDS*sizeof(uint32_t)==sizeof(kntwr_status) && KNTWR_DRAG_LADDER_WORDS==16u &&
               KNTWR_AI_CTRL_FLAGS_VALID==0x1F0Fu &&
               KNTWR_AI_POLY_SHADOW==0x4u && KNTWR_AI_POLY==0x8u && KNTWR_AI_SPIRAL_CENSUS==0x10u && KNTWR_AI_SPIRAL_CAP_SHIFT==16u &&
               KNTWR_AI_RECORD_TEST_SHADOW==0x20u && KNTWR_AI_RECORD_TEST==0x40u && KNTWR_AI_PREPASS_FLAGS_VALID==0xFFFF007Fu &&
@@ -193,7 +195,7 @@ static_assert(KNTWR_BRAIN2_WORDS==48u && offsetof(kntwr_status,brain2_words)==of
               "brain2 words are appended after the collide words; the attribution arrays keep the byte positions of the former agents arrays");
 static_assert(offsetof(kntwr_status,collide_lod_words)==offsetof(kntwr_status,brain2_words)+KNTWR_BRAIN2_WORDS*sizeof(uint32_t) &&
               sizeof(((kntwr_status*)nullptr)->collide_lod_words)==16*sizeof(uint32_t), "collision LOD preserves every prior status offset");
-static_assert(KNTWR_ABI==2u && sizeof(kntwr_config)==64 && offsetof(kntwr_config,ai_prepass_flags)==60 && offsetof(kntwr_config,ai_ctrl_flags)==56 && offsetof(kntwr_config,ai_deferred)==52 && offsetof(kntwr_config,va_watch_flags)==48 && KNTWR_VA_WATCH==1u && KNTWR_VA_WATCH_FLAGS_VALID==(KNTWR_VA_WATCH|KNTWR_ARMY_STORM_CENSUS|KNTWR_ARMY_STORM_SAMPLE_MASK|KNTWR_TICK_PCORE|KNTWR_TICK_CORE_AB|KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW|KNTWR_ALLOC_CENSUS|KNTWR_ARENA_RELEASE|KNTWR_HEAP_OPTIMIZE|KNTWR_ALLOC_FIX|KNTWR_MOUNTED_OFFICER|KNTWR_MOUNTED_OFFICER_WIDEN|KNTWR_ENGAGE_CENSUS|KNTWR_FORMATION_CENSUS|KNTWR_VA_FLOOR_MASK|KNTWR_VA_HOLE_MASK) && KNTWR_FORMATION_CENSUS==0x100000u && KNTWR_ARMY_STORM_CENSUS==2u && KNTWR_ARMY_STORM_SAMPLE_MASK==0xFF00u && KNTWR_TICK_PCORE==4u && KNTWR_TICK_CORE_AB==8u && KNTWR_ARMY_SOLVER_MEMO==0x10u && KNTWR_ARMY_SOLVER_SHADOW==0x20u && KNTWR_ALLOC_CENSUS==0x40u && KNTWR_ARENA_RELEASE==0x80u && KNTWR_HEAP_OPTIMIZE==0x10000u && KNTWR_ALLOC_FIX==0x200000u && KNTWR_VA_FLOOR_SHIFT==22u && KNTWR_VA_HOLE_SHIFT==27u && offsetof(kntwr_config,collide_lod_m)==32 && offsetof(kntwr_config,loco_flags)==36 &&
+static_assert(KNTWR_ABI==2u && sizeof(kntwr_config)==68 && offsetof(kntwr_config,gameplay_flags)==64 && KNTWR_DRAG_LADDER==0x1u && KNTWR_GAMEPLAY_FLAGS_VALID==KNTWR_DRAG_LADDER && offsetof(kntwr_config,ai_prepass_flags)==60 && offsetof(kntwr_config,ai_ctrl_flags)==56 && offsetof(kntwr_config,ai_deferred)==52 && offsetof(kntwr_config,va_watch_flags)==48 && KNTWR_VA_WATCH==1u && KNTWR_VA_WATCH_FLAGS_VALID==(KNTWR_VA_WATCH|KNTWR_ARMY_STORM_CENSUS|KNTWR_ARMY_STORM_SAMPLE_MASK|KNTWR_TICK_PCORE|KNTWR_TICK_CORE_AB|KNTWR_ARMY_SOLVER_MEMO|KNTWR_ARMY_SOLVER_SHADOW|KNTWR_ALLOC_CENSUS|KNTWR_ARENA_RELEASE|KNTWR_HEAP_OPTIMIZE|KNTWR_ALLOC_FIX|KNTWR_MOUNTED_OFFICER|KNTWR_MOUNTED_OFFICER_WIDEN|KNTWR_ENGAGE_CENSUS|KNTWR_FORMATION_CENSUS|KNTWR_VA_FLOOR_MASK|KNTWR_VA_HOLE_MASK) && KNTWR_FORMATION_CENSUS==0x100000u && KNTWR_ARMY_STORM_CENSUS==2u && KNTWR_ARMY_STORM_SAMPLE_MASK==0xFF00u && KNTWR_TICK_PCORE==4u && KNTWR_TICK_CORE_AB==8u && KNTWR_ARMY_SOLVER_MEMO==0x10u && KNTWR_ARMY_SOLVER_SHADOW==0x20u && KNTWR_ALLOC_CENSUS==0x40u && KNTWR_ARENA_RELEASE==0x80u && KNTWR_HEAP_OPTIMIZE==0x10000u && KNTWR_ALLOC_FIX==0x200000u && KNTWR_VA_FLOOR_SHIFT==22u && KNTWR_VA_HOLE_SHIFT==27u && offsetof(kntwr_config,collide_lod_m)==32 && offsetof(kntwr_config,loco_flags)==36 &&
               offsetof(kntwr_config,collide_flags)==44 && KNTWR_COLLIDE_CONTACT_SHADOW==1u && KNTWR_COLLIDE_CONTACT_WORKERS==2u &&
               KNTWR_COLLIDE_FLAGS_VALID==3u &&
               offsetof(kntwr_config,brain_flags)==40 && KNTWR_BRAIN2_VERSION==2u &&
@@ -216,6 +218,13 @@ static HMODULE (WINAPI *realModule)(LPCWSTR)=GetModuleHandleW;
 static HMODULE WINAPI TestModule(LPCWSTR name) { return name ? realModule(name) : reinterpret_cast<HMODULE>(image); }
 static U A(const void* p) { return static_cast<U>(reinterpret_cast<uintptr_t>(p)); }
 static void Check(bool ok,const char* what) { ++checks; if(!ok) { ++failures; fprintf(stderr,"FAIL %s (%lu)\n",what,GetLastError()); } }
+// The runtime clamps the pool to min(requested, max(1, usable LPs - 2)) from the process affinity at start (kntwr_runtime.cpp StartImpl),
+// so published workers / allocator rows / probe totals follow this value, not the requested count. Affinity is read, never changed.
+static U EffectiveWorkers(U requested) {
+    DWORD_PTR affinity=0, systemAffinity=0;
+    if(!GetProcessAffinityMask(GetCurrentProcess(),&affinity,&systemAffinity)) return requested;
+    return kntwr_topology::ClampWorkers(requested,kntwr_topology::PopCount(static_cast<uint32_t>(affinity)));
+}
 static bool InRuntime(U address);
 static bool AiEventWorker(const kntwr_status& s) {
     if(s.ai_slice_words[6] || !s.ai_slice_words[7]) return false;
@@ -388,6 +397,7 @@ static unsigned char arenaStatus[kArenaItems];
 static volatile LONG arenaSlotOwners[KNTWR_ALLOCATOR_THREADS], arenaSeen, arenaCalls, arenaProblems, arenaResets, arenaTails;
 static HANDLE arenaOverlap;
 static volatile LONG arenaArrivals, arenaArrived[KNTWR_ALLOCATOR_THREADS];
+static U arenaParticipants=3;   // main + effective pool workers (set by VisualArenaFixture)
 static U ArenaAddress(U i) { return i==0 ? A(arenaRoot) : A(arenaContext)+(i==1 ? 0x80 : 0x118); }
 static void __fastcall TestArenaPrepare(U context) {
     auto bytes=reinterpret_cast<uint8_t*>(context);
@@ -440,7 +450,7 @@ static void __fastcall TestArenaPose(U context,void*,U item) {
     // A one-time rendezvous guarantees overlapping live outputs on all three participants.
     // Per-item Sleep(1) is unsuitable: Windows can round it to a full ~15.6 ms timer interval.
     if(!InterlockedCompareExchange(&arenaArrived[participant],1,0)) {
-        if(InterlockedIncrement(&arenaArrivals)==3) SetEvent(arenaOverlap);
+        if(InterlockedIncrement(&arenaArrivals)==static_cast<LONG>(arenaParticipants)) SetEvent(arenaOverlap);
         if(WaitForSingleObject(arenaOverlap,1000)!=WAIT_OBJECT_0) InterlockedIncrement(&arenaProblems);
     }
     SwitchToThread();
@@ -724,7 +734,7 @@ static int AllocatorFailureFixture(bool ai,U faultMode,kntwr_start_fn start,kntw
     Check(snapshot.allocator_words[row*KNTWR_ALLOCATOR_ROW_WORDS]==result &&
           snapshot.allocator_words[row*KNTWR_ALLOCATOR_ROW_WORDS+4]==EXCEPTION_ACCESS_VIOLATION,
           "allocator stage and exception survive failed startup unwind");
-    if(!ai) Check(snapshot.allocator_words[KNTWR_ALLOCATOR_ROW_WORDS]==result,"every created pool worker reports its failed probe");
+    if(!ai && EffectiveWorkers(config.workers)>=2) Check(snapshot.allocator_words[KNTWR_ALLOCATOR_ROW_WORDS]==result,"every created pool worker reports its failed probe");
     Check(!snapshot.crash_words[0],"caught admission fault is not reported as a gameplay crash");
     Check(stop(nullptr)==0,"failed allocator admission joins its workers");
     printf("native host lifecycle (allocator %s refusal): checks=%u failures=%u\n",ai ? "AI" : "pool",checks,failures);
@@ -1017,9 +1027,10 @@ static int VisualArenaFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile k
     U* slot=nullptr;
     Check(VisualHits(&slot)==1 && slot,"native-arena fixture finds visual slot");
     config.enabled_mask=KNTWR_VISUAL; config.workers=2;
+    arenaParticipants=1+EffectiveWorkers(config.workers);
     root[0x2829c]=0;
     arenaOverlap=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-    Check(arenaOverlap!=nullptr,"create the three-participant overlap barrier");
+    Check(arenaOverlap!=nullptr,"create the overlap barrier (main plus every effective pool worker)");
     U maxDispatchUs=0;
     LARGE_INTEGER frequency={};
     QueryPerformanceFrequency(&frequency);
@@ -1047,7 +1058,7 @@ static int VisualArenaFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile k
         } while(GetTickCount64()<deadline);
         Check(snapshot.visual_words[1]==2 && snapshot.visual_words[8]==0 && snapshot.visual_words[14]==2,
               "native arenas shard both calls without faults");
-        Check(arenaCalls==2*kArenaItems && !arenaProblems && arenaSeen==7,
+        Check(arenaCalls==2*kArenaItems && !arenaProblems && arenaSeen==static_cast<LONG>((1u<<arenaParticipants)-1u),
               "native arena slots are bounded, thread-exclusive and preserve every concurrent output");
         Check(arenaResets==2 && arenaTails==2,"one main-thread reset per call; native serial tail sees restored arenas");
     }
@@ -1415,7 +1426,7 @@ static int AiCensusFixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
 // and the observer 0x6A95A0 (slot 16 of 0x13376FC, ret 0xC) are redirected in the owned image to probes. No installed
 // executable is patched.
 struct Ai2Planner {
-    volatile U calls; volatile LONG started; U delayMs, thread, destroyFromWorker, walk;
+    volatile U calls; volatile LONG started; U delayMs, thread, destroyFromWorker, walk, hash;
     HANDLE entered,release;
 };
 struct Ai2Probe { volatile LONG calls; U thread, thinksAtEntry; Ai2Planner* planner; };
@@ -1428,6 +1439,36 @@ static void* __fastcall Ai2FakeDestroy(void* self,void*,U) {
     ai2Probe.thinksAtEntry=ai2Probe.planner ? ai2Probe.planner->calls : 0;
     InterlockedIncrement(&ai2Probe.calls);
     return self;
+}
+static void __fastcall Ai2FakeDirectDestroy(void*,void*) {
+    ai2Probe.thread=GetCurrentThreadId();
+    ai2Probe.thinksAtEntry=ai2Probe.planner ? ai2Probe.planner->calls : 0;
+    InterlockedIncrement(&ai2Probe.calls);
+}
+static U Ai2DirectTarget(U siteVa) {
+    const uint8_t* p=reinterpret_cast<const uint8_t*>(At(siteVa));
+    U rel=0; memcpy(&rel,p+1,4);
+    return (siteVa+delta)+5u+rel;
+}
+static void CallDirectSite(U siteVa) {
+    U object=0;
+    reinterpret_cast<void (__fastcall*)(void*,void*)>(static_cast<uintptr_t>(Ai2DirectTarget(siteVa)))(&object,nullptr);
+}
+struct Ai2DirectSite { U va, target; uint8_t opcode; };
+static const Ai2DirectSite kAi2DirectSites[19]={
+    {0x73924C,0x8254D0,0xE8},{0x7394D0,0x8254D0,0xE8},{0x7395E5,0x8254D0,0xE8},{0x73967C,0x8254D0,0xE8},{0x73E059,0x8254D0,0xE8},
+    {0x73E0EC,0x8254D0,0xE8},{0x76BA18,0x8254D0,0xE8},{0x826293,0x8254D0,0xE8},{0x85DC1A,0x8254D0,0xE8},{0x739439,0x8254D0,0xE9},
+    {0x69E173,0x69C720,0xE8},{0x825AEC,0x69C720,0xE8},{0x825BBC,0x69C720,0xE8},{0x825C2F,0x69C720,0xE8},{0x825CBC,0x69C720,0xE8},
+    {0x825CDC,0x69C720,0xE8},{0x825CFC,0x69C720,0xE8},{0x825D3C,0x69C720,0xE8},{0x82566B,0x69C720,0xE9},
+};
+static bool Ai2DirectSitesState(bool gated) {
+    for(const Ai2DirectSite& s:kAi2DirectSites) {
+        const uint8_t* p=reinterpret_cast<const uint8_t*>(At(s.va));
+        if(p[0]!=s.opcode) return false;
+        const U target=Ai2DirectTarget(s.va);
+        if(gated ? !InRuntime(target) : target!=s.target+delta) return false;
+    }
+    return true;
 }
 static void CallDeleting(U* cell) {
     U object=0;
@@ -1561,7 +1602,7 @@ static DWORD WINAPI Ai2Mutator(void*) { // shared-global writer: any foreign wri
     return 0;
 }
 
-static void __fastcall Ai2FakeThink(Ai2Planner* planner,void*,U) {
+static void __fastcall Ai2FakeThink(Ai2Planner* planner,void*,U flag) {
     planner->thread=GetCurrentThreadId();
     InterlockedIncrement(&planner->started);
     if(planner->entered) SetEvent(planner->entered);
@@ -1569,17 +1610,22 @@ static void __fastcall Ai2FakeThink(Ai2Planner* planner,void*,U) {
     if(planner->destroyFromWorker) CallDestroySlot(); // worker-side delegate destruction inside the think: marshalled
     if(planner->walk) Ai2WalkThink();
     Sleep(planner->delayMs);
-    ++planner->calls;
+    const U next=planner->calls+1u;
+    planner->hash=((planner->hash^(flag+0x9e3779b9u))*16777619u)^next;
+    planner->calls=next;
 }
 static DWORD WINAPI Ai2DestroyHelper(void* cell) { CallDeleting(static_cast<U*>(cell)); return 0; }
-struct Ai2Mid { Ai2Planner* planner; ULONGLONG begin, elapsed; U thinksAtMid, sleepMs; bool destroy, observer; };
+static DWORD WINAPI Ai2DirectDestroyHelper(void* rawSite) { CallDirectSite(static_cast<U>(reinterpret_cast<uintptr_t>(rawSite))); return 0; }
+struct Ai2Mid { Ai2Planner* planner; ULONGLONG begin, elapsed; U thinksAtMid, hashAtMid, sleepMs, directSite; bool destroy, observer; };
 static void __stdcall Ai2MidTick(void* raw) {
     Ai2Mid& m=*static_cast<Ai2Mid*>(raw);
     m.elapsed=GetTickCount64()-m.begin;
     m.thinksAtMid=m.planner->calls;
+    m.hashAtMid=m.planner->hash;
     if(m.sleepMs) Sleep(m.sleepMs);
-    if(m.destroy) CallDestroySlot();   // tick-owner writer: the batch has already been joined at the tick start
-    if(m.observer) CallObserverSlot(); // routed observer slot on the tick thread: original
+    if(m.destroy) CallDestroySlot();             // tick-owner writer: the batch has already been joined at the tick start
+    if(m.directSite) CallDirectSite(m.directSite); // tick-owner direct destructor site: publishes staged calls before joining
+    if(m.observer) CallObserverSlot();           // routed observer slot on the tick thread: original
 }
 static bool Ai2WaitCalls(const Ai2Planner& p,U calls,U ms) {
     const ULONGLONG end=GetTickCount64()+ms;
@@ -1601,6 +1647,15 @@ static void Ai2TeardownWhileThinking(Ai2Planner& p,U* cell,LONG started,U callsA
     if(helper) { WaitForSingleObject(helper,15000); CloseHandle(helper); }
     Check(ai2Probe.calls==probeCalls && ai2Probe.thinksAtEntry==callsAtEntry && ai2Probe.thread==helperId,what);
     Sleep(50); // the lease release resumes the worker, which reports idle before the next tick start
+}
+static void Ai2DirectTeardownWhileThinking(Ai2Planner& p,U siteVa,LONG started,U callsAtEntry,LONG probeCalls,const char* what) {
+    Check(Ai2WaitStarted(p,started,3000),what);
+    DWORD helperId=0;
+    HANDLE helper=CreateThread(nullptr,0,Ai2DirectDestroyHelper,reinterpret_cast<void*>(static_cast<uintptr_t>(siteVa)),0,&helperId);
+    Check(helper && WaitForSingleObject(helper,40)==WAIT_TIMEOUT,what);
+    if(helper) { WaitForSingleObject(helper,15000); CloseHandle(helper); }
+    Check(ai2Probe.calls==probeCalls && ai2Probe.thinksAtEntry==callsAtEntry && ai2Probe.thread==helperId,what);
+    Sleep(50);
 }
 
 // ---- --ai-prepass-census / --ai-presize: ten pinned node-think slots + the walk-state slot (census) and the 0x56A610 slot (presize) in the owned
@@ -1803,7 +1858,7 @@ static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
     auto tick=[&](Ai2Planner* planner,U delayMs,U options,Ai2Mid* mid) {
         if(planner) p.delayMs=delayMs; // a null-planner tick must not retime a think still queued or running
         if(mid) { const Ai2Mid keep=*mid; *mid={}; mid->planner=&p; mid->sleepMs=keep.sleepMs; mid->destroy=keep.destroy;
-                  mid->observer=keep.observer; mid->begin=GetTickCount64(); }
+                  mid->observer=keep.observer; mid->directSite=keep.directSite; mid->begin=GetTickCount64(); }
         return boundary(model,planner,1,mid ? &Ai2MidTick : nullptr,mid,options);
     };
     // T1: site 34 queues and returns; nothing runs during the admitting tick (published only at its end); the think
@@ -1977,6 +2032,93 @@ static int AiAsync2Fixture(kntwr_start_fn start,kntwr_stop_fn stop,volatile kntw
           "world-loss: one aborted marshal recorded; stop succeeds");
     Put(model,0,A(root));
     p.destroyFromWorker=0;
+
+    // Fourth generation: direct-call owner-teardown gates (0x8254D0 and 0x69C720, 19 rel32 call/jmp sites), same-tick
+    // staged-then-teardown publish order, and coexistence with --brain-target-cull and --ai-claim-once.
+    Check(Ai2DirectSitesState(false),"stop restored all 19 direct-call teardown sites to their stock targets");
+    Check(RedirectImage(0x8254D0,reinterpret_cast<const void*>(&Ai2FakeDirectDestroy)) &&
+          RedirectImage(0x69C720,reinterpret_cast<const void*>(&Ai2FakeDirectDestroy)),
+          "install direct-call operation (0x8254D0) and delegate (0x69C720) destructor probes");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2;
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL|KNTWR_AI_CLAIM_ONCE;
+    Check(start(&config)==0 && WaitActive(state,config.enabled_mask),
+          "fourth ai_async2 generation activates with brain-target-cull and ai-claim-once");
+    Check(Ai2DirectSitesState(true),"activation retargets all 19 direct-call/jmp teardown sites into runtime gates");
+    // Direct-call teardown on a non-tick thread with NO think in flight: immediate execution under lease.
+    {
+        DWORD helperId=0;
+        HANDLE h1=CreateThread(nullptr,0,Ai2DirectDestroyHelper,reinterpret_cast<void*>(static_cast<uintptr_t>(0x73924Cu)),0,&helperId);
+        Check(h1 && WaitForSingleObject(h1,3000)==WAIT_OBJECT_0,"direct 0x8254D0 teardown with no think in flight completes immediately");
+        if(h1) CloseHandle(h1);
+        Check(ai2Probe.calls==6 && ai2Probe.thinksAtEntry==15 && ai2Probe.thread==helperId,
+              "direct 0x8254D0 no-flight call ran on the helper thread");
+        HANDLE h2=CreateThread(nullptr,0,Ai2DirectDestroyHelper,reinterpret_cast<void*>(static_cast<uintptr_t>(0x825AECu)),0,&helperId);
+        Check(h2 && WaitForSingleObject(h2,3000)==WAIT_OBJECT_0,"direct 0x69C720 teardown with no think in flight completes immediately");
+        if(h2) CloseHandle(h2);
+        Check(ai2Probe.calls==7 && ai2Probe.thinksAtEntry==15 && ai2Probe.thread==helperId,
+              "direct 0x69C720 no-flight call ran on the helper thread");
+    }
+    // Non-tick direct-call teardown DURING an in-flight two-think batch: 0x8254D0 call site (0x73924C), 0x8254D0 tail-jmp
+    // site (0x739439), and 0x69C720 call site (0x825AEC) must each block until the whole published batch has drained.
+    Check(tick(&p,100,1,nullptr)==1,"direct 0x8254D0 call-site: two thinks queued in one tick");
+    Ai2DirectTeardownWhileThinking(p,0x73924C,17,17,8,"direct 0x8254D0 call site (0x73924C) waits for the whole published batch");
+    Check(tick(nullptr,0,0,nullptr)==1,"direct 0x8254D0 call-site batch joined at tick start");
+    Check(tick(&p,100,1,nullptr)==1,"direct 0x8254D0 jmp-site: two thinks queued in one tick");
+    Ai2DirectTeardownWhileThinking(p,0x739439,19,19,9,"direct 0x8254D0 tail-jmp site (0x739439) waits for the whole published batch");
+    Check(tick(nullptr,0,0,nullptr)==1,"direct 0x8254D0 jmp-site batch joined at tick start");
+    Check(tick(&p,100,1,nullptr)==1,"direct 0x69C720 call-site: two thinks queued in one tick");
+    Ai2DirectTeardownWhileThinking(p,0x825AEC,21,21,10,"direct 0x69C720 call site (0x825AEC) waits for the whole published batch");
+    Check(tick(nullptr,0,0,nullptr)==1,"direct 0x69C720 call-site batch joined at tick start");
+    // Same-tick staged-then-teardown: a think staged at site 34 earlier in the SAME tick is published and joined by a
+    // subsequent tick-owner KDestroy before the destructor body runs (synchronous order, counted in word 95).
+    m={}; m.directSite=0x73924C;
+    Check(tick(&p,20,0,&m)==1 && m.thinksAtMid==21 && ai2Probe.calls==11 && ai2Probe.thread==owner &&
+          ai2Probe.thinksAtEntry==22 && p.calls==22,
+          "same-tick staged think is published and completed before tick-owner direct teardown enters");
+    Check(stop(nullptr)==0 && Ai2DirectSitesState(false),"fourth generation stops and restores all 19 direct-call sites");
+    Check(ReadState(state,snapshot) && snapshot.ai_async2_words[94]==5 && snapshot.ai_async2_words[95]==1,
+          "fourth generation recorded 5 owner-teardown leases and 1 staged-teardown publish");
+    config.ai_ctrl_flags=0;
+
+    // Fifth & sixth generations: repeated battle start/stop cycles and determinism under artificial worker delay.
+    // Two runs of the same 5-tick scripted admission sequence (flags 1, 0, 1, 1, 0; options 0, 1, 0, 1, 0 -> 7 thinks):
+    // Run 0 uses 0 ms worker delay with a 30 ms inter-tick gap (0 seam stalls); Run 1 injects 35 ms worker delay per think
+    // with 0 ms inter-tick gap (every batch spans the window and blocks the tick-start seam). Both runs must produce
+    // byte-identical per-tick (calls, hash) observations at every tick seam and reset cleanly across start/stop cycles.
+    U traceCalls[2][6]={}, traceHash[2][6]={}, runStalls[2]={}, runComplete[2]={};
+    const U scriptFlags[5]={1,0,1,1,0}, scriptOpts[5]={0,1,0,1,0};
+    for(U run=0;run<2;++run) {
+        p={}; p.hash=2166136261u;
+        ai2Probe={}; ai2Probe.planner=&p;
+        Check(start(&config)==0 && WaitActive(state,config.enabled_mask) && Ai2DirectSitesState(true),
+              "determinism cycle: generation activates and installs all 19 direct-call gates");
+        Check(ReadState(state,snapshot) && snapshot.ai_async2_words[1]==0 && snapshot.ai_async2_words[2]==0 &&
+              snapshot.ai_async2_words[94]==0 && snapshot.ai_async2_words[95]==0,
+              "determinism cycle: owner and schedule counters reset at activation");
+        for(U t=0;t<5;++t) {
+            p.delayMs=run ? 35u : 0u;
+            m={}; m.planner=&p; m.begin=GetTickCount64();
+            Check(boundary(model,&p,scriptFlags[t],&Ai2MidTick,&m,scriptOpts[t])==1,"determinism cycle: scripted tick");
+            traceCalls[run][t]=m.thinksAtMid;
+            traceHash[run][t]=m.hashAtMid;
+            if(!run) Sleep(30);
+        }
+        m={}; m.planner=&p; m.begin=GetTickCount64();
+        Check(boundary(model,nullptr,0,&Ai2MidTick,&m,0)==1,"determinism cycle: final join tick");
+        traceCalls[run][5]=m.thinksAtMid;
+        traceHash[run][5]=m.hashAtMid;
+        Check(stop(nullptr)==0 && Ai2DirectSitesState(false) &&
+              *Ai2DestroyCell()==destroyOriginal && *Ai2OwnerCell()==ownerOriginal && *Ai2ObserverCell()==observerOriginal,
+              "determinism cycle: stop restores all 19 direct sites and all pinned vtable slots");
+        Check(ReadState(state,snapshot),"determinism cycle: telemetry readable after stop");
+        runStalls[run]=snapshot.ai_async2_route_words[11];
+        runComplete[run]=snapshot.ai_async2_route_words[9];
+    }
+    Check(runComplete[0]==5 && runStalls[0]==0 && runStalls[1]==5,
+          "determinism cycle: fast run completed all 5 batches in-window; slow run stalled at all 5 tick-start seams");
+    Check(traceCalls[0][5]==7 && memcmp(traceCalls[0],traceCalls[1],sizeof(traceCalls[0]))==0 &&
+          memcmp(traceHash[0],traceHash[1],sizeof(traceHash[0]))==0,
+          "determinism cycle: per-tick think counts and stateful hashes are byte-identical regardless of worker delay");
     return failures ? 1 : 0;
 }
 
@@ -3243,10 +3385,11 @@ int main(int argc,char** argv) {
     config.ai_ctrl_flags=0x20000u; Check(start(&config)==1,"bits 17..31 are reserved");
     config.ai_ctrl_flags=KNTWR_AI_CLAIM_ONCE; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"ai-claim-once without a routed tick refused");
-    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"ai-claim-once excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==2,"ai-claim-once coexists with ai_async2 (non-deferred)");
+    config.ai_deferred=2u|(2u<<8); Check(start(&config)==1,"ai-claim-once excludes ai_deferred"); config.ai_deferred=0;
     config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CTRL; Check(start(&config)==1,"ai-claim-once excludes the controller offload");
     config.ai_ctrl_flags=0;
-    // Retired AI group lever bits 13..17 (formup gate, stand-off, hold slots (+all), march slots) are no longer defined: every one is refused alone and beside a valid routed-tick brain-step setup.
+    // Retired AI group lever bits 13..17 (group, hold slots (+all), march slots) are no longer defined: every one is refused alone and beside a valid routed-tick brain-step setup.
     config.enabled_mask=KNTWR_AI_ASYNC;
     for(unsigned bit=13;bit<=17;++bit){
         config.ai_ctrl_flags=1u<<bit; Check(start(&config)==1,"retired ai_ctrl bit 13..17 refused");
@@ -3266,9 +3409,18 @@ int main(int argc,char** argv) {
     config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER|KNTWR_AI_CTRL_HISTOGRAM; Check(start(&config)==2,"brain-retarget-jitter combines with the histogram mode");
     config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER; config.enabled_mask=KNTWR_BATCH64;
     Check(start(&config)==1,"brain-retarget-jitter without a routed tick refused");
-    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==1,"brain-retarget-jitter excludes ai_async2");
+    config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_ASYNC2; Check(start(&config)==2,"brain-retarget-jitter coexists with ai_async2");
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL; Check(start(&config)==2,"brain-target-cull coexists with ai_async2");
+    config.ai_ctrl_flags=KNTWR_AI_TARGET_CULL_SHADOW; Check(start(&config)==2,"brain-target-cull-shadow coexists with ai_async2");
+    config.ai_ctrl_flags=KNTWR_AI_RETARGET_JITTER;
     config.enabled_mask=KNTWR_AI_ASYNC|KNTWR_AI_CTRL; Check(start(&config)==1,"brain-retarget-jitter excludes the controller offload");
     config.ai_ctrl_flags=0;
+    // --drag-ladder: a standalone gameplay bit (no routed tick needed), known bits only.
+    config.enabled_mask=KNTWR_AI_ASYNC; config.gameplay_flags=KNTWR_DRAG_LADDER;
+    Check(start(&config)==2,"drag-ladder passes validation and refuses a foreign main image");
+    config.gameplay_flags=KNTWR_GAMEPLAY_FLAGS_VALID+1; Check(start(&config)==1,"drag-ladder unknown gameplay flag bit refused");
+    config.gameplay_flags=0x80000000u; Check(start(&config)==1,"drag-ladder high gameplay flag bit refused");
+    config.gameplay_flags=0;
     // --ai-prepass-*: routed tick, no ai_async2, census combines only with presize, known bits only.
     config.enabled_mask=KNTWR_AI_ASYNC; config.ai_prepass_flags=KNTWR_AI_PREPASS_CENSUS;
     Check(start(&config)==2,"ai-prepass census passes validation and refuses a foreign main image");
@@ -3661,7 +3813,7 @@ int main(int argc,char** argv) {
             config.brain_flags=c.brain2 ? (i&KNTWR_BRAIN_FLAGS_VALID)|(i>=sizeof(cycles)/sizeof(cycles[0]) ? KNTWR_BRAIN_UNIT_SHADOW : 0u) : 0u;
             config.main_thread_id=(c.mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
             Check(start(&config)==0 && WaitActive(state,c.mask),"brain2 cycle became active with the exact mask");
-            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==c.workers,"brain2 request and activation published");
+            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==EffectiveWorkers(c.workers),"brain2 request and activation published");
             Check(siteCallee && ((siteCallee(6)==loopOriginal)==!c.brain2) && (!c.brain2 || InRuntime(siteCallee(6))),
                   c.brain2 ? "entity loop site bound to the host dispatcher" : "entity loop site stays the original without the feature");
             Check(siteCallee && ((siteCallee(13)==0x531AF0+delta)==!(c.mask&KNTWR_LOCO)),
@@ -3707,6 +3859,7 @@ int main(int argc,char** argv) {
         Check(stop(nullptr)==0,"brain S0 stop drains the owner");
         Check(ReadState(state,snapshot) && snapshot.phase==KNTWR_STOPPED && snapshot.brain_s0_words[2]==1 &&
               siteCallee(6)==loopOriginal,"brain S0 stop retains its row and restores site 6");
+        config.ai_ctrl_flags=0; config.enabled_mask=KNTWR_BRAIN2; config.workers=0; config.main_thread_id=0; config.brain_flags=KNTWR_BRAIN_S0;
         // --brain-locality: activation starts the census (CPU check, storage, static line tables, bracket calibration) without any
         // dispatch; it reuses the S0 status row: version, configured bits (1 census, +2 warm, +4 prefetch, +8 prefetch2), running.
         {
@@ -3799,7 +3952,7 @@ int main(int argc,char** argv) {
             config.enabled_mask=c.mask; config.workers=c.workers;
             config.main_thread_id=(c.mask&KNTWR_PROFILE) ? GetCurrentThreadId() : 0;
             Check(start(&config)==0 && WaitActive(state,c.mask),"collide restart activates exact feature mask");
-            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.workers==c.workers &&
+            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.workers==EffectiveWorkers(c.workers) &&
                   AllCollideWordsZero(snapshot),"collide restart resets counters, including disabled generations");
             Check(stop(nullptr)==0,"collide restart stop joins monitor and pool");
             Check(*taskSlot==taskOriginal && ReadOnly(taskSlot) && *slot==original,"collide restart restores slots");
@@ -3933,7 +4086,7 @@ int main(int argc,char** argv) {
                 ((c.flags&KNTWR_LOCO_OWNED_SERVICES) ? 1u : 0u);
             Check(activationBoundaries==boundariesBefore+expectedBoundaries,
                   "each generation captures workload once and owned scene once at quiescent boundaries");
-            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==c.workers,"loco request and activation published");
+            Check(ReadState(state,snapshot) && snapshot.requested_mask==c.mask && snapshot.active_mask==c.mask && snapshot.workers==EffectiveWorkers(c.workers),"loco request and activation published");
             Check(GridCensusWithoutCalls(snapshot,false),"ordinary LOCO starts keep census disabled");
             U storage=0;
             for(U m=KNTWR_MEM_LOCO_BYTES;m<=KNTWR_MEM_OTHER_BYTES;++m) storage+=snapshot.memory_words[m];
@@ -4005,11 +4158,12 @@ int main(int argc,char** argv) {
                 Check(AllVisualWorkWordsZero(snapshot),"no visual work counter without work");
                 if(c.mask&KNTWR_AI_ASYNC) Check(AiEventWorker(snapshot),"ai worker idles without suspension beside visual");
                 bool admitted=true;
-                for(U worker=0;worker<config.workers;++worker)
+                const U effWorkers=EffectiveWorkers(config.workers);
+                for(U worker=0;worker<effWorkers;++worker)
                     admitted=admitted && snapshot.allocator_words[worker*KNTWR_ALLOCATOR_ROW_WORDS]==1;
                 if(c.mask&KNTWR_AI_ASYNC)
                     admitted=admitted && snapshot.allocator_words[(KNTWR_ALLOCATOR_THREADS-1)*KNTWR_ALLOCATOR_ROW_WORDS]==1;
-                const LONG probes=static_cast<LONG>(config.workers+((c.mask&KNTWR_AI_ASYNC) ? 1 : 0));
+                const LONG probes=static_cast<LONG>(effWorkers+((c.mask&KNTWR_AI_ASYNC) ? 1 : 0));
                 Check(admitted && allocatorAllocations-allocatedBefore==probes && allocatorFrees-freedBefore==probes,
                       "every pool and AI worker allocates and frees exactly once before activation");
                 Check(start(&config)==1,"duplicate visual start refused");

@@ -7,6 +7,7 @@
 #include <string.h>
 #include "kntwr_ai_async2.h"
 #include "kntwr_ai_deferred.h"
+#include "core/kntwr_entry_patch.h"
 
 namespace kntwr_ai_async2 {
 namespace {
@@ -34,12 +35,17 @@ const Pin kPins[kPinCount] = {
     {0x134B48C, 2, 0x85E020, KDestroy, 4},
     {0x13378F8, 26, 0x69CED0, KDestroy, 4}, {0x1337998, 26, 0x69DC70, KDestroy, 4}, {0x1337BB8, 26, 0x69CEF0, KDestroy, 4},
     {0x1337C30, 26, 0x69E170, KDestroy, 4}, {0x1349C18, 26, 0x826290, KDestroy, 4},
+    // Pins 25/26: call-site gates (vtable == 0, no data slot; the runtime skips them). Inner destructor bodies with no
+    // vtable reference: 0x8254D0 (operation, tail-jumps 0x69C720) and 0x69C720 (delegate, tail-jumps 0x69A990), both
+    // thiscall, no stack argument, plain ret; reached through the 19 rel32 sites retargeted by InstallSites.
+    {0, 0, 0x8254D0, KDestroy, 0}, {0, 0, 0x69C720, KDestroy, 0},
 };
 static_assert(kUnroutedPin < kRoutePins && kRoutePins <= kPinCount, "route-row pin counters");
 constexpr U kMaxArgs = 6;
 
 volatile LONG g_words[kWords], g_route[kRouteWords];
 volatile LONG g_on, g_inFlight, g_running, g_hold, g_fallback, g_workerAsync, g_measure, g_closing;
+volatile LONG g_directBusy; // threads between entry and exit of a call-site gate (pins >= kDirectPinFirst)
 volatile U g_serving; // thread executing a marshalled call (0 none)
 volatile long* g_tickOwner;
 volatile U* g_worker;
@@ -245,6 +251,10 @@ extern "C" U __stdcall KntwrAi2SlotGate(U pin, U* frame) {
     const U tid = Tid();
     const bool worker = IsWorker();
     if (!worker && kind != KCommand && static_cast<U>(g_serving) != tid && IsTick()) {
+        // A think staged at site 34 earlier in THIS tick is published only at tick end, yet it holds a raw pointer into
+        // the graph this teardown frees (synchronous order ran it before the teardown). Publish it now: the join below
+        // then waits for it, so the staged think runs strictly before the owner is touched. A function of call order only.
+        if (kind == KDestroy && !g_deferred && g_published != g_tail) { PublishLocked(); Inc(WStagedTeardownPublishes); }
         Join(kind); // counts the entry; the tick admits at site 34 only, so it needs no lease
         return 0;
     }
@@ -330,16 +340,179 @@ KNTWR_AI2_GATE(23, 4)
 KNTWR_AI2_GATE(24, 4)
 #undef KNTWR_AI2_GATE
 
+// Call-site gates (pins 25/26, thiscall, no stack argument, plain ret). Same frame as above; additionally every entry is
+// counted in g_directBusy from the first instruction to the last before the exit jump/ret, and the code is bounded by an
+// 8-byte tail marker (never executed), so the site restore can prove that no thread is inside a gate before the module
+// may unload. The marker must stay the last bytes of the gate (see kGateTail).
+#define KNTWR_AI2_DIRECT_GATE(i) \
+    __declspec(naked) void Gate##i() { \
+        __asm pushfd \
+        __asm lock inc dword ptr [g_directBusy] \
+        __asm pushad \
+        __asm mov eax, esp \
+        __asm push eax \
+        __asm push i \
+        __asm cld \
+        __asm call KntwrAi2SlotGate \
+        __asm lock dec dword ptr [g_directBusy] \
+        __asm test eax, eax \
+        __asm jnz handled \
+        __asm popad \
+        __asm popfd \
+        __asm jmp dword ptr [g_original + 4 * i] \
+        __asm handled: \
+        __asm popad \
+        __asm popfd \
+        __asm ret 0 \
+        __asm _emit 0xA3 __asm _emit 0x71 __asm _emit 0x0D __asm _emit 0x5C \
+        __asm _emit 0xE2 __asm _emit 0x90 __asm _emit 0x4B __asm _emit 0x16 \
+    }
+KNTWR_AI2_DIRECT_GATE(25)
+KNTWR_AI2_DIRECT_GATE(26)
+#undef KNTWR_AI2_DIRECT_GATE
+
 const Pin* Pins() { return kPins; }
 
 U Gate(U pin) {
     static void (*const gates[kPinCount])() = {&Gate0, &Gate1, &Gate2, &Gate3, &Gate4, &Gate5, &Gate6, &Gate7,
                                                &Gate8, &Gate9, &Gate10, &Gate11, &Gate12, &Gate13, &Gate14, &Gate15,
                                                &Gate16, &Gate17, &Gate18, &Gate19, &Gate20, &Gate21, &Gate22, &Gate23,
-                                               &Gate24};
-    static_assert(kPinCount == 25, "one naked gate per pin");
+                                               &Gate24, &Gate25, &Gate26};
+    static_assert(kPinCount == 27, "one naked gate per pin");
     return pin < kPinCount ? static_cast<U>(reinterpret_cast<uintptr_t>(gates[pin])) : 0;
 }
+
+namespace {
+// ---- direct-call owner-teardown sites ---------------------------------------------------------------------------------
+// The inner destructor bodies 0x8254D0 (operation, derived) and 0x69C720 (delegate) have NO vtable or data reference in
+// the stock image (static census of every rel32 call/jmp and every absolute word): they are reached only through the
+// 19 `E8/E9 rel32` sites below. Reset(true) retargets each rel32 at the naked gate of pin 25 / 26, which runs the owner-
+// teardown protocol of KntwrAi2SlotGate; the stock functions are never touched, so the gate tail-jumps or invokes them
+// with the caller's exact registers and stack. The 8-byte compare-exchange covers the 5 displaced bytes and the 3
+// following (unchanged) bytes; a mismatch writes nothing.
+struct Site { U va; unsigned char opcode; U pin; };
+constexpr U kSiteCount = 19;
+constexpr Site kSites[kSiteCount] = {
+    // 0x8254D0 (pin 25): nine calls and the tail jmp of the 0x739430 thunk
+    {0x73924C, 0xE8, 25}, {0x7394D0, 0xE8, 25}, {0x7395E5, 0xE8, 25}, {0x73967C, 0xE8, 25}, {0x73E059, 0xE8, 25},
+    {0x73E0EC, 0xE8, 25}, {0x76BA18, 0xE8, 25}, {0x826293, 0xE8, 25}, {0x85DC1A, 0xE8, 25}, {0x739439, 0xE9, 25},
+    // 0x69C720 (pin 26): eight calls and the tail jmp inside 0x8254D0
+    {0x69E173, 0xE8, 26}, {0x825AEC, 0xE8, 26}, {0x825BBC, 0xE8, 26}, {0x825C2F, 0xE8, 26}, {0x825CBC, 0xE8, 26},
+    {0x825CDC, 0xE8, 26}, {0x825CFC, 0xE8, 26}, {0x825D3C, 0xE8, 26}, {0x82566B, 0xE9, 26},
+};
+static_assert(kPinCount == kDirectPinFirst + 2, "one call-site gate per direct teardown target");
+constexpr unsigned char kGateTail[8] = {0xA3, 0x71, 0x0D, 0x5C, 0xE2, 0x90, 0x4B, 0x16};
+constexpr U kGateScanBytes = 192;
+
+SRWLOCK g_siteLock = SRWLOCK_INIT;
+U g_siteAddress[kSiteCount];
+unsigned char g_siteFrom[kSiteCount][8], g_siteTo[kSiteCount][8];
+bool g_sitePatched[kSiteCount];
+
+U ResolveGate(U fn) { // follows an incremental-link thunk (E9) so the range bounds the real gate body
+    for (U hop = 0; hop < 4; ++hop) {
+        const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(fn));
+        if (p[0] != 0xE9) return fn;
+        U displacement;
+        memcpy(&displacement, p + 1, 4);
+        const U next = fn + 5 + displacement;
+        if (next <= fn || next - fn > 0x10000u) return 0;
+        fn = next;
+    }
+    return 0;
+}
+
+// [begin, end): every gate byte a frozen thread could still execute (the tail marker is never executed).
+bool GateRange(U pin, U& begin, U& end) {
+    begin = ResolveGate(Gate(pin));
+    if (!begin) return false;
+    const auto p = reinterpret_cast<const unsigned char*>(static_cast<uintptr_t>(begin));
+    for (U offset = 0; offset + 8 <= kGateScanBytes; ++offset)
+        if (memcmp(p + offset, kGateTail, 8) == 0) { end = begin + offset; return offset != 0; }
+    return false;
+}
+
+bool ReadBytes(U address, unsigned char* out, U count) {
+    __try { memcpy(out, reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), count); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return true;
+}
+
+bool RemoveSitesLocked(ULONGLONG deadline) {
+    for (;;) {
+        bool pending = false;
+        for (U i = 0; i < kSiteCount; ++i) {
+            if (!g_sitePatched[i]) continue;
+            U begin = 0, end = 0;
+            if (!GateRange(kSites[i].pin, begin, end)) { pending = true; continue; } // cannot prove the gate drained
+            // Refused while any frozen peer's EIP is inside the gate or any thread is between gate entry and exit.
+            const kntwr_entry_patch::Guard guard{begin, end, &g_directBusy};
+            if (kntwr_entry_patch::Swap8(g_siteAddress[i], g_siteTo[i], g_siteFrom[i], 5, guard, [] {})) {
+                g_sitePatched[i] = false;
+                continue;
+            }
+            unsigned char live[8];
+            if (ReadBytes(g_siteAddress[i], live, 8) && memcmp(live, g_siteFrom[i], 8) == 0) g_sitePatched[i] = false;
+            else pending = true; // busy gate (retry) or foreign bytes (never claimed restored)
+        }
+        if (!pending) return true;
+        if (GetTickCount64() >= deadline) return false;
+        Sleep(1);
+    }
+}
+
+bool InstallSitesLocked(U delta) {
+    U begin[2] = {}, end[2] = {};
+    for (U p = 0; p < 2; ++p)
+        if (!GateRange(kDirectPinFirst + p, begin[p], end[p])) { SetLastError(ERROR_INVALID_FUNCTION); return false; }
+    unsigned char from[kSiteCount][8];
+    bool already[kSiteCount];
+    for (U i = 0; i < kSiteCount; ++i) { // validate every site before the first write
+        const Site& s = kSites[i];
+        const U site = s.va + delta;
+        if (!ReadBytes(site, from[i], 8) || from[i][0] != s.opcode) { SetLastError(ERROR_INVALID_DATA); return false; }
+        U rel;
+        memcpy(&rel, from[i] + 1, 4);
+        const U target = site + 5 + rel;
+        already[i] = g_sitePatched[i] && g_siteAddress[i] == site && target == begin[s.pin - kDirectPinFirst];
+        if (!already[i] && target != kPins[s.pin].original + delta) { SetLastError(ERROR_INVALID_DATA); return false; }
+    }
+    for (U i = 0; i < kSiteCount; ++i) {
+        if (already[i]) continue;
+        const Site& s = kSites[i];
+        const U site = s.va + delta, gate = begin[s.pin - kDirectPinFirst];
+        unsigned char to[8];
+        memcpy(to, from[i], 8);
+        const U rel = gate - (site + 5);
+        memcpy(to + 1, &rel, 4);
+        const kntwr_entry_patch::Guard guard{gate, end[s.pin - kDirectPinFirst], &g_directBusy};
+        if (!kntwr_entry_patch::Swap8(site, from[i], to, 5, guard, [] {})) {
+            SetLastError(ERROR_BUSY);
+            RemoveSitesLocked(GetTickCount64() + 1000); // best effort: the gates pass through while g_on == 0 anyway
+            return false;
+        }
+        g_siteAddress[i] = site;
+        memcpy(g_siteFrom[i], from[i], 8);
+        memcpy(g_siteTo[i], to, 8);
+        g_sitePatched[i] = true;
+    }
+    return true;
+}
+
+bool InstallSites(U delta) {
+    AcquireSRWLockExclusive(&g_siteLock);
+    const bool ok = InstallSitesLocked(delta);
+    ReleaseSRWLockExclusive(&g_siteLock);
+    return ok;
+}
+
+bool RemoveSites(ULONGLONG deadline) {
+    AcquireSRWLockExclusive(&g_siteLock);
+    const bool ok = RemoveSitesLocked(deadline);
+    ReleaseSRWLockExclusive(&g_siteLock);
+    return ok;
+}
+} // namespace
 
 
 namespace {
@@ -478,6 +651,7 @@ bool Reset(bool enabled, U delta, volatile long* tickOwner, volatile U* workerTh
     SetEvent(g_idle); SetEvent(g_drained); ResetEvent(g_posted); ResetEvent(g_served);
     g_tickOwner = tickOwner; g_worker = workerThread;
     for (U i = 0; i < kPinCount; ++i) g_original[i] = kPins[i].original + delta;
+    if (enabled && !InstallSites(delta)) return false; // fail closed: g_on stays 0, every gate passes through
     if (enabled) {
         g_words[WVersion] = kVersion;
         g_route[RVersion] = kVersion;
@@ -695,32 +869,39 @@ U FunctionCounters() { return static_cast<U>(reinterpret_cast<uintptr_t>(&g_rout
 void SetWake(U handle) { g_wake = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle)); }
 
 bool Quiesce(U graceMs, U timeoutMs, bool (*receiversValid)()) {
-    if (!Load(&g_on)) return true;
-    _InterlockedExchange(&g_closing, 1); // site 34 stops queueing: later calls use the same-call barrier
     const ULONGLONG begin = GetTickCount64(), grace = begin + graceMs, deadline = begin + timeoutMs;
-    for (;;) {
-        // Staged calls belong to a tick in progress: its end publishes them and the next tick start joins them.
-        if (!Load(&g_inFlight) && !Staged()) return true;
-        const ULONGLONG now = GetTickCount64();
-        if (now >= deadline) return false;
-        const bool valid = receiversValid && receiversValid();
-        if (valid && now < grace) { Sleep(1); continue; } // the routed tick-start join services and drains it
-        // No tick came (paused, or the battle is gone): never leave the worker's borrowed frame blocked. Execute its
-        // call here while the receivers are still bound; otherwise abort it (EAX = 0, the original is NOT executed).
-        if (WaitForSingleObject(g_posted, 1) != WAIT_OBJECT_0) continue;
-        if (receiversValid && receiversValid()) { Serve(false); Inc(WStopServed); }
-        else { g_mail.result = 0; Inc(WStopAborted); SetEvent(g_served); }
+    if (Load(&g_on)) {
+        _InterlockedExchange(&g_closing, 1); // site 34 stops queueing: later calls use the same-call barrier
+        for (;;) {
+            // Staged calls belong to a tick in progress: its end publishes them and the next tick start joins them.
+            if (!Load(&g_inFlight) && !Staged()) break;
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) return false;
+            const bool valid = receiversValid && receiversValid();
+            if (valid && now < grace) { Sleep(1); continue; } // the routed tick-start join services and drains it
+            // No tick came (paused, or the battle is gone): never leave the worker's borrowed frame blocked. Execute its
+            // call here while the receivers are still bound; otherwise abort it (EAX = 0, the original is NOT executed).
+            if (WaitForSingleObject(g_posted, 1) != WAIT_OBJECT_0) continue;
+            if (receiversValid && receiversValid()) { Serve(false); Inc(WStopServed); }
+            else { g_mail.result = 0; Inc(WStopAborted); SetEvent(g_served); }
+        }
     }
+    // Drained: no think is queued or running, so the direct-call teardown sites have nothing left to protect. Restoring
+    // them is part of a clean stop; a refusal (a peer is inside a site gate, or foreign bytes) fails the stop closed.
+    return RemoveSites(deadline);
 }
 
 bool Drain(U timeoutMs) {
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
     const bool staged = Staged();
-    if (!Load(&g_inFlight)) return !staged;
-    const LONGLONG begin = Now();
-    const bool ok = WaitForSingleObject(g_drained, timeoutMs) == WAIT_OBJECT_0 && !Load(&g_inFlight);
-    const U us = Micro(begin, Now());
-    Inc(WKindWaits + 2 * KStop); Max(WKindWaits + 2 * KStop + 1, us);
-    return ok && !staged;
+    bool ok = !staged;
+    if (Load(&g_inFlight)) {
+        const LONGLONG begin = Now();
+        ok = WaitForSingleObject(g_drained, timeoutMs) == WAIT_OBJECT_0 && !Load(&g_inFlight) && ok;
+        const U us = Micro(begin, Now());
+        Inc(WKindWaits + 2 * KStop); Max(WKindWaits + 2 * KStop + 1, us);
+    }
+    return ok && RemoveSites(deadline);
 }
 
 void Snapshot(volatile U* out) {

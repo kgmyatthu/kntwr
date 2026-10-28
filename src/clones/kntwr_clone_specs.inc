@@ -272,6 +272,9 @@
 #define KNTWR_SRC_SOLVER_51A9A0 266u
 #define KNTWR_SRC_SOLVER_584E10 267u
 #define KNTWR_SRC_SOLVER_57AC10 268u
+#define KNTWR_SRC_CMD_581CA0 269u
+#define KNTWR_SRC_CMD_4F84C0 270u
+#define KNTWR_SRC_CMD_5736B0 271u
 
 static const uint32_t kntwr_reloc_TICK[] = {
     0xF8u, 0x108u, 0x14Au, 0x15Au
@@ -997,6 +1000,9 @@ static const kntwr_source_spec kntwr_sources[] = {
     { 0x51A9A0u, 0x2A8u, 0x2C550D43579BE3B7ull, kntwr_reloc_SOLVER_51A9A0, 3u }, /* SOLVER_51A9A0 clone */
     { 0x584E10u, 0x927u, 0xDFCE5AA616DD6A2Dull, kntwr_reloc_SOLVER_584E10, 12u }, /* SOLVER_584E10 clone */
     { 0x57AC10u, 0x7Au, 0x230B449B2ACC4245ull, 0, 0u }, /* SOLVER_57AC10 clone */
+    { 0x581CA0u, 0x28u, 0x46B82B8304611EE4ull, 0, 0u }, /* CMD_581CA0 private */
+    { 0x4F84C0u, 0x15u, 0x52D0397764D9842Full, 0, 0u }, /* CMD_4F84C0 private */
+    { 0x5736B0u, 0x94u, 0xD200DB66EE346CEAull, 0, 0u }, /* CMD_5736B0 private */
 };
 static const uint32_t kntwr_source_count = (uint32_t)(sizeof(kntwr_sources) / sizeof(kntwr_sources[0]));
 
@@ -10563,6 +10569,42 @@ static const kntwr_clone_op kntwr_ops_SOLVER_57AC10[] = {
     { KNTWR_RELATIVE, 0x6Cu, 4u, KNTWR_TARGET_IMAGE, 0xFF7EF0u, 0, 0 },
 };
 
+static const kntwr_clone_op kntwr_ops_CMD_581CA0[] = {
+    { KNTWR_COPY, 0x0u, 0x28u, KNTWR_SRC_CMD_581CA0, 0x0u, 0, 0 },
+    { KNTWR_RELATIVE, 0x7u, 4u, KNTWR_TARGET_CLONE, KNTWR_CLONE_CMD_10FC370, 0, 0 },
+    { KNTWR_RELATIVE, 0x1Au, 4u, KNTWR_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { KNTWR_RELATIVE, 0x22u, 4u, KNTWR_TARGET_IMAGE, 0x557D80u, 0, 0 },
+};
+
+static const kntwr_clone_op kntwr_ops_CMD_10FC370[] = {
+    { KNTWR_COPY, 0x0u, 0x36u, KNTWR_SRC_S0_POSTURE, 0x0u, 0, 0 },
+    { KNTWR_RELATIVE, 0x1Au, 4u, KNTWR_TARGET_CLONE, KNTWR_CLONE_CMD_10FBBD0, 0, 0 },
+};
+
+static const uint8_t kntwr_literal_CMD_10FBBD0_0[] = {
+    0x8B, 0xCF, 0x56, 0xE8, 0x00, 0x00, 0x00, 0x00
+};
+static const kntwr_clone_op kntwr_ops_CMD_10FBBD0[] = {
+    { KNTWR_COPY, 0x0u, 0x1Eu, KNTWR_SRC_S0_POSTURE_STEP, 0x0u, 0, 0 },
+    { KNTWR_LITERAL, 0x1Eu, 0x8u, 0, 0, 0, kntwr_literal_CMD_10FBBD0_0 },
+    { KNTWR_COPY, 0x26u, 0x19u, KNTWR_SRC_S0_POSTURE_STEP, 0x26u, 0, 0 },
+    { KNTWR_RELATIVE, 0x22u, 4u, KNTWR_TARGET_BINDING, KNTWR_BIND_CMD_ENTER, 0, 0 },
+};
+
+static const kntwr_clone_op kntwr_ops_CMD_4F84C0[] = {
+    { KNTWR_COPY, 0x0u, 0x15u, KNTWR_SRC_CMD_4F84C0, 0x0u, 0, 0 },
+    { KNTWR_RELATIVE, 0xEu, 4u, KNTWR_TARGET_CLONE, KNTWR_CLONE_CMD_5736B0, 0, 0 },
+};
+
+static const kntwr_clone_op kntwr_ops_CMD_5736B0[] = {
+    { KNTWR_COPY, 0x0u, 0x94u, KNTWR_SRC_CMD_5736B0, 0x0u, 0, 0 },
+    { KNTWR_RELATIVE, 0x31u, 4u, KNTWR_TARGET_BINDING, KNTWR_BIND_CMD_ASSIGN, 0, 0 },
+    { KNTWR_RELATIVE, 0x3Au, 4u, KNTWR_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { KNTWR_RELATIVE, 0x53u, 4u, KNTWR_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+    { KNTWR_RELATIVE, 0x78u, 4u, KNTWR_TARGET_BINDING, KNTWR_BIND_CMD_PERMAN, 0, 0 },
+    { KNTWR_RELATIVE, 0x83u, 4u, KNTWR_TARGET_IMAGE, 0x4B4A50u, 0, 0 },
+};
+
 static const kntwr_clone_spec kntwr_specs[KNTWR_CLONE_COUNT] = {
     { 0x1C5u, kntwr_ops_TICK, (uint32_t)(sizeof(kntwr_ops_TICK) / sizeof(kntwr_ops_TICK[0])) }, /* KNTWR_CLONE_TICK */
     { 0x46u, kntwr_ops_TASK, (uint32_t)(sizeof(kntwr_ops_TASK) / sizeof(kntwr_ops_TASK[0])) }, /* KNTWR_CLONE_TASK */
@@ -10786,6 +10828,11 @@ static const kntwr_clone_spec kntwr_specs[KNTWR_CLONE_COUNT] = {
     { 0x1DFu, kntwr_ops_FORM_UPDATE, (uint32_t)(sizeof(kntwr_ops_FORM_UPDATE) / sizeof(kntwr_ops_FORM_UPDATE[0])) }, /* KNTWR_CLONE_FORM_UPDATE */
     { 0x927u, kntwr_ops_SOLVER_584E10, (uint32_t)(sizeof(kntwr_ops_SOLVER_584E10) / sizeof(kntwr_ops_SOLVER_584E10[0])) }, /* KNTWR_CLONE_SOLVER_584E10 */
     { 0x7Au, kntwr_ops_SOLVER_57AC10, (uint32_t)(sizeof(kntwr_ops_SOLVER_57AC10) / sizeof(kntwr_ops_SOLVER_57AC10[0])) }, /* KNTWR_CLONE_SOLVER_57AC10 */
+    { 0x28u, kntwr_ops_CMD_581CA0, (uint32_t)(sizeof(kntwr_ops_CMD_581CA0) / sizeof(kntwr_ops_CMD_581CA0[0])) }, /* KNTWR_CLONE_CMD_581CA0 */
+    { 0x36u, kntwr_ops_CMD_10FC370, (uint32_t)(sizeof(kntwr_ops_CMD_10FC370) / sizeof(kntwr_ops_CMD_10FC370[0])) }, /* KNTWR_CLONE_CMD_10FC370 */
+    { 0x3Fu, kntwr_ops_CMD_10FBBD0, (uint32_t)(sizeof(kntwr_ops_CMD_10FBBD0) / sizeof(kntwr_ops_CMD_10FBBD0[0])) }, /* KNTWR_CLONE_CMD_10FBBD0 */
+    { 0x15u, kntwr_ops_CMD_4F84C0, (uint32_t)(sizeof(kntwr_ops_CMD_4F84C0) / sizeof(kntwr_ops_CMD_4F84C0[0])) }, /* KNTWR_CLONE_CMD_4F84C0 */
+    { 0x94u, kntwr_ops_CMD_5736B0, (uint32_t)(sizeof(kntwr_ops_CMD_5736B0) / sizeof(kntwr_ops_CMD_5736B0[0])) }, /* KNTWR_CLONE_CMD_5736B0 */
 };
 /* Conservative reader ranges and all surviving direct clone edges. */
 static const kntwr_grid_reader_spec kntwr_grid_readers[] = {
