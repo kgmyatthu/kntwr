@@ -1,0 +1,44 @@
+name: CI
+
+# Quoted so YAML 1.1 parsers (PyYAML) do not turn this key into boolean true.
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  windows-x86:
+    name: MSVC Win32 Release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A Win32 -DKNTWR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        # image|assets need the proprietary game image and local captures, which are not on GitHub.
+        # Single quotes keep the label regex intact under PowerShell.
+        run: ctest --test-dir build -C Release --output-on-failure -LE 'image|assets'
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: kntwr-windows-x86
+          if-no-files-found: error
+          path: |
+            build/bin/Release/KNTWR.exe
+            build/bin/Release/kntwr_runtime.dll

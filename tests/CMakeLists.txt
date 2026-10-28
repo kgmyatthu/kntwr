@@ -663,6 +663,19 @@ else()
   endif()
 endif()
 
+# Launcher version.  No game files: --version returns before discovery.  Dots in the version are literal.
+if(TARGET kntwr)
+  string(REPLACE "." "\\." _kntwr_version_re "${PROJECT_VERSION}")
+  add_test(NAME kntwr_launcher_version COMMAND kntwr --version)
+  set_tests_properties(kntwr_launcher_version PROPERTIES
+    PASS_REGULAR_EXPRESSION "KNTWR ${_kntwr_version_re}"
+    LABELS "native"
+    TIMEOUT 30)
+  kntwr_note_registered(kntwr_launcher_version)
+else()
+  kntwr_note_skipped(kntwr_launcher_version "KNTWR_BUILD_RUNTIME is OFF")
+endif()
+
 get_property(_reg GLOBAL PROPERTY KNTWR_TESTS_REGISTERED)
 get_property(_skip GLOBAL PROPERTY KNTWR_TESTS_SKIPPED)
 list(JOIN _reg ", " _reg_text)

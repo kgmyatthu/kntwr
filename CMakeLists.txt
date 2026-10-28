@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # MSVC runtime: static /MT for every target (the game process must not gain a CRT DLL dependency).  Set before project().
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
-project(kntwr VERSION 1.0 LANGUAGES C CXX ASM_MASM)
+project(kntwr VERSION 1.0.0 LANGUAGES C CXX ASM_MASM)
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Toolchain contract.  The target game is a 32-bit MSVC image and every native module is verified against it bit for
@@ -171,6 +171,25 @@ set(KNTWR_EXPORTS_RUNTIME_ABI
 # Generated source-pinning metadata is checked in; product builds need no Python.
 # Missing required runtime sources are a configure error, never a skipped module.
 # ---------------------------------------------------------------------------------------------------------------------
+# Product version is project(kntwr VERSION X.Y.Z) only.  Both VERSIONINFO resources and the launcher's KNTWR_VERSION
+# macro are generated from it; do not hardcode a second copy.
+if(NOT PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "kntwr project VERSION must be X.Y.Z (got '${PROJECT_VERSION}').")
+endif()
+
+# kntwr_add_version_resource(<target> <VFT_APP|VFT_DLL> <description> <original filename> <internal name>)
+function(kntwr_add_version_resource target file_type description original internal)
+  set(KNTWR_VI_FILETYPE "${file_type}")
+  set(KNTWR_VI_FILEDESCRIPTION "${description}")
+  set(KNTWR_VI_ORIGINALFILENAME "${original}")
+  set(KNTWR_VI_INTERNALNAME "${internal}")
+  set(KNTWR_VI_VERSION_STRING "${PROJECT_VERSION}")
+  set(KNTWR_VI_FILEVERSION_CSV "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+  set(_rc "${CMAKE_CURRENT_BINARY_DIR}/generated/${target}_version.rc")
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/kntwr_version.rc.in" "${_rc}" @ONLY)
+  target_sources(${target} PRIVATE "${_rc}")
+endfunction()
+
 if(KNTWR_BUILD_RUNTIME)
   # Link order of the runtime's own objects, relative to src/.  The order decides the layout of kntwr_runtime.dll's code
   # (COMDATs are placed in input order), so it is pinned here instead of following the per-domain registration order.
@@ -248,6 +267,10 @@ if(KNTWR_BUILD_RUNTIME)
   target_link_options(kntwr PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   add_dependencies(kntwr kntwr_runtime)
   set_target_properties(kntwr PROPERTIES OUTPUT_NAME KNTWR)
+  # KNTWR_VERSION is a quoted narrow string ("1.0.0") so launcher/main.c can widen it.  Not a process exit code.
+  target_compile_definitions(kntwr PRIVATE "KNTWR_VERSION=\"${PROJECT_VERSION}\"")
+  kntwr_add_version_resource(kntwr VFT_APP "KNTWR launcher" "KNTWR.exe" "KNTWR")
+  kntwr_add_version_resource(kntwr_runtime VFT_DLL "KNTWR runtime" "kntwr_runtime.dll" "kntwr_runtime")
 
   install(TARGETS kntwr kntwr_runtime RUNTIME DESTINATION .)
 endif()

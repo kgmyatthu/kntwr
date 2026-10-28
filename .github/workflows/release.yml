@@ -1,0 +1,83 @@
+name: Release
+
+# Quoted so YAML 1.1 parsers (PyYAML) do not turn this key into boolean true.
+"on":
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    name: Tag release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A Win32 -DKNTWR_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure -LE 'image|assets'
+
+      - name: Verify tag matches product version
+        id: ver
+        run: |
+          $exe = Join-Path (Get-Location) 'build\bin\Release\KNTWR.exe'
+          $dll = Join-Path (Get-Location) 'build\bin\Release\kntwr_runtime.dll'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "missing $exe" }
+          if (-not (Test-Path -LiteralPath $dll)) { throw "missing $dll" }
+          # KNTWR.exe is a Windows-subsystem binary: PowerShell's call operator neither waits for it nor reliably
+          # captures its output, so run it through System.Diagnostics.Process.
+          $psi = [Diagnostics.ProcessStartInfo]::new($exe, '--version')
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $proc = [Diagnostics.Process]::Start($psi)
+          $stdout = $proc.StandardOutput.ReadToEnd()
+          $stderr = $proc.StandardError.ReadToEnd()
+          if (-not $proc.WaitForExit(30000)) { $proc.Kill(); throw 'KNTWR --version timed out' }
+          if ($proc.ExitCode -ne 0) { throw "KNTWR --version exited $($proc.ExitCode): $stderr" }
+          $text = $stdout.Trim()
+          if ($text -notmatch '(?m)^KNTWR (\d+\.\d+\.\d+)$') { throw "unexpected --version output: [$text]" }
+          $version = $Matches[1]
+          foreach ($bin in @($exe, $dll)) {
+            $pe = [Diagnostics.FileVersionInfo]::GetVersionInfo($bin).ProductVersion
+            if (-not $pe) { throw "no ProductVersion on $bin" }
+            $pe = $pe.Trim([char]0).Trim()
+            if ($pe -ne $version) { throw "PE ProductVersion '$pe' != --version '$version' ($bin)" }
+          }
+          $tag = '${{ github.ref_name }}'
+          if ($tag -ne "v$version") { throw "tag '$tag' != v$version" }
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$version`n")
+
+      - name: Package
+        run: ./tools/package_release.ps1 -Version '${{ steps.ver.outputs.version }}' -BuildDir build -OutputDir artifacts
+
+      - name: Attest release archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/KNTWR-${{ steps.ver.outputs.version }}-windows-x86.zip
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' `
+            --title 'KNTWR ${{ steps.ver.outputs.version }}' `
+            --verify-tag `
+            --generate-notes `
+            'artifacts/KNTWR-${{ steps.ver.outputs.version }}-windows-x86.zip' `
+            'artifacts/SHA256SUMS.txt'

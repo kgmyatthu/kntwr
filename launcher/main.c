@@ -7140,6 +7140,13 @@ static BOOL launch_game(Run *r)
     return TRUE;
 }
 
+/* KNTWR_VERSION is the quoted CMake project version ("1.0.0").  The two-level widen runs after that macro expands. */
+#ifndef KNTWR_VERSION
+#error "KNTWR_VERSION must be set from the CMake project version"
+#endif
+#define KNTWR_WIDE_LIT(s) L##s
+#define KNTWR_WIDE(s) KNTWR_WIDE_LIT(s)
+
 /* ------------------------------------------------------------------------------------------------ command line */
 static void usage(void)
 {
@@ -7419,6 +7426,7 @@ static void usage(void)
         L"  --console             development: attach to the parent terminal or create a console window for launcher output\n"
         L"                        (the default for a no-argument run, i.e. a double-click; a run from a terminal shows its output there either way)\n"
         L"  --no-console          skip even the inherited-terminal attach, dropping terminal output (wrappers only)\n"
+        L"  --version             print KNTWR <version> and exit before any game lookup\n"
         L"  --help\n\n"
         L"exit codes: 0 active/ok, 1 usage, 2 unsupported game/runtime, 3 game already running, 4 launch failed,\n"
         L"  5 install failed, 6 runtime failed, 7 armed but never fully active, 8 interrupted (runtime stopped),\n"
@@ -7471,7 +7479,7 @@ static BOOL parse_features(const wchar_t *s, uint32_t *mask)
     return TRUE;
 }
 
-/* Returns 0 ok, 1 help, -1 error. */
+/* Returns 0 ok, 1 help, 2 version, -1 error.  2 is not a process exit code (process exit 2 is unsupported game). */
 static int parse_args(int argc, wchar_t **argv, Options *o)
 {
     int i;
@@ -7506,6 +7514,10 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         if (eq) val = eq + 1;
 #define NEEDVAL() do { if (!val) { if (i + 1 >= argc) { errsay(L"%ls needs a value.\n", name); return -1; } val = argv[++i]; } } while (0)
         if (!wcscmp(name, L"--help") || !wcscmp(name, L"-h")) return 1;
+        else if (!wcscmp(name, L"--version")) {
+            if (val) { errsay(L"--version takes no value.\n"); return -1; }
+            return 2;
+        }
         else if (!wcscmp(name, L"--console")) { /* consumed in wmain before any console is acquired */ }
         else if (!wcscmp(name, L"--no-console")) { /* consumed in wmain before any console is acquired */ }
         else if (!wcscmp(name, L"--no-activate")) o->activate = FALSE;
@@ -8104,6 +8116,7 @@ static int run_main(Run *r, int argc, wchar_t **argv)
 
     pr = parse_args(argc, argv, &r->opt);
     if (pr == 1) { usage(); return EXIT_OK; }
+    if (pr == 2) { say(L"KNTWR " KNTWR_WIDE(KNTWR_VERSION) L"\n"); return EXIT_OK; }
     if (pr < 0) { say(L"Run KNTWR.exe --console --help for usage.\n"); return EXIT_USAGE; }
     if (r->opt.validate_only) g_ui_mute = TRUE; /* --check/--validate-only: read-only, never a dialog */
     r->cfg.enabled_mask = r->opt.mask;

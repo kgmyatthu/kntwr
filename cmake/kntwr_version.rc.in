@@ -1,0 +1,30 @@
+#include <winver.h>
+
+// Generated from project(kntwr VERSION ...).  Do not edit the configured copy under the build tree.
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @KNTWR_VI_FILEVERSION_CSV@
+PRODUCTVERSION @KNTWR_VI_FILEVERSION_CSV@
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE @KNTWR_VI_FILETYPE@
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Kaung"
+            VALUE "FileDescription", "@KNTWR_VI_FILEDESCRIPTION@"
+            VALUE "FileVersion", "@KNTWR_VI_VERSION_STRING@"
+            VALUE "InternalName", "@KNTWR_VI_INTERNALNAME@"
+            VALUE "OriginalFilename", "@KNTWR_VI_ORIGINALFILENAME@"
+            VALUE "ProductName", "KNTWR"
+            VALUE "ProductVersion", "@KNTWR_VI_VERSION_STRING@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
