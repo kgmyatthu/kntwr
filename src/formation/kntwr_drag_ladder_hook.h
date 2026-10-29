@@ -1,4 +1,4 @@
-// --drag-ladder runtime hook (gameplay change, opt-in via kntwr_config::gameplay_flags & KNTWR_DRAG_LADDER; never part of --features all).
+// --drag-ladder runtime hook (gameplay change via kntwr_config::gameplay_flags & KNTWR_DRAG_LADDER; implied by --features all, launcher --no-drag-ladder opts out).
 // Policy: formation/kntwr_drag_ladder.h. Evidence: analysis/FINDINGS.md "drag ladder".
 //
 // v6 is one full-body detour of stock cdecl FilesPerRow 0x642C90 (args [esp+4]=width, [esp+8]=l8, [esp+0xC]=l10; EAX = files >= 1;

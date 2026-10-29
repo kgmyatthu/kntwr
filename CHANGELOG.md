@@ -5,6 +5,11 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
 
 ## [Unreleased]
 
+### Changed
+
+- `--drag-ladder` (60-file drag-out frontage ladder) is now implied by `--features all`;
+  `--no-drag-ladder` opts out. Gameplay change: every multiplayer peer must run the same setting.
+
 ## [1.0.0] - 2026-10-28
 
 First tagged release.

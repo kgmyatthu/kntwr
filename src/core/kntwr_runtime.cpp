@@ -3992,7 +3992,7 @@ DWORD WINAPI Monitor(void*) {
         PublishAnimGuard();
     }
     if (!failure && (config.gameplay_flags&KNTWR_DRAG_LADDER)) {
-        // --drag-ladder (opt-in gameplay change): one detour at stock FilesPerRow 0x642C90 floors files>60 to a 60-multiple at the source. The site verifies stock bytes first; a refusal is a silent no-op reported only in the words row (WInstalled), never a runtime failure.
+        // --drag-ladder (gameplay change, implied by --features all; launcher --no-drag-ladder opts out): one detour at stock FilesPerRow 0x642C90 floors files>60 to a 60-multiple at the source. The site verifies stock bytes first; a refusal is a silent no-op reported only in the words row (WInstalled), never a runtime failure.
         (void)kntwr_drag_ladder_hook::Install(imageBase);
         PublishDragLadder();
     }

@@ -315,7 +315,8 @@ typedef struct Options {
     BOOL mounted_officer;    /* --mounted-officer: gameplay feature, one mount for the officer of units with resolved mount columns (KNTWR_MOUNTED_OFFICER); implied by --features all unless --no-mounted-officer */
     BOOL no_mounted_officer; /* --no-mounted-officer: opt out of --mounted-officer under --features all */
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
-    BOOL drag_ladder;        /* --drag-ladder: opt-in GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); never implied by --features all */
+    BOOL drag_ladder;        /* --drag-ladder: GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); implied by --features all unless --no-drag-ladder */
+    BOOL no_drag_ladder;     /* --no-drag-ladder: opt out of --drag-ladder under --features all */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
@@ -7249,12 +7250,13 @@ static void usage(void)
         L"                        0x531340 to a private constructor clone and the unit visual constructor test at 0x72C9D2 to a gate that still builds the bayonet\n"
         L"                        attachment list for infantry that carry the officer's horse (all restored at stop). Words: mounted_officer_words, receipt mounted_officer.\n"
         L"  --no-mounted-officer  opt out of --mounted-officer under --features all\n"
-        L"  --drag-ladder         GAMEPLAY feature (opt-in; NEVER implied by --features all; changes the simulation: every multiplayer peer must run the same setting): the player's\n"
+        L"  --drag-ladder         GAMEPLAY feature (implied by --features all unless --no-drag-ladder; changes the simulation: every multiplayer peer must run the same setting): the player's\n"
         L"                        drag-out formation frontage snaps DOWN to 60-file steps once it exceeds 60 files (<= 60 files is untouched). One detour at the engine's\n"
         L"                        files-per-row function (FilesPerRow 0x642C90) floors its result to a 60-multiple above 60 files, so the blue preview markers, the placement\n"
         L"                        records, the slot generator, the issued order and the formation solver all read the same laddered count by construction. Needs no routed\n"
         L"                        tick. The site verifies the stock bytes first; restored at stop. Words: drag_ladder_words (installed, calls, laddered, passthrough, last files),\n"
         L"                        receipt drag_ladder.\n"
+        L"  --no-drag-ladder      opt out of --drag-ladder under --features all\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
@@ -7612,6 +7614,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         }
         else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
         else if (!wcscmp(name, L"--drag-ladder")) o->drag_ladder = TRUE;
+        else if (!wcscmp(name, L"--no-drag-ladder")) o->no_drag_ladder = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -7798,6 +7801,14 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_mounted_officer)
         o->mounted_officer = TRUE;
+    /* The shipping set also implies the drag ladder (user decision 2026-10-30; GAMEPLAY change: drag-out frontage snaps down to
+       60-file steps above 60 files; every multiplayer peer must run the same setting). --no-drag-ladder opts out. */
+    if (o->drag_ladder && o->no_drag_ladder) {
+        errsay(L"--drag-ladder and --no-drag-ladder are exclusive.\n");
+        return -1;
+    }
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_drag_ladder)
+        o->drag_ladder = TRUE;
     if ((o->mask & KNTWR_GRID_CENSUS) && !(o->mask & KNTWR_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;
