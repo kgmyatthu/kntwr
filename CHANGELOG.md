@@ -5,6 +5,14 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
 
 ## [Unreleased]
 
+### Added
+
+- `--wounded[=PCT]` (EXPERIMENTAL, opt-in, not part of `--features all`): PCT percent (default 33)
+  of shot deaths whose death clip carries a `FACE_DOWN`/`FACE_UP` orientation tag enter the stock
+  wounded state (idle/injury/crawl loops) instead of becoming a static corpse. Uses only stock
+  clips and the stock wounded state machine; one 8-byte detour at the death state commit.
+  Gameplay change: every multiplayer peer must run the same setting.
+
 ### Changed
 
 - `--drag-ladder` (60-file drag-out frontage ladder) is now implied by `--features all`;

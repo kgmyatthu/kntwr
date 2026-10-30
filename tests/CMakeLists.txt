@@ -306,6 +306,13 @@ kntwr_harness(native_drag_ladder_oracle STD 20 FP strict
 add_test(NAME kntwr_drag_ladder COMMAND native_drag_ladder_oracle)
 set_tests_properties(kntwr_drag_ladder PROPERTIES LABELS "native" TIMEOUT 60)
 kntwr_note_registered(kntwr_drag_ladder)
+# --wounded decision policy (src/animation/kntwr_wounded.h): pure integer rules, no image, no live process.
+kntwr_harness(native_wounded_oracle STD 20 FP strict
+  SOURCES native_wounded_oracle.cpp
+  INCLUDES "${KNTWR_SRC}")
+add_test(NAME kntwr_wounded COMMAND native_wounded_oracle)
+set_tests_properties(kntwr_wounded PROPERTIES LABELS "native" TIMEOUT 60)
+kntwr_note_registered(kntwr_wounded)
 # Isolated adapter graph: no game image, native movement, input, or live processes.
 kntwr_harness(native_cavalry_runtime_oracle STD 20 FP strict
   SOURCES native_cavalry_runtime.cpp "${KNTWR_SRC}/army/native_cavalry_orbit.cpp"
@@ -319,6 +326,9 @@ kntwr_harness(native_clip_picker_guard_oracle STD 20 FP strict
 kntwr_harness(native_drag_ladder_hook_oracle STD 20 FP strict
   SOURCES native_drag_ladder_hook_oracle.cpp "${KNTWR_SRC}/formation/kntwr_drag_ladder_hook.cpp"
   OBJECTS kntwr_formation_layout
+  INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
+kntwr_harness(native_wounded_hook_oracle STD 20 FP strict
+  SOURCES native_wounded_hook_oracle.cpp "${KNTWR_SRC}/animation/kntwr_wounded_hook.cpp"
   INCLUDES "${KNTWR_SRC}" "${CMAKE_SOURCE_DIR}/include" LIBS bcrypt)
 kntwr_harness(native_terrain_merge_guard_oracle STD 20 FP strict
   SOURCES native_terrain_merge_guard_oracle.cpp "${KNTWR_SRC}/ai/kntwr_terrain_merge_guard.cpp"
@@ -580,6 +590,9 @@ if(KNTWR_HAVE_IMAGE)
   add_test(NAME kntwr_drag_ladder_hook COMMAND native_drag_ladder_hook_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_drag_ladder_hook PROPERTIES LABELS "image" TIMEOUT 300)
   kntwr_note_registered(kntwr_drag_ladder_hook)
+  add_test(NAME kntwr_wounded_hook COMMAND native_wounded_hook_oracle "${KNTWR_IMAGE_ARG}")
+  set_tests_properties(kntwr_wounded_hook PROPERTIES LABELS "image" TIMEOUT 300)
+  kntwr_note_registered(kntwr_wounded_hook)
   add_test(NAME kntwr_terrain_merge_guard COMMAND native_terrain_merge_guard_oracle "${KNTWR_IMAGE_ARG}")
   set_tests_properties(kntwr_terrain_merge_guard PROPERTIES LABELS "image" TIMEOUT 300)
   kntwr_note_registered(kntwr_terrain_merge_guard)

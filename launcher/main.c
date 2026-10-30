@@ -317,6 +317,8 @@ typedef struct Options {
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
     BOOL drag_ladder;        /* --drag-ladder: GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); implied by --features all unless --no-drag-ladder */
     BOOL no_drag_ladder;     /* --no-drag-ladder: opt out of --drag-ladder under --features all */
+    BOOL wounded;            /* --wounded[=PCT]: EXPERIMENTAL GAMEPLAY feature, FACE-tagged shot deaths flip to the native wounded state with probability PCT% (KNTWR_WOUNDED in kntwr_config::gameplay_flags); never implied by --features all */
+    uint32_t wounded_pct;    /* PCT 1..100 (default KNTWR_WOUNDED_PCT_DEFAULT) */
     BOOL no_cavalry_orbit;   /* --no-cavalry-orbit: opt out of cavalry_orbit (clears the default and the --features all implication) */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
@@ -2678,6 +2680,19 @@ static void print_drag_ladder(const uint32_t *w)
     for (i = 0; i < KNTWR_DRAG_LADDER_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
     say(L"\n");
 }
+/* --wounded (src/animation/kntwr_wounded_hook.h): printed only when the runtime published the row (word 0 = version). */
+static void print_wounded(const uint32_t *w)
+{
+    static const char *const names[KNTWR_WOUNDED_WORDS] = { KNTWR_WOUNDED_LABELS };
+    unsigned i;
+    if (!w[0]) return;
+    say(L"  wounded: state-commit detour (0x653F1A) applied_this_run=%ls calls=%lu flipped=%lu eligible=%lu denied_roll=%lu untagged=%lu faults=%lu\n",
+        w[2] ? L"APPLIED" : L"NOT-APPLIED", (unsigned long)w[3], (unsigned long)w[7], (unsigned long)w[6],
+        (unsigned long)w[8], (unsigned long)w[9], (unsigned long)w[11]);
+    say(L"  wounded words:");
+    for (i = 0; i < KNTWR_WOUNDED_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
+    say(L"\n");
+}
 static void print_engage_census(const uint32_t *w)
 {
     print_engage_census_line(w);
@@ -2919,6 +2934,7 @@ static void print_module_words(const kntwr_status *s, uint32_t brain_flags, uint
     print_mounted_officer(s->mounted_officer_words);
     print_anim_guard(s->anim_guard_words);
     print_drag_ladder(s->drag_ladder_words);
+    print_wounded(s->wounded_words);
     print_engage_census(s->engage_census_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
@@ -4739,6 +4755,19 @@ static void sb_drag_ladder(Sb *b, const Run *r)
     for (i = 0; i < KNTWR_DRAG_LADDER_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.drag_ladder_words[i]);
     sb_fmt(b, "}},\n");
 }
+/* --wounded (src/animation/kntwr_wounded_hook.h): the hook counters; null unless requested. installed is sticky applied-this-run (1 after a successful Install until ResetRow), not live hook presence. */
+static void sb_wounded(Sb *b, const Run *r)
+{
+    static const char *const names[KNTWR_WOUNDED_WORDS] = { KNTWR_WOUNDED_LABELS };
+    unsigned i;
+    if (!r->opt.wounded) {
+        sb_fmt(b, "  \"wounded\": null,\n");
+        return;
+    }
+    sb_fmt(b, "  \"wounded\": {\"have_status\": %s, \"pct\": %lu, \"words\": {", r->have_status ? "true" : "false", (unsigned long)r->opt.wounded_pct);
+    for (i = 0; i < KNTWR_WOUNDED_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.wounded_words[i]);
+    sb_fmt(b, "}},\n");
+}
 static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
 {
     unsigned i;
@@ -5519,6 +5548,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_fmt(&b, "  \"mounted_officer_requested\": %s,\n  \"mounted_officer_widen_requested\": %s,\n", r->opt.mounted_officer ? "true" : "false",
            r->opt.mounted_officer_widen ? "true" : "false");
     sb_fmt(&b, "  \"drag_ladder_requested\": %s,\n", r->opt.drag_ladder ? "true" : "false");
+    sb_fmt(&b, "  \"wounded_requested\": %s,\n", r->opt.wounded ? "true" : "false");
     sb_fmt(&b, "  \"engage_census_requested\": %s,\n", r->opt.engage_census ? "true" : "false");
     sb_fmt(&b, "  \"va_floor_mib\": %lu,\n  \"va_hole_mib\": %lu,\n",
            (unsigned long)(r->opt.va_floor_mib ? r->opt.va_floor_mib : (KNTWR_MEMORY_MIN_AVAIL_VIRTUAL >> 20)),
@@ -5587,6 +5617,7 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_mounted_officer(&b, r);
     sb_anim_guard(&b, r);
     sb_drag_ladder(&b, r);
+    sb_wounded(&b, r);
     sb_engage_census(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
@@ -6496,7 +6527,8 @@ static int install_runtime(Run *r)
                            (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
-    r->cfg.gameplay_flags = r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u;
+    r->cfg.gameplay_flags = (r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u) |
+                            (r->opt.wounded ? (KNTWR_WOUNDED | (r->opt.wounded_pct << KNTWR_WOUNDED_PCT_SHIFT)) : 0u);
     memcpy(local, &r->cfg, sizeof r->cfg);
     memcpy(local + sizeof r->cfg, r->dll_path, plen_bytes);
     {
@@ -6992,6 +7024,7 @@ static BOOL launch_game(Run *r)
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
     if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
+    if (r->opt.wounded) say(L"  wounded: ON %lu%% (EXPERIMENTAL GAMEPLAY change: FACE-tagged shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
     if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
     if (r->opt.formation_census)
         say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
@@ -7259,6 +7292,12 @@ static void usage(void)
         L"                        tick. The site verifies the stock bytes first; restored at stop. Words: drag_ladder_words (installed, calls, laddered, passthrough, last files),\n"
         L"                        receipt drag_ladder.\n"
         L"  --no-drag-ladder      opt out of --drag-ladder under --features all\n"
+        L"  --wounded[=PCT]       EXPERIMENTAL GAMEPLAY feature (NEVER implied by --features all; changes the simulation: every multiplayer peer must run the same setting): a shot\n"
+        L"                        soldier whose death clip carries the stock FACE_DOWN/FACE_UP orientation events enters the engine's own wounded state (front/back injury loops,\n"
+        L"                        crawling; categories WOUNDED_* 0x330..0x338, shipped in every man animation table) with probability PCT% (1..100, default 33) instead of freezing\n"
+        L"                        as a static corpse. One detour at the kill-path state commit (0x653F1A); deterministic per-death roll; men without FACE-tagged clips (all\n"
+        L"                        non-musket/sabre families) are untouched by construction. The site verifies the stock bytes first; restored at stop. Words: wounded_words\n"
+        L"                        (installed, calls, eligible, flipped, denied_roll, untagged), receipt wounded.\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
@@ -7620,6 +7659,11 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--mounted-officer-widen")) { o->mounted_officer_widen = TRUE; o->mounted_officer = TRUE; }
         else if (!wcscmp(name, L"--drag-ladder")) o->drag_ladder = TRUE;
         else if (!wcscmp(name, L"--no-drag-ladder")) o->no_drag_ladder = TRUE;
+        else if (!wcscmp(name, L"--wounded")) {
+            o->wounded = TRUE;
+            o->wounded_pct = KNTWR_WOUNDED_PCT_DEFAULT;
+            if (val && !parse_uint(val, 1, 100, &o->wounded_pct)) { errsay(L"--wounded=PCT must be 1..100 (percent of FACE-tagged shot deaths that go wounded).\n"); return -1; }
+        }
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -8190,7 +8234,8 @@ static int run_main(Run *r, int argc, wchar_t **argv)
                            (r->opt.brain_target_cull_shadow ? KNTWR_AI_TARGET_CULL_SHADOW : 0u) | (r->opt.brain_target_cull ? KNTWR_AI_TARGET_CULL : 0u) |
                            (r->opt.brain_retarget_jitter ? KNTWR_AI_RETARGET_JITTER : 0u);
     r->cfg.ai_prepass_flags = r->opt.ai_prepass_flags;
-    r->cfg.gameplay_flags = r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u;
+    r->cfg.gameplay_flags = (r->opt.drag_ladder ? KNTWR_DRAG_LADDER : 0u) |
+                            (r->opt.wounded ? (KNTWR_WOUNDED | (r->opt.wounded_pct << KNTWR_WOUNDED_PCT_SHIFT)) : 0u);
     say(L"Effective config: mask=0x%08lX workers=%lu loco_flags=0x%08lX collide_flags=0x%08lX va_watch_flags=0x%08lX\n",
         (unsigned long)r->cfg.enabled_mask, (unsigned long)r->cfg.workers, (unsigned long)r->cfg.loco_flags,
         (unsigned long)r->cfg.collide_flags, (unsigned long)r->cfg.va_watch_flags);
@@ -8229,6 +8274,7 @@ static int run_main(Run *r, int argc, wchar_t **argv)
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
         if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
+        if (r->opt.wounded) say(L"  wounded: ON %lu%% (EXPERIMENTAL GAMEPLAY change: FACE-tagged shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
         if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
         if (r->opt.allow_concurrent) say(L"  concurrent: ALLOWED (a second game instance may run; timings are not comparable between concurrent runs)\n");
         say(L"Validation complete; nothing was started.\n");

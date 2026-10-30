@@ -70,6 +70,7 @@
 #include "ai/kntwr_engage_census.h"
 #include "formation/kntwr_formation_census.h"
 #include "formation/kntwr_drag_ladder_hook.h"
+#include "animation/kntwr_wounded_hook.h"
 #include "core/kntwr_alloc_census.h"
 #include "core/kntwr_topology.h"
 #include "render/kntwr_arena_release.h"
@@ -3971,6 +3972,11 @@ void PublishDragLadder() { // monitor thread: counters of the --drag-ladder File
     static_assert(kntwr_drag_ladder_hook::kWords==KNTWR_DRAG_LADDER_WORDS, "hook words fill drag_ladder_words");
     StateBegin(); kntwr_drag_ladder_hook::Snapshot(kntwr_state.drag_ladder_words); StateEnd();
 }
+void PublishWounded() { // monitor thread: counters of the --wounded state-commit detour (plain increments in the hot path)
+    if (!(config.gameplay_flags&KNTWR_WOUNDED)) return; // the row stays zero without the flag
+    static_assert(kntwr_wounded_hook::kWords==KNTWR_WOUNDED_WORDS, "hook words fill wounded_words");
+    StateBegin(); kntwr_wounded_hook::Snapshot(kntwr_state.wounded_words); StateEnd();
+}
 DWORD WINAPI Monitor(void*) {
     if (!LoadEntries()) RecordError(MissingExport,0);
     if (!failure) BuildClones();
@@ -3995,6 +4001,13 @@ DWORD WINAPI Monitor(void*) {
         // --drag-ladder (gameplay change, implied by --features all; launcher --no-drag-ladder opts out): one detour at stock FilesPerRow 0x642C90 floors files>60 to a 60-multiple at the source. The site verifies stock bytes first; a refusal is a silent no-op reported only in the words row (WInstalled), never a runtime failure.
         (void)kntwr_drag_ladder_hook::Install(imageBase);
         PublishDragLadder();
+    }
+    if (!failure && (config.gameplay_flags&KNTWR_WOUNDED)) {
+        // --wounded[=PCT] (EXPERIMENTAL gameplay change, explicit opt-in only): one detour at the kill-path state commit 0x653F1A flips
+        // FACE-tagged static deaths to wounded state 0x4B with probability PCT%. The site verifies stock bytes first; a refusal is a
+        // silent no-op reported only in the words row (WInstalled), never a runtime failure.
+        (void)kntwr_wounded_hook::Install(imageBase,(config.gameplay_flags&KNTWR_WOUNDED_PCT_MASK)>>KNTWR_WOUNDED_PCT_SHIFT);
+        PublishWounded();
     }
     if (!failure) {
         // Terrain-analyser merge predicate fast rejection (always on, no switch): the displacement of the call at 0x62CA2B points at the guard, which answers only pairs the native
@@ -4027,6 +4040,7 @@ DWORD WINAPI Monitor(void*) {
         PublishMountedOfficer(); // the unit constructors run while loading: publish in every phase
         PublishAnimGuard();
         PublishDragLadder();
+        PublishWounded();
         if (Load(&enabled)) {
             // Preserve native 5F9440/5EE050 joins, scheduling and mode writes.
             // Both synchronous calls and TASK enter the same route; +2829C
@@ -4093,6 +4107,10 @@ DWORD WINAPI Monitor(void*) {
     if (config.gameplay_flags&KNTWR_DRAG_LADDER) {
         if (!kntwr_drag_ladder_hook::Remove()) { RecordError(SlotConflict,0x642c90u); clean=false; } // restore the FilesPerRow entry bytes before the final publish
         PublishDragLadder();
+    }
+    if (config.gameplay_flags&KNTWR_WOUNDED) {
+        if (!kntwr_wounded_hook::Remove()) { RecordError(SlotConflict,kntwr_wounded_hook::kCommitSite); clean=false; } // restore the state-commit bytes before the final publish
+        PublishWounded();
     }
     if (config.enabled_mask&KNTWR_AI_CENSUS) { // sampler joined, slots restored: publish the final totals
         StateBegin(); kntwr_ai_census::Snapshot(kntwr_state.ai_census_words,CensusSlotsOwned()); StateEnd();
@@ -4188,7 +4206,10 @@ static U StartImpl(void* raw) {
                                 ((next.enabled_mask&KNTWR_AI_ASYNC2) && ((next.ai_ctrl_flags&KNTWR_AI_CTRL_MODE_MASK) || (next.ai_deferred && (next.ai_ctrl_flags&KNTWR_AI_CLAIM_BITS)))) ||
                                 ((next.ai_ctrl_flags&KNTWR_AI_CTRL_CENSUS) && (next.ai_ctrl_flags&(KNTWR_AI_CTRL_HISTOGRAM|KNTWR_AI_CTRL_GEOMETRY))) ||
                                 ((next.ai_ctrl_flags&KNTWR_AI_CTRL_VERIFY) && !(next.ai_ctrl_flags&(KNTWR_AI_CTRL_HISTOGRAM|KNTWR_AI_CTRL_GEOMETRY))))) ||
-        (next.gameplay_flags&~KNTWR_GAMEPLAY_FLAGS_VALID) || // --drag-ladder: stands alone (no manager route needed: its two seams are installed at monitor start)
+        (next.gameplay_flags&~KNTWR_GAMEPLAY_FLAGS_VALID) || // --drag-ladder / --wounded: stand alone (no manager route needed: their seams are installed at monitor start)
+        // --wounded[=PCT]: the percent bits carry 1..100 and exist exactly when the flag does.
+        (((next.gameplay_flags&KNTWR_WOUNDED)!=0) != ((next.gameplay_flags&KNTWR_WOUNDED_PCT_MASK)!=0)) ||
+        ((next.gameplay_flags&KNTWR_WOUNDED_PCT_MASK)>>KNTWR_WOUNDED_PCT_SHIFT > 100u) ||
         // --ai-prepass-*: the census hooks live behind the routed MANAGER tick and run on the thread executing site 34; the async2
         // schedule (private clones, no site-34 scope on the executing thread) is excluded. CENSUS combines only with PRESIZE.
         (next.ai_prepass_flags&~KNTWR_AI_PREPASS_FLAGS_VALID) ||
@@ -4349,6 +4370,8 @@ static U StartImpl(void* raw) {
     for (U i=0;i<KNTWR_ANIM_GUARD_WORDS;++i) kntwr_state.anim_guard_words[i]=0;
     kntwr_drag_ladder_hook::ResetRow();
     for (U i=0;i<KNTWR_DRAG_LADDER_WORDS;++i) kntwr_state.drag_ladder_words[i]=0;
+    kntwr_wounded_hook::ResetRow();
+    for (U i=0;i<KNTWR_WOUNDED_WORDS;++i) kntwr_state.wounded_words[i]=0;
     kntwr_engage_census::Snapshot(kntwr_state.engage_census_words); // zero row (Reset above) or the armed header
     for (U cls=0;cls<KNTWR_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<KNTWR_NODE_WORDS;++i) kntwr_state.idle_node_words[cls][i]=0;

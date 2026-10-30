@@ -210,7 +210,7 @@ if(KNTWR_BUILD_RUNTIME)
     brain2/native_unit_select.cpp brain2/native_unit_policy.cpp brain2/native_unit_fatigue.cpp ai/kntwr_planner_search.cpp
     ai/kntwr_spiral.cpp ai/kntwr_claim_once.cpp brain/kntwr_retarget_jitter.cpp brain/kntwr_target_cull.cpp
     ai/kntwr_record_test.cpp core/kntwr_alloc_census.cpp render/kntwr_arena_release.cpp army/kntwr_mounted_officer.cpp army/native_cavalry_orbit.cpp army/native_cavalry_runtime.cpp army/kntwr_cavalry_intent_hook.cpp ai/kntwr_engage_census.cpp
-    animation/kntwr_clip_picker_guard.cpp ai/kntwr_terrain_merge_guard.cpp formation/kntwr_formation_census.cpp formation/kntwr_drag_ladder_hook.cpp)
+    animation/kntwr_clip_picker_guard.cpp animation/kntwr_wounded_hook.cpp ai/kntwr_terrain_merge_guard.cpp formation/kntwr_formation_census.cpp formation/kntwr_drag_ladder_hook.cpp)
   get_property(_kntwr_registered GLOBAL PROPERTY KNTWR_RUNTIME_DOMAIN_SOURCES)
   set(KNTWR_RUNTIME_SOURCES "")
   foreach(_s IN LISTS KNTWR_RUNTIME_LINK_ORDER)

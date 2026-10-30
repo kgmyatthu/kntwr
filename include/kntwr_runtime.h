@@ -347,7 +347,24 @@ enum kntwr_memory_word {
    stay stock. The site verifies the stock bytes first; a refusal is a silent no-op reported in the words row (installed = 0).
    SHARED-SIMULATION change: all peers of a multiplayer game must run the same setting. Publishes drag_ladder_words. */
 #define KNTWR_DRAG_LADDER 0x1u
-#define KNTWR_GAMEPLAY_FLAGS_VALID KNTWR_DRAG_LADDER
+/* --wounded[=PCT] (kntwr_config::gameplay_flags bit 1 + percent in bits 8..14; src/animation/kntwr_wounded*.{h,cpp}; analysis/FINDINGS.md "wounded census 2026-10-31"):
+   EXPERIMENTAL opt-in, NOT implied by --features all. Stock kill path 0x653A10 commits the death-anim state at 0x653F1A..0x653F38: only categories
+   [0x14521C8]=0x32A .. +[0x14521CC]=5 (KNOCKDOWN_2..KNOCKED_FLYING_1, melee/impact deaths) enter wounded state 0x4B; every bullet death picks a DEATH_*
+   category and becomes a static corpse (state 0x2A). The hook detours the 8-byte range test (8B 15 C8 21 45 01 / 3B CA) and recomputes the state in the
+   host: native knockdown range unchanged; otherwise, when the man's picked death clip carries the FACE_DOWN/FACE_UP .anim trailer events (clip +0x60
+   presence byte, +0x5C/+0x54 orientation ints — the same fields the stock state-0x4B stepper 0x679300 gates on), a deterministic per-death roll flips
+   state 0x2A -> 0x4B with probability PCT%. Downstream is stock: the stepper picks front/back from the clip, queues the native weighted injury/crawl
+   loops (categories 0x330..0x338, mapped by man_common_fragment in every man animation table). Men whose clips carry no FACE events (all non-musket/
+   sabre families) stay static by construction. SHARED-SIMULATION change: all multiplayer peers must run the same setting. Publishes wounded_words. */
+#define KNTWR_WOUNDED 0x2u
+#define KNTWR_WOUNDED_PCT_SHIFT 8u
+#define KNTWR_WOUNDED_PCT_MASK (0x7Fu << KNTWR_WOUNDED_PCT_SHIFT) /* percent 1..100 in bits 8..14; nonzero requires KNTWR_WOUNDED */
+#define KNTWR_WOUNDED_PCT_DEFAULT 33u
+#define KNTWR_GAMEPLAY_FLAGS_VALID (KNTWR_DRAG_LADDER | KNTWR_WOUNDED | KNTWR_WOUNDED_PCT_MASK)
+#define KNTWR_WOUNDED_WORDS 16u /* wounded_words (kntwr_wounded_hook::Word, labels KNTWR_WOUNDED_LABELS; last_cat is a last-value word, the rest are counters; words 13..15 reserved zero) */
+#define KNTWR_WOUNDED_LABELS \
+    "version", "requested", "installed", "calls", "native_knockdown", "static_candidates", "eligible", "flipped", \
+    "denied_roll", "untagged", "no_clip", "faults", "last_cat", "reserved13", "reserved14", "reserved15"
 #define KNTWR_DRAG_LADDER_WORDS 16u /* drag_ladder_words (kntwr_drag_ladder_hook::Word, labels KNTWR_DRAG_LADDER_LABELS; calls/laddered/passthrough are plain counters, last_files_* are last-value words, words 9..15 are reserved zero) */
 #define KNTWR_DRAG_LADDER_LABELS \
     "version", "requested", "installed", "calls", "laddered", "passthrough", "faults", "last_files_before", \
@@ -1140,6 +1157,8 @@ typedef struct kntwr_status {
     uint32_t army_residual_words[KNTWR_FORMATION_RESIDUAL_WORDS];
     /* --drag-ladder (appended after army_residual_words; owner module src/formation/kntwr_drag_ladder_hook.*, labels KNTWR_DRAG_LADDER_LABELS). Reset at monitor start, retained after stop; all zero without KNTWR_DRAG_LADDER. */
     uint32_t drag_ladder_words[KNTWR_DRAG_LADDER_WORDS];
+    /* --wounded (appended after drag_ladder_words; owner module src/animation/kntwr_wounded_hook.*, labels KNTWR_WOUNDED_LABELS). Reset at monitor start, retained after stop; all zero without KNTWR_WOUNDED. */
+    uint32_t wounded_words[KNTWR_WOUNDED_WORDS];
 } kntwr_status;
 
 /* DATA export "kntwr_profile", separate from the sequence-locked lifecycle status.
@@ -1608,8 +1627,11 @@ static_assert(offsetof(kntwr_status,ai_prepass_census_words) + KNTWR_AI_PREPASS_
               offsetof(kntwr_status,engage_census_words) + KNTWR_ENGAGE_CENSUS_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,anim_guard_words) &&
               offsetof(kntwr_status,anim_guard_words) + KNTWR_ANIM_GUARD_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,army_residual_words) &&
               offsetof(kntwr_status,army_residual_words) + KNTWR_FORMATION_RESIDUAL_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,drag_ladder_words) &&
-              offsetof(kntwr_status,drag_ladder_words) + KNTWR_DRAG_LADDER_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) &&
-              KNTWR_DRAG_LADDER_WORDS == 16u && KNTWR_DRAG_LADDER == 0x1u && KNTWR_GAMEPLAY_FLAGS_VALID == KNTWR_DRAG_LADDER &&
+              offsetof(kntwr_status,drag_ladder_words) + KNTWR_DRAG_LADDER_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,wounded_words) &&
+              offsetof(kntwr_status,wounded_words) + KNTWR_WOUNDED_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) &&
+              KNTWR_DRAG_LADDER_WORDS == 16u && KNTWR_DRAG_LADDER == 0x1u &&
+              KNTWR_WOUNDED_WORDS == 16u && KNTWR_WOUNDED == 0x2u && KNTWR_WOUNDED_PCT_MASK == 0x7F00u &&
+              KNTWR_GAMEPLAY_FLAGS_VALID == (KNTWR_DRAG_LADDER | KNTWR_WOUNDED | KNTWR_WOUNDED_PCT_MASK) &&
               KNTWR_ANIM_GUARD_WORDS == 8u &&
               KNTWR_FORMATION_RESIDUAL_WORDS == 832u &&
               KNTWR_ENGAGE_CENSUS_WORDS == 6832u &&
