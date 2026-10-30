@@ -10,10 +10,11 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
 - `--wounded[=PCT]` (EXPERIMENTAL, opt-in, not part of `--features all`): PCT percent (default 33)
   of shot deaths whose death clip carries a `FACE_DOWN`/`FACE_UP` orientation tag enter the stock
   wounded state (idle/injury/crawl loops) instead of becoming a static corpse. Uses only stock
-  clips and the stock wounded state machine; one 8-byte detour at the death state commit, plus a
-  repair of the render pose-category remap (the stock table maps every `WOUNDED_*`/`FALL_OVER_*`
-  category to "no pose", which froze wounded men visually while their simulation animated).
-  Gameplay change: every multiplayer peer must run the same setting.
+  clips and the stock wounded state machine; two 8-byte entry detours: the death state commit, and
+  the animation-table unique-clip builder, where the render pose-category remap is repaired before
+  clip slots are assigned (the stock table maps every `WOUNDED_*`/`FALL_OVER_*` category to "no
+  pose", which froze wounded men visually; repairing it after slot assignment instead crashed the
+  keyframe sampler with slot -1). Gameplay change: every multiplayer peer must run the same setting.
 
 ### Fixed
 

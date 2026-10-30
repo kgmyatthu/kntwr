@@ -1,13 +1,19 @@
-// --wounded hook (src/animation/kntwr_wounded_hook.cpp) against a private relocated copy of the supported Napoleon image.
-//  * The stock 8 bytes of the state commit 0x653F1A are asserted; Install replaces them with E9 rel32 + 3 int3 and touches
-//    no other image byte; Remove restores them bit-exactly; foreign bytes and bad percents are refused.
-//  * EXECUTION: a ret scribbled after the state store 0x653F39 (our private copy only) lets the oracle call the site with
-//    ECX=category / EBP=a fake man FSM. Pre-install the stock select answers; post-install the gate must agree with the
-//    stock select for every non-flip case (knockdowns 0x4B, missing/untagged clips 0x2A) and flip exactly when the policy
-//    (animation/kntwr_wounded.h) says so, leaving EAX=state, EDX=[0x14521C8], ECX untouched.
-//  * xmm1..xmm7, ebx/esi/edi, the x87 stack depth and the state written through EBP are checked across the hooked call;
-//    receipt words are checked against a tally. SEH: a poisoned clip-table pointer must count a fault and commit static.
-// No running game or installed file is modified.
+// --wounded hooks (src/animation/kntwr_wounded_hook.cpp) against a private relocated copy of the supported Napoleon image.
+//  * Two 8-byte entry patches: site A = state commit 0x653F1A (E9 rel32 + 3 int3 over the relocated stock mov/cmp), site
+//    B = unique-clip builder entry 0xE61020 (E9 rel32 + 3 int3 over the 8-byte prologue). Install patches both or neither
+//    and touches no other image byte; Remove restores both bit-exactly; foreign bytes at either site and bad percents are
+//    refused.
+//  * EXECUTION, site A: a ret scribbled after the state store 0x653F39 (our private copy only) lets the oracle call the
+//    site with ECX=category / EBP=a fake man FSM. Pre-install the stock select answers; post-install the gate must agree
+//    with the stock select for every non-flip case (knockdowns 0x4B, missing/untagged clips 0x2A) and flip exactly when
+//    the policy (animation/kntwr_wounded.h) says so, leaving EAX=state, EDX=[0x14521C8], ECX untouched. Commits never
+//    touch the render remap.
+//  * EXECUTION, site B: pop esi/add esp,8/ret scribbled at 0xE61028 (right after the displaced prologue) bounds the call
+//    to the detour + replayed prologue. Post-install one call must identity-write remap[0x330..0x33C] of the fake table
+//    (neighbors untouched, idempotent on the second call) and preserve every register the prologue preserves; a null
+//    remap pointer is skipped and a garbage table pointer must count a fault, never throw.
+//  * xmm1..xmm7, ebx/esi/edi, the x87 stack depth and the memory each site writes are checked across every hooked call;
+//    receipt words are checked against a tally. No running game or installed file is modified.
 #define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -62,8 +68,11 @@ static void Map(const char* path) {
 }
 
 constexpr U kSite=0x653F1A, kStore=0x653F39, kRetScribble=0x653F3F, kRangeLo=0x14521C8;
+constexpr U kBuildSite=0xE61020, kBuildResume=0xE61028;
 constexpr B kStock[8]={0x8B,0x15,0xC8,0x21,0x45,0x01,0x3B,0xCA};
 constexpr B kStore6[6]={0x89,0x85,0xB8,0x01,0x00,0x00};   // mov [ebp+0x1B8], eax
+constexpr B kBuildStock[8]={0x83,0xEC,0x08,0x56,0x8B,0xF1,0x33,0xC9};  // sub esp,8/push esi/mov esi,ecx/xor ecx,ecx
+constexpr B kBuildScribble[5]={0x5E,0x83,0xC4,0x08,0xC3}; // pop esi/add esp,8/ret: unwind the replayed prologue
 
 // ---- fake man FSM + clip world (layouts from the census: holder [M+0x218] -> table -> records [table+0x2C],
 //      record cat*0x18 {clips[0..4], count +0x14}, clip {+0x54 FACE_UP int, +0x5C FACE_DOWN int, +0x60 FACE_DOWN byte},
@@ -153,6 +162,57 @@ static __declspec(naked) void __stdcall CallSite(U /*site*/,U /*cat*/,U /*m*/) {
     }
 }
 
+// ---- thunk: ECX=table, sentinels everywhere else; the builder entry (gate + replayed prologue + scribble) must leave
+//      ECX=0 (the displaced xor) and preserve EAX/EDX/EBX/ESI/EDI/EBP, the x87 depth and xmm1..7. ----
+static U g_ebp;
+static __declspec(naked) void __stdcall CallBuildSite(U /*site*/,U /*table*/) {
+    __asm {
+        push ebp
+        push ebx
+        push esi
+        push edi
+        mov eax, offset g_xin
+        movups xmm1,[eax+0x00]
+        movups xmm2,[eax+0x10]
+        movups xmm3,[eax+0x20]
+        movups xmm4,[eax+0x30]
+        movups xmm5,[eax+0x40]
+        movups xmm6,[eax+0x50]
+        movups xmm7,[eax+0x60]
+        mov ecx,[esp+24]
+        mov ebx,0x13579BDF
+        mov esi,0x2468ACE0
+        mov edi,0x0F1E2D3C
+        mov ebp,0x5A5A1234
+        mov eax,0xDEADBEEF
+        mov edx,0xCAFEF00D
+        call dword ptr [esp+20]
+        mov g_state,eax
+        mov g_edx,edx
+        mov g_ecx,ecx
+        mov g_ebx,ebx
+        mov g_esi,esi
+        mov g_edi,edi
+        mov g_ebp,ebp
+        fnstsw ax
+        and eax,0x3800
+        mov g_fsw,eax
+        mov eax, offset g_xout
+        movups [eax+0x00],xmm1
+        movups [eax+0x10],xmm2
+        movups [eax+0x20],xmm3
+        movups [eax+0x30],xmm4
+        movups [eax+0x40],xmm5
+        movups [eax+0x50],xmm6
+        movups [eax+0x60],xmm7
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret 8
+    }
+}
+
 // Run one commit through the (possibly hooked) site; verify register contract and return the committed state.
 static U Commit(U cat) {
     for(U i=0;i<112;++i) g_xin[i]=static_cast<B>(0xA5^(i*37));
@@ -167,6 +227,19 @@ static U Commit(U cat) {
     Require(g_fsw==0u,"x87 stack balanced (TOP==0)");
     Require(!std::memcmp(g_xin,g_xout,112),"xmm1..xmm7 preserved");
     return g_state;
+}
+
+// Run one table build through the (possibly hooked) builder entry; verify the register contract.
+static void BuildCall(U tbl) {
+    for(U i=0;i<112;++i) g_xin[i]=static_cast<B>(0x3C^(i*53));
+    std::memset(g_xout,0,sizeof g_xout);
+    CallBuildSite(kBuildSite+delta,tbl);
+    Require(g_state==0xDEADBEEFu && g_edx==0xCAFEF00Du,"build: EAX/EDX preserved");
+    Require(g_ecx==0u,"build: ECX zeroed by the replayed prologue");
+    Require(g_ebx==0x13579BDFu && g_esi==0x2468ACE0u && g_edi==0x0F1E2D3Cu,"build: ebx/esi/edi preserved");
+    Require(g_ebp==0x5A5A1234u,"build: EBP preserved");
+    Require(g_fsw==0u,"build: x87 stack balanced");
+    Require(!std::memcmp(g_xin,g_xout,112),"build: xmm1..xmm7 preserved");
 }
 
 // ---- receipt tally ----
@@ -204,13 +277,18 @@ int main(int argc,char** argv) {
     }
     Require(!std::memcmp(At(kStore),kStore6,6),"state store mov [ebp+1B8],eax at 0x653F39");
     Require(Rd(kRangeLo)==0x32Au && Rd(kRangeLo+4)==5u,"knockdown range {0x32A,5} in .data");
+    Require(!std::memcmp(At(kBuildSite),kBuildStock,8),"stock builder prologue at 0xE61020");
+    Require(*At(kBuildResume)==0x57,"push edi at 0xE61028 (prologue displaces whole instructions)");
     *At(kRetScribble)=0xC3;                     // our private copy: return to the oracle right after the state store
+    std::memcpy(At(kBuildResume),kBuildScribble,5);   // our private copy: unwind + return right after the prologue
     std::vector<B> pristine(image,image+imageSize);   // whole private image incl. the scribble
 
-    // ---- pre-install: stock select answers ----
+    // ---- pre-install: stock select answers, stock prologue replays ----
     BuildWorld();
     static const U kStockCases[][2]={{0x329,0x2A},{0x32A,0x4B},{0x32E,0x4B},{0x32F,0x2A},{0x293,0x2A},{kCat,0x2A}};
     for(const auto& c: kStockCases) Require(Commit(c[0])==c[1],"stock select state");
+    BuildCall(A(table));
+    for(U c=0x32Fu;c<=0x33Du;++c) Require(remap[c]==0x360u,"pre-install build leaves the remap stock");
 
     // ---- refusals ----
     h::ResetRow(); CheckRow("after reset");
@@ -225,6 +303,13 @@ int main(int argc,char** argv) {
         p[3]=keep;
         Require(!std::memcmp(image,pristine.data(),imageSize),"refused Install writes nothing");
     }
+    {
+        B* p=At(kBuildSite); const B keep=p[1]; p[1]=0xF2;
+        Require(!h::Install(base,33),"Install refuses modified builder entry bytes");
+        Require(!h::Installed(),"refused Install leaves hooks uninstalled");
+        p[1]=keep;
+        Require(!std::memcmp(image,pristine.data(),imageSize),"refused Install rolled site A back bit-exactly");
+    }
     CheckRow("after refusals");
 
     // ---- Install pct=100: every eligible death flips ----
@@ -233,30 +318,30 @@ int main(int argc,char** argv) {
     Require(!h::Install(base,100),"second Install refused while installed");
     Require(h::Installed(),"still installed after refused re-install");
     {
-        const B* p=At(kSite);
-        Require(p[0]==0xE9,"patch opcode E9");
-        Require(p[5]==0xCC && p[6]==0xCC && p[7]==0xCC,"3 int3 pad");
-        U rel; std::memcpy(&rel,p+1,4);
-        const U target=A(p)+5+rel;
-        Require(target<base || target>=base+imageSize,"detour target lives outside the image");
+        for(const U site: {kSite,kBuildSite}) {
+            const B* p=At(site);
+            Require(p[0]==0xE9,"patch opcode E9");
+            Require(p[5]==0xCC && p[6]==0xCC && p[7]==0xCC,"3 int3 pad");
+            U rel; std::memcpy(&rel,p+1,4);
+            const U target=A(p)+5+rel;
+            Require(target<base || target>=base+imageSize,"detour target lives outside the image");
+        }
         for(U i=0;i<imageSize;++i) {
-            const U va=i+0x400000; if(va>=kSite && va<kSite+8) continue;
-            if(image[i]!=pristine[i]) Require(false,"install wrote outside the 8 entry bytes");
+            const U va=i+0x400000;
+            if(va>=kSite && va<kSite+8) continue;
+            if(va>=kBuildSite && va<kBuildSite+8) continue;
+            if(image[i]!=pristine[i]) Require(false,"install wrote outside the two 8-byte entries");
         }
     }
     auto native=[&](U cat) { Require(Commit(cat)==0x4Bu,"knockdown stays native 0x4B"); ++expCalls; ++expNative; expLastCat=cat; };
     auto noClip=[&](U cat) { Require(Commit(cat)==0x2Au,"missing clip commits static"); ++expCalls; ++expStatic; ++expNoClip; expLastCat=cat; };
     native(0x32A); native(0x32E);
     noClip(0x329); noClip(0x32F); noClip(0x293);        // zeroed records: count 0
-    Require(remap[0x330]==0x330u,"first static-candidate commit repaired the render remap");
-    for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"remap identity 0x330..0x33C");
-    Require(remap[0x32F]==0x360u && remap[0x33D]==0x360u,"remap neighbors untouched");
-    expRemap=1;
     SetRnd(4);  Require(Commit(kCat)==0x2Au,"untagged clip stays static"); ++expCalls; ++expStatic; ++expUntagged; expLastCat=kCat;
     SetRnd(6);  Require(Commit(kCat)==0x2Au,"present-but-unoriented clip stays static"); ++expCalls; ++expStatic; ++expUntagged;
     SetRnd(5);  Require(Commit(kCat)==0x4Bu,"FACE_DOWN clip flips at pct 100"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped;
     SetRnd(7);  Require(Commit(kCat)==0x4Bu,"FACE_UP clip flips at pct 100"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped;
-    { Wr(table,0x3C,0); SetRnd(5); Require(Commit(kCat)==0x4Bu,"null remap pointer: flip still commits"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped; Wr(table,0x3C,A(remap.data())); }
+    for(U c=0x32Fu;c<=0x33Du;++c) Require(remap[c]==0x360u,"commits never touch the render remap");
     { U keep=*RecordSlot(kCat,1); *RecordSlot(kCat,1)=0; SetRnd(5); noClip(kCat); *RecordSlot(kCat,1)=keep; }
     { Wr(table,0x2C,0); SetRnd(5); noClip(kCat); Wr(table,0x2C,A(records.data())); }
     { SetHolder(0); SetRnd(5); noClip(kCat); }
@@ -264,6 +349,21 @@ int main(int argc,char** argv) {
       SetRnd(5); Require(Commit(kCat)==0x2Au,"faulting walk commits static"); ++expCalls; ++expStatic; ++expFaults;
       SetHolder(A(&holderCell)); }
     CheckRow("after pct 100 battery");
+
+    // ---- build gate battery: remap repaired at table build, idempotent, fault-safe ----
+    BuildCall(A(table));
+    for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"hooked build repairs remap identity 0x330..0x33C");
+    Require(remap[0x32F]==0x360u && remap[0x33D]==0x360u,"remap neighbors untouched");
+    ++expRemap; CheckRow("after first hooked build");
+    BuildCall(A(table));
+    CheckRow("second build on a repaired table is a counted no-op");   // expRemap unchanged: idempotent per table
+    std::fill(remap.begin(),remap.end(),0x360u);
+    BuildCall(A(table));
+    for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"re-broken remap repaired again");
+    ++expRemap;
+    { Wr(table,0x3C,0); BuildCall(A(table)); Wr(table,0x3C,A(remap.data())); }   // null remap: skipped, no fault
+    { BuildCall(0x10u); ++expFaults; }                   // unmapped table: SEH fault counted, registers intact
+    CheckRow("after build gate battery");
 
     // ---- roll parity: host policy == gate at the pct boundary ----
     Require(h::Remove(),"Remove to change pct");
@@ -281,10 +381,18 @@ int main(int argc,char** argv) {
 
     // ---- Remove: foreign bytes refused, then bit-exact restore ----
     {
-        B* p=At(kSite); const B keep=p[2]; p[2]^=0x5A;
-        Require(!h::Remove(),"Remove refuses foreign bytes");
-        Require(h::Installed(),"refused Remove leaves the hook installed");
-        p[2]=keep;
+        B* p=At(kBuildSite); const B keepB=p[2]; p[2]^=0x5A;
+        Require(!h::Remove(),"Remove refuses foreign bytes at the builder site");
+        Require(h::Installed(),"refused Remove leaves the hooks installed");
+        p[2]=keepB;
+        B* q=At(kSite); const B keep=q[2]; q[2]^=0x5A;
+        Require(!h::Remove(),"Remove refuses foreign bytes at the commit site");
+        Require(h::Installed(),"refused Remove leaves the hooks installed (site B re-armed)");
+        {
+            const B* pb=At(kBuildSite);
+            Require(pb[0]==0xE9 && pb[5]==0xCC,"builder site stays patched after the refused Remove");
+        }
+        q[2]=keep;
         Require(h::Remove(),"Remove restores");
         Require(!h::Installed(),"not Installed after Remove");
         Require(!std::memcmp(image,pristine.data(),imageSize),"Remove restores the whole image bit-exactly");
@@ -299,10 +407,10 @@ int main(int argc,char** argv) {
     for(U cycle=0;cycle<4;++cycle) {
         h::ResetRow();
         expReq=expApplied=expCalls=expNative=expStatic=expEligible=expFlipped=expDenied=expUntagged=expNoClip=expFaults=expLastCat=expRemap=0;
-        std::fill(remap.begin(),remap.end(),0x360u);     // renderer remap broken again; first commit must re-repair it
+        std::fill(remap.begin(),remap.end(),0x360u);     // renderer remap broken again; the next build must repair it
         Require(h::Install(base,100),"cycle install"); expReq=1; expApplied=1;
         SetRnd(5); Require(Commit(kCat)==0x4Bu,"cycle: flip"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped; expLastCat=kCat;
-        expRemap=1;
+        BuildCall(A(table)); expRemap=1;
         for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"cycle: remap identity restored");
         native(0x32C);
         CheckRow("cycle hooked");

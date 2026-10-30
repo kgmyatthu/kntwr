@@ -1,8 +1,8 @@
 // --wounded runtime hook (gameplay change via kntwr_config::gameplay_flags & KNTWR_WOUNDED + percent in KNTWR_WOUNDED_PCT_MASK;
 // EXPERIMENTAL opt-in, NOT implied by --features all). Policy: animation/kntwr_wounded.h. Evidence: analysis/FINDINGS.md
-// "Wounded/corpse animation infrastructure census" (2026-10-31).
+// "Wounded/corpse animation infrastructure census" (2026-10-31) and "--wounded crash at 0x121EAC0" (2026-11-01).
 //
-// Native site 0x653F1A (inside kill path 0x653A10; ECX = normalized death category, EBP = man anim FSM M): stock bytes
+// Site A 0x653F1A (inside kill path 0x653A10; ECX = normalized death category, EBP = man anim FSM M): stock bytes
 //   8B 15 C8 21 45 01     mov edx, [0x14521C8]
 //   3B CA                 cmp ecx, edx
 // are 8 bytes of COMPLETE displaced instructions - exactly one Swap8 window. The gate does NOT replay them: the host
@@ -12,8 +12,13 @@
 // (0x653F39 relocated, the `mov [ebp+0x1B8], eax` state store). The bypassed stock select 0x653F22..0x653F38 becomes dead
 // code while installed and is restored bit-exactly by Remove.
 //
+// Site B 0xE61020 (unique-clip builder entry, thiscall ECX = anim table; runs at animation-table load): the 8-byte
+// prologue 83 EC 08 / 56 / 8B F1 / 33 C9 is displaced; the gate identity-writes the render pose-category remap
+// [table+0x3C] for 0x330..0x33C BEFORE the builder's passes assign sampler slots, replays the prologue and resumes at
+// site+8. Install patches both sites or neither; Remove restores site B first (remaining flips only freeze - safe).
+//
 // Thread-freeze / interior-IP refusal / 8-byte CAS policy is the shared core/kntwr_entry_patch.h. Remove refuses while any
-// peer is inside the gate (EIP range or in-gate counter); a CAS mismatch writes NOTHING and reports failure.
+// peer is inside either gate (EIP range or in-gate counter); a CAS mismatch writes NOTHING and reports failure.
 #ifndef KNTWR_WOUNDED_HOOK_H
 #define KNTWR_WOUNDED_HOOK_H
 #include <stdint.h>
