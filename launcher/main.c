@@ -317,6 +317,7 @@ typedef struct Options {
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
     BOOL drag_ladder;        /* --drag-ladder: GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); implied by --features all unless --no-drag-ladder */
     BOOL no_drag_ladder;     /* --no-drag-ladder: opt out of --drag-ladder under --features all */
+    BOOL no_cavalry_orbit;   /* --no-cavalry-orbit: opt out of cavalry_orbit (clears the default and the --features all implication) */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
@@ -7156,7 +7157,8 @@ static void usage(void)
         L"  --game DIR            folder containing Napoleon.exe (default: the saved configuration, then every Steam library;\n"
         L"                        a launch that finds nothing interactively opens a folder picker and remembers the choice)\n"
         L"  --replay FILE         start the game on a replay (game_startup_mode replay \"FILE\")\n"
-        L"  --features LIST       default: all,cavalry_orbit; an explicit list replaces it (all selects accepted optimizations only)\n"
+        L"  --features LIST       default: all,cavalry_orbit; an explicit list replaces it (all selects accepted optimizations only,\n"
+        L"                        and implies cavalry_orbit unless --no-cavalry-orbit or the exclusive ai_async2/brain2 are listed)\n"
         L"                        all = batch64,ai,visual,loco,collide plus their default switches (--loco-clone --loco-parallel\n"
         L"                        --loco-owned-services --loco-quiet --loco-grid --loco-grid-incremental --loco-cw-workers\n"
         L"                        --collide-contact-workers --ai-poly --ai-record-test --ai-claim-once --brain-target-cull --tick-pcore\n"
@@ -7316,11 +7318,13 @@ static void usage(void)
         L"                        add ai,ai_census to measure planner writes. Also Stage B0 qualification (army_b0_words,\n"
         L"                        receipt army_unit.b0): FSM steps/transitions, formation queue/scratch, recorder pins, RNG\n"
         L"                        member bound, own-state copy, exclusive refusal cost and the Stage B release gates\n"
-        L"  --cavalry-orbit       gameplay feature enabled by default; adds cavalry to an explicit --features list: cavalry of\n"
+        L"  --cavalry-orbit       gameplay feature enabled by default and implied by --features all (--no-cavalry-orbit opts out;\n"
+        L"                        listing the exclusive ai_async2/brain2 suppresses the implication): cavalry of\n"
         L"                        both sides orbit an explicitly attack-ordered square in periodic small rider melee waves\n"
         L"                        with native eligible mounted fire and immediate native handback (mask bit cavalry_orbit,\n"
         L"                        0x100000; no status row, no logging). Routes its own tick; excludes ai_async2 and brain2\n"
         L"                        (including serial cloned-driver diagnostics); replays desync vs vanilla\n"
+        L"  --no-cavalry-orbit    opt out of cavalry_orbit (default set and --features all implication)\n"
         L"  --army-storm-census   requires profile or a simulation feature; exclusive with --army-unit-shadow: opt-in site-18 storm\n"
         L"                        census. Times every 0x581F30 call (sites 101/103), counts units taking the command/formation\n"
         L"                        route, sub-brackets the preparation/FSM/formation calls, and keeps the top-8 storm ticks (site 18\n"
@@ -7528,6 +7532,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--grid-census")) feature_options |= KNTWR_GRID_CENSUS;
         else if (!wcscmp(name, L"--army-unit-shadow")) feature_options |= KNTWR_ARMY_UNIT_SHADOW;
         else if (!wcscmp(name, L"--cavalry-orbit")) feature_options |= KNTWR_CAVALRY_ORBIT;
+        else if (!wcscmp(name, L"--no-cavalry-orbit")) o->no_cavalry_orbit = TRUE;
         else if (!wcscmp(name, L"--loco-clone")) o->loco_clone = TRUE;
         else if (!wcscmp(name, L"--loco-parallel")) o->loco_parallel = TRUE;
         else if (!wcscmp(name, L"--loco-owned-services")) o->loco_owned = TRUE;
@@ -7809,6 +7814,19 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_drag_ladder)
         o->drag_ladder = TRUE;
+    /* The shipping set (and --features all) implies the cavalry orbit (user decision 2026-10-31; GAMEPLAY change: cavalry of
+       both sides orbit an attack-ordered square; replays desync vs vanilla). --no-cavalry-orbit opts out (clears the default
+       too); ai_async2 and brain2 (exclusive with the orbit) suppress the implication rather than erroring, so
+       --features all,ai_async2 keeps working. An explicit --cavalry-orbit still errors against them below. */
+    if ((feature_options & KNTWR_CAVALRY_ORBIT) && o->no_cavalry_orbit) {
+        errsay(L"--cavalry-orbit and --no-cavalry-orbit are exclusive.\n");
+        return -1;
+    }
+    if (o->no_cavalry_orbit)
+        o->mask &= ~KNTWR_CAVALRY_ORBIT;
+    else if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !(feature_options & KNTWR_CAVALRY_ORBIT) &&
+             !(o->mask & (KNTWR_AI_ASYNC2 | KNTWR_BRAIN2)))
+        o->mask |= KNTWR_CAVALRY_ORBIT;
     if ((o->mask & KNTWR_GRID_CENSUS) && !(o->mask & KNTWR_LOCO)) {
         errsay(L"--grid-census (grid_census) requires --features loco (or a feature list containing loco).\n");
         return -1;

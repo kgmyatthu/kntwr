@@ -9,6 +9,8 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
 
 - `--drag-ladder` (60-file drag-out frontage ladder) is now implied by `--features all`;
   `--no-drag-ladder` opts out. Gameplay change: every multiplayer peer must run the same setting.
+- `--features all` now implies `cavalry_orbit` (already in the default set); `--no-cavalry-orbit`
+  opts out, and listing the exclusive `ai_async2`/`brain2` suppresses the implication.
 
 ## [1.0.0] - 2026-10-28
 
