@@ -5796,12 +5796,24 @@ static BOOL write_receipt(Run *r, int exit_code)
         goto done;
     }
     CloseHandle(h);
-    if (!MoveFileExW(tmp, r->opt.receipt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        win_fail(L"publishing the receipt", GetLastError());
-        DeleteFileW(tmp);
-        goto done;
+    /* Replacing the target needs DELETE access on it: a concurrent reader holding receipt.json open (tail/poller) makes
+       MoveFileExW fail with a sharing violation even though the reader opened with full sharing. Transient by nature, so
+       retry briefly instead of aborting the 1 Hz live-receipt loop (which would stop receipts for the rest of the run). */
+    {
+        int attempt;
+        DWORD err = 0;
+        for (attempt = 0; attempt < 20; ++attempt) {
+            if (MoveFileExW(tmp, r->opt.receipt, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { ok = TRUE; break; }
+            err = GetLastError();
+            if (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED) break;
+            Sleep(25);
+        }
+        if (!ok) {
+            win_fail(L"publishing the receipt", err);
+            DeleteFileW(tmp);
+            goto done;
+        }
     }
-    ok = TRUE;
 done:
     return ok;
 }

@@ -361,10 +361,10 @@ enum kntwr_memory_word {
 #define KNTWR_WOUNDED_PCT_MASK (0x7Fu << KNTWR_WOUNDED_PCT_SHIFT) /* percent 1..100 in bits 8..14; nonzero requires KNTWR_WOUNDED */
 #define KNTWR_WOUNDED_PCT_DEFAULT 33u
 #define KNTWR_GAMEPLAY_FLAGS_VALID (KNTWR_DRAG_LADDER | KNTWR_WOUNDED | KNTWR_WOUNDED_PCT_MASK)
-#define KNTWR_WOUNDED_WORDS 16u /* wounded_words (kntwr_wounded_hook::Word, labels KNTWR_WOUNDED_LABELS; last_cat is a last-value word, the rest are counters; words 13..15 reserved zero) */
+#define KNTWR_WOUNDED_WORDS 16u /* wounded_words (kntwr_wounded_hook::Word, labels KNTWR_WOUNDED_LABELS; last_cat is a last-value word, the rest are counters; words 14..15 reserved zero) */
 #define KNTWR_WOUNDED_LABELS \
     "version", "requested", "installed", "calls", "native_knockdown", "static_candidates", "eligible", "flipped", \
-    "denied_roll", "untagged", "no_clip", "faults", "last_cat", "reserved13", "reserved14", "reserved15"
+    "denied_roll", "untagged", "no_clip", "faults", "last_cat", "remap_fixes", "reserved14", "reserved15"
 #define KNTWR_DRAG_LADDER_WORDS 16u /* drag_ladder_words (kntwr_drag_ladder_hook::Word, labels KNTWR_DRAG_LADDER_LABELS; calls/laddered/passthrough are plain counters, last_files_* are last-value words, words 9..15 are reserved zero) */
 #define KNTWR_DRAG_LADDER_LABELS \
     "version", "requested", "installed", "calls", "laddered", "passthrough", "faults", "last_files_before", \

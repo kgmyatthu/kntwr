@@ -36,6 +36,14 @@ constexpr U kSpan = 8;                   // complete displaced instructions: mov
 constexpr U kResumeOffset = 0x1Fu;       // site+0x1F = 0x653F39, the `mov [ebp+0x1B8], eax` state store
 constexpr U kRangeLo = 0x14521C8u;       // preferred-VA of the knockdown category range {lo, count}
 constexpr U kCategoryCount = 0x360u;     // anim category table size; normalized cat is always < this
+// Render pose-category remap ([table+0x3C], 0x360 dwords, read by the visual item update 0x7725D0 at 0x772AE3: the
+// renderer picks its own pose clip via remap[cat], and remap entries holding 0x360 mean "no pose" - the stock table
+// leaves every WOUNDED_*/FALL_OVER_* category at 0x360, which is WHY flipped men froze while their sim FSM looped
+// injury clips (verified live 2026-10-31: identity-writing these entries in a running battle was accepted; records
+// for all wounded cats exist with count 1). Identity-map the wounded families so the renderer poses them.
+constexpr U kRemapOffset = 0x3Cu;        // table+0x3C -> U[0x360] pose-category remap
+constexpr U kRemapFirst = 0x330u;        // WOUNDED_FRONT_IDLE .. FALL_OVER_4
+constexpr U kRemapLast = 0x33Cu;         // inclusive; 9 WOUNDED_* + 4 FALL_OVER_* (cat 0x339 observed live in state 0x4B)
 // Preferred-base template: the disp32 at +2 carries a base relocation, so the live original is rebuilt per image base.
 constexpr unsigned char kStock[kSpan] = {0x8B,0x15,0xC8,0x21,0x45,0x01,0x3B,0xCA};
 // Gate tail marker (never executed): scanned at Install to bound the gate's code range, validated by requiring the
@@ -62,6 +70,18 @@ bool BytesAre(U address, const unsigned char* expected, U bytes) {
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+
+// Repairs the render pose remap of this man's anim table so wounded categories pose instead of freezing. Idempotent per
+// table (first entry already identity -> no writes); runs on the kill-path owner thread under the caller's SEH frame.
+// Concurrent render reads of a repaired entry see either 0x360 (skip one frame) or the identity value - both benign.
+void FixupRemap(U table) {
+    const U remap = *reinterpret_cast<const U*>(static_cast<uintptr_t>(table + kRemapOffset));
+    if (!remap) return;
+    volatile U* entries = reinterpret_cast<volatile U*>(static_cast<uintptr_t>(remap));
+    if (entries[kRemapFirst] == kRemapFirst) return;
+    for (U cat = kRemapFirst; cat <= kRemapLast; ++cat) entries[cat] = cat;
+    ++g_words[WRemapFixes];
+}
 // Native-memory walk; every dereference may fault, the caller holds the SEH frame. Returns the committed state.
 U DecideBody(U cat, U m) {
     const U lo = *reinterpret_cast<const volatile U*>(static_cast<uintptr_t>(g_rangeLo));
@@ -74,6 +94,7 @@ U DecideBody(U cat, U m) {
     const U table = holder ? *reinterpret_cast<const U*>(static_cast<uintptr_t>(holder)) : 0;
     const U records = table ? *reinterpret_cast<const U*>(static_cast<uintptr_t>(table + 0x2C)) : 0;
     if (!records) { ++g_words[WNoClip]; return kntwr_wounded::kStateStatic; }
+    FixupRemap(table);
     const U record = records + cat * 0x18u;
     const U count = *reinterpret_cast<const U*>(static_cast<uintptr_t>(record + 0x14));
     if (!count) { ++g_words[WNoClip]; return kntwr_wounded::kStateStatic; }

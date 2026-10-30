@@ -23,11 +23,12 @@ using U = uint32_t;
 
 // wounded_words (kntwr_status::wounded_words, KNTWR_WOUNDED_LABELS). Hot-path counters are plain ++; reset at monitor start.
 // WInstalled is sticky applied-this-run (set on a successful Install, cleared only by ResetRow), not live hook presence.
+// WRemapFixes counts render pose-remap tables repaired (see hook .cpp: [table+0x3C] identity for wounded categories).
 constexpr U kWords = 16, kVersion = 1;
 constexpr U kCommitSite = 0x653F1Au;
 enum Word : U {
     WVersion, WRequested, WInstalled, WCalls, WNativeKnockdown, WStaticCandidates, WEligible, WFlipped,
-    WDeniedRoll, WUntagged, WNoClip, WFaults, WLastCat
+    WDeniedRoll, WUntagged, WNoClip, WFaults, WLastCat, WRemapFixes
 };
 
 void ResetRow();                        // monitor start: zero the row (including applied-this-run), set the version

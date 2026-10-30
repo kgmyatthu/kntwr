@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <vector>
 #include "native_image_relocation.h"
 #include "kntwr_runtime.h"
@@ -71,6 +72,7 @@ constexpr U kCat=0x300;              // a DEATH_* category outside the knockdown
 alignas(16) static B M[0x600];
 static B table[0x40];
 static std::vector<B> records;       // 0x360 records * 0x18
+static std::vector<U> remap;         // [table+0x3C] render pose-category remap, 0x360 entries (0x360 = "no pose")
 alignas(16) static B clipUntagged[0x70], clipTagged[0x70], clipPresentOnly[0x70], clipFaceUp[0x70];
 static U holderCell;                 // first dword = table ptr
 
@@ -93,6 +95,8 @@ static void BuildWorld() {
     *RecordSlot(kCat,2)=A(clipPresentOnly); *RecordSlot(kCat,3)=A(clipFaceUp);
     *RecordCount(kCat)=4;
     Wr(table,0x2C,A(records.data()));
+    remap.assign(0x360u,0x360u);
+    Wr(table,0x3C,A(remap.data()));
     holderCell=A(table);
     SetHolder(A(&holderCell));
     SetRnd(1);
@@ -166,7 +170,7 @@ static U Commit(U cat) {
 }
 
 // ---- receipt tally ----
-static U expReq,expApplied,expCalls,expNative,expStatic,expEligible,expFlipped,expDenied,expUntagged,expNoClip,expFaults,expLastCat;
+static U expReq,expApplied,expCalls,expNative,expStatic,expEligible,expFlipped,expDenied,expUntagged,expNoClip,expFaults,expLastCat,expRemap;
 static void CheckRow(const char* what) {
     volatile U row[h::kWords]; h::Snapshot(row);
     char msg[96];
@@ -183,7 +187,8 @@ static void CheckRow(const char* what) {
     std::snprintf(msg,sizeof msg,"%s: no clip",what);           Require(row[h::WNoClip]==expNoClip,msg);
     std::snprintf(msg,sizeof msg,"%s: faults",what);            Require(row[h::WFaults]==expFaults,msg);
     std::snprintf(msg,sizeof msg,"%s: last cat",what);          Require(row[h::WLastCat]==expLastCat,msg);
-    for(U i=h::WLastCat+1;i<h::kWords;++i) Require(row[i]==0u,"reserved words stay zero");
+    std::snprintf(msg,sizeof msg,"%s: remap fixes",what);       Require(row[h::WRemapFixes]==expRemap,msg);
+    for(U i=h::WRemapFixes+1;i<h::kWords;++i) Require(row[i]==0u,"reserved words stay zero");
 }
 
 int main(int argc,char** argv) {
@@ -243,10 +248,15 @@ int main(int argc,char** argv) {
     auto noClip=[&](U cat) { Require(Commit(cat)==0x2Au,"missing clip commits static"); ++expCalls; ++expStatic; ++expNoClip; expLastCat=cat; };
     native(0x32A); native(0x32E);
     noClip(0x329); noClip(0x32F); noClip(0x293);        // zeroed records: count 0
+    Require(remap[0x330]==0x330u,"first static-candidate commit repaired the render remap");
+    for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"remap identity 0x330..0x33C");
+    Require(remap[0x32F]==0x360u && remap[0x33D]==0x360u,"remap neighbors untouched");
+    expRemap=1;
     SetRnd(4);  Require(Commit(kCat)==0x2Au,"untagged clip stays static"); ++expCalls; ++expStatic; ++expUntagged; expLastCat=kCat;
     SetRnd(6);  Require(Commit(kCat)==0x2Au,"present-but-unoriented clip stays static"); ++expCalls; ++expStatic; ++expUntagged;
     SetRnd(5);  Require(Commit(kCat)==0x4Bu,"FACE_DOWN clip flips at pct 100"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped;
     SetRnd(7);  Require(Commit(kCat)==0x4Bu,"FACE_UP clip flips at pct 100"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped;
+    { Wr(table,0x3C,0); SetRnd(5); Require(Commit(kCat)==0x4Bu,"null remap pointer: flip still commits"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped; Wr(table,0x3C,A(remap.data())); }
     { U keep=*RecordSlot(kCat,1); *RecordSlot(kCat,1)=0; SetRnd(5); noClip(kCat); *RecordSlot(kCat,1)=keep; }
     { Wr(table,0x2C,0); SetRnd(5); noClip(kCat); Wr(table,0x2C,A(records.data())); }
     { SetHolder(0); SetRnd(5); noClip(kCat); }
@@ -288,9 +298,12 @@ int main(int argc,char** argv) {
     // ---- lifecycle cycles ----
     for(U cycle=0;cycle<4;++cycle) {
         h::ResetRow();
-        expReq=expApplied=expCalls=expNative=expStatic=expEligible=expFlipped=expDenied=expUntagged=expNoClip=expFaults=expLastCat=0;
+        expReq=expApplied=expCalls=expNative=expStatic=expEligible=expFlipped=expDenied=expUntagged=expNoClip=expFaults=expLastCat=expRemap=0;
+        std::fill(remap.begin(),remap.end(),0x360u);     // renderer remap broken again; first commit must re-repair it
         Require(h::Install(base,100),"cycle install"); expReq=1; expApplied=1;
         SetRnd(5); Require(Commit(kCat)==0x4Bu,"cycle: flip"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped; expLastCat=kCat;
+        expRemap=1;
+        for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"cycle: remap identity restored");
         native(0x32C);
         CheckRow("cycle hooked");
         Require(h::Remove(),"cycle remove");
