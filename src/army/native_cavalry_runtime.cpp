@@ -91,6 +91,7 @@ constexpr U kMaxAge = 80;              // forced refresh even without arrival or
 constexpr U kRenewBudget = 16;         // renewal installs per EndTick (budgeted)
 constexpr U kAdmitBudget = 16;         // probe combat admissions per tick (budgeted)
 constexpr U kPulloutMin = 10;          // ticks (1 s) between melee pull-out attempts on the same mount
+constexpr U kAvoidStuckMin = 20;       // consecutive held sweeps (2 s) before a persistent avoidance hold is escaped
 constexpr U kPulloutBudget = 8;        // melee pull-outs per EndTick (budgeted)
 constexpr U kStageMax = kMaxRecords + kAdmitBudget + kRenewBudget + kPulloutBudget;
 constexpr U kMaxFaults = 8;            // guarded faults before the adapter disables itself until Reset
@@ -108,7 +109,8 @@ constexpr U kOrbitNodeVt = 0x1348B44, kANode = 0x22C, kANodeDone = 0x234, kAHold
 constexpr U kTrackerClear = 0x63CE00, kMountedCall = 0x55ABF0, kTerrainQuery = 0x57E870;
 constexpr U kOrderAdjust = 0x66AE10;
 constexpr U kUnbind = 0x65FEE0;        // interaction-group member release: thiscall(controller; agent), ret 4
-constexpr U kMeleeClusterVt = 0x1334250;  // kind-5 melee cluster controller vtable (ctor 0x61C5B0); avoidance pairs use 0x1334218
+constexpr U kMeleeClusterVt = 0x1334250;  // kind-5 melee cluster controller vtable (ctor 0x61C5B0)
+constexpr U kAvoidPairVt = 0x1334218;     // collision-avoidance pair controller vtable (normally resolves within ticks)
 constexpr U kAttackRowVt = 0x1324080;
 
 // unit / agent offsets (documented in the contract and the headers referenced above)
@@ -169,6 +171,7 @@ struct Record {
     B lane1;                              // 1-based sticky orbit lane (0 = unassigned); odd = "+" side (direction -1), even = "-" side (direction +1)
     float rad;                            // lane radius at the last install of THIS mount's waypoint (0 = none): real prior radius for renewal
     U pullTick;                           // tick of the last melee pull-out attempt on this mount (cadence)
+    U avoidSince;                         // tick the current avoidance-pair hold was first observed (0 = none; escape threshold)
 };
 enum RecordFlag : U { rDesc = 1, rProbe = 2, rRenew = 4, rActivate = 8, rOrbit = 16 };
 // rOrbit: the movement node currently on the mount was installed by THIS adapter from a normalized orbit descriptor
@@ -198,7 +201,7 @@ U goRetEntity, goRetPoint, combatRetCmd, unbind;
 // records/orbit_units are per-sweep absolutes; held..not_pullable are cumulative since Bind.
 enum PullWord : U { wVersion, wTicks, wRecords, wOrbitUnits, wHeld, wPulls, wRiderPulls, wReleased,
                     wReleaseRefused, wEscapeInstalls, wLaneInstalls, wProbeFrees, wNotPullable,
-                    wLastBindVt, wLastHold, wReserved15, kPullWords };
+                    wLastBindVt, wLastHold, wAvoidPulls, kPullWords };
 U pullWords[kPullWords];
 // per-mount (hashed) counter bumped by every native order install this adapter could not observe in scope (any thread):
 // a record's orbit authority is void when its snapshot no longer matches.  Collisions only void authority (fail to replace).
@@ -628,6 +631,20 @@ U MeleeBound(U mount) {
 bool MeleePullable(U mount) {
     return RdB(mount + 0x30) == 1 && Rd(mount + 0x224) != 0x14 && !RoutingAgent(mount) && MeleeBound(mount) != 0;
 }
+// An avoidance pair normally resolves within ticks, but one that keeps re-forming against a packed
+// square pins the rider indefinitely: a held record gets no waypoint renewals, so the mount mills on a
+// stale goal (live evidence: not_pullable dominated by last_bind_vt 0x1334218, hold byte 0x0B000001).
+// After kAvoidStuckMin consecutive held sweeps an otherwise-clean avoidance-bound mount is escaped
+// through the same pull stage; PullRelease deliberately no-ops on it (UnbindOne only releases the
+// kind-5 cluster), the fresh radial goal lets the pair resolve away from the crowd.
+bool AvoidBound(U mount) {
+    if (!Sane(mount)) return false;
+    const U c = Rd(mount + 0x628);
+    return c != 0 && Sane(c) && Rd(c) == V(kAvoidPairVt);
+}
+bool AvoidPullable(U mount) {
+    return RdB(mount + 0x30) == 1 && Rd(mount + 0x224) != 0x14 && !RoutingAgent(mount) && MeleeBound(mount) == 0;
+}
 // Diagnostic snapshot of WHY a held mount could not be pulled this attempt: the binder's vtable
 // (preferred-base, 0 when +0x628 is clear, raw pointer when its vtable is unreadable) plus packed hold
 // fields (byte0 = +0x30 worklist byte, bit8 = refusal phase 0x14, bit9 = routing, bit10 = melee-bound,
@@ -784,7 +801,7 @@ void DropRecord(U r) {
             }
         }
     }
-    rec.mount = rec.unit = rec.flags = rec.probeUntil = rec.pullTick = 0;
+    rec.mount = rec.unit = rec.flags = rec.probeUntil = rec.pullTick = rec.avoidSince = 0;
     rec.lane1 = 0;
 }
 void StageIdentity(Stage& s, const Record& rec, const UnitEntry& e) {
@@ -1364,8 +1381,15 @@ void TryPullout(Record& rec, U& pullouts, bool& probesChanged, PullWord pathWord
     if (rec.flags & (rProbe | rRenew)) return;  // live probe window: the probe fights on
     if (!(rec.flags & rDesc) || !e->orbit) return;
     if (pullouts >= kPulloutBudget || staged >= kStageMax) return;
-    if (curTick - rec.pullTick < kPulloutMin) return;
-    if (!MeleePullable(rec.mount)) { NoteUnpullable(rec.mount); return; }
+    if (curTick - rec.pullTick < kPulloutMin) return;  // also the native-read guard: nothing below runs before tick kPulloutMin
+    const bool avoidHeld = AvoidBound(rec.mount);
+    if (!avoidHeld) rec.avoidSince = 0;
+    else if (!rec.avoidSince) rec.avoidSince = curTick;
+    bool avoidEscape = false;
+    if (!MeleePullable(rec.mount)) {
+        avoidEscape = avoidHeld && curTick - rec.avoidSince >= kAvoidStuckMin && AvoidPullable(rec.mount);
+        if (!avoidEscape) { NoteUnpullable(rec.mount); return; }
+    }
     rec.pullTick = curTick;  // attempt cadence, successful or not
     float wx, wz, y;
     B tmp[kDescBytes];
@@ -1382,8 +1406,9 @@ void TryPullout(Record& rec, U& pullouts, bool& probesChanged, PullWord pathWord
     memcpy(s.desc, tmp, kDescBytes);
     rec.wx = wx; rec.wz = wz; rec.ux = e->tx; rec.uz = e->tz; rec.rad = LaneRadius(*e, rec); rec.lastTick = curTick;
     rec.flags &= ~(rActivate | rOrbit);
+    rec.avoidSince = 0;
     ++pullWords[escaped ? wEscapeInstalls : wLaneInstalls];
-    ++pullWords[pathWord];
+    ++pullWords[avoidEscape ? wAvoidPulls : pathWord];
     ++pullouts;
 }
 

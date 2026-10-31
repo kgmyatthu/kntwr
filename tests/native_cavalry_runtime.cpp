@@ -2160,7 +2160,7 @@ void MeleePulloutRecoversOrbit() {
         Put(Address(pair.data()), V(0x1334218u));  // avoidance-pair vtable: resolves on its own
         Put(c.mount() + 0x628, Address(pair.data()));
         c.w.Tick(25); Sweep();
-        Check(staged == 0 && c.rec() != nullptr, "an avoidance pair is never pulled");
+        Check(staged == 0 && c.rec() != nullptr, "an avoidance pair is not pulled before the stuck threshold");
         Put(Address(pair.data()), V(kMeleeClusterVt));
         Put(c.mount() + 0x224, 0x14);
         c.w.Tick(46); Sweep();
@@ -2202,6 +2202,28 @@ void MeleePulloutRecoversOrbit() {
         c.ExpectOneInstall(c.mount(), "the orbit waypoint is re-installed after the rider release", "rider-bound pull-out");
         Check(pullWords[wRiderPulls] == riderPulls + 1 && pullWords[wReleased] == released + 1,
               "the diagnostic words count the rider-path pull and the release");
+    }
+    {   // a persistently re-forming avoidance pair (vt 0x1334218) pins the rider with a stale waypoint;
+        // after kAvoidStuckMin consecutive held sweeps it is escaped WITHOUT any release call
+        Charge c(Charge::Installed);
+        std::vector<B> pair(0x10);
+        Put(Address(pair.data()), V(0x1334218u));
+        g_unbindLog.clear();
+        Put(c.mount() + 0x628, Address(pair.data()));
+        const U avoid = pullWords[wAvoidPulls];
+        for (U t = 25; t < 25 + kAvoidStuckMin; ++t) {
+            c.w.Tick(t); Sweep();
+            Check(staged == 0, "below the stuck threshold the pair stays native");
+        }
+        c.w.Tick(25 + kAvoidStuckMin); Sweep();
+        Check(staged == 1 && stage[0].pull == 1 && stage[0].orbit == 1 && stage[0].mount == c.mount(),
+              "the stuck avoidance hold stages an escape");
+        Fire();
+        Check(g_unbindLog.empty() && Rd(c.mount() + 0x628) != 0,
+              "no release call: the pair object itself is never touched");
+        c.ExpectOneInstall(c.mount(), "the escape waypoint is installed around the pair", "avoidance escape");
+        Check(pullWords[wAvoidPulls] == avoid + 1 && c.rec()->avoidSince == 0,
+              "the escape counts as avoid_pulls and re-arms the threshold");
     }
 }
 

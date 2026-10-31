@@ -368,13 +368,13 @@ enum kntwr_memory_word {
 #define KNTWR_CAVALRY_WORDS 16u /* cavalry_words (kntwr_cavalry::SnapshotWords, labels KNTWR_CAVALRY_LABELS; live only with KNTWR_CAVALRY_ORBIT in enabled_mask) */
 /* version;
    ticks/records/orbit_units absolute per tick;
-   held/pulls/rider_pulls/released/release_refused/escape_installs/lane_installs/probe_frees/not_pullable cumulative since Bind;
+   held/pulls/rider_pulls/released/release_refused/escape_installs/lane_installs/probe_frees/not_pullable/avoid_pulls cumulative since Bind;
    last_bind_vt = preferred-base vtable of the last un-pullable mount's +0x628 binding;
    last_hold = packed hold state byte0=+0x30, bit8 refusal 0x14, bit9 routing, bit10 rider-bound, byte2=order low byte, byte3=activity low byte;
-   reserved15 zero. */
+   avoid_pulls = escapes of persistent avoidance-pair holds (vt 0x1334218, no release call, re-waypoint only). */
 #define KNTWR_CAVALRY_LABELS \
     "version", "ticks", "records", "orbit_units", "held", "pulls", "rider_pulls", "released", \
-    "release_refused", "escape_installs", "lane_installs", "probe_frees", "not_pullable", "last_bind_vt", "last_hold", "reserved15"
+    "release_refused", "escape_installs", "lane_installs", "probe_frees", "not_pullable", "last_bind_vt", "last_hold", "avoid_pulls"
 #define KNTWR_DRAG_LADDER_WORDS 16u /* drag_ladder_words (kntwr_drag_ladder_hook::Word, labels KNTWR_DRAG_LADDER_LABELS; calls/laddered/passthrough are plain counters, last_files_* are last-value words, words 9..15 are reserved zero) */
 #define KNTWR_DRAG_LADDER_LABELS \
     "version", "requested", "installed", "calls", "laddered", "passthrough", "faults", "last_files_before", \

@@ -40,7 +40,10 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   cadence; re-binds on renewed contact simply retry). Also frees the probe-wave slot of a prober
   whose window expired while melee-bound — previously one bound probe wave permanently stopped a
   unit's orbit probing. Diagnostic counters are published as `cavalry_words` in the status block and
-  as `cavalry_orbit_words` in the launcher receipt.
+  as `cavalry_orbit_words` in the launcher receipt. Pairs whose RIDER carries the melee binding
+  (the mount's own fields stay clean) now reach the same pull-out, and a collision-avoidance pair
+  (vt `0x1334218`) that persists for 2 s against the square — live counters showed these dominate
+  the residual sticks — is escaped with a fresh radial waypoint, without touching the pair object.
 - `--wounded` is now implied by `--features all` at the default 33% (user acceptance after live
   battles); `--no-wounded` opts out, an explicit `--wounded=PCT` keeps its percent. Gameplay
   change: every multiplayer peer must run the same setting.
