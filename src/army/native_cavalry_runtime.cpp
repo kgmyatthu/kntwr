@@ -90,7 +90,9 @@ constexpr U kRenewMin = 10;            // ticks between two installs on the same
 constexpr U kMaxAge = 80;              // forced refresh even without arrival or drift
 constexpr U kRenewBudget = 16;         // renewal installs per EndTick (budgeted)
 constexpr U kAdmitBudget = 16;         // probe combat admissions per tick (budgeted)
-constexpr U kStageMax = kMaxRecords + kAdmitBudget + kRenewBudget;
+constexpr U kPulloutMin = 20;          // ticks between melee pull-out attempts on the same mount
+constexpr U kPulloutBudget = 8;        // melee pull-outs per EndTick (budgeted)
+constexpr U kStageMax = kMaxRecords + kAdmitBudget + kRenewBudget + kPulloutBudget;
 constexpr U kMaxFaults = 8;            // guarded faults before the adapter disables itself until Reset
 constexpr float kCoordLimit = 1000000.0f;  // the policy's own max_coordinate: mod map sizes must not be excluded
 constexpr U kStampEmpty = 0xFFFFFFFFu;
@@ -105,6 +107,8 @@ constexpr U kGoRetEntity = 0x7FF51A, kGoRetPoint = 0x7FF53D, kCombatRetCmd = 0x7
 constexpr U kOrbitNodeVt = 0x1348B44, kANode = 0x22C, kANodeDone = 0x234, kAHolderFlag = 0x2C4;
 constexpr U kTrackerClear = 0x63CE00, kMountedCall = 0x55ABF0, kTerrainQuery = 0x57E870;
 constexpr U kOrderAdjust = 0x66AE10;
+constexpr U kUnbind = 0x65FEE0;        // interaction-group member release: thiscall(controller; agent), ret 4
+constexpr U kMeleeClusterVt = 0x1334250;  // kind-5 melee cluster controller vtable (ctor 0x61C5B0); avoidance pairs use 0x1334218
 constexpr U kAttackRowVt = 0x1324080;
 
 // unit / agent offsets (documented in the contract and the headers referenced above)
@@ -164,6 +168,7 @@ struct Record {
     B desc[kDescBytes];                   // the captured native movement descriptor (verbatim)
     B lane1;                              // 1-based sticky orbit lane (0 = unassigned); odd = "+" side (direction -1), even = "-" side (direction +1)
     float rad;                            // lane radius at the last install of THIS mount's waypoint (0 = none): real prior radius for renewal
+    U pullTick;                           // tick of the last melee pull-out attempt on this mount (cadence)
 };
 enum RecordFlag : U { rDesc = 1, rProbe = 2, rRenew = 4, rActivate = 8, rOrbit = 16 };
 // rOrbit: the movement node currently on the mount was installed by THIS adapter from a normalized orbit descriptor
@@ -183,10 +188,11 @@ struct UnitEntry {
     State policy;            // the pure policy's per-unit state
 };
 
-struct Stage { U mount, combat, unit, serial, target, memberIdx, orbit; B desc[kDescBytes]; };  // orbit: desc is a normalized orbit copy
+struct Stage { U mount, combat, unit, serial, target, memberIdx, orbit, pull; B desc[kDescBytes]; };  // orbit: desc is a
+// normalized orbit copy; pull: release the mount from its melee cluster through 0x65FEE0 before installing
 
 U delta, imageLo, imageSize, moveInstall, combatInstall, combatRet, trackerClear, mountedCall, terrainQuery, orderAdjust;
-U goRetEntity, goRetPoint, combatRetCmd;
+U goRetEntity, goRetPoint, combatRetCmd, unbind;
 // per-mount (hashed) counter bumped by every native order install this adapter could not observe in scope (any thread):
 // a record's orbit authority is void when its snapshot no longer matches.  Collisions only void authority (fail to replace).
 volatile long foreignMark[256];
@@ -591,6 +597,30 @@ bool YieldToNative(U agent) {
     return RdB(agent + 0x30) != 1 || Rd(agent + 0x628) != 0 ||
            Rd(agent + 0x224) == 0x14 || RoutingAgent(agent);
 }
+// The agent's interaction-group binding iff it is the kind-5 melee cluster (vtable 0x1334250).  Avoidance
+// pairs (0x1334218) resolve on their own within ticks and anything unrecognized stays strictly native.
+U MeleeBinding(U agent) {
+    if (!Sane(agent)) return 0;
+    const U c = Rd(agent + 0x628);
+    if (!c || !Sane(c)) return 0;
+    return Rd(c) == V(kMeleeClusterVt) ? c : 0;
+}
+// The melee-cluster-bound agent of this mount (the mount itself or an attached rider), else 0.
+U MeleeBound(U mount) {
+    if (MeleeBinding(mount)) return mount;
+    const U n = Rd(mount + kARiders), arr = Rd(mount + kARiderArr);
+    if (Sane(arr))
+        for (U i = 0; i < n && i < kRiderCap; ++i) {
+            const U a = Rd(arr + 4 * i);
+            if (MeleeBinding(a)) return a;
+        }
+    return 0;
+}
+// A held mount may be pulled out of melee exactly when the ONLY movement blocker is the kind-5 cluster:
+// worklist-active, not refusing (phase 0x14 self-terminates), not routing.
+bool MeleePullable(U mount) {
+    return RdB(mount + 0x30) == 1 && Rd(mount + 0x224) != 0x14 && !RoutingAgent(mount) && MeleeBound(mount) != 0;
+}
 // The unit's live row is still the captured attack row against the captured target.
 bool RowLive(U unit, U serial, U target) {
     const U cnt = Rd(unit + kURowCnt), idx = Rd(unit + kURowIdx);
@@ -730,7 +760,7 @@ void DropRecord(U r) {
             }
         }
     }
-    rec.mount = rec.unit = rec.flags = rec.probeUntil = 0;
+    rec.mount = rec.unit = rec.flags = rec.probeUntil = rec.pullTick = 0;
     rec.lane1 = 0;
 }
 void StageIdentity(Stage& s, const Record& rec, const UnitEntry& e) {
@@ -743,7 +773,8 @@ bool StageValid(Stage& s) {
         valid = KnownHas(s.unit) && Rd(s.unit + kUState) != 0 && Rd(s.unit + kUState) != 2 &&
                 OrderLive(s.unit, s.serial, s.target) && !SteeringHold(s.unit) &&
                 MemberOf(s.unit, s.mount, s.memberIdx) && Rd(s.mount + kAUnit) == s.unit &&
-                !YieldToNative(s.mount);
+                (s.pull ? RdB(s.mount + 0x30) == 1 && Rd(s.mount + 0x224) != 0x14 && !RoutingAgent(s.mount)
+                        : !YieldToNative(s.mount));
     } __except (EXCEPTION_EXECUTE_HANDLER) { valid = false; }
     --kntwr::probeDepth;
     return valid;
@@ -760,7 +791,7 @@ void DropUnitRecords(U unit, bool handback) {
                 (records[r].flags & rDesc) && staged < kStageMax &&
                 MemberOf(unit, records[r].mount, records[r].memberIdx) && !YieldToNative(records[r].mount)) {
                 Stage& s = stage[staged++];
-                s.mount = records[r].mount; s.combat = 0; s.orbit = 0;
+                s.mount = records[r].mount; s.combat = 0; s.orbit = 0; s.pull = 0;
                 StageIdentity(s, records[r], *e);
                 memcpy(s.desc, records[r].desc, kDescBytes);
             }
@@ -990,7 +1021,7 @@ void Scan(U model) {
                     if (Rd(rec.mount + kAUnit) != c.unit ||
                         !MemberOf(c.unit, rec.mount, rec.memberIdx) || YieldToNative(rec.mount)) continue;
                     Stage& s = stage[staged++];
-                    s.mount = rec.mount; s.combat = 1; s.orbit = 0;
+                    s.mount = rec.mount; s.combat = 1; s.orbit = 0; s.pull = 0;
                     StageIdentity(s, rec, *e);
                     memset(s.desc, 0, kDescBytes);
                     const U mode = 1, key = e->target;
@@ -1064,7 +1095,7 @@ bool KeepOrbit(U mount, const Record& rec) {
 
 // shared hook prelude: the record of an owned, currently-valid mount, or kStampEmpty (record dropped when
 // provably stale; untouched when simply out of scope)
-U OwnedMount(U mount) {
+U OwnedMount(U mount, bool* held = nullptr) {
     if (!Sane(mount)) return kStampEmpty;
     const U unit = Rd(mount + kAUnit);
     if (!Sane(unit)) return kStampEmpty;
@@ -1087,6 +1118,7 @@ U OwnedMount(U mount) {
     if (!MemberOf(unit, mount, rec.memberIdx)) { DropRecord(r); return kStampEmpty; }
     if (YieldToNative(mount)) {
         if (RoutingAgent(mount) || RdB(mount + 0x30) != 1) DropRecord(r);
+        else if (held) *held = true;  // record kept: the only blocker is a native hold (controller binding / refusal)
         return kStampEmpty; // temporary controller ownership/refusal preserves the approach, never forces movement
     }
     if (!e->orbit) return kStampEmpty;
@@ -1246,12 +1278,70 @@ void PlanTracker(U tracker, U agent) {
     if (Rd(tracker + kTKey) != e->target) Wr32(tracker + kTKey, e->target);
 }
 
+// -------------------------------------------------------------------------------------------- melee pull-out
+// A mount bound into the kind-5 melee cluster never leaves a sustained square fight on its own: the
+// cluster releases members only on lost contact (0x62F750 via 0x6735E0), which a held mount cannot
+// create.  While the unit still orbits, release the mount through the group's own member release
+// (0x65FEE0: clears +0x628 and the group bitset; list guards tolerate the external release) and
+// re-install its orbit waypoint.  Cadenced per record and budgeted per tick; a re-bind on renewed
+// contact is expected and simply retried, so riders grind free instead of parking in melee forever.
+void OnFault();
+using UnbindFn = void(__fastcall*)(U controller, U, U agent);  // thiscall(controller; agent), ret 4
+void UnbindOne(U agent) {
+    const U c = MeleeBinding(agent);
+    if (c) reinterpret_cast<UnbindFn>(static_cast<uintptr_t>(unbind))(c, 0, agent);
+}
+bool PullRelease(U mount) {  // guarded: Fire runs outside the tick __try
+    bool ok = false;
+    ++kntwr::probeDepth;
+    __try {
+        UnbindOne(mount);
+        const U n = Rd(mount + kARiders), arr = Rd(mount + kARiderArr);
+        if (Sane(arr))
+            for (U i = 0; i < n && i < kRiderCap; ++i) UnbindOne(Rd(arr + 4 * i));
+        ok = MeleeBound(mount) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; OnFault(); }
+    --kntwr::probeDepth;
+    return ok;
+}
+// Sweep-side planner for one held record.  `held` from OwnedMount proves everything else is valid
+// (live order, proven member, live entry).  The probe bookkeeping must run even when the mount cannot
+// be pulled, or a melee-bound probe wave would block the unit's probe admissions forever.
+void TryPullout(Record& rec, U& pullouts, bool& probesChanged) {
+    UnitEntry* e = EntryByUnit(rec.unit);
+    if (!e) return;
+    if ((rec.flags & rProbe) && (curTick >= rec.probeUntil || (rec.flags & rRenew))) {
+        rec.flags &= ~(rProbe | rRenew);
+        if (e->probes) --e->probes;
+        probesChanged = true;
+    }
+    if (rec.flags & (rProbe | rRenew)) return;  // live probe window: the probe fights on
+    if (!(rec.flags & rDesc) || !e->orbit) return;
+    if (pullouts >= kPulloutBudget || staged >= kStageMax) return;
+    if (curTick - rec.pullTick < kPulloutMin) return;
+    if (!MeleePullable(rec.mount)) return;
+    rec.pullTick = curTick;  // attempt cadence, successful or not
+    float wx, wz, y;
+    B tmp[kDescBytes];
+    memcpy(tmp, rec.desc, kDescBytes);
+    if (!MountWaypoint(rec, *e, wx, wz) || !InstallY(rec.mount, wx, wz, y)) return;  // lane failure already handed the order back; no fabricated height
+    memcpy(tmp + 0, &wx, 4); memcpy(tmp + 4, &y, 4); memcpy(tmp + 8, &wz, 4);
+    if (!NormalizeOrbit(rec.mount, tmp, wx, wz)) return;
+    Stage& s = stage[staged++];
+    s.mount = rec.mount; s.combat = 0; s.orbit = 1; s.pull = 1;
+    StageIdentity(s, rec, *e);
+    memcpy(s.desc, tmp, kDescBytes);
+    rec.wx = wx; rec.wz = wz; rec.ux = e->tx; rec.uz = e->tz; rec.rad = LaneRadius(*e, rec); rec.lastTick = curTick;
+    rec.flags &= ~(rActivate | rOrbit);
+    ++pullouts;
+}
+
 // -------------------------------------------------------------------------------------------- EndTick sweep (POD only)
 // Full pass every tick (a 512-record rotation delayed routing/order/death exits by 8 ticks - exits must be
 // immediate).  Restores (probe expiry / tracker-demanded / cancellation handbacks) are UNBUDGETED; only
 // waypoint renewal is budgeted.
 void Sweep() {
-    U renewals = 0;
+    U renewals = 0, pullouts = 0;
     bool probesChanged = false;
     const U start = renewalCursor < recordLimit ? renewalCursor : 0;
     for (U visited = 0; visited < recordLimit; ++visited) {
@@ -1259,8 +1349,13 @@ void Sweep() {
         const U r = index < recordLimit ? index : index - recordLimit;
         Record& rec = records[r];
         if (!rec.unit) continue;
-        // A native new order or routing decision wins over a scheduled probe expiry.
-        if (OwnedMount(rec.mount) == kStampEmpty) continue;
+        // A native new order or routing decision wins over a scheduled probe expiry.  A mount whose
+        // only blocker is the kind-5 melee cluster is actively pulled back out to its orbit lane.
+        bool held = false;
+        if (OwnedMount(rec.mount, &held) == kStampEmpty) {
+            if (held) TryPullout(rec, pullouts, probesChanged);
+            continue;
+        }
         // 1) probe exit: window elapsed, or the tracker pre-step demanded it.  Unconditional native
         //    movement restore (a combat node persists ~8 s on its own); arrival/drift never gate this.
         if ((rec.flags & rProbe) && (curTick >= rec.probeUntil || (rec.flags & rRenew))) {
@@ -1270,7 +1365,7 @@ void Sweep() {
             probesChanged = true;
             if ((rec.flags & rDesc) && Sane(rec.mount) && staged < kStageMax) {
                 Stage& s = stage[staged++];
-                s.mount = rec.mount; s.combat = 0; s.orbit = 0;
+                s.mount = rec.mount; s.combat = 0; s.orbit = 0; s.pull = 0;
                 StageIdentity(s, rec, *e);
                 memcpy(s.desc, rec.desc, kDescBytes);
                 float wx, wz, y;
@@ -1314,7 +1409,7 @@ void Sweep() {
         if (!MountWaypoint(rec, *e, wx, wz)) continue;
         if (staged >= kStageMax) continue;  // (defensive; renewals << stage capacity)
         Stage& s = stage[staged++];
-        s.mount = rec.mount; s.combat = 0; s.orbit = 0;
+        s.mount = rec.mount; s.combat = 0; s.orbit = 0; s.pull = 0;
         StageIdentity(s, rec, *e);
         memcpy(s.desc, rec.desc, kDescBytes);
         float y;
@@ -1330,9 +1425,10 @@ void Sweep() {
     if (probesChanged) RebuildProbeHash();
 }
 
-void Fire() {  // no guard, no epoch interposition: one plain native install per stage entry
+void Fire() {  // no epoch interposition: one plain native install per stage entry (pull-outs release the bind first, guarded)
     for (U i = 0; i < staged; ++i)
         if (Sane(stage[i].mount) && StageValid(stage[i])) {
+            if (stage[i].pull && !PullRelease(stage[i].mount)) continue;  // cluster kept its grip (or fault): retry next cadence
             const U fn = stage[i].combat ? combatInstall : moveInstall;
             reinterpret_cast<NativeOrder>(static_cast<uintptr_t>(fn))(stage[i].mount, 0, stage[i].desc);
             const U r = RecordFind(stage[i].mount);  // authority follows the install that actually ran
@@ -1387,6 +1483,7 @@ void Bind(U imageBase) {
     mountedCall = V(kMountedCall);
     terrainQuery = V(kTerrainQuery);
     orderAdjust = V(kOrderAdjust);
+    unbind = V(kUnbind);
     ownerTid = curTick = curModel = seq = targetCursor = allocCursor = faults = staged = probeCount = 0;
     epoch = 0;
     disabled = false;

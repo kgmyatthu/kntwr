@@ -32,6 +32,12 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   `--no-drag-ladder` opts out. Gameplay change: every multiplayer peer must run the same setting.
 - `--features all` now implies `cavalry_orbit` (already in the default set); `--no-cavalry-orbit`
   opts out, and listing the exclusive `ai_async2`/`brain2` suppresses the implication.
+- Cavalry orbit now pulls riders back out of sustained square melee: a mount (or its rider) bound
+  into the engine's melee-cluster controller, with no other movement blocker, is released through
+  the cluster's own member-release routine and sent back to its orbit lane (budgeted, 2 s per-mount
+  cadence; re-binds on renewed contact simply retry). Also frees the probe-wave slot of a prober
+  whose window expired while melee-bound — previously one bound probe wave permanently stopped a
+  unit's orbit probing.
 - `--wounded` is now implied by `--features all` at the default 33% (user acceptance after live
   battles); `--no-wounded` opts out, an explicit `--wounded=PCT` keeps its percent. Gameplay
   change: every multiplayer peer must run the same setting.
