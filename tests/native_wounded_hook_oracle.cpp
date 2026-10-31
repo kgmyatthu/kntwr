@@ -23,7 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
+#include <string>
 #include <vector>
 #include "native_image_relocation.h"
 #include "kntwr_runtime.h"
