@@ -317,8 +317,9 @@ typedef struct Options {
     BOOL mounted_officer_widen; /* --mounted-officer-widen: sets mounted_officer; the mount also raises the unit radius (KNTWR_MOUNTED_OFFICER_WIDEN) */
     BOOL drag_ladder;        /* --drag-ladder: GAMEPLAY feature, 60-file frontage ladder for drag-out formation (KNTWR_DRAG_LADDER in kntwr_config::gameplay_flags); implied by --features all unless --no-drag-ladder */
     BOOL no_drag_ladder;     /* --no-drag-ladder: opt out of --drag-ladder under --features all */
-    BOOL wounded;            /* --wounded[=PCT]: EXPERIMENTAL GAMEPLAY feature, FACE-tagged shot deaths flip to the native wounded state with probability PCT% (KNTWR_WOUNDED in kntwr_config::gameplay_flags); never implied by --features all */
+    BOOL wounded;            /* --wounded[=PCT]: GAMEPLAY feature, shot deaths flip to the native wounded state with probability PCT% (KNTWR_WOUNDED in kntwr_config::gameplay_flags); implied by --features all unless --no-wounded */
     uint32_t wounded_pct;    /* PCT 1..100 (default KNTWR_WOUNDED_PCT_DEFAULT) */
+    BOOL no_wounded;         /* --no-wounded: opt out of --wounded under --features all */
     BOOL no_cavalry_orbit;   /* --no-cavalry-orbit: opt out of cavalry_orbit (clears the default and the --features all implication) */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
@@ -7036,7 +7037,7 @@ static BOOL launch_game(Run *r)
                                (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
     if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
     if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
-    if (r->opt.wounded) say(L"  wounded: ON %lu%% (EXPERIMENTAL GAMEPLAY change: FACE-tagged shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
+    if (r->opt.wounded) say(L"  wounded: ON %lu%% (GAMEPLAY change: shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
     if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
     if (r->opt.formation_census)
         say(L"  formation census: ON (%ls, every %lu ticks, csv %ls)\n", r->opt.activate ? L"in-process observer after every routed tick" : L"launcher-side ReadProcessMemory",
@@ -7304,12 +7305,13 @@ static void usage(void)
         L"                        tick. The site verifies the stock bytes first; restored at stop. Words: drag_ladder_words (installed, calls, laddered, passthrough, last files),\n"
         L"                        receipt drag_ladder.\n"
         L"  --no-drag-ladder      opt out of --drag-ladder under --features all\n"
-        L"  --wounded[=PCT]       EXPERIMENTAL GAMEPLAY feature (NEVER implied by --features all; changes the simulation: every multiplayer peer must run the same setting): a shot\n"
+        L"  --wounded[=PCT]       GAMEPLAY feature (implied by --features all at the default PCT unless --no-wounded; changes the simulation: every multiplayer peer must run the same setting): a shot\n"
         L"                        soldier whose death clip carries the stock FACE_DOWN/FACE_UP orientation events enters the engine's own wounded state (front/back injury loops,\n"
         L"                        crawling; categories WOUNDED_* 0x330..0x338, shipped in every man animation table) with probability PCT% (1..100, default 33) instead of freezing\n"
-        L"                        as a static corpse. One detour at the kill-path state commit (0x653F1A); deterministic per-death roll; men without FACE-tagged clips (all\n"
-        L"                        non-musket/sabre families) are untouched by construction. Untagged death animations are orientation-classified automatically at table build. The site verifies the stock bytes first; restored at stop. Words: wounded_words\n"
-        L"                        (installed, calls, eligible, flipped, denied_roll, untagged), receipt wounded.\n"
+        L"                        as a static corpse. One detour at the kill-path state commit (0x653F1A); deterministic per-death roll. Untagged death animations are\n"
+        L"                        orientation-classified automatically at table build, so every soldier family is eligible. The sites verify the stock bytes first; restored at\n"
+        L"                        stop. Words: wounded_words (installed, calls, eligible, flipped, denied_roll, untagged), receipt wounded.\n"
+        L"  --no-wounded          opt out of --wounded under --features all\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"
         L"                        and records how deep (dM/range) AI infantry walk into their own range before they halt or start firing. One line every 10 s;\n"
@@ -7676,6 +7678,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             o->wounded_pct = KNTWR_WOUNDED_PCT_DEFAULT;
             if (val && !parse_uint(val, 1, 100, &o->wounded_pct)) { errsay(L"--wounded=PCT must be 1..100 (percent of FACE-tagged shot deaths that go wounded).\n"); return -1; }
         }
+        else if (!wcscmp(name, L"--no-wounded")) o->no_wounded = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -7870,6 +7873,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
     }
     if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_drag_ladder)
         o->drag_ladder = TRUE;
+    /* The shipping set also implies the wounded state flip (user decision 2026-11-01; GAMEPLAY change: shot deaths enter the
+       stock wounded/crawl loops with the default probability; every multiplayer peer must run the same setting). --no-wounded
+       opts out; an explicit --wounded[=PCT] keeps its percent. */
+    if (o->wounded && o->no_wounded) {
+        errsay(L"--wounded and --no-wounded are exclusive.\n");
+        return -1;
+    }
+    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_wounded && !o->wounded) {
+        o->wounded = TRUE;
+        o->wounded_pct = KNTWR_WOUNDED_PCT_DEFAULT;
+    }
     /* The shipping set (and --features all) implies the cavalry orbit (user decision 2026-10-31; GAMEPLAY change: cavalry of
        both sides orbit an attack-ordered square; replays desync vs vanilla). --no-cavalry-orbit opts out (clears the default
        too); ai_async2 and brain2 (exclusive with the orbit) suppress the implication rather than erroring, so
@@ -8286,7 +8300,7 @@ static int run_main(Run *r, int argc, wchar_t **argv)
                                    (r->opt.alloc_fix ? L"FIX (mode=2, zero-VA pathfinder subnode reclamation)" : L"CENSUS (mode=1, 32.25 MiB callsite table)"));
         if (r->opt.mounted_officer) say(L"  mounted officer: ON (%ls radius)\n", r->opt.mounted_officer_widen ? L"WIDENED" : L"infantry-spacing");
         if (r->opt.drag_ladder) say(L"  drag ladder: ON (GAMEPLAY change: files-per-row laddered at source, drag-out frontage snaps down to 60-file steps above 60 files; all multiplayer peers must use the same setting)\n");
-        if (r->opt.wounded) say(L"  wounded: ON %lu%% (EXPERIMENTAL GAMEPLAY change: FACE-tagged shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
+        if (r->opt.wounded) say(L"  wounded: ON %lu%% (GAMEPLAY change: shot deaths enter the native wounded/crawl loops instead of a static corpse; all multiplayer peers must use the same setting)\n", (unsigned long)r->opt.wounded_pct);
         if (r->opt.engage_census) say(L"  engage census: ON (read-only observer after every routed tick)\n");
         if (r->opt.allow_concurrent) say(L"  concurrent: ALLOWED (a second game instance may run; timings are not comparable between concurrent runs)\n");
         say(L"Validation complete; nothing was started.\n");

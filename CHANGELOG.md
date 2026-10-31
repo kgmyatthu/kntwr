@@ -7,7 +7,7 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
 
 ### Added
 
-- `--wounded[=PCT]` (EXPERIMENTAL, opt-in, not part of `--features all`): PCT percent (default 33)
+- `--wounded[=PCT]` (implied by `--features all` at the default 33%; `--no-wounded` opts out): PCT percent
   of shot deaths whose death clip carries a `FACE_DOWN`/`FACE_UP` orientation tag enter the stock
   wounded state (idle/injury/crawl loops) instead of becoming a static corpse. Uses only stock
   clips and the stock wounded state machine; two 8-byte entry detours: the death state commit, and
@@ -28,6 +28,9 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   `--no-drag-ladder` opts out. Gameplay change: every multiplayer peer must run the same setting.
 - `--features all` now implies `cavalry_orbit` (already in the default set); `--no-cavalry-orbit`
   opts out, and listing the exclusive `ai_async2`/`brain2` suppresses the implication.
+- `--wounded` is now implied by `--features all` at the default 33% (user acceptance after live
+  battles); `--no-wounded` opts out, an explicit `--wounded=PCT` keeps its percent. Gameplay
+  change: every multiplayer peer must run the same setting.
 
 ## [1.0.0] - 2026-10-28
 

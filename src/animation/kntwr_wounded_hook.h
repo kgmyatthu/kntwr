@@ -1,5 +1,5 @@
 // --wounded runtime hook (gameplay change via kntwr_config::gameplay_flags & KNTWR_WOUNDED + percent in KNTWR_WOUNDED_PCT_MASK;
-// EXPERIMENTAL opt-in, NOT implied by --features all). Policy: animation/kntwr_wounded.h. Evidence: analysis/FINDINGS.md
+// GAMEPLAY feature, implied by --features all unless --no-wounded). Policy: animation/kntwr_wounded.h. Evidence: analysis/FINDINGS.md
 // "Wounded/corpse animation infrastructure census" (2026-10-31) and "--wounded crash at 0x121EAC0" (2026-11-01).
 //
 // Site A 0x653F1A (inside kill path 0x653A10; ECX = normalized death category, EBP = man anim FSM M): stock bytes

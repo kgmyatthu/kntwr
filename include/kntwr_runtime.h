@@ -348,7 +348,7 @@ enum kntwr_memory_word {
    SHARED-SIMULATION change: all peers of a multiplayer game must run the same setting. Publishes drag_ladder_words. */
 #define KNTWR_DRAG_LADDER 0x1u
 /* --wounded[=PCT] (kntwr_config::gameplay_flags bit 1 + percent in bits 8..14; src/animation/kntwr_wounded*.{h,cpp}; analysis/FINDINGS.md "wounded census 2026-10-31"):
-   EXPERIMENTAL opt-in, NOT implied by --features all. Stock kill path 0x653A10 commits the death-anim state at 0x653F1A..0x653F38: only categories
+   GAMEPLAY feature, implied by --features all at the default percent unless --no-wounded. Stock kill path 0x653A10 commits the death-anim state at 0x653F1A..0x653F38: only categories
    [0x14521C8]=0x32A .. +[0x14521CC]=5 (KNOCKDOWN_2..KNOCKED_FLYING_1, melee/impact deaths) enter wounded state 0x4B; every bullet death picks a DEATH_*
    category and becomes a static corpse (state 0x2A). The hook detours the 8-byte range test (8B 15 C8 21 45 01 / 3B CA) and recomputes the state in the
    host: native knockdown range unchanged; otherwise, when the man's picked death clip carries the FACE_DOWN/FACE_UP .anim trailer events (clip +0x60
@@ -523,7 +523,7 @@ typedef struct kntwr_config {
     uint32_t ai_deferred;    /* Appended at offset 52 (config 52 -> 56 bytes). 0: off. Otherwise the KNTWR_AI_ASYNC2 deferred schedule (launcher --ai-deferred): K = bits 0..7 (KNTWR_AI_DEFERRED_K_MASK, 1..KNTWR_AI_DEFERRED_MAX_K) consumption delay in ticks, B = bits 8..23 (KNTWR_AI_DEFERRED_BUDGET_SHIFT, 1..65535) costed node units per inter-tick slice; requires KNTWR_AI_ASYNC2; other bits refused. */
     uint32_t ai_ctrl_flags;  /* Appended at offset 56 (config 56 -> 60 bytes). KNTWR_AI_CTRL_* flags (launcher --ai-ctrl-census/-histogram/-geometry/-verify) in bits 0..3, KNTWR_AI_CLAIM_ONCE / KNTWR_AI_CLAIM_ONCE_CENSUS (--ai-claim-once / --ai-claim-once-census) in bits 8 / 9, KNTWR_AI_TARGET_CULL_SHADOW / KNTWR_AI_TARGET_CULL / KNTWR_AI_RETARGET_JITTER in bits 10..12; 0: off. */
     uint32_t ai_prepass_flags; /* Appended at offset 60 (config 60 -> 64 bytes; the launcher's injection blob places the DLL path at sizeof(kntwr_config)). KNTWR_AI_PREPASS_* / KNTWR_AI_PRESIZE / KNTWR_AI_POLY* flags (launcher --ai-prepass-census, --ai-presize, --ai-poly-shadow, --ai-poly), KNTWR_AI_SPIRAL_CENSUS (--ai-spiral-census) and the spiral cap in metres in bits 16..31 (--ai-spiral-cap-m); 0: off. */
-    uint32_t gameplay_flags;   /* Appended at offset 64 (config 64 -> 68 bytes). KNTWR_GAMEPLAY_* opt-in gameplay hooks that need no routed tick and no enabled_mask bit (launcher --drag-ladder); 0: off (nothing patched); other bits refused. SHARED-SIMULATION change: every peer of a multiplayer game must run the same value. */
+    uint32_t gameplay_flags;   /* Appended at offset 64 (config 64 -> 68 bytes). KNTWR_GAMEPLAY_* gameplay hooks that need no routed tick and no enabled_mask bit (launcher --drag-ladder, --wounded[=PCT]); 0: off (nothing patched); other bits refused. SHARED-SIMULATION change: every peer of a multiplayer game must run the same value. */
 } kntwr_config;
 
 enum kntwr_phase {
