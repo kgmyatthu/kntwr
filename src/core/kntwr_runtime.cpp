@@ -3656,10 +3656,6 @@ void SampleCounters() {
     StateEnd();
     RetireBudgetOwned();
 }
-void PublishCavalry() { // monitor thread / stop path: diagnostic counters of the cavalry-orbit adapter (published before Reset discards them)
-    if (!(config.enabled_mask&KNTWR_CAVALRY_ORBIT)) return; // the row stays zero without the mask bit
-    StateBegin(); kntwr_cavalry::SnapshotWords(kntwr_state.cavalry_words); StateEnd();
-}
 bool StopModules() {
     const ULONGLONG deadline=GetTickCount64()+kStopTimeoutMs;
     while (Load(&tickOwner) || Load(&visualOwner)) {
@@ -3694,7 +3690,6 @@ bool StopModules() {
         // The flush detour must be gone before the adapter state it publishes is discarded: the detour calls
         // kntwr_cavalry::ObserveFlush on any thread. A refused removal leaves the detour live, so the adapter
         // state stays resident (fail closed: this stop reports failure and a later stop retries the removal).
-        PublishCavalry(); // final counters stay published after stop; Reset below discards the adapter state
         if (!kntwr_cavalry_intent_hook::Installed() || kntwr_cavalry_intent_hook::Remove())
             kntwr_cavalry::Reset();
         else { RecordError(SlotConflict,0x542ae0u); all=false; }
@@ -4046,7 +4041,6 @@ DWORD WINAPI Monitor(void*) {
         PublishAnimGuard();
         PublishDragLadder();
         PublishWounded();
-        PublishCavalry();
         if (Load(&enabled)) {
             // Preserve native 5F9440/5EE050 joins, scheduling and mode writes.
             // Both synchronous calls and TASK enter the same route; +2829C
@@ -4378,7 +4372,6 @@ static U StartImpl(void* raw) {
     for (U i=0;i<KNTWR_DRAG_LADDER_WORDS;++i) kntwr_state.drag_ladder_words[i]=0;
     kntwr_wounded_hook::ResetRow();
     for (U i=0;i<KNTWR_WOUNDED_WORDS;++i) kntwr_state.wounded_words[i]=0;
-    for (U i=0;i<KNTWR_CAVALRY_WORDS;++i) kntwr_state.cavalry_words[i]=0;
     kntwr_engage_census::Snapshot(kntwr_state.engage_census_words); // zero row (Reset above) or the armed header
     for (U cls=0;cls<KNTWR_IDLE_NODE_CLASSES;++cls) {
         for (U i=0;i<KNTWR_NODE_WORDS;++i) kntwr_state.idle_node_words[cls][i]=0;

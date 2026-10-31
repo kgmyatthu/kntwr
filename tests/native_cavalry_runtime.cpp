@@ -1285,33 +1285,22 @@ struct GoBuf {
     bool Untouched() const { return std::memcmp(p, snap, 12) == 0; }
 };
 
-// Controlled 0x65FEE0 member release: records the released agent and clears the binding exactly like
-// the native release (0x65FF20 -> 0x63CE20 zeroes +0x628).  UnbindStick models a cluster that keeps
-// its grip (list anomaly): the adapter must then install nothing and leave the retry on its cadence.
-std::vector<U> g_unbindLog;
-void __fastcall UnbindProbe(U ctl, U, U agent) {
-    g_unbindLog.push_back(agent);
-    if (Rd(agent + 0x628) == ctl) Put(agent + 0x628, 0);
-}
-void __fastcall UnbindStick(U, U, U agent) { g_unbindLog.push_back(agent); }
-
 // Installs the probes and the exact call-site allowlists (Bind() does this in production; the World fixture does not call it).
 struct NativeGuard {
     U terrain = terrainQuery, move = moveInstall, combat = combatInstall, cRet = combatRet, cRetCmd = combatRetCmd,
-      gEntity = goRetEntity, gPoint = goRetPoint, ub = unbind;
+      gEntity = goRetEntity, gPoint = goRetPoint;
     NativeGuard() {
         delta = 0;
         terrainQuery = Address(reinterpret_cast<void*>(&CountingTerrain));
         moveInstall = Address(reinterpret_cast<void*>(&InstallProbe));
         combatInstall = Address(reinterpret_cast<void*>(&CombatInstallProbe));
-        unbind = Address(reinterpret_cast<void*>(&UnbindProbe));
         combatRet = V(kCombatRet); combatRetCmd = V(kCombatRetCmd);
         goRetEntity = V(kGoRetEntity); goRetPoint = V(kGoRetPoint);
         ResetNative();
     }
     ~NativeGuard() {
         terrainQuery = terrain; moveInstall = move; combatInstall = combat; combatRet = cRet; combatRetCmd = cRetCmd;
-        goRetEntity = gEntity; goRetPoint = gPoint; unbind = ub;
+        goRetEntity = gEntity; goRetPoint = gPoint;
         disabled = false; epoch = 0;
     }
 };
@@ -2093,167 +2082,6 @@ void SplitFlowReservationSurvivesClassificationChange() {
     terrainQuery = savedTerrain;
 }
 
-// Melee pull-out: a mount bound into the kind-5 melee cluster (+0x628, vtable 0x1334250) is released
-// through the group's own member release and sent back to its orbit lane.  Any other binding kind,
-// refusal, routing, the per-record cadence and a refused release all leave native ownership alone.
-void MeleePulloutRecoversOrbit() {
-    {   // bound mount: released, orbit re-installed, authority restamped
-        Charge c(Charge::Installed);
-        std::vector<B> ctl(0x10);
-        Put(Address(ctl.data()), V(kMeleeClusterVt));
-        g_unbindLog.clear();
-        Put(c.mount() + 0x628, Address(ctl.data()));
-        c.w.Tick(25); Sweep();
-        Check(staged == 1 && stage[0].pull == 1 && stage[0].orbit == 1 && stage[0].mount == c.mount(),
-              "a melee-cluster-bound mount stages a budgeted pull-out");
-        Check(StageValid(stage[0]), "the pull stage is admissible while the bind persists");
-        Fire();
-        Check(g_unbindLog.size() == 1 && g_unbindLog[0] == c.mount() && Rd(c.mount() + 0x628) == 0,
-              "the group's own member release freed the mount");
-        c.ExpectOneInstall(c.mount(), "the orbit waypoint is re-installed after the release", "melee pull-out");
-        Check(c.rec()->pullTick == 25, "the attempt stamped the cadence tick");
-        // repulse geometry: the first leg steps radially out of the square ring through the rider
-        const UnitEntry* e = EntryByUnit(c.w.unit);
-        const float mx = *reinterpret_cast<float*>(c.mount() + 0x48), mz = *reinterpret_cast<float*>(c.mount() + 0x50);
-        const float dx = mx - e->tx, dz = mz - e->tz, len = std::hypot(dx, dz);
-        const float out = std::min(len + settings.clearance_margin, 100.0f);
-        const float wx = RdDescF(g_instDesc, 0), wz = RdDescF(g_instDesc, 8);
-        Check(std::fabs(std::hypot(wx - e->tx, wz - e->tz) - out) < 1e-3f,
-              "the repulse waypoint stands one clearance margin further out");
-        Check(std::fabs((wx - e->tx) * dz - (wz - e->tz) * dx) < 1e-2f * len &&
-                  (wx - e->tx) * dx + (wz - e->tz) * dz > 0,
-              "the repulse direction is radial through the rider, away from the square");
-    }
-    {   // the rider is bound too: every member of the pair is released before the install
-        Charge c(Charge::Installed);
-        std::vector<B> ctl(0x10), rider(0x700);
-        std::array<U, 1> riders{Address(rider.data())};
-        Put(Address(ctl.data()), V(kMeleeClusterVt));
-        Put(c.mount() + 0x66C, 1); Put(c.mount() + 0x670, Address(riders.data()));
-        g_unbindLog.clear();
-        Put(c.mount() + 0x628, Address(ctl.data()));
-        Put(Address(rider.data()) + 0x628, Address(ctl.data()));
-        c.w.Tick(25); Sweep(); Fire();
-        Check(g_unbindLog.size() == 2 && g_unbindLog[0] == c.mount() && g_unbindLog[1] == Address(rider.data()),
-              "mount and rider are both released");
-        Check(Rd(c.mount() + 0x628) == 0 && Rd(Address(rider.data()) + 0x628) == 0 && g_instCalls == 1,
-              "the pair is free and the orbit install ran");
-    }
-    {   // cadence: a fresh re-bind is not hammered; the retry waits kPulloutMin ticks
-        Charge c(Charge::Installed);
-        std::vector<B> ctl(0x10);
-        Put(Address(ctl.data()), V(kMeleeClusterVt));
-        g_unbindLog.clear();
-        Put(c.mount() + 0x628, Address(ctl.data()));
-        c.w.Tick(25); Sweep(); Fire();
-        Check(g_instCalls == 1 && Rd(c.mount() + 0x628) == 0, "first pull-out fired");
-        ResetNative();
-        Put(c.mount() + 0x628, Address(ctl.data()));  // the square's men re-grabbed the rider
-        c.w.Tick(30); Sweep();
-        Check(staged == 0, "a re-bind inside the cadence window is left alone");
-        c.w.Tick(45); Sweep();
-        Check(staged == 1 && stage[0].pull == 1, "the next cadence tick retries the pull-out");
-    }
-    {   // non-cluster bindings, refusal and routing stay strictly native
-        Charge c(Charge::Installed);
-        std::vector<B> pair(0x10);
-        Put(Address(pair.data()), V(0x1334218u));  // avoidance-pair vtable: resolves on its own
-        Put(c.mount() + 0x628, Address(pair.data()));
-        c.w.Tick(25); Sweep();
-        Check(staged == 0 && c.rec() != nullptr, "an avoidance pair is not pulled before the stuck threshold");
-        Put(Address(pair.data()), V(kMeleeClusterVt));
-        Put(c.mount() + 0x224, 0x14);
-        c.w.Tick(46); Sweep();
-        Check(staged == 0 && c.rec() != nullptr, "horse refusal is never interrupted");
-        Put(c.mount() + 0x224, 0);
-        Put(c.mount() + 0x1d8, 0x3c);
-        c.w.Tick(67); Sweep();
-        Check(staged == 0 && c.rec() == nullptr, "routing drops the record instead of pulling");
-    }
-    {   // the cluster keeps its grip: nothing is installed and the retry stays on the cadence
-        Charge c(Charge::Installed);
-        std::vector<B> ctl(0x10);
-        Put(Address(ctl.data()), V(kMeleeClusterVt));
-        g_unbindLog.clear();
-        unbind = Address(reinterpret_cast<void*>(&UnbindStick));
-        Put(c.mount() + 0x628, Address(ctl.data()));
-        c.w.Tick(25); Sweep(); Fire();
-        Check(g_unbindLog.size() == 1 && g_instCalls == 0 && Rd(c.mount() + 0x628) != 0,
-              "a refused release installs nothing");
-        Check(c.rec() != nullptr && c.rec()->pullTick == 25, "the retry stays scheduled on the cadence");
-    }
-    {   // only the RIDER is bound (the mount's own fields stay clean, so OwnedMount still owns the
-        // record): the owned-path sweep must pull the pair all the same - this exact shape froze live
-        Charge c(Charge::Installed);
-        std::vector<B> ctl(0x10), rider(0x700);
-        std::array<U, 1> riders{Address(rider.data())};
-        Put(Address(ctl.data()), V(kMeleeClusterVt));
-        Put(c.mount() + 0x66C, 1); Put(c.mount() + 0x670, Address(riders.data()));
-        g_unbindLog.clear();
-        Put(Address(rider.data()) + 0x628, Address(ctl.data()));
-        const U riderPulls = pullWords[wRiderPulls], released = pullWords[wReleased];
-        c.w.Tick(25); Sweep();
-        Check(staged == 1 && stage[0].pull == 1 && stage[0].orbit == 1 && stage[0].mount == c.mount(),
-              "a rider-bound pair stages a pull-out through the owned path");
-        Fire();
-        Check(g_unbindLog.size() == 1 && g_unbindLog[0] == Address(rider.data()) &&
-                  Rd(Address(rider.data()) + 0x628) == 0,
-              "only the bound rider needed the release");
-        c.ExpectOneInstall(c.mount(), "the orbit waypoint is re-installed after the rider release", "rider-bound pull-out");
-        Check(pullWords[wRiderPulls] == riderPulls + 1 && pullWords[wReleased] == released + 1,
-              "the diagnostic words count the rider-path pull and the release");
-    }
-    {   // a persistently re-forming avoidance pair (vt 0x1334218) pins the rider with a stale waypoint;
-        // after kAvoidStuckMin consecutive held sweeps it is escaped WITHOUT any release call
-        Charge c(Charge::Installed);
-        std::vector<B> pair(0x10);
-        Put(Address(pair.data()), V(0x1334218u));
-        g_unbindLog.clear();
-        Put(c.mount() + 0x628, Address(pair.data()));
-        const U avoid = pullWords[wAvoidPulls];
-        for (U t = 25; t < 25 + kAvoidStuckMin; ++t) {
-            c.w.Tick(t); Sweep();
-            Check(staged == 0, "below the stuck threshold the pair stays native");
-        }
-        c.w.Tick(25 + kAvoidStuckMin); Sweep();
-        Check(staged == 1 && stage[0].pull == 1 && stage[0].orbit == 1 && stage[0].mount == c.mount(),
-              "the stuck avoidance hold stages an escape");
-        Fire();
-        Check(g_unbindLog.empty() && Rd(c.mount() + 0x628) != 0,
-              "no release call: the pair object itself is never touched");
-        c.ExpectOneInstall(c.mount(), "the escape waypoint is installed around the pair", "avoidance escape");
-        Check(pullWords[wAvoidPulls] == avoid + 1 && c.rec()->avoidSince == 0,
-              "the escape counts as avoid_pulls and re-arms the threshold");
-    }
-}
-
-// A probe wave whose window expired while the prober is melee-bound must surrender its wave slot:
-// without the pull-out, e->probes stayed pinned and the unit could never admit a probe again.
-void MeleeProbeSlotRecovery() {
-    NativeGuard guard;
-    World w;
-    terrainQuery = Address(reinterpret_cast<void*>(&FlatTerrain));
-    w.Tick(1);
-    UnitEntry* e = EntryByUnit(w.unit);
-    Check(e && e->orbit, "setup: the unit orbits its square");
-    w.CaptureProbe();
-    Record& rec = records[0];
-    MoveDesc(rec.desc, 4.5f);
-    e->probes = 1;
-    rec.probeUntil = 5;
-    std::vector<B> ctl(0x10);
-    Put(Address(ctl.data()), V(kMeleeClusterVt));
-    g_unbindLog.clear();
-    Put(w.ownArr[0] + 0x628, Address(ctl.data()));
-    curTick = 4; staged = 0; Sweep();
-    Check(e->probes == 1 && (records[0].flags & rProbe) != 0 && staged == 0, "a live probe window keeps fighting");
-    w.Tick(25); Sweep();
-    Check(e->probes == 0 && !(records[0].flags & rProbe), "an expired probe surrenders its wave slot while bound");
-    Check(staged == 1 && stage[0].pull == 1, "the freed prober is pulled back to its lane");
-    Fire();
-    Check(g_unbindLog.size() == 1 && g_instCalls == 1 && g_instMount == w.ownArr[0], "released and re-installed");
-}
-
 }
 int main() {
     SplitFlowOppositeSides(); SplitFlowAxisFrozen(); SplitFlowStickyThroughProbeAndController();
@@ -2267,7 +2095,6 @@ int main() {
     SquareActivationTransitions();
     ArmedLifecycle();
     TemporaryControllerOwnership(); FirstCaptureDuringTemporaryOwnership();
-    MeleePulloutRecoversOrbit(); MeleeProbeSlotRecovery();
     MultiRowOrbit(); MultiRowBoundaryHandback();
     NormalizeOrbitSeam(); MovementTimingNormalization(); InvalidSpeedKeepsNative();
     OrbitMovementDoesNotInheritChargeStance();

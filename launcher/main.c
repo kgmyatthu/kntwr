@@ -2695,22 +2695,6 @@ static void print_wounded(const uint32_t *w)
     for (i = 0; i < KNTWR_WOUNDED_WORDS; ++i) say(L" %hs=%lu", names[i], (unsigned long)w[i]);
     say(L"\n");
 }
-/* --cavalry-orbit (src/army/native_cavalry_runtime.h): printed only when the runtime published the row (word 0 = version). last_bind_vt / last_hold are raw values, printed in hex. */
-static void print_cavalry(const uint32_t *w)
-{
-    static const char *const names[KNTWR_CAVALRY_WORDS] = { KNTWR_CAVALRY_LABELS };
-    unsigned i;
-    if (!w[0]) return;
-    say(L"  cavalry_orbit: ticks=%lu records=%lu orbit_units=%lu held=%lu pulls=%lu rider_pulls=%lu released=%lu release_refused=%lu not_pullable=%lu\n",
-        (unsigned long)w[1], (unsigned long)w[2], (unsigned long)w[3], (unsigned long)w[4], (unsigned long)w[5], (unsigned long)w[6],
-        (unsigned long)w[7], (unsigned long)w[8], (unsigned long)w[12]);
-    say(L"  cavalry_orbit words:");
-    for (i = 0; i < KNTWR_CAVALRY_WORDS; ++i) {
-        if (i == 13 || i == 14) say(L" %hs=0x%08lX", names[i], (unsigned long)w[i]);
-        else say(L" %hs=%lu", names[i], (unsigned long)w[i]);
-    }
-    say(L"\n");
-}
 static void print_engage_census(const uint32_t *w)
 {
     print_engage_census_line(w);
@@ -2953,7 +2937,6 @@ static void print_module_words(const kntwr_status *s, uint32_t brain_flags, uint
     print_anim_guard(s->anim_guard_words);
     print_drag_ladder(s->drag_ladder_words);
     print_wounded(s->wounded_words);
-    print_cavalry(s->cavalry_words);
     print_engage_census(s->engage_census_words);
     print_ai_ctrl(s->ai_ctrl_reuse_words, ai_ctrl_flags);
     print_ai_prepass(s->ai_prepass_census_words);
@@ -4787,19 +4770,6 @@ static void sb_wounded(Sb *b, const Run *r)
     for (i = 0; i < KNTWR_WOUNDED_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.wounded_words[i]);
     sb_fmt(b, "}},\n");
 }
-/* --cavalry-orbit (src/army/native_cavalry_runtime.h): the adapter's diagnostic counters; null unless the cavalry_orbit mask bit was requested. */
-static void sb_cavalry(Sb *b, const Run *r)
-{
-    static const char *const names[KNTWR_CAVALRY_WORDS] = { KNTWR_CAVALRY_LABELS };
-    unsigned i;
-    if (!(r->opt.mask & KNTWR_CAVALRY_ORBIT)) {
-        sb_fmt(b, "  \"cavalry_orbit_words\": null,\n");
-        return;
-    }
-    sb_fmt(b, "  \"cavalry_orbit_words\": {\"have_status\": %s, \"words\": {", r->have_status ? "true" : "false");
-    for (i = 0; i < KNTWR_CAVALRY_WORDS; ++i) sb_fmt(b, "%s\"%s\": %lu", i ? ", " : "", names[i], (unsigned long)r->last.cavalry_words[i]);
-    sb_fmt(b, "}},\n");
-}
 static void sb_u32_array(Sb *b, const char *name, const uint32_t *w, unsigned n)
 {
     unsigned i;
@@ -5650,7 +5620,6 @@ static BOOL write_receipt(Run *r, int exit_code)
     sb_anim_guard(&b, r);
     sb_drag_ladder(&b, r);
     sb_wounded(&b, r);
-    sb_cavalry(&b, r);
     sb_engage_census(&b, r);
     sb_brain2(&b, r);
     if (r->have_status) {
@@ -7411,7 +7380,7 @@ static void usage(void)
         L"                        listing the exclusive ai_async2/brain2 suppresses the implication): cavalry of\n"
         L"                        both sides orbit an explicitly attack-ordered square in periodic small rider melee waves\n"
         L"                        with native eligible mounted fire and immediate native handback (mask bit cavalry_orbit,\n"
-        L"                        0x100000; status row cavalry_words, receipt cavalry_orbit_words). Routes its own tick; excludes ai_async2 and brain2\n"
+        L"                        0x100000; no status row, no logging). Routes its own tick; excludes ai_async2 and brain2\n"
         L"                        (including serial cloned-driver diagnostics); replays desync vs vanilla\n"
         L"  --no-cavalry-orbit    opt out of cavalry_orbit (default set and --features all implication)\n"
         L"  --army-storm-census   requires profile or a simulation feature; exclusive with --army-unit-shadow: opt-in site-18 storm\n"
