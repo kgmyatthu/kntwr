@@ -34,7 +34,9 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   opts out, and listing the exclusive `ai_async2`/`brain2` suppresses the implication.
 - Cavalry orbit now pulls riders back out of sustained square melee: a mount (or its rider) bound
   into the engine's melee-cluster controller, with no other movement blocker, is released through
-  the cluster's own member-release routine and sent back to its orbit lane (budgeted, 2 s per-mount
+  the cluster's own member-release routine and repulsed — the first leg steps radially out of the
+  square ring (the lane point could path straight back through the square, or an adjacent one,
+  that grabbed the rider), then normal renewals resume the circle (budgeted, 1 s per-mount
   cadence; re-binds on renewed contact simply retry). Also frees the probe-wave slot of a prober
   whose window expired while melee-bound — previously one bound probe wave permanently stopped a
   unit's orbit probing.

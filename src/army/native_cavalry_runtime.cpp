@@ -90,7 +90,7 @@ constexpr U kRenewMin = 10;            // ticks between two installs on the same
 constexpr U kMaxAge = 80;              // forced refresh even without arrival or drift
 constexpr U kRenewBudget = 16;         // renewal installs per EndTick (budgeted)
 constexpr U kAdmitBudget = 16;         // probe combat admissions per tick (budgeted)
-constexpr U kPulloutMin = 20;          // ticks between melee pull-out attempts on the same mount
+constexpr U kPulloutMin = 10;          // ticks (1 s) between melee pull-out attempts on the same mount
 constexpr U kPulloutBudget = 8;        // melee pull-outs per EndTick (budgeted)
 constexpr U kStageMax = kMaxRecords + kAdmitBudget + kRenewBudget + kPulloutBudget;
 constexpr U kMaxFaults = 8;            // guarded faults before the adapter disables itself until Reset
@@ -1283,7 +1283,9 @@ void PlanTracker(U tracker, U agent) {
 // cluster releases members only on lost contact (0x62F750 via 0x6735E0), which a held mount cannot
 // create.  While the unit still orbits, release the mount through the group's own member release
 // (0x65FEE0: clears +0x628 and the group bitset; list guards tolerate the external release) and
-// re-install its orbit waypoint.  Cadenced per record and budgeted per tick; a re-bind on renewed
+// repulse it: the first leg steps radially OUT of the square ring (the lane waypoint may path right
+// back through the square - or through an ADJACENT square - that grabbed the rider), then the normal
+// renewals resume the circle.  Cadenced per record and budgeted per tick; a re-bind on renewed
 // contact is expected and simply retried, so riders grind free instead of parking in melee forever.
 void OnFault();
 using UnbindFn = void(__fastcall*)(U controller, U, U agent);  // thiscall(controller; agent), ret 4
@@ -1303,6 +1305,25 @@ bool PullRelease(U mount) {  // guarded: Fire runs outside the tick __try
     } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; OnFault(); }
     --kntwr::probeDepth;
     return ok;
+}
+// Repulse waypoint: straight out from the target square centre through the rider's own position,
+// one clearance margin further than where he stands (capped by the user's 100-unit outer envelope).
+// Falls back to the lane waypoint when degenerate or already at the envelope.
+bool EscapeWaypoint(const Record& rec, const UnitEntry& e, float& wx, float& wz) {
+    if (!Sane(rec.mount)) return false;
+    const float mx = RdF(rec.mount + kAX), mz = RdF(rec.mount + kAZ);
+    if (!Good(mx) || !Good(mz) || !Good(e.tx) || !Good(e.tz)) return false;
+    float memberRadius;
+    if (!MemberRadius(rec.unit, memberRadius)) return false;
+    const float dx = FSub(mx, e.tx), dz = FSub(mz, e.tz);
+    const float len = FSqrt(FAdd(FMul(dx, dx), FMul(dz, dz)));
+    if (!FLt(0.25f, len)) return false;              // degenerate: standing on the square centre
+    const float out = FMin(FAdd(len, settings.clearance_margin), static_cast<float>(kOuterLimit));
+    if (!FLt(len, out)) return false;                // already at the outer envelope
+    const float s = FDiv(out, len);
+    wx = FAdd(e.tx, FMul(dx, s));
+    wz = FAdd(e.tz, FMul(dz, s));
+    return Good(wx) && Good(wz) && BoundaryPoint(wx, wz, memberRadius);
 }
 // Sweep-side planner for one held record.  `held` from OwnedMount proves everything else is valid
 // (live order, proven member, live entry).  The probe bookkeeping must run even when the mount cannot
@@ -1324,7 +1345,9 @@ void TryPullout(Record& rec, U& pullouts, bool& probesChanged) {
     float wx, wz, y;
     B tmp[kDescBytes];
     memcpy(tmp, rec.desc, kDescBytes);
-    if (!MountWaypoint(rec, *e, wx, wz) || !InstallY(rec.mount, wx, wz, y)) return;  // lane failure already handed the order back; no fabricated height
+    if (!EscapeWaypoint(rec, *e, wx, wz) &&
+        !MountWaypoint(rec, *e, wx, wz)) return;     // lane failure already handed the order back
+    if (!InstallY(rec.mount, wx, wz, y)) return;     // terrain unavailable: no fabricated height
     memcpy(tmp + 0, &wx, 4); memcpy(tmp + 4, &y, 4); memcpy(tmp + 8, &wz, 4);
     if (!NormalizeOrbit(rec.mount, tmp, wx, wz)) return;
     Stage& s = stage[staged++];

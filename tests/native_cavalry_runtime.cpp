@@ -2112,6 +2112,17 @@ void MeleePulloutRecoversOrbit() {
               "the group's own member release freed the mount");
         c.ExpectOneInstall(c.mount(), "the orbit waypoint is re-installed after the release", "melee pull-out");
         Check(c.rec()->pullTick == 25, "the attempt stamped the cadence tick");
+        // repulse geometry: the first leg steps radially out of the square ring through the rider
+        const UnitEntry* e = EntryByUnit(c.w.unit);
+        const float mx = *reinterpret_cast<float*>(c.mount() + 0x48), mz = *reinterpret_cast<float*>(c.mount() + 0x50);
+        const float dx = mx - e->tx, dz = mz - e->tz, len = std::hypot(dx, dz);
+        const float out = std::min(len + settings.clearance_margin, 100.0f);
+        const float wx = RdDescF(g_instDesc, 0), wz = RdDescF(g_instDesc, 8);
+        Check(std::fabs(std::hypot(wx - e->tx, wz - e->tz) - out) < 1e-3f,
+              "the repulse waypoint stands one clearance margin further out");
+        Check(std::fabs((wx - e->tx) * dz - (wz - e->tz) * dx) < 1e-2f * len &&
+                  (wx - e->tx) * dx + (wz - e->tz) * dz > 0,
+              "the repulse direction is radial through the rider, away from the square");
     }
     {   // the rider is bound too: every member of the pair is released before the install
         Charge c(Charge::Installed);
