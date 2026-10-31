@@ -321,6 +321,7 @@ typedef struct Options {
     uint32_t wounded_pct;    /* PCT 1..100 (default KNTWR_WOUNDED_PCT_DEFAULT) */
     BOOL no_wounded;         /* --no-wounded: opt out of --wounded under --features all */
     BOOL no_cavalry_orbit;   /* --no-cavalry-orbit: opt out of cavalry_orbit (clears the default and the --features all implication) */
+    BOOL gameplay_only;      /* --gameplay-only: replace the default feature set; no optimizations, all gameplay features (cavalry_orbit mask bit + implied --mounted-officer --drag-ladder --wounded); exclusive with --features */
     BOOL engage_census;      /* --engage-census: opt-in read-only AI engagement-depth diagnostic (KNTWR_ENGAGE_CENSUS); never implied by --features all */
     BOOL formation_census;   /* --formation-census[=EVERY]: opt-in read-only formation compactness census (KNTWR_FORMATION_CENSUS with a runtime; launcher-side RPM census with --no-activate) */
     uint32_t formation_census_every; /* EVERY model ticks (0 = default 30) */
@@ -7292,6 +7293,10 @@ static void usage(void)
         L"  --no-arena-release    opt out of --arena-release under --features all\n"
         L"  --heap-optimize       opt-in HeapOptimizeResources at teardown and <640 MiB watermark (1 Hz GlobalMemoryStatusEx\n"
         L"                        sample even without --va-watch; arena_words, receipt arena). Default off.\n"
+        L"  --gameplay-only       replace the default all,cavalry_orbit feature set: NO optimizations, every gameplay feature\n"
+        L"                        (cavalry_orbit plus the implied --mounted-officer --drag-ladder --wounded at the default 33%).\n"
+        L"                        The --no-* opt-outs and an explicit --wounded=PCT still apply; explicit positive switches and\n"
+        L"                        their requirements too. Exclusive with --features (list features explicitly instead)\n"
         L"  --mounted-officer     GAMEPLAY feature (implied by --features all unless --no-mounted-officer; replays desync vs vanilla): an infantry unit whose unit_stats_land\n"
         L"                        row fills the mount columns (mount_model, mount_entity, mount_animations_table, mount_armour, mount_health) with horse = 0\n"
         L"                        gets exactly one mount for its officer (men[0]). Data decides which units qualify. Redirects the unit constructor call\n"
@@ -7543,6 +7548,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 {
     int i;
     uint32_t feature_options = 0;
+    BOOL features_given = FALSE;
     o->mask = KNTWR_ALL | KNTWR_CAVALRY_ORBIT;
     o->workers = 8;
     o->poll_ms = 100;
@@ -7679,6 +7685,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
             if (val && !parse_uint(val, 1, 100, &o->wounded_pct)) { errsay(L"--wounded=PCT must be 1..100 (percent of FACE-tagged shot deaths that go wounded).\n"); return -1; }
         }
         else if (!wcscmp(name, L"--no-wounded")) o->no_wounded = TRUE;
+        else if (!wcscmp(name, L"--gameplay-only")) o->gameplay_only = TRUE;
         else if (!wcscmp(name, L"--army-storm-sample-ms")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 255, &o->army_storm_sample_ms)) { errsay(L"--army-storm-sample-ms must be 1..255.\n"); return -1; }
@@ -7729,6 +7736,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         else if (!wcscmp(name, L"--features")) {
             NEEDVAL();
             if (!parse_features(val, &o->mask)) return -1;
+            features_given = TRUE;
         } else if (!wcscmp(name, L"--workers")) {
             NEEDVAL();
             if (!parse_uint(val, 1, 16, &o->workers)) { errsay(L"--workers must be 1..16.\n"); return -1; }
@@ -7782,6 +7790,17 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
 #undef NEEDVAL
     }
     o->mask |= feature_options; /* independent of the position of --features */
+    /* --gameplay-only (user decision 2026-11-01): no optimizations, all gameplay features. The mask keeps only the
+       cavalry orbit (plus explicit positive feature switches); the gameplay implications below treat it like the
+       shipping set, so --no-mounted-officer/--no-drag-ladder/--no-wounded/--no-cavalry-orbit and an explicit
+       --wounded[=PCT] keep working. Optimization implications stay keyed on the full shipping set and stay off. */
+    if (o->gameplay_only) {
+        if (features_given) {
+            errsay(L"--gameplay-only replaces the feature set and excludes --features; list features explicitly instead.\n");
+            return -1;
+        }
+        o->mask = KNTWR_CAVALRY_ORBIT | feature_options;
+    }
     /* Check explicit contradictions before adding defaults, independent of argument order. */
     if (o->no_tick_pcore && (o->tick_pcore || o->tick_core_ab)) {
         errsay(L"--no-tick-pcore conflicts with --tick-pcore and --tick-core-ab.\n");
@@ -7863,7 +7882,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--mounted-officer / --mounted-officer-widen and --no-mounted-officer are exclusive.\n");
         return -1;
     }
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_mounted_officer)
+    if (((o->mask & KNTWR_ALL) == KNTWR_ALL || o->gameplay_only) && !o->no_mounted_officer)
         o->mounted_officer = TRUE;
     /* The shipping set also implies the drag ladder (user decision 2026-10-30; GAMEPLAY change: drag-out frontage snaps down to
        60-file steps above 60 files; every multiplayer peer must run the same setting). --no-drag-ladder opts out. */
@@ -7871,7 +7890,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--drag-ladder and --no-drag-ladder are exclusive.\n");
         return -1;
     }
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_drag_ladder)
+    if (((o->mask & KNTWR_ALL) == KNTWR_ALL || o->gameplay_only) && !o->no_drag_ladder)
         o->drag_ladder = TRUE;
     /* The shipping set also implies the wounded state flip (user decision 2026-11-01; GAMEPLAY change: shot deaths enter the
        stock wounded/crawl loops with the default probability; every multiplayer peer must run the same setting). --no-wounded
@@ -7880,7 +7899,7 @@ static int parse_args(int argc, wchar_t **argv, Options *o)
         errsay(L"--wounded and --no-wounded are exclusive.\n");
         return -1;
     }
-    if ((o->mask & KNTWR_ALL) == KNTWR_ALL && !o->no_wounded && !o->wounded) {
+    if (((o->mask & KNTWR_ALL) == KNTWR_ALL || o->gameplay_only) && !o->no_wounded && !o->wounded) {
         o->wounded = TRUE;
         o->wounded_pct = KNTWR_WOUNDED_PCT_DEFAULT;
     }

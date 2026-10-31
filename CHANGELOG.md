@@ -15,6 +15,10 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   clip slots are assigned (the stock table maps every `WOUNDED_*`/`FALL_OVER_*` category to "no
   pose", which froze wounded men visually; repairing it after slot assignment instead crashed the
   keyframe sampler with slot -1). Untagged men death clips are FACE-tagged at table build from a generated orientation table (221 clips classified by final-frame forward kinematics; generator tools/gen_wounded_orient.py), raising wounded eligibility from ~2% to ~90% of shot deaths. Gameplay change: every multiplayer peer must run the same setting.
+- `--gameplay-only`: replace the default `all,cavalry_orbit` feature set with no optimizations and
+  every gameplay feature (cavalry orbit plus the implied `--mounted-officer`, `--drag-ladder`,
+  `--wounded` at the default 33%). The `--no-*` opt-outs and an explicit `--wounded=PCT` still
+  apply; exclusive with `--features`.
 
 ### Fixed
 
