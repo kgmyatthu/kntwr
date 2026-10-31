@@ -7,6 +7,8 @@
 //    percentage within tolerance for pct 1/33/50/100 over large sweeps; pct=100 always flips, pct=0 never does.
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
+#include <string>
 #include "animation/kntwr_wounded.h"
 
 using U = uint32_t;
@@ -89,6 +91,45 @@ int main() {
         if (roll == 0 || roll > 99) continue;
         Require(!w::Flip(rnd, key, roll), "pct == roll denies");
         Require(w::Flip(rnd, key, roll + 1), "pct == roll+1 flips");
+    }
+
+    // ---- orientation table: hash, lookup, ordering, case folding ----
+    {
+        const wchar_t* upName = KNTWR_WOUNDED_ORIENT_SAMPLE_UP_NAME;
+        const wchar_t* downName = KNTWR_WOUNDED_ORIENT_SAMPLE_DOWN_NAME;
+        Require(w::OrientHash(upName, static_cast<unsigned>(std::wcslen(upName))) == KNTWR_WOUNDED_ORIENT_SAMPLE_UP_HASH,
+                "OrientHash(sample up name) == generated hash");
+        Require(w::OrientHash(downName, static_cast<unsigned>(std::wcslen(downName))) == KNTWR_WOUNDED_ORIENT_SAMPLE_DOWN_HASH,
+                "OrientHash(sample down name) == generated hash");
+        Require(w::OrientLookup(KNTWR_WOUNDED_ORIENT_SAMPLE_UP_HASH) == 0, "OrientLookup(sample up) == face-up");
+        Require(w::OrientLookup(KNTWR_WOUNDED_ORIENT_SAMPLE_DOWN_HASH) == 1, "OrientLookup(sample down) == face-down");
+        // a hash absent from the table (pick the first value not present, deterministic)
+        U miss = 0x12345678u;
+        for (;; ++miss) {
+            bool present = false;
+            for (U i = 0; i < KNTWR_WOUNDED_ORIENT_COUNT; ++i) if (kntwr_wounded_orient[i].hash == miss) present = true;
+            if (!present) break;
+        }
+        Require(w::OrientLookup(miss) == -1, "OrientLookup(absent hash) == -1");
+        Require(w::OrientLookup(0u) == -1 || kntwr_wounded_orient[0].hash == 0u, "OrientLookup(0) misses unless the table holds 0");
+        for (U i = 1; i < KNTWR_WOUNDED_ORIENT_COUNT; ++i)
+            Require(kntwr_wounded_orient[i - 1].hash < kntwr_wounded_orient[i].hash, "orient table strictly ascending by hash");
+        U downs = 0;
+        for (U i = 0; i < KNTWR_WOUNDED_ORIENT_COUNT; ++i) {
+            Require(kntwr_wounded_orient[i].face_down <= 1u, "orient entry face_down is 0/1");
+            Require(w::OrientLookup(kntwr_wounded_orient[i].hash) == static_cast<int>(kntwr_wounded_orient[i].face_down),
+                    "every table entry is found by its own hash");
+            downs += kntwr_wounded_orient[i].face_down;
+        }
+        Require(downs > 0u && downs < KNTWR_WOUNDED_ORIENT_COUNT, "table carries both orientations");
+        std::wstring upper = upName;
+        for (auto& c : upper) if (c >= L'a' && c <= L'z') c = static_cast<wchar_t>(c - L'a' + L'A');
+        Require(upper != upName, "uppercase variant differs textually");
+        Require(w::OrientHash(upper.c_str(), static_cast<unsigned>(upper.size())) == KNTWR_WOUNDED_ORIENT_SAMPLE_UP_HASH,
+                "uppercase variant hashes identically (ASCII fold)");
+        Require(w::OrientHash(upName, 0u) == 0x811C9DC5u, "empty name hashes to the FNV offset");
+        Require(w::OrientHash(L"\x0141", 1u) == w::OrientHash(L"\x0141", 1u) && w::OrientHash(L"\x0141", 1u) != w::OrientHash(L"A", 1u),
+                "high byte of a code unit participates in the hash");
     }
 
     std::printf("native_wounded_oracle: %u checks\n", checks);

@@ -90,6 +90,93 @@ static void SetRnd(U rnd) { Wr(M,0x1E0,rnd); }
 static void SetHolder(U v) { Wr(M,0x218,v); }
 static U* RecordSlot(U cat,U idx) { return reinterpret_cast<U*>(records.data()+cat*0x18u+idx*4u); }
 static U* RecordCount(U cat) { return reinterpret_cast<U*>(records.data()+cat*0x18u+0x14u); }
+
+// ---- orientation-tag world (TagOrient, site B): death records 0x293..0x311 carry clips whose A-string name
+//      {len +0x8, cap +0xC, wchar_t* +0x10} is looked up in kntwr_wounded_orient.h; tagging writes {+0x54,+0x58} FACE_UP
+//      and {+0x5C,+0x60} FACE_DOWN (int param, presence byte) ----
+enum { kOcDown,kOcUp,kOcUnknown,kOcPre,kOcNull,kOcUpperDown,kOcUpperUp,kOcNonDeath,kOcBelow,kOcAbove,kOcLast,kOcFirst,kOcPre2,kOcZeroLen,kOcTooLong,kOcN };
+constexpr U kOcCatMain=0x294, kOcCatUpper=0x295, kOcCatEdge=0x296, kOcCatClamp=0x297, kOcCatNonDeath=0x200,
+            kOcCatBelow=0x292, kOcCatFirst=0x293, kOcCatLast=0x311, kOcCatAbove=0x312;
+struct OClip { B clip[0x70]; std::wstring name; U len, ptr; B pre; };   // pre: 1 = presence 0x60 preset, 2 = presence 0x58 preset
+static OClip oc[kOcN];
+static U RdC(const B* p,U off) { U v; std::memcpy(&v,p+off,4); return v; }
+static std::wstring UpperAscii(std::wstring s) { for(auto& c: s) if(c>=L'a' && c<=L'z') c=static_cast<wchar_t>(c-L'a'+L'A'); return s; }
+// Reset the tag fields (and everything else) of every orientation clip to its pristine, untagged state.
+static void ResetOrient() {
+    for(U i=0;i<kOcN;++i) {
+        OClip& o=oc[i];
+        std::memset(o.clip,0,sizeof o.clip);
+        Wr(o.clip,0x8,o.len); Wr(o.clip,0xC,o.len); Wr(o.clip,0x10,o.ptr);
+        if(o.pre==1) { o.clip[0x60]=1; Wr(o.clip,0x5C,7); }
+        if(o.pre==2) { o.clip[0x58]=1; Wr(o.clip,0x54,3); }
+    }
+}
+static void InitOrient() {
+    const std::wstring down=KNTWR_WOUNDED_ORIENT_SAMPLE_DOWN_NAME, up=KNTWR_WOUNDED_ORIENT_SAMPLE_UP_NAME, unknown=L"animations/men/none/not_in_the_orient_table_001.anim";
+    Require(w::OrientLookup(w::OrientHash(unknown.c_str(),static_cast<unsigned>(unknown.size())))==-1,"unknown clip name misses the table");
+    for(U i=0;i<kOcN;++i) { oc[i].name.clear(); oc[i].len=0; oc[i].ptr=0; oc[i].pre=0; }
+    auto named=[&](U i,const std::wstring& n) { oc[i].name=n; oc[i].len=static_cast<U>(n.size()); oc[i].ptr=A(oc[i].name.c_str()); };
+    named(kOcDown,down); named(kOcUp,up); named(kOcUnknown,unknown);
+    named(kOcPre,down); oc[kOcPre].pre=1;
+    named(kOcPre2,up); oc[kOcPre2].pre=2;
+    oc[kOcNull].len=5; oc[kOcNull].ptr=0;                                // null name pointer
+    named(kOcUpperDown,UpperAscii(down)); named(kOcUpperUp,UpperAscii(up));
+    named(kOcNonDeath,down); named(kOcBelow,up); named(kOcAbove,down); named(kOcLast,down); named(kOcFirst,up);
+    oc[kOcZeroLen].len=0; oc[kOcZeroLen].ptr=0x10;                       // zero length: pointer never dereferenced
+    oc[kOcTooLong].len=513; oc[kOcTooLong].ptr=0x10;                     // over the 512 cap: pointer never dereferenced
+    ResetOrient();
+    auto put=[&](U cat,U idx,U clipIdx) { *RecordSlot(cat,idx)=A(oc[clipIdx].clip); };
+    put(kOcCatMain,0,kOcDown); put(kOcCatMain,1,kOcUp); put(kOcCatMain,2,kOcUnknown); put(kOcCatMain,3,kOcPre); put(kOcCatMain,4,kOcNull);
+    *RecordCount(kOcCatMain)=5;
+    put(kOcCatUpper,0,kOcUpperDown); *RecordSlot(kOcCatUpper,1)=0; put(kOcCatUpper,2,kOcUpperUp);
+    *RecordCount(kOcCatUpper)=3;
+    put(kOcCatEdge,0,kOcZeroLen); put(kOcCatEdge,1,kOcTooLong); put(kOcCatEdge,2,kOcPre2);
+    *RecordCount(kOcCatEdge)=3;
+    *RecordCount(kOcCatClamp)=9;                                         // slot 5 would read the count field itself as a clip pointer
+    put(kOcCatNonDeath,0,kOcNonDeath); *RecordCount(kOcCatNonDeath)=1;
+    put(kOcCatBelow,0,kOcBelow); *RecordCount(kOcCatBelow)=1;
+    put(kOcCatAbove,0,kOcAbove); *RecordCount(kOcCatAbove)=1;
+    put(kOcCatLast,0,kOcLast); *RecordCount(kOcCatLast)=1;
+}
+// Record 0x293 (first death category) is kept empty outside the build checks: the commit battery relies on it being clip-less.
+static void ArmFirst(bool on) {
+    if(on) *RecordSlot(kOcCatFirst,0)=A(oc[kOcFirst].clip); else *RecordSlot(kOcCatFirst,0)=0;
+    *RecordCount(kOcCatFirst)=on?1u:0u;
+}
+static void ExpectTagged(U idx,bool faceDown,const char* what) {
+    const B* c=oc[idx].clip;
+    Require(RdC(c,0x5C)==(faceDown?1u:0u) && RdC(c,0x54)==(faceDown?0u:1u),what);
+    Require(c[0x58]==1 && c[0x60]==1,what);
+}
+static void ExpectPristine(U idx,const char* what) {
+    const B* c=oc[idx].clip;
+    OClip ref; std::memset(ref.clip,0,sizeof ref.clip);
+    Wr(ref.clip,0x8,oc[idx].len); Wr(ref.clip,0xC,oc[idx].len); Wr(ref.clip,0x10,oc[idx].ptr);
+    if(oc[idx].pre==1) { ref.clip[0x60]=1; Wr(ref.clip,0x5C,7); }
+    if(oc[idx].pre==2) { ref.clip[0x58]=1; Wr(ref.clip,0x54,3); }
+    Require(!std::memcmp(c,ref.clip,sizeof ref.clip),what);
+}
+// Every orientation clip is in its pristine untagged state (fresh table or reset between cycles).
+static void ExpectAllUntagged(const char* what) { for(U i=0;i<kOcN;++i) ExpectPristine(i,what); }
+// State after one hooked build on the armed fake table: six clips tagged (down/up/upper x2/last/first), the rest untouched.
+constexpr U kOcTaggedPerBuild=6;
+static void ExpectBuilt(const char* what) {
+    ExpectTagged(kOcDown,true,what);          // (a)
+    ExpectTagged(kOcUp,false,what);           // (b)
+    ExpectPristine(kOcUnknown,what);          // (c) unknown name
+    ExpectPristine(kOcPre,what);              // (d) already tagged (presence 0x60): params untouched
+    ExpectPristine(kOcPre2,what);             //     already tagged (presence 0x58 only): params untouched
+    ExpectPristine(kOcNull,what);             // (e) null name pointer
+    ExpectPristine(kOcNonDeath,what);         // (f) sample name under non-death cat 0x200
+    ExpectTagged(kOcUpperDown,true,what);     // (h) uppercase ASCII folded
+    ExpectTagged(kOcUpperUp,false,what);
+    ExpectPristine(kOcBelow,what);            // cat 0x292, just below the death range
+    ExpectPristine(kOcAbove,what);            // cat 0x312, just above
+    ExpectTagged(kOcLast,true,what);          // cat 0x311, inclusive upper bound
+    ExpectTagged(kOcFirst,false,what);        // cat 0x293, inclusive lower bound
+    ExpectPristine(kOcZeroLen,what);          // zero length: skipped without dereferencing the pointer
+    ExpectPristine(kOcTooLong,what);          // length > 512: skipped without dereferencing the pointer
+}
 static void BuildWorld() {
     std::memset(M,0,sizeof M); std::memset(table,0,sizeof table);
     records.assign(0x360u*0x18u,0);
@@ -106,6 +193,7 @@ static void BuildWorld() {
     Wr(table,0x2C,A(records.data()));
     remap.assign(0x360u,0x360u);
     Wr(table,0x3C,A(remap.data()));
+    InitOrient();
     holderCell=A(table);
     SetHolder(A(&holderCell));
     SetRnd(1);
@@ -243,7 +331,7 @@ static void BuildCall(U tbl) {
 }
 
 // ---- receipt tally ----
-static U expReq,expApplied,expCalls,expNative,expStatic,expEligible,expFlipped,expDenied,expUntagged,expNoClip,expFaults,expLastCat,expRemap;
+static U expReq,expApplied,expCalls,expNative,expStatic,expEligible,expFlipped,expDenied,expUntagged,expNoClip,expFaults,expLastCat,expRemap,expOrient;
 static void CheckRow(const char* what) {
     volatile U row[h::kWords]; h::Snapshot(row);
     char msg[96];
@@ -261,7 +349,8 @@ static void CheckRow(const char* what) {
     std::snprintf(msg,sizeof msg,"%s: faults",what);            Require(row[h::WFaults]==expFaults,msg);
     std::snprintf(msg,sizeof msg,"%s: last cat",what);          Require(row[h::WLastCat]==expLastCat,msg);
     std::snprintf(msg,sizeof msg,"%s: remap fixes",what);       Require(row[h::WRemapFixes]==expRemap,msg);
-    for(U i=h::WRemapFixes+1;i<h::kWords;++i) Require(row[i]==0u,"reserved words stay zero");
+    std::snprintf(msg,sizeof msg,"%s: orient tagged",what);     Require(row[h::WOrientTagged]==expOrient,msg);
+    for(U i=h::WOrientTagged+1;i<h::kWords;++i) Require(row[i]==0u,"reserved words stay zero");
 }
 
 int main(int argc,char** argv) {
@@ -288,6 +377,9 @@ int main(int argc,char** argv) {
     static const U kStockCases[][2]={{0x329,0x2A},{0x32A,0x4B},{0x32E,0x4B},{0x32F,0x2A},{0x293,0x2A},{kCat,0x2A}};
     for(const auto& c: kStockCases) Require(Commit(c[0])==c[1],"stock select state");
     BuildCall(A(table));
+    ExpectAllUntagged("pre-install build never orient-tags");
+    ArmFirst(true); BuildCall(A(table)); ArmFirst(false);
+    ExpectAllUntagged("pre-install build never orient-tags (armed boundary)");
     for(U c=0x32Fu;c<=0x33Du;++c) Require(remap[c]==0x360u,"pre-install build leaves the remap stock");
 
     // ---- refusals ----
@@ -351,12 +443,21 @@ int main(int argc,char** argv) {
     CheckRow("after pct 100 battery");
 
     // ---- build gate battery: remap repaired at table build, idempotent, fault-safe ----
+    ArmFirst(true);
     BuildCall(A(table));
+    ArmFirst(false);
     for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"hooked build repairs remap identity 0x330..0x33C");
     Require(remap[0x32F]==0x360u && remap[0x33D]==0x360u,"remap neighbors untouched");
-    ++expRemap; CheckRow("after first hooked build");
+    ExpectBuilt("hooked build orient-tags untagged death clips");
+    ++expRemap; expOrient+=kOcTaggedPerBuild; CheckRow("after first hooked build");
+    ArmFirst(true);
     BuildCall(A(table));
-    CheckRow("second build on a repaired table is a counted no-op");   // expRemap unchanged: idempotent per table
+    ArmFirst(false);
+    ExpectBuilt("second build leaves the tags as they were");
+    CheckRow("second build on a repaired, tagged table is a counted no-op");   // expRemap/expOrient unchanged: idempotent per table
+    // (g) tag fields already set -> a hand-modified param survives (presence byte guards, params never rewritten)
+    { oc[kOcDown].clip[0x5C]=9; ArmFirst(true); BuildCall(A(table)); ArmFirst(false);
+      Require(RdC(oc[kOcDown].clip,0x5C)==9u,"tagged clip params never rewritten"); oc[kOcDown].clip[0x5C]=1; CheckRow("tagged clip survives a rebuild"); }
     std::fill(remap.begin(),remap.end(),0x360u);
     BuildCall(A(table));
     for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"re-broken remap repaired again");
@@ -406,11 +507,13 @@ int main(int argc,char** argv) {
     // ---- lifecycle cycles ----
     for(U cycle=0;cycle<4;++cycle) {
         h::ResetRow();
-        expReq=expApplied=expCalls=expNative=expStatic=expEligible=expFlipped=expDenied=expUntagged=expNoClip=expFaults=expLastCat=expRemap=0;
+        expReq=expApplied=expCalls=expNative=expStatic=expEligible=expFlipped=expDenied=expUntagged=expNoClip=expFaults=expLastCat=expRemap=expOrient=0;
         std::fill(remap.begin(),remap.end(),0x360u);     // renderer remap broken again; the next build must repair it
+        ResetOrient(); ArmFirst(false); ExpectAllUntagged("cycle: orientation clips reset to untagged");   // tag fields cleared between cycles
         Require(h::Install(base,100),"cycle install"); expReq=1; expApplied=1;
         SetRnd(5); Require(Commit(kCat)==0x4Bu,"cycle: flip"); ++expCalls; ++expStatic; ++expEligible; ++expFlipped; expLastCat=kCat;
-        BuildCall(A(table)); expRemap=1;
+        ArmFirst(true); BuildCall(A(table)); ArmFirst(false); expRemap=1; expOrient=kOcTaggedPerBuild;
+        ExpectBuilt("cycle: death clips re-tagged exactly once");
         for(U c=0x330u;c<=0x33Cu;++c) Require(remap[c]==c,"cycle: remap identity restored");
         native(0x32C);
         CheckRow("cycle hooked");

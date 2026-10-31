@@ -14,7 +14,7 @@ All notable changes are recorded here. Versions follow `X.Y.Z`; the single sourc
   the animation-table unique-clip builder, where the render pose-category remap is repaired before
   clip slots are assigned (the stock table maps every `WOUNDED_*`/`FALL_OVER_*` category to "no
   pose", which froze wounded men visually; repairing it after slot assignment instead crashed the
-  keyframe sampler with slot -1). Gameplay change: every multiplayer peer must run the same setting.
+  keyframe sampler with slot -1). Untagged men death clips are FACE-tagged at table build from a generated orientation table (221 clips classified by final-frame forward kinematics; generator tools/gen_wounded_orient.py), raising wounded eligibility from ~2% to ~90% of shot deaths. Gameplay change: every multiplayer peer must run the same setting.
 
 ### Fixed
 

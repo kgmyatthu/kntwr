@@ -14,8 +14,10 @@
 //
 // Site B 0xE61020 (unique-clip builder entry, thiscall ECX = anim table; runs at animation-table load): the 8-byte
 // prologue 83 EC 08 / 56 / 8B F1 / 33 C9 is displaced; the gate identity-writes the render pose-category remap
-// [table+0x3C] for 0x330..0x33C BEFORE the builder's passes assign sampler slots, replays the prologue and resumes at
-// site+8. Install patches both sites or neither; Remove restores site B first (remaining flips only freeze - safe).
+// [table+0x3C] for 0x330..0x33C BEFORE the builder's passes assign sampler slots, FACE-tags untagged men death clips
+// (categories 0x293..0x311) from the generated orientation table (kntwr_wounded_orient.h, hashed clip path) so the
+// wounded FSM can accept them, replays the prologue and resumes at site+8. Install patches both sites or neither;
+// Remove restores site B first (remaining flips only freeze - safe).
 //
 // Thread-freeze / interior-IP refusal / 8-byte CAS policy is the shared core/kntwr_entry_patch.h. Remove refuses while any
 // peer is inside either gate (EIP range or in-gate counter); a CAS mismatch writes NOTHING and reports failure.
@@ -29,11 +31,12 @@ using U = uint32_t;
 // wounded_words (kntwr_status::wounded_words, KNTWR_WOUNDED_LABELS). Hot-path counters are plain ++; reset at monitor start.
 // WInstalled is sticky applied-this-run (set on a successful Install, cleared only by ResetRow), not live hook presence.
 // WRemapFixes counts render pose-remap tables repaired (see hook .cpp: [table+0x3C] identity for wounded categories).
+// WOrientTagged counts death clips FACE-tagged at table build from the orientation table (idempotent: presence bytes already set are left alone).
 constexpr U kWords = 16, kVersion = 1;
 constexpr U kCommitSite = 0x653F1Au;
 enum Word : U {
     WVersion, WRequested, WInstalled, WCalls, WNativeKnockdown, WStaticCandidates, WEligible, WFlipped,
-    WDeniedRoll, WUntagged, WNoClip, WFaults, WLastCat, WRemapFixes
+    WDeniedRoll, WUntagged, WNoClip, WFaults, WLastCat, WRemapFixes, WOrientTagged
 };
 
 void ResetRow();                        // monitor start: zero the row (including applied-this-run), set the version

@@ -7308,7 +7308,7 @@ static void usage(void)
         L"                        soldier whose death clip carries the stock FACE_DOWN/FACE_UP orientation events enters the engine's own wounded state (front/back injury loops,\n"
         L"                        crawling; categories WOUNDED_* 0x330..0x338, shipped in every man animation table) with probability PCT% (1..100, default 33) instead of freezing\n"
         L"                        as a static corpse. One detour at the kill-path state commit (0x653F1A); deterministic per-death roll; men without FACE-tagged clips (all\n"
-        L"                        non-musket/sabre families) are untouched by construction. The site verifies the stock bytes first; restored at stop. Words: wounded_words\n"
+        L"                        non-musket/sabre families) are untouched by construction. Untagged death animations are orientation-classified automatically at table build. The site verifies the stock bytes first; restored at stop. Words: wounded_words\n"
         L"                        (installed, calls, eligible, flipped, denied_roll, untagged), receipt wounded.\n"
         L"  --engage-census       opt-in READ-ONLY diagnostic (NEVER implied by --features all; requires a routed tick: profile or a simulation feature): after every\n"
         L"                        routed native tick the tick owner reads the AI units' positions, calls the native is_moving / is_firing / missile-range predicates\n"

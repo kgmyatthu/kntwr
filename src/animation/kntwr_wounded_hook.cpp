@@ -27,12 +27,14 @@
 // kntwr-27396-0.dmp: [item+0x20] = 0xFFFFFFFF). Repairing at build time gives the wounded clips real slots and sizes
 // every downstream array consistently. Without site B the remap stays stock and flipped men freeze (the renderer skips
 // posing them) - degraded but safe; that is the deliberate fallback whenever only site A can be (or stay) patched.
+// The same gate also FACE-tags untagged men death clips (TagOrient: categories 0x293..0x311, name A-string on the clip hashed
+// into kntwr_wounded_orient.h) so the stock wounded FSM, which only accepts clips with the FACE presence bytes set, can use them.
 //
 // Decide walks native memory read-only on the owner (simulation) thread that runs the kill path, exactly like the stock
 // stepper 0x679300 does one frame later: holder [M+0x218] -> table -> records [table+0x2C] -> record cat*0x18 -> clip
 // (rnd % count, rnd = [M+0x1E0] - the same deterministic re-pick the stepper performs, so the inspected FACE fields
 // belong to the clip that is actually playing). Every dereference sits under SEH; a fault counts WFaults and commits the
-// stock static state. No allocation, no native call, integer-only. BuildFix writes 13 dwords under the same SEH policy.
+// stock static state. No allocation, no native call, integer-only. BuildFix repairs the remap and FACE-tags untagged death clips under the same SEH policy.
 //
 // Thread-freeze / interior-IP refusal / 8-byte CAS policy is the shared core/kntwr_entry_patch.h. Remove refuses while
 // any peer is inside either gate (EIP in its [begin, end) or its in-gate counter); a CAS mismatch writes NOTHING.
@@ -105,10 +107,52 @@ void FixupRemap(U table) {
     ++g_words[WRemapFixes];
 }
 
+// Tags untagged men death clips FACE_UP/FACE_DOWN in memory from the generated orientation table so the stock wounded
+// FSM (which requires byte[clip+0x60] and a nonzero param) accepts them. Death categories 0x293..0x311; clip name is the
+// A-string on the clip ({len +0x8, wchar_t* +0x10}); hash = lowercased FNV-1a over UTF-16LE. Clips that already carry
+// either presence byte (native tags, or tagged by an earlier build) are left alone, which makes this idempotent.
+constexpr U kDeathFirst = 0x293u;
+constexpr U kDeathLast = 0x311u;         // inclusive
+constexpr U kRecordStride = 0x18u;
+constexpr U kRecordCountOff = 0x14u;
+constexpr U kRecordClipSlots = 5u;
+constexpr U kClipNameLen = 0x8u, kClipNamePtr = 0x10u;
+constexpr U kClipFaceUpParam = 0x54u, kClipFaceUpPresent = 0x58u;
+constexpr U kClipFaceDownParam = 0x5Cu, kClipFaceDownPresent = 0x60u;
+constexpr U kMaxNameLen = 512u;
+void TagOrient(U table) {
+    const U records = *reinterpret_cast<const U*>(static_cast<uintptr_t>(table + 0x2Cu));
+    if (!records) return;
+    for (U cat = kDeathFirst; cat <= kDeathLast; ++cat) {
+        const U record = records + cat * kRecordStride;
+        U count = *reinterpret_cast<const U*>(static_cast<uintptr_t>(record + kRecordCountOff));
+        if (count > kRecordClipSlots) count = kRecordClipSlots;
+        for (U i = 0; i < count; ++i) {
+            const U clip = *reinterpret_cast<const U*>(static_cast<uintptr_t>(record + i * 4u));
+            if (!clip) continue;
+            volatile unsigned char* upPresent = reinterpret_cast<volatile unsigned char*>(static_cast<uintptr_t>(clip + kClipFaceUpPresent));
+            volatile unsigned char* downPresent = reinterpret_cast<volatile unsigned char*>(static_cast<uintptr_t>(clip + kClipFaceDownPresent));
+            if (*upPresent || *downPresent) continue;
+            const U nameLen = *reinterpret_cast<const U*>(static_cast<uintptr_t>(clip + kClipNameLen));
+            const U namePtr = *reinterpret_cast<const U*>(static_cast<uintptr_t>(clip + kClipNamePtr));
+            if (!namePtr || !nameLen || nameLen > kMaxNameLen) continue;
+            const int orient = kntwr_wounded::OrientLookup(
+                kntwr_wounded::OrientHash(reinterpret_cast<const wchar_t*>(static_cast<uintptr_t>(namePtr)), nameLen));
+            if (orient < 0) continue;
+            *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(clip + kClipFaceUpParam)) = orient ? 0u : 1u;
+            *reinterpret_cast<volatile U*>(static_cast<uintptr_t>(clip + kClipFaceDownParam)) = orient ? 1u : 0u;
+            *upPresent = 1;
+            *downPresent = 1;
+            ++g_words[WOrientTagged];
+        }
+    }
+}
+
 // The only code BuildGate runs. stdcall so the gate's stack arithmetic is independent of calling-convention flags.
 void __stdcall BuildFix(U table) {
     __try {
         FixupRemap(table);
+        TagOrient(table);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ++g_words[WFaults];
     }

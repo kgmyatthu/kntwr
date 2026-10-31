@@ -14,6 +14,7 @@
 #ifndef KNTWR_WOUNDED_H
 #define KNTWR_WOUNDED_H
 #include <stdint.h>
+#include "kntwr_wounded_orient.h"
 
 namespace kntwr_wounded {
 using U = uint32_t;
@@ -40,5 +41,34 @@ inline U Roll(U rnd, U manKey) {
 }
 
 inline bool Flip(U rnd, U manKey, U pct) { return Roll(rnd, manKey) < pct; }
+
+// FNV-1a 32 over the UTF-16LE bytes of s[0..len), ASCII A-Z lowered per code unit first
+// (offset 0x811C9DC5, prime 0x01000193). Matches tools/gen_wounded_orient.py and kntwr_wounded_orient.h.
+inline U OrientHash(const wchar_t* s, unsigned len) {
+    U h = 0x811C9DC5u;
+    for (unsigned i = 0; i < len; ++i) {
+        unsigned unit = static_cast<unsigned>(s[i]);
+        if (unit >= static_cast<unsigned>(L'A') && unit <= static_cast<unsigned>(L'Z'))
+            unit = unit - static_cast<unsigned>(L'A') + static_cast<unsigned>(L'a');
+        h ^= unit & 0xFFu;
+        h *= 0x01000193u;
+        h ^= (unit >> 8) & 0xFFu;
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+// Binary search of kntwr_wounded_orient (sorted by hash). -1 miss, 0 face-up, 1 face-down.
+inline int OrientLookup(unsigned hash) {
+    unsigned lo = 0, hi = KNTWR_WOUNDED_ORIENT_COUNT;
+    while (lo < hi) {
+        const unsigned mid = lo + (hi - lo) / 2u;
+        const unsigned h = kntwr_wounded_orient[mid].hash;
+        if (h == hash) return kntwr_wounded_orient[mid].face_down ? 1 : 0;
+        if (h < hash) lo = mid + 1u;
+        else hi = mid;
+    }
+    return -1;
+}
 } // namespace kntwr_wounded
 #endif
