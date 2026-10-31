@@ -193,6 +193,13 @@ struct Stage { U mount, combat, unit, serial, target, memberIdx, orbit, pull; B 
 
 U delta, imageLo, imageSize, moveInstall, combatInstall, combatRet, trackerClear, mountedCall, terrainQuery, orderAdjust;
 U goRetEntity, goRetPoint, combatRetCmd, unbind;
+// Diagnostic counter words published through kntwr_status::cavalry_words (receipt cavalry_orbit_words).
+// Written on the tick owner only; SnapshotWords copies cross-thread (tearing tolerated, diagnostic only).
+// records/orbit_units are per-sweep absolutes; held..not_pullable are cumulative since Bind.
+enum PullWord : U { wVersion, wTicks, wRecords, wOrbitUnits, wHeld, wPulls, wRiderPulls, wReleased,
+                    wReleaseRefused, wEscapeInstalls, wLaneInstalls, wProbeFrees, wNotPullable,
+                    wLastBindVt, wLastHold, wReserved15, kPullWords };
+U pullWords[kPullWords];
 // per-mount (hashed) counter bumped by every native order install this adapter could not observe in scope (any thread):
 // a record's orbit authority is void when its snapshot no longer matches.  Collisions only void authority (fail to replace).
 volatile long foreignMark[256];
@@ -620,6 +627,23 @@ U MeleeBound(U mount) {
 // worklist-active, not refusing (phase 0x14 self-terminates), not routing.
 bool MeleePullable(U mount) {
     return RdB(mount + 0x30) == 1 && Rd(mount + 0x224) != 0x14 && !RoutingAgent(mount) && MeleeBound(mount) != 0;
+}
+// Diagnostic snapshot of WHY a held mount could not be pulled this attempt: the binder's vtable
+// (preferred-base, 0 when +0x628 is clear, raw pointer when its vtable is unreadable) plus packed hold
+// fields (byte0 = +0x30 worklist byte, bit8 = refusal phase 0x14, bit9 = routing, bit10 = melee-bound,
+// byte2 = order low byte, byte3 = activity low byte).  Last-writer-wins by design.
+void NoteUnpullable(U mount) {
+    ++pullWords[wNotPullable];
+    if (!Sane(mount)) return;
+    const U b = Rd(mount + 0x628);
+    pullWords[wLastBindVt] = (b && Sane(b)) ? Rd(b) - delta : b;
+    U h = RdB(mount + 0x30) & 0xFFu;
+    if (Rd(mount + 0x224) == 0x14) h |= 0x100u;
+    if (RoutingAgent(mount)) h |= 0x200u;
+    if (MeleeBound(mount)) h |= 0x400u;
+    h |= (Rd(mount + kAOrder) & 0xFFu) << 16;
+    h |= (Rd(mount + kAActivity) & 0xFFu) << 24;
+    pullWords[wLastHold] = h;
 }
 // The unit's live row is still the captured attack row against the captured target.
 bool RowLive(U unit, U serial, U target) {
@@ -1328,24 +1352,26 @@ bool EscapeWaypoint(const Record& rec, const UnitEntry& e, float& wx, float& wz)
 // Sweep-side planner for one held record.  `held` from OwnedMount proves everything else is valid
 // (live order, proven member, live entry).  The probe bookkeeping must run even when the mount cannot
 // be pulled, or a melee-bound probe wave would block the unit's probe admissions forever.
-void TryPullout(Record& rec, U& pullouts, bool& probesChanged) {
+void TryPullout(Record& rec, U& pullouts, bool& probesChanged, PullWord pathWord) {
     UnitEntry* e = EntryByUnit(rec.unit);
     if (!e) return;
     if ((rec.flags & rProbe) && (curTick >= rec.probeUntil || (rec.flags & rRenew))) {
         rec.flags &= ~(rProbe | rRenew);
         if (e->probes) --e->probes;
         probesChanged = true;
+        ++pullWords[wProbeFrees];
     }
     if (rec.flags & (rProbe | rRenew)) return;  // live probe window: the probe fights on
     if (!(rec.flags & rDesc) || !e->orbit) return;
     if (pullouts >= kPulloutBudget || staged >= kStageMax) return;
     if (curTick - rec.pullTick < kPulloutMin) return;
-    if (!MeleePullable(rec.mount)) return;
+    if (!MeleePullable(rec.mount)) { NoteUnpullable(rec.mount); return; }
     rec.pullTick = curTick;  // attempt cadence, successful or not
     float wx, wz, y;
     B tmp[kDescBytes];
     memcpy(tmp, rec.desc, kDescBytes);
-    if (!EscapeWaypoint(rec, *e, wx, wz) &&
+    const bool escaped = EscapeWaypoint(rec, *e, wx, wz);
+    if (!escaped &&
         !MountWaypoint(rec, *e, wx, wz)) return;     // lane failure already handed the order back
     if (!InstallY(rec.mount, wx, wz, y)) return;     // terrain unavailable: no fabricated height
     memcpy(tmp + 0, &wx, 4); memcpy(tmp + 4, &y, 4); memcpy(tmp + 8, &wz, 4);
@@ -1356,6 +1382,8 @@ void TryPullout(Record& rec, U& pullouts, bool& probesChanged) {
     memcpy(s.desc, tmp, kDescBytes);
     rec.wx = wx; rec.wz = wz; rec.ux = e->tx; rec.uz = e->tz; rec.rad = LaneRadius(*e, rec); rec.lastTick = curTick;
     rec.flags &= ~(rActivate | rOrbit);
+    ++pullWords[escaped ? wEscapeInstalls : wLaneInstalls];
+    ++pullWords[pathWord];
     ++pullouts;
 }
 
@@ -1364,7 +1392,7 @@ void TryPullout(Record& rec, U& pullouts, bool& probesChanged) {
 // immediate).  Restores (probe expiry / tracker-demanded / cancellation handbacks) are UNBUDGETED; only
 // waypoint renewal is budgeted.
 void Sweep() {
-    U renewals = 0, pullouts = 0;
+    U renewals = 0, pullouts = 0, liveRecs = 0;
     bool probesChanged = false;
     const U start = renewalCursor < recordLimit ? renewalCursor : 0;
     for (U visited = 0; visited < recordLimit; ++visited) {
@@ -1372,11 +1400,12 @@ void Sweep() {
         const U r = index < recordLimit ? index : index - recordLimit;
         Record& rec = records[r];
         if (!rec.unit) continue;
+        ++liveRecs;
         // A native new order or routing decision wins over a scheduled probe expiry.  A mount whose
         // only blocker is the kind-5 melee cluster is actively pulled back out to its orbit lane.
         bool held = false;
         if (OwnedMount(rec.mount, &held) == kStampEmpty) {
-            if (held) TryPullout(rec, pullouts, probesChanged);
+            if (held) { ++pullWords[wHeld]; TryPullout(rec, pullouts, probesChanged, wPulls); }
             continue;
         }
         // 1) probe exit: window elapsed, or the tracker pre-step demanded it.  Unconditional native
@@ -1413,6 +1442,10 @@ void Sweep() {
         UnitEntry* e = EntryLive(rec.unit);
         if (!e || !e->orbit || (rec.flags & rProbe)) continue;
         if (Sane(rec.mount) && YieldToNative(rec.mount)) continue;  // native owns: keep rActivate/lastTick so recovery is prompt
+        // Owned, yet the PAIR is still stuck: a rider's own +0x628 melee binding (the mount's fields are
+        // clean, so YieldToNative is false and no pull ever fired here before) pins the pair in the fight
+        // all the same.  Same cadence/budget/escape as the held-mount pull; the release frees the riders.
+        if (MeleeBound(rec.mount) != 0) { TryPullout(rec, pullouts, probesChanged, wRiderPulls); continue; }
         // 3) budgeted waypoint renewal (staggered by construction: per-record age/arrival/drift gates)
         const bool activating = (rec.flags & rActivate) != 0;
         if (!activating && curTick - rec.lastTick < kRenewMin) continue;
@@ -1446,12 +1479,19 @@ void Sweep() {
         ++renewals;
     }
     if (probesChanged) RebuildProbeHash();
+    pullWords[wRecords] = liveRecs;
+    U orbitUnits = 0;
+    for (U i = 0; i < kMaxUnitEntries; ++i) if (entries[i].unit && entries[i].orbit) ++orbitUnits;
+    pullWords[wOrbitUnits] = orbitUnits;
 }
 
 void Fire() {  // no epoch interposition: one plain native install per stage entry (pull-outs release the bind first, guarded)
     for (U i = 0; i < staged; ++i)
         if (Sane(stage[i].mount) && StageValid(stage[i])) {
-            if (stage[i].pull && !PullRelease(stage[i].mount)) continue;  // cluster kept its grip (or fault): retry next cadence
+            if (stage[i].pull) {
+                if (!PullRelease(stage[i].mount)) { ++pullWords[wReleaseRefused]; continue; }  // cluster kept its grip (or fault): retry next cadence
+                ++pullWords[wReleased];
+            }
             const U fn = stage[i].combat ? combatInstall : moveInstall;
             reinterpret_cast<NativeOrder>(static_cast<uintptr_t>(fn))(stage[i].mount, 0, stage[i].desc);
             const U r = RecordFind(stage[i].mount);  // authority follows the install that actually ran
@@ -1513,10 +1553,16 @@ void Bind(U imageBase) {
     bound = imageSize != 0;
     settings = DefaultSettings();
     settings.clearance_margin = kSquareGap;
+    memset(pullWords, 0, sizeof(pullWords));
+    pullWords[wVersion] = 1;
     ClearAll();
 }
 
 void Reset() { ClearAll(); }  // world teardown / dormancy: discard state, never dereference native memory
+// Diagnostic words for kntwr_status::cavalry_words (any thread; plain copies, tearing tolerated).
+void SnapshotWords(volatile U* dst) {
+    for (U i = 0; i < kPullWords; ++i) dst[i] = pullWords[i];
+}
 // Destructor-gate observation (0x582736-class call sites; tick owner only, called with the row intact
 // BEFORE the native 0x529D80 body runs).  The entry snapshot of the flush generation opens the protocol:
 // a publication overlapping ANY flush - one already in flight at entry (begin != end) or one moving
@@ -1604,6 +1650,7 @@ void EndTick() {
         OnFault();
     }
     --kntwr::probeDepth;
+    ++pullWords[wTicks];
     epoch = 0;
     if (staged) Fire();
 }

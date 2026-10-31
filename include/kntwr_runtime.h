@@ -365,6 +365,16 @@ enum kntwr_memory_word {
 #define KNTWR_WOUNDED_LABELS \
     "version", "requested", "installed", "calls", "native_knockdown", "static_candidates", "eligible", "flipped", \
     "denied_roll", "untagged", "no_clip", "faults", "last_cat", "remap_fixes", "orient_tagged", "reserved15"
+#define KNTWR_CAVALRY_WORDS 16u /* cavalry_words (kntwr_cavalry::SnapshotWords, labels KNTWR_CAVALRY_LABELS; live only with KNTWR_CAVALRY_ORBIT in enabled_mask) */
+/* version;
+   ticks/records/orbit_units absolute per tick;
+   held/pulls/rider_pulls/released/release_refused/escape_installs/lane_installs/probe_frees/not_pullable cumulative since Bind;
+   last_bind_vt = preferred-base vtable of the last un-pullable mount's +0x628 binding;
+   last_hold = packed hold state byte0=+0x30, bit8 refusal 0x14, bit9 routing, bit10 rider-bound, byte2=order low byte, byte3=activity low byte;
+   reserved15 zero. */
+#define KNTWR_CAVALRY_LABELS \
+    "version", "ticks", "records", "orbit_units", "held", "pulls", "rider_pulls", "released", \
+    "release_refused", "escape_installs", "lane_installs", "probe_frees", "not_pullable", "last_bind_vt", "last_hold", "reserved15"
 #define KNTWR_DRAG_LADDER_WORDS 16u /* drag_ladder_words (kntwr_drag_ladder_hook::Word, labels KNTWR_DRAG_LADDER_LABELS; calls/laddered/passthrough are plain counters, last_files_* are last-value words, words 9..15 are reserved zero) */
 #define KNTWR_DRAG_LADDER_LABELS \
     "version", "requested", "installed", "calls", "laddered", "passthrough", "faults", "last_files_before", \
@@ -1159,6 +1169,8 @@ typedef struct kntwr_status {
     uint32_t drag_ladder_words[KNTWR_DRAG_LADDER_WORDS];
     /* --wounded (appended after drag_ladder_words; owner module src/animation/kntwr_wounded_hook.*, labels KNTWR_WOUNDED_LABELS). Reset at monitor start, retained after stop; all zero without KNTWR_WOUNDED. */
     uint32_t wounded_words[KNTWR_WOUNDED_WORDS];
+    /* --cavalry-orbit (appended after wounded_words; owner module src/army/native_cavalry_runtime.*, labels KNTWR_CAVALRY_LABELS). Reset at monitor start, retained after stop; all zero without KNTWR_CAVALRY_ORBIT. */
+    uint32_t cavalry_words[KNTWR_CAVALRY_WORDS];
 } kntwr_status;
 
 /* DATA export "kntwr_profile", separate from the sequence-locked lifecycle status.
@@ -1628,9 +1640,11 @@ static_assert(offsetof(kntwr_status,ai_prepass_census_words) + KNTWR_AI_PREPASS_
               offsetof(kntwr_status,anim_guard_words) + KNTWR_ANIM_GUARD_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,army_residual_words) &&
               offsetof(kntwr_status,army_residual_words) + KNTWR_FORMATION_RESIDUAL_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,drag_ladder_words) &&
               offsetof(kntwr_status,drag_ladder_words) + KNTWR_DRAG_LADDER_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,wounded_words) &&
-              offsetof(kntwr_status,wounded_words) + KNTWR_WOUNDED_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) &&
+              offsetof(kntwr_status,wounded_words) + KNTWR_WOUNDED_WORDS * sizeof(uint32_t) == offsetof(kntwr_status,cavalry_words) &&
+              offsetof(kntwr_status,cavalry_words) + KNTWR_CAVALRY_WORDS * sizeof(uint32_t) == sizeof(kntwr_status) &&
               KNTWR_DRAG_LADDER_WORDS == 16u && KNTWR_DRAG_LADDER == 0x1u &&
               KNTWR_WOUNDED_WORDS == 16u && KNTWR_WOUNDED == 0x2u && KNTWR_WOUNDED_PCT_MASK == 0x7F00u &&
+              KNTWR_CAVALRY_WORDS == 16u && KNTWR_CAVALRY_ORBIT == 0x100000u &&
               KNTWR_GAMEPLAY_FLAGS_VALID == (KNTWR_DRAG_LADDER | KNTWR_WOUNDED | KNTWR_WOUNDED_PCT_MASK) &&
               KNTWR_ANIM_GUARD_WORDS == 8u &&
               KNTWR_FORMATION_RESIDUAL_WORDS == 832u &&

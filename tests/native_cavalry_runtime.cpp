@@ -2182,6 +2182,27 @@ void MeleePulloutRecoversOrbit() {
               "a refused release installs nothing");
         Check(c.rec() != nullptr && c.rec()->pullTick == 25, "the retry stays scheduled on the cadence");
     }
+    {   // only the RIDER is bound (the mount's own fields stay clean, so OwnedMount still owns the
+        // record): the owned-path sweep must pull the pair all the same - this exact shape froze live
+        Charge c(Charge::Installed);
+        std::vector<B> ctl(0x10), rider(0x700);
+        std::array<U, 1> riders{Address(rider.data())};
+        Put(Address(ctl.data()), V(kMeleeClusterVt));
+        Put(c.mount() + 0x66C, 1); Put(c.mount() + 0x670, Address(riders.data()));
+        g_unbindLog.clear();
+        Put(Address(rider.data()) + 0x628, Address(ctl.data()));
+        const U riderPulls = pullWords[wRiderPulls], released = pullWords[wReleased];
+        c.w.Tick(25); Sweep();
+        Check(staged == 1 && stage[0].pull == 1 && stage[0].orbit == 1 && stage[0].mount == c.mount(),
+              "a rider-bound pair stages a pull-out through the owned path");
+        Fire();
+        Check(g_unbindLog.size() == 1 && g_unbindLog[0] == Address(rider.data()) &&
+                  Rd(Address(rider.data()) + 0x628) == 0,
+              "only the bound rider needed the release");
+        c.ExpectOneInstall(c.mount(), "the orbit waypoint is re-installed after the rider release", "rider-bound pull-out");
+        Check(pullWords[wRiderPulls] == riderPulls + 1 && pullWords[wReleased] == released + 1,
+              "the diagnostic words count the rider-path pull and the release");
+    }
 }
 
 // A probe wave whose window expired while the prober is melee-bound must surrender its wave slot:

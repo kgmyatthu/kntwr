@@ -33,6 +33,9 @@ using NativeTracker = U(__fastcall*)(U, U, U);
 
 void Bind(U imageBase);  // activation, before any calls; (re)initialises every table
 void Reset();            // discard all state (world teardown / dormancy); never dereferences native memory
+// Copies the 16 diagnostic counter words (kntwr_status::cavalry_words / receipt cavalry_orbit_words;
+// labels KNTWR_CAVALRY_LABELS in include/kntwr_runtime.h).  Any thread; never dereferences native memory.
+void SnapshotWords(volatile U* dst);
 
 // Tick owner, after the AI join and before the native tick: opens the epoch, rebuilds the unit table (eligibility, footprints, orbit decisions, probe waves).
 void BeginTick(U model, U tick);
